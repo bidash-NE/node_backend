@@ -1,0 +1,21 @@
+{
+  "name": "new-edge",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "driver",
+    "map_and_location_services",
+    "ride_management",
+    "admin",
+    "merchant"
+  ],
+  "scripts": {
+    "start:registration": "npm run dev --workspace=driver",
+    "start:location": "npm run dev --workspace=map_and_location_services",
+    "start:ride": "npm run dev --workspace=ride_management",
+    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  }
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Ride Request Test</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <h2>Send Ride Request</h2>
+  <button onclick="sendRideRequest()">Request Ride</button>
+
+  <script>
+    // Connect socket to backend
+    const socket = io("http://localhost:7000");  // update if your server URL differs
+
+    // Listen for broadcasted ride requests from server
+    socket.on("ride_request_broadcast", (data) => {
+      console.log("📡 Ride request broadcast received via socket:", data);
+    });
+
+    async function sendRideRequest() {
+      const rideData = {
+        rider_id: 2,
+        pickup_lat: 27.4728,
+        pickup_lng: 89.6397,
+        dropoff_lat: 27.4900,
+        dropoff_lng: 89.6500,
+        pickup_address: "Thimphu City Center",
+        dropoff_address: "Changangkha Temple",
+        ride_type: "standard",
+        payment_method: "cash",
+        distance_meters: 5000,
+        duration_seconds: 900
+      };
+
+      console.log("🚀 Sending ride request:", rideData);
+
+      try {
+        const response = await fetch("http://localhost:7000/api/rides/request", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(rideData),
+        });
+
+        const result = await response.json();
+        console.log("✅ Ride request API response:", result);
+
+      } catch (error) {
+        console.error("❌ Error sending ride request:", error);
+      }
+    }
+  </script>
+</body>
+</html>
