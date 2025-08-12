@@ -1,15 +1,52 @@
 const redis = require("../models/redisClient");
 const transporter = require("../config/mailer");
+const db = require("../config/db");
 
 // ✅ Send OTP
+// exports.sendOtp = async (req, res) => {
+//   const { email } = req.body;
+//   const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+//   try {
+//     // ✅ Correct usage with Upstash Redis
+//     await redis.set(`otp:${email}`, otp, { ex: 300 });
+
+//     await transporter.sendMail({
+//       from: `"Ride App" <${process.env.EMAIL_USER}>`,
+//       to: email,
+//       subject: "Your OTP Code",
+//       text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
+//     });
+
+//     res.status(200).json({ message: "OTP sent to email" });
+//     // console.log("otp send successfully");
+//   } catch (err) {
+//     console.error("Error sending OTP:", err.message);
+//     res.status(500).json({ error: "Failed to send OTP" });
+//   }
+// };
 exports.sendOtp = async (req, res) => {
   const { email } = req.body;
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
   try {
-    // ✅ Correct usage with Upstash Redis
+    // Check if email exists in users table
+    const [rows] = await db.execute(
+      "SELECT user_id FROM users WHERE email = ?",
+      [email]
+    );
+
+    if (rows.length > 0) {
+      // Email already exists
+      return res
+        .status(400)
+        .json({ error: "Email already registered. OTP not sent." });
+    }
+
+    // Save OTP in Redis with expiration (5 mins)
     await redis.set(`otp:${email}`, otp, { ex: 300 });
 
+    // Send OTP email
     await transporter.sendMail({
       from: `"Ride App" <${process.env.EMAIL_USER}>`,
       to: email,
@@ -18,13 +55,11 @@ exports.sendOtp = async (req, res) => {
     });
 
     res.status(200).json({ message: "OTP sent to email" });
-    // console.log("otp send successfully");
   } catch (err) {
     console.error("Error sending OTP:", err.message);
     res.status(500).json({ error: "Failed to send OTP" });
   }
 };
-
 // ✅ Verify OTP
 exports.verifyOtp = async (req, res) => {
   const { email, otp } = req.body;

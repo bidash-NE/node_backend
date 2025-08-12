@@ -4,6 +4,168 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 // ✅ Register controller
+// const registerUser = async (req, res) => {
+//   let user_id = null;
+//   let driver_id = null;
+//   const connection = await pool.getConnection();
+
+//   try {
+//     const { user, driver, documents, vehicle } = req.body;
+//     console.log(user, req.body.deviceID);
+//     // 0. Check if deviceID is present, else reject request immediately
+//     const deviceID = driver?.device_id || req.body.deviceID;
+
+//     if (!deviceID) {
+//       return res.status(400).json({ error: "Device ID is required" });
+//     }
+
+//     await connection.beginTransaction();
+
+//     const hashedPassword = await bcrypt.hash(user.password, 10);
+
+//     // 1. Insert into users table
+//     const [userResult] = await connection.query(
+//       `INSERT INTO users (user_name, email, phone, password_hash, is_verified, role) VALUES (?, ?, ?, ?, 1, ?)`,
+//       [user.user_name, user.email, user.phone, hashedPassword, user.role]
+//     );
+//     user_id = userResult.insertId;
+
+//     // 2. Insert device info based on role
+//     const deviceTable =
+//       user.role === "driver" ? "driver_devices" : "user_devices";
+//     await connection.query(
+//       `INSERT INTO ${deviceTable} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
+//       [user_id, deviceID]
+//     );
+
+//     // 3. If driver, insert driver-related tables
+//     if (user.role === "driver") {
+//       const [driverResult] = await connection.query(
+//         `INSERT INTO drivers (
+//           user_id, license_number, license_expiry, approval_status, is_approved, rating, total_rides, is_online, current_location, current_location_updated_at
+//         ) VALUES (?, ?, ?, 'pending', 0, 0, 0, 0, ST_GeomFromText(?, 4326), ?)`,
+//         [
+//           user_id,
+//           driver.license_number,
+//           driver.license_expiry,
+//           `POINT(${driver.current_location.coordinates[0]} ${driver.current_location.coordinates[1]})`,
+//           new Date(),
+//         ]
+//       );
+
+//       driver_id = driverResult.insertId;
+
+//       // Insert into MongoDB (DriverMongo)
+//       await DriverMongo.create({
+//         user_id, // Ensures matching SQL-Mongo mapping
+//         license_number: driver.license_number,
+//         license_expiry: driver.license_expiry,
+//         current_location: driver.current_location,
+//         current_location_updated_at: new Date(),
+//         device_id: deviceID,
+//         actual_capacity: vehicle.capacity,
+//         available_capacity: vehicle.capacity,
+//         vehicle_type: vehicle.vehicle_type,
+//       });
+
+//       // Insert driver documents if any
+//       if (documents?.length > 0) {
+//         const docValues = documents.map((d) => [
+//           driver_id,
+//           d.document_type,
+//           d.document_url,
+//         ]);
+//         const placeholders = docValues.map(() => "(?, ?, ?)").join(", ");
+//         const flatValues = docValues.flat();
+//         await connection.query(
+//           `INSERT INTO driver_documents (driver_id, document_type, document_url) VALUES ${placeholders}`,
+//           flatValues
+//         );
+//       }
+
+//       // Insert vehicle into MySQL
+//       if (vehicle) {
+//         await connection.query(
+//           `INSERT INTO driver_vehicles (
+//             driver_id, make, model, year, color, license_plate, vehicle_type, actual_capacity, available_capacity, features, insurance_expiry
+//           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+//           [
+//             driver_id,
+//             vehicle.make,
+//             vehicle.model,
+//             vehicle.year,
+//             vehicle.color,
+//             vehicle.license_plate,
+//             vehicle.vehicle_type,
+//             vehicle.capacity,
+//             vehicle.capacity,
+//             vehicle.features ? vehicle.features.join(",") : null,
+//             vehicle.insurance_expiry,
+//           ]
+//         );
+//       }
+//     }
+
+//     await connection.commit();
+
+//     res.status(201).json({
+//       message:
+//         user.role === "driver"
+//           ? "User and driver registered successfully"
+//           : "User registered successfully",
+//       user_id,
+//     });
+//   } catch (err) {
+//     await connection.rollback();
+//     console.error("Registration error:", err);
+//     let errorMessage = "Registration failed";
+
+//     if (err.code === "ER_DUP_ENTRY") {
+//       const duplicateFieldMatch = err.sqlMessage.match(/for key '(.+?)'/);
+//       if (duplicateFieldMatch && duplicateFieldMatch[1]) {
+//         const key = duplicateFieldMatch[1];
+//         const fieldParts = key.split(".");
+//         let fieldName = fieldParts.length > 1 ? fieldParts[1] : key;
+
+//         switch (fieldName) {
+//           case "email":
+//             errorMessage = "Email already exists";
+//             break;
+//           case "phone":
+//             errorMessage = "Phone number already exists";
+//             break;
+//           case "license_number":
+//             errorMessage = "Driver license number already exists";
+//             break;
+//           case "license_plate":
+//             errorMessage = "Vehicle license plate already exists";
+//             break;
+//           default:
+//             errorMessage = `Duplicate entry for ${fieldName}`;
+//         }
+//       }
+
+//       try {
+//         if (user_id) {
+//           await connection.query(`DELETE FROM users WHERE user_id = ?`, [
+//             user_id,
+//           ]);
+//         }
+//       } catch (delErr) {
+//         console.error("Error deleting user after duplicate entry:", delErr);
+//       }
+
+//       return res.status(409).json({ error: errorMessage });
+//     }
+
+//     return res
+//       .status(500)
+//       .json({ error: err.sqlMessage || err.message || errorMessage });
+//   } finally {
+//     connection.release();
+//   }
+// };
+
 const registerUser = async (req, res) => {
   let user_id = null;
   let driver_id = null;
@@ -11,11 +173,13 @@ const registerUser = async (req, res) => {
 
   try {
     const { user, driver, documents, vehicle } = req.body;
-    console.log(user);
-    // 0. Check if deviceID is present, else reject request immediately
-    const deviceID = driver?.device_id || req.body.deviceID;
 
-    if (!deviceID) {
+    // deviceID may come from driver.device_id or req.body.deviceID
+    const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
+
+    // ✅ Require device ID for everyone EXCEPT admins
+    const requiresDevice = user?.role !== "admin";
+    if (requiresDevice && !deviceID) {
       return res.status(400).json({ error: "Device ID is required" });
     }
 
@@ -23,26 +187,30 @@ const registerUser = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(user.password, 10);
 
-    // 1. Insert into users table
+    // 1) users
     const [userResult] = await connection.query(
-      `INSERT INTO users (user_name, email, phone, password_hash, is_verified, role) VALUES (?, ?, ?, ?, 1, ?)`,
+      `INSERT INTO users (user_name, email, phone, password_hash, is_verified, role)
+       VALUES (?, ?, ?, ?, 1, ?)`,
       [user.user_name, user.email, user.phone, hashedPassword, user.role]
     );
     user_id = userResult.insertId;
 
-    // 2. Insert device info based on role
-    const deviceTable =
-      user.role === "driver" ? "driver_devices" : "user_devices";
-    await connection.query(
-      `INSERT INTO ${deviceTable} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
-      [user_id, deviceID]
-    );
+    // 2) device (skip for admin)
+    if (requiresDevice) {
+      const deviceTable =
+        user.role === "driver" ? "driver_devices" : "user_devices";
+      await connection.query(
+        `INSERT INTO ${deviceTable} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
+        [user_id, deviceID]
+      );
+    }
 
-    // 3. If driver, insert driver-related tables
+    // 3) driver-only inserts
     if (user.role === "driver") {
       const [driverResult] = await connection.query(
         `INSERT INTO drivers (
-          user_id, license_number, license_expiry, approval_status, is_approved, rating, total_rides, is_online, current_location, current_location_updated_at
+          user_id, license_number, license_expiry, approval_status, is_approved,
+          rating, total_rides, is_online, current_location, current_location_updated_at
         ) VALUES (?, ?, ?, 'pending', 0, 0, 0, 0, ST_GeomFromText(?, 4326), ?)`,
         [
           user_id,
@@ -55,39 +223,39 @@ const registerUser = async (req, res) => {
 
       driver_id = driverResult.insertId;
 
-      // Insert into MongoDB (DriverMongo)
+      // Mongo mirror
       await DriverMongo.create({
-        user_id, // Ensures matching SQL-Mongo mapping
+        user_id,
         license_number: driver.license_number,
         license_expiry: driver.license_expiry,
         current_location: driver.current_location,
         current_location_updated_at: new Date(),
-        device_id: deviceID,
+        device_id: deviceID ?? null,
         actual_capacity: vehicle.capacity,
         available_capacity: vehicle.capacity,
         vehicle_type: vehicle.vehicle_type,
       });
 
-      // Insert driver documents if any
-      if (documents?.length > 0) {
+      // documents
+      if (Array.isArray(documents) && documents.length > 0) {
         const docValues = documents.map((d) => [
           driver_id,
           d.document_type,
           d.document_url,
         ]);
         const placeholders = docValues.map(() => "(?, ?, ?)").join(", ");
-        const flatValues = docValues.flat();
         await connection.query(
           `INSERT INTO driver_documents (driver_id, document_type, document_url) VALUES ${placeholders}`,
-          flatValues
+          docValues.flat()
         );
       }
 
-      // Insert vehicle into MySQL
+      // vehicle
       if (vehicle) {
         await connection.query(
           `INSERT INTO driver_vehicles (
-            driver_id, make, model, year, color, license_plate, vehicle_type, actual_capacity, available_capacity, features, insurance_expiry
+            driver_id, make, model, year, color, license_plate, vehicle_type,
+            actual_capacity, available_capacity, features, insurance_expiry
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             driver_id,
@@ -112,6 +280,8 @@ const registerUser = async (req, res) => {
       message:
         user.role === "driver"
           ? "User and driver registered successfully"
+          : user.role === "admin"
+          ? "Admin registered successfully"
           : "User registered successfully",
       user_id,
     });
@@ -121,7 +291,7 @@ const registerUser = async (req, res) => {
     let errorMessage = "Registration failed";
 
     if (err.code === "ER_DUP_ENTRY") {
-      const duplicateFieldMatch = err.sqlMessage.match(/for key '(.+?)'/);
+      const duplicateFieldMatch = err.sqlMessage?.match(/for key '(.+?)'/);
       if (duplicateFieldMatch && duplicateFieldMatch[1]) {
         const key = duplicateFieldMatch[1];
         const fieldParts = key.split(".");

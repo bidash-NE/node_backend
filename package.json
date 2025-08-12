@@ -13,7 +13,8 @@
     "start:registration": "npm run dev --workspace=driver",
     "start:location": "npm run dev --workspace=map_and_location_services",
     "start:ride": "npm run dev --workspace=ride_management",
-    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\""
+    "start:admin": "npm run dev --workspace=admin",
+    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\""
   },
   "devDependencies": {
     "concurrently": "^9.2.0"

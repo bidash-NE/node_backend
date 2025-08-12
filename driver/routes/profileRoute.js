@@ -12,5 +12,5 @@ router.put(
   upload.single("profile_image"),
   profileController.updateProfile
 );
-
+router.put("/password/:user_id", profileController.changePassword);
 module.exports = router;
