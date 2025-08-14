@@ -1,0 +1,27 @@
+// server.js
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const { initMerchantTables } = require("./models/initModel");
+const merchantRoutes = require("./routes/merchantRegistrationRoute");
+const businessTypesRoutes = require("./routes/businessTypesRoute");
+
+dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+app.use(cors());
+app.use(express.json());
+
+// Create tables at server start
+initMerchantTables()
+  .then(() => console.log("✅ Merchant tables initialized"))
+  .catch((err) => console.error("❌ Error initializing merchant tables:", err));
+
+app.use("/uploads", express.static("uploads"));
+app.use("/api/merchant", merchantRoutes);
+app.use("/api/admin", businessTypesRoutes);
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
+});

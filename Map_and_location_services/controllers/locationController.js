@@ -1,35 +1,25 @@
-const Driver = require("../models/driverModel");
+// controllers/driverSocketController.js
+const moment = require("moment-timezone");
+const Driver = require("../models/driverModel"); // Mongo model
 const { emitAllDrivers } = require("./emitDriverController");
+const {
+  setDriverOnlineStatusByUserId,
+} = require("../models/driveronlineModel");
 
-// Converts current UTC time to Bhutan time Date object
-const getBhutanTimeDate = () => {
-  const bhutanTimeString = new Date().toLocaleString("en-US", {
-    timeZone: "Asia/Thimphu",
-  });
-  return new Date(bhutanTimeString);
-};
-
-// Converts UTC date to Bhutan time string (for display)
-const formatToBhutanTime = (utcDate) => {
-  return new Date(utcDate).toLocaleString("en-GB", {
-    timeZone: "Asia/Thimphu",
-    hour12: false,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-};
+// Bhutan time helpers (moment-timezone)
+const bhutanNowMoment = () => moment.tz("Asia/Thimphu");
+const bhutanNowDate = () => bhutanNowMoment().toDate();
+const formatToBhutanTime = (dateOrMoment) =>
+  moment(dateOrMoment).tz("Asia/Thimphu").format("DD/MM/YYYY HH:mm:ss");
 
 // ✅ Update driver's location & online status
 const handleDriverLocationUpdate = async (socket, data) => {
-  const { user_id, latitude, longitude } = data;
+  const { user_id, latitude, longitude } = data || {};
 
   try {
-    const bhutanTime = getBhutanTimeDate();
+    const bhutanMoment = bhutanNowMoment();
 
+    // 1) Update Mongo (location + online)
     const updatedDriver = await Driver.findOneAndUpdate(
       { user_id },
       {
@@ -37,8 +27,8 @@ const handleDriverLocationUpdate = async (socket, data) => {
           latitude,
           longitude,
           is_online: true,
-          updatedAt: formatToBhutanTime(bhutanTime),
-          current_location_updated_at: bhutanTime,
+          updatedAt: formatToBhutanTime(bhutanMoment),
+          current_location_updated_at: bhutanMoment.toDate(),
         },
       },
       { new: true }
@@ -50,20 +40,31 @@ const handleDriverLocationUpdate = async (socket, data) => {
       });
     }
 
+    // 2) Sync MySQL drivers.is_online = 1
+    try {
+      const affected = await setDriverOnlineStatusByUserId(user_id, 1);
+      if (affected === 0) {
+        console.warn(
+          `MySQL drivers row not found for user_id=${user_id}, is_online not updated`
+        );
+      }
+    } catch (sqlErr) {
+      console.error("MySQL is_online update error:", sqlErr.message);
+    }
+
+    const prettyTime = formatToBhutanTime(bhutanMoment);
+
     console.log(
-      `✅ Location & status updated for user_id: ${user_id} at Bhutan time ${formatToBhutanTime(
-        bhutanTime
-      )}`
+      `✅ Location & status updated for user_id: ${user_id} at Bhutan time ${prettyTime}`
     );
 
     socket.emit("locationUpdateSuccess", {
       message: "Location and active status updated successfully!",
-      bhutan_time: formatToBhutanTime(bhutanTime),
+      bhutan_time: prettyTime,
     });
 
     const allDrivers = await emitAllDrivers(socket);
     socket.broadcast.emit("allDriversData", allDrivers);
-    console.log(allDrivers);
   } catch (err) {
     console.error("❌ Error updating driver info:", err.message);
     socket.emit("locationUpdateError", {
@@ -75,23 +76,36 @@ const handleDriverLocationUpdate = async (socket, data) => {
 // ✅ Update driver's is_online to false on disconnect
 const handleDriverDisconnect = async (socket, user_id) => {
   try {
-    const bhutanTime = getBhutanTimeDate();
+    const bhutanMoment = bhutanNowMoment();
 
+    // 1) Update Mongo
     const updated = await Driver.findOneAndUpdate(
       { user_id },
       {
         $set: {
           is_online: false,
-          updatedAt: formatToBhutanTime(bhutanTime),
+          updatedAt: formatToBhutanTime(bhutanMoment),
         },
       },
       { new: true }
     );
 
+    // 2) Sync MySQL drivers.is_online = 0
+    try {
+      const affected = await setDriverOnlineStatusByUserId(user_id, 0);
+      if (affected === 0) {
+        console.warn(
+          `MySQL drivers row not found for user_id=${user_id}, is_online not updated`
+        );
+      }
+    } catch (sqlErr) {
+      console.error("MySQL is_online update error:", sqlErr.message);
+    }
+
     if (updated) {
       console.log(
         `🔴 Driver (user_id: ${user_id}) set to offline at ${formatToBhutanTime(
-          bhutanTime
+          bhutanMoment
         )}`
       );
 
@@ -107,5 +121,5 @@ const handleDriverDisconnect = async (socket, user_id) => {
 module.exports = {
   handleDriverLocationUpdate,
   handleDriverDisconnect,
-  formatToBhutanTime,
+  formatToBhutanTime, // still exported if used elsewhere
 };

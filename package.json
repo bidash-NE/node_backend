@@ -14,9 +14,13 @@
     "start:location": "npm run dev --workspace=map_and_location_services",
     "start:ride": "npm run dev --workspace=ride_management",
     "start:admin": "npm run dev --workspace=admin",
-    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\""
+    "start:merchant": "npm run dev --workspace=merchant",
+    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\" \"npm run start:merchant\""
   },
   "devDependencies": {
     "concurrently": "^9.2.0"
+  },
+  "dependencies": {
+    "moment-timezone": "^0.6.0"
   }
 }

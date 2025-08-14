@@ -337,13 +337,79 @@ const registerUser = async (req, res) => {
 };
 
 // ✅ Login controller using phone & password
+// const loginUser = async (req, res) => {
+//   const { phone, password, role } = req.body;
+
+//   try {
+//     const [rows] = await pool.query(`SELECT * FROM users WHERE phone = ?`, [
+//       phone,
+//     ]);
+
+//     if (rows.length === 0) {
+//       return res
+//         .status(404)
+//         .json({ error: "User with this phone number not found" });
+//     }
+
+//     const user = rows[0];
+
+//     const isMatch = await bcrypt.compare(password, user.password_hash);
+//     if (!isMatch) {
+//       return res.status(401).json({ error: "Incorrect password" });
+//     }
+
+//     if (user.role !== "admin" && user.role !== role) {
+//       return res
+//         .status(403)
+//         .json({ error: `Role mismatch. Expected: ${user.role}` });
+//     }
+
+//     const payload = {
+//       user_id: user.user_id,
+//       role: user.role,
+//       phone: user.phone,
+//     };
+
+//     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+//       expiresIn: "1m",
+//     });
+
+//     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
+//       expiresIn: "10m",
+//     });
+
+//     return res.status(200).json({
+//       message: "Login successful",
+//       token: {
+//         access_token,
+//         access_token_time: 1,
+//         refresh_token,
+//         refresh_token_time: 10,
+//       },
+//       user: {
+//         user_id: user.user_id,
+//         user_name: user.user_name,
+//         phone: user.phone,
+//         role: user.role,
+//         email: user.email,
+//       },
+//     });
+//   } catch (err) {
+//     console.error("Login error:", err);
+//     return res.status(500).json({ error: "Login failed due to server error" });
+//   }
+// };
+
 const loginUser = async (req, res) => {
   const { phone, password, role } = req.body;
 
   try {
-    const [rows] = await pool.query(`SELECT * FROM users WHERE phone = ?`, [
-      phone,
-    ]);
+    const [rows] = await pool.query(
+      `SELECT user_id, user_name, phone, email, role, password_hash, is_active
+       FROM users
+       WHERE phone = ?`,
+      [phone]
+    );
 
     if (rows.length === 0) {
       return res
@@ -353,12 +419,25 @@ const loginUser = async (req, res) => {
 
     const user = rows[0];
 
+    // ✅ Require active account
+    if (Number(user.is_active) !== 1) {
+      return res.status(403).json({ error: "Account is deactivated." });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    if (user.role !== "admin" && user.role !== role) {
+    // ✅ Allow both 'admin' and 'super admin'
+    if (
+      !(
+        user.role === "admin" ||
+        user.role === "super admin" ||
+        user.role === "user" ||
+        user.role === "merchant"
+      )
+    ) {
       return res
         .status(403)
         .json({ error: `Role mismatch. Expected: ${user.role}` });

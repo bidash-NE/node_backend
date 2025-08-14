@@ -10,6 +10,7 @@ async function getAll() {
     SELECT
       al.log_id,
       al.user_id,
+      al.admin_name,
       al.activity,
       al.created_at
     FROM admin_logs al

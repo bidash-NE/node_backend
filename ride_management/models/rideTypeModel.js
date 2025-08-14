@@ -1,23 +1,32 @@
 const db = require("../config/db");
+const moment = require("moment-timezone");
 
-// Helpers to sanitize values for DB
+// Helper functions to sanitize values for DB
 function toDbIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
 function toDbStrOrNull(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s.length ? s : null;
 }
 
-// Insert into admin_logs
+// Function to get Bhutan time (Asia/Thimphu)
+function getBhutanTime() {
+  return moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
+}
+
+// Insert into admin_logs (with Bhutan's time for created_at)
 async function logAdmin(conn, userId, adminName, activity) {
-  const sql = `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`;
+  const createdAt = getBhutanTime(); // Get Bhutan time when creating the log
+  const sql = `INSERT INTO admin_logs (user_id, admin_name, activity, created_at) VALUES (?, ?, ?, ?)`;
   await conn.query(sql, [
     toDbIntOrNull(userId),
     toDbStrOrNull(adminName),
     toDbStrOrNull(activity),
+    createdAt,
   ]);
 }
 
