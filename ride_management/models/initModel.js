@@ -7,6 +7,7 @@ const tables = [
       CREATE TABLE ride_types (
         ride_type_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(50) NOT NULL,
+        image VARCHAR(1024) NULL,
         base_fare INT NOT NULL,
         per_km INT NOT NULL,
         per_min INT NOT NULL

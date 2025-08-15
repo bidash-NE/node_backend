@@ -435,7 +435,8 @@ const loginUser = async (req, res) => {
         user.role === "admin" ||
         user.role === "super admin" ||
         user.role === "user" ||
-        user.role === "merchant"
+        user.role === "merchant" ||
+        user.role === "driver"
       )
     ) {
       return res

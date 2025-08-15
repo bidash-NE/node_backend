@@ -1,3 +1,4 @@
+// models/rideTypeModel.js
 const db = require("../config/db");
 const moment = require("moment-timezone");
 
@@ -31,7 +32,7 @@ async function logAdmin(conn, userId, adminName, activity) {
 }
 
 const createRideType = async (
-  { name, base_fare, per_km, per_min },
+  { name, base_fare, per_km, per_min, image = null },
   actorUserId = null,
   adminName = null
 ) => {
@@ -49,8 +50,8 @@ const createRideType = async (
     }
 
     const [result] = await conn.query(
-      `INSERT INTO ride_types (name, base_fare, per_km, per_min) VALUES (?, ?, ?, ?)`,
-      [name, base_fare, per_km, per_min]
+      `INSERT INTO ride_types (name, image, base_fare, per_km, per_min) VALUES (?, ?, ?, ?, ?)`,
+      [name, image || null, base_fare, per_km, per_min]
     );
 
     await logAdmin(
@@ -76,14 +77,16 @@ const updateRideType = async (
   actorUserId = null,
   adminName = null
 ) => {
-  const { name, base_fare, per_km, per_min } = data;
+  const { name, base_fare, per_km, per_min, image = null } = data;
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
     const [result] = await conn.query(
-      `UPDATE ride_types SET name = ?, base_fare = ?, per_km = ?, per_min = ? WHERE ride_type_id = ?`,
-      [name, base_fare, per_km, per_min, id]
+      `UPDATE ride_types
+         SET name = ?, image = ?, base_fare = ?, per_km = ?, per_min = ?
+       WHERE ride_type_id = ?`,
+      [name, image || null, base_fare, per_km, per_min, id]
     );
 
     if (result.affectedRows > 0) {
@@ -128,7 +131,7 @@ const deleteRideType = async (
     await conn.beginTransaction();
 
     const [[existing]] = await conn.query(
-      `SELECT name FROM ride_types WHERE ride_type_id = ?`,
+      `SELECT name, image FROM ride_types WHERE ride_type_id = ?`,
       [ride_type_id]
     );
 
@@ -149,7 +152,10 @@ const deleteRideType = async (
     }
 
     await conn.commit();
-    return result.affectedRows;
+    return {
+      affectedRows: result.affectedRows,
+      deletedImage: existing?.image || null,
+    };
   } catch (err) {
     await conn.rollback();
     throw err;

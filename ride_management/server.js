@@ -35,6 +35,7 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use("/uploads", express.static("uploads"));
 // ✅ API routes
 app.use("/api", popularLocationRoute);
 app.use("/api/ridetypes", rideTypeRoutes);

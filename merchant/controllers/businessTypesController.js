@@ -1,4 +1,8 @@
 // controllers/businessTypesController.js
+const fs = require("fs");
+const fsp = fs.promises;
+const path = require("path");
+
 const {
   getAllBusinessTypes,
   getBusinessTypeById,
@@ -8,11 +12,16 @@ const {
   deleteBusinessType,
 } = require("../models/businessTypesModel");
 
+const { toWebPath } = require("../middlewares/businessTypesImage");
+
+/* -------------------- helpers -------------------- */
+
 // Extract acting admin for logs
 function toIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
 function actor(req) {
   return {
     user_id:
@@ -28,14 +37,48 @@ function actor(req) {
   };
 }
 
+// Prefer uploaded file; fallback to body.image
+function extractIncomingImage(req) {
+  if (req.file) return toWebPath(req.file);
+  const raw = (req.body?.image || "").toString().trim();
+  if (!raw) return null;
+  if (raw.startsWith("/uploads/")) return raw;
+  if (raw.startsWith("uploads/")) return `/${raw}`;
+  try {
+    const u = new URL(raw);
+    return u.pathname || raw;
+  } catch {
+    return raw;
+  }
+}
+
+function isLocalUploadsPath(p) {
+  return p && p.startsWith("/uploads/");
+}
+
+function toAbsoluteUploadsPath(webPath) {
+  return path.join(process.cwd(), webPath.replace(/^\/+/, ""));
+}
+
+async function safeUnlink(absPath) {
+  try {
+    await fsp.unlink(absPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* -------------------- routes -------------------- */
+
 // GET /api/business-types
-exports.listBusinessTypes = async (req, res) => {
+exports.listBusinessTypes = async (_req, res) => {
   try {
     const out = await getAllBusinessTypes();
-    return res.status(out.success ? 200 : 404).json(out);
+    res.status(out.success ? 200 : 404).json(out);
   } catch (e) {
     console.error("listBusinessTypes error:", e);
-    return res
+    res
       .status(500)
       .json({ success: false, message: "Unable to fetch business types." });
   }
@@ -45,10 +88,10 @@ exports.listBusinessTypes = async (req, res) => {
 exports.getBusinessType = async (req, res) => {
   try {
     const out = await getBusinessTypeById(req.params.id);
-    return res.status(out.success ? 200 : 404).json(out);
+    res.status(out.success ? 200 : 404).json(out);
   } catch (e) {
     console.error("getBusinessType error:", e);
-    return res
+    res
       .status(500)
       .json({ success: false, message: "Unable to fetch business type." });
   }
@@ -58,10 +101,10 @@ exports.getBusinessType = async (req, res) => {
 exports.listFoodBusinessTypes = async (_req, res) => {
   try {
     const out = await getBusinessTypesByType("food");
-    return res.status(out.success ? 200 : 404).json(out);
+    res.status(out.success ? 200 : 404).json(out);
   } catch (e) {
     console.error("listFoodBusinessTypes error:", e);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Unable to fetch food business types.",
     });
@@ -72,10 +115,10 @@ exports.listFoodBusinessTypes = async (_req, res) => {
 exports.listMartBusinessTypes = async (_req, res) => {
   try {
     const out = await getBusinessTypesByType("mart");
-    return res.status(out.success ? 200 : 404).json(out);
+    res.status(out.success ? 200 : 404).json(out);
   } catch (e) {
     console.error("listMartBusinessTypes error:", e);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: "Unable to fetch mart business types.",
     });
@@ -84,20 +127,26 @@ exports.listMartBusinessTypes = async (_req, res) => {
 
 // POST /api/business-types
 exports.createBusinessType = async (req, res) => {
+  const { user_id, admin_name } = actor(req);
+  const { name, description, types } = req.body || {};
+  const newImage = extractIncomingImage(req);
+
   try {
-    const { user_id, admin_name } = actor(req);
-    const { name, description, types } = req.body || {};
     const out = await addBusinessType(
       name,
       description,
       types,
+      newImage,
       user_id,
       admin_name
     );
-    return res.status(out.success ? 201 : 400).json(out);
+    res.status(out.success ? 201 : 400).json(out);
   } catch (e) {
+    if (req.file && isLocalUploadsPath(newImage)) {
+      await safeUnlink(toAbsoluteUploadsPath(newImage));
+    }
     console.error("createBusinessType error:", e);
-    return res
+    res
       .status(500)
       .json({ success: false, message: "Unable to add business type." });
   }
@@ -105,21 +154,66 @@ exports.createBusinessType = async (req, res) => {
 
 // PUT /api/business-types/:id
 exports.updateBusinessType = async (req, res) => {
+  const { user_id, admin_name } = actor(req);
+  const { name, description, types } = req.body || {};
+  const incomingImage = extractIncomingImage(req);
+
+  let current;
   try {
-    const { user_id, admin_name } = actor(req);
-    const { name, description, types } = req.body || {};
+    const out = await getBusinessTypeById(req.params.id);
+    if (!out.success) {
+      if (req.file && isLocalUploadsPath(incomingImage)) {
+        await safeUnlink(toAbsoluteUploadsPath(incomingImage));
+      }
+      return res.status(404).json(out);
+    }
+    current = out.data;
+  } catch (e) {
+    if (req.file && isLocalUploadsPath(incomingImage)) {
+      await safeUnlink(toAbsoluteUploadsPath(incomingImage));
+    }
+    console.error("updateBusinessType fetch error:", e);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch current business type.",
+    });
+  }
+
+  const imageToStore = incomingImage ?? current.image ?? null;
+
+  try {
     const out = await updateBusinessType(
       req.params.id,
       name,
       description,
       types,
+      imageToStore,
       user_id,
       admin_name
     );
-    return res.status(out.success ? 200 : 404).json(out);
+
+    if (!out.success) {
+      if (req.file && isLocalUploadsPath(incomingImage)) {
+        await safeUnlink(toAbsoluteUploadsPath(incomingImage));
+      }
+      return res.status(404).json(out);
+    }
+
+    if (
+      incomingImage &&
+      incomingImage !== current.image &&
+      isLocalUploadsPath(current.image)
+    ) {
+      await safeUnlink(toAbsoluteUploadsPath(current.image));
+    }
+
+    res.status(200).json(out);
   } catch (e) {
+    if (req.file && isLocalUploadsPath(incomingImage)) {
+      await safeUnlink(toAbsoluteUploadsPath(incomingImage));
+    }
     console.error("updateBusinessType error:", e);
-    return res
+    res
       .status(500)
       .json({ success: false, message: "Unable to update business type." });
   }
@@ -127,10 +221,23 @@ exports.updateBusinessType = async (req, res) => {
 
 // DELETE /api/business-types/:id
 exports.removeBusinessType = async (req, res) => {
+  const { user_id, admin_name } = actor(req);
+  let current = null;
+
   try {
-    const { user_id, admin_name } = actor(req);
+    const out = await getBusinessTypeById(req.params.id);
+    if (out.success) current = out.data;
+  } catch (_) {}
+
+  try {
     const out = await deleteBusinessType(req.params.id, user_id, admin_name);
-    return res.status(out.success ? 200 : 404).json(out);
+    if (!out.success) return res.status(404).json(out);
+
+    if (current?.image && isLocalUploadsPath(current.image)) {
+      await safeUnlink(toAbsoluteUploadsPath(current.image));
+    }
+
+    res.status(200).json(out);
   } catch (e) {
     if (
       e &&
@@ -142,7 +249,7 @@ exports.removeBusinessType = async (req, res) => {
       });
     }
     console.error("removeBusinessType error:", e);
-    return res
+    res
       .status(500)
       .json({ success: false, message: "Unable to delete business type." });
   }

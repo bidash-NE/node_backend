@@ -1,19 +1,32 @@
 // routes/businessTypesRoutes.js
 const express = require("express");
 const router = express.Router();
-const ctrl = require("../controllers/businessTypesController");
 
-// Read
-router.get("/business-types", ctrl.listBusinessTypes);
-router.get("/business-types/:id", ctrl.getBusinessType);
+const {
+  listBusinessTypes,
+  getBusinessType,
+  listFoodBusinessTypes,
+  listMartBusinessTypes,
+  createBusinessType,
+  updateBusinessType,
+  removeBusinessType,
+} = require("../controllers/businessTypesController");
 
-// Special type filters
-router.get("/business-types/type/food", ctrl.listFoodBusinessTypes);
-router.get("/business-types/type/mart", ctrl.listMartBusinessTypes);
+const {
+  uploadBusinessTypeImage,
+} = require("../middlewares/businessTypesImage");
 
-// Mutations
-router.post("/business-types", ctrl.createBusinessType);
-router.put("/business-types/:id", ctrl.updateBusinessType);
-router.delete("/business-types/:id", ctrl.removeBusinessType);
+// list/get
+router.get("/business-types", listBusinessTypes);
+router.get("/business-types/:id", getBusinessType);
+router.get("/business-types/type/food", listFoodBusinessTypes);
+router.get("/business-types/type/mart", listMartBusinessTypes);
+
+// create/update with image upload (field name: "image")
+router.post("/business-types", uploadBusinessTypeImage, createBusinessType);
+router.put("/business-types/:id", uploadBusinessTypeImage, updateBusinessType);
+
+// delete
+router.delete("/business-types/:id", removeBusinessType);
 
 module.exports = router;

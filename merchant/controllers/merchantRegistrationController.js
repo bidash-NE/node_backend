@@ -2,7 +2,7 @@
 const {
   registerMerchantModel,
   findUserByUsername,
-} = require("../models/merchantRegistrationModel");
+} = require("../models/merchantRegistrationModel"); // keep your original path/name
 
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -56,6 +56,10 @@ async function registerMerchant(req, res) {
       ? toRelPath(f.bank_qr_code_image[0])
       : fromBodyToStoredPath(b.bank_qr_code_image);
 
+    // Support many-to-many business types:
+    // - Preferred: b.business_type_ids (array or CSV, e.g. [2,5,8] or "2,5,8")
+    // - Fallback:  b.business_types (array of names, e.g. ["Cafe", "Bakery"])
+    // The model will normalize/validate these.
     const payload = {
       // users
       user_name: b.user_name,
@@ -66,7 +70,16 @@ async function registerMerchant(req, res) {
 
       // business
       business_name: b.business_name,
-      business_type: b.business_type,
+      // REMOVED: business_type (single) — now using many-to-many
+      business_type_ids: b.business_type_ids ?? null,
+      business_types: Array.isArray(b.business_types)
+        ? b.business_types
+        : typeof b.business_types === "string" && b.business_types.trim()
+        ? b.business_types
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+        : undefined,
       business_license_number: b.business_license_number,
       license_image,
       latitude:
@@ -84,7 +97,7 @@ async function registerMerchant(req, res) {
       address: b.address || null,
       business_logo,
       delivery_option: b.delivery_option, // 'SELF' | 'GRAB' | 'BOTH'
-      owner_type: b.owner_type || "individual", // Default owner_type to 'individual' if not provided
+      owner_type: b.owner_type || "individual",
 
       // bank
       bank_name: b.bank_name,
@@ -99,6 +112,8 @@ async function registerMerchant(req, res) {
     res.status(201).json({
       message: "Merchant registered successfully",
       user_id: result.user_id,
+      business_id: result.business_id,
+      business_type_ids: result.business_type_ids, // from model’s success payload
     });
   } catch (err) {
     console.error(err.message || err);
@@ -108,6 +123,7 @@ async function registerMerchant(req, res) {
       .json({ error: err.message || "Merchant registration failed" });
   }
 }
+
 async function loginByUsername(req, res) {
   try {
     const { user_name, password } = req.body || {};
@@ -168,4 +184,5 @@ async function loginByUsername(req, res) {
     return res.status(500).json({ error: "Login failed due to server error" });
   }
 }
+
 module.exports = { registerMerchant, loginByUsername };
