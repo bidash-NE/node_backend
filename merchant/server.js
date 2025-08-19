@@ -5,6 +5,7 @@ const cors = require("cors");
 const { initMerchantTables } = require("./models/initModel");
 const merchantRoutes = require("./routes/merchantRegistrationRoute");
 const businessTypesRoutes = require("./routes/businessTypesRoute");
+const categoryRoutes = require("./routes/categoryRoute");
 
 dotenv.config();
 const app = express();
@@ -21,6 +22,8 @@ initMerchantTables()
 app.use("/uploads", express.static("uploads"));
 app.use("/api/merchant", merchantRoutes);
 app.use("/api/admin", businessTypesRoutes);
+app.use("/api/category", categoryRoutes);
+
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);

@@ -94,30 +94,52 @@ async function ensureMerchantBusinessDetailsTable() {
            ADD COLUMN address VARCHAR(512) NULL AFTER longitude`
       );
     }
+    // hours/holidays migrations if existing table lacks them
+    if (!(await columnExists("merchant_business_details", "opening_time"))) {
+      await db.query(
+        `ALTER TABLE merchant_business_details
+           ADD COLUMN opening_time TIME NULL AFTER delivery_option`
+      );
+    }
+    if (!(await columnExists("merchant_business_details", "closing_time"))) {
+      await db.query(
+        `ALTER TABLE merchant_business_details
+           ADD COLUMN closing_time TIME NULL AFTER opening_time`
+      );
+    }
+    if (!(await columnExists("merchant_business_details", "holidays"))) {
+      await db.query(
+        `ALTER TABLE merchant_business_details
+           ADD COLUMN holidays JSON NULL AFTER closing_time`
+      );
+    }
     return;
   }
 
   // NOTE: no business_type_id column here anymore (many-to-many via merchant_business_types)
   const sql = `
-    CREATE TABLE merchant_business_details (
-      business_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      user_id BIGINT UNSIGNED NOT NULL,
-      owner_type VARCHAR(255) NULL,
-      business_name VARCHAR(255) NOT NULL,
-      business_license_number VARCHAR(100) NULL,
-      license_image VARCHAR(1024) NULL,
-      latitude DECIMAL(10,7) NULL,
-      longitude DECIMAL(10,7) NULL,
-      address VARCHAR(512) NULL,
-      business_logo VARCHAR(1024) NULL,
-      delivery_option ENUM('SELF','GRAB','BOTH') NOT NULL DEFAULT 'SELF',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (business_id),
-      KEY idx_user_id (user_id),
-      CONSTRAINT fk_mb_user FOREIGN KEY (user_id) REFERENCES users(user_id)
-        ON DELETE CASCADE ON UPDATE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+   CREATE TABLE merchant_business_details (
+    business_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    owner_type VARCHAR(255) NULL,
+    business_name VARCHAR(255) NOT NULL,
+    business_license_number VARCHAR(100) NULL,
+    license_image VARCHAR(1024) NULL,
+    latitude DECIMAL(10,7) NULL,
+    longitude DECIMAL(10,7) NULL,
+    address VARCHAR(512) NULL,
+    business_logo VARCHAR(1024) NULL,
+    delivery_option ENUM('SELF','GRAB','BOTH') NOT NULL DEFAULT 'SELF',
+    opening_time TIME NULL,
+    closing_time TIME NULL,
+    holidays JSON NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (business_id),
+    KEY idx_user_id (user_id),
+    CONSTRAINT fk_mb_user FOREIGN KEY (user_id) REFERENCES users(user_id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `;
   await db.query(sql);
 }
@@ -143,6 +165,85 @@ async function ensureMerchantBusinessTypesTable() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `;
   await db.query(sql);
+}
+
+/* ---------- NEW: food_category & mart_category creators ---------- */
+async function ensureFoodCategoryTable() {
+  if (!(await tableExists("food_category"))) {
+    const sql = `
+      CREATE TABLE food_category (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        category_name VARCHAR(255) NOT NULL,
+        business_type VARCHAR(50) NOT NULL DEFAULT 'food',
+        description TEXT NULL,
+        category_image VARCHAR(1024) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_food_cat (business_type, category_name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `;
+    await db.query(sql);
+    return;
+  }
+
+  // migrations
+  if (!(await columnExists("food_category", "category_image"))) {
+    await db.query(
+      `ALTER TABLE food_category
+         ADD COLUMN category_image VARCHAR(1024) NULL AFTER description`
+    );
+  }
+  if (!(await columnExists("food_category", "business_type"))) {
+    await db.query(
+      `ALTER TABLE food_category
+         ADD COLUMN business_type VARCHAR(50) NOT NULL DEFAULT 'food' AFTER category_name`
+    );
+  }
+  if (!(await indexExists("food_category", "uk_food_cat"))) {
+    await db.query(
+      `ALTER TABLE food_category
+         ADD UNIQUE KEY uk_food_cat (business_type, category_name)`
+    );
+  }
+}
+
+async function ensureMartCategoryTable() {
+  if (!(await tableExists("mart_category"))) {
+    const sql = `
+      CREATE TABLE mart_category (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        category_name VARCHAR(255) NOT NULL,
+        business_type VARCHAR(50) NOT NULL DEFAULT 'mart',
+        description TEXT NULL,
+        category_image VARCHAR(1024) NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_mart_cat (business_type, category_name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `;
+    await db.query(sql);
+    return;
+  }
+
+  // migrations
+  if (!(await columnExists("mart_category", "category_image"))) {
+    await db.query(
+      `ALTER TABLE mart_category
+         ADD COLUMN category_image VARCHAR(1024) NULL AFTER description`
+    );
+  }
+  if (!(await columnExists("mart_category", "business_type"))) {
+    await db.query(
+      `ALTER TABLE mart_category
+         ADD COLUMN business_type VARCHAR(50) NOT NULL DEFAULT 'mart' AFTER category_name`
+    );
+  }
+  if (!(await indexExists("mart_category", "uk_mart_cat"))) {
+    await db.query(
+      `ALTER TABLE mart_category
+         ADD UNIQUE KEY uk_mart_cat (business_type, category_name)`
+    );
+  }
 }
 
 /* --------------- migration --------------- */
@@ -212,6 +313,10 @@ async function initMerchantTables() {
   await ensureMerchantBusinessTypesTable();
   await migrateLegacyBusinessTypeId();
   await ensureMerchantBankDetailsTable();
+
+  // NEW category tables
+  await ensureFoodCategoryTable();
+  await ensureMartCategoryTable();
 }
 
 module.exports = { initMerchantTables };
