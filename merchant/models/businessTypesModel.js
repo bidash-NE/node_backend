@@ -1,8 +1,8 @@
-// models/categoryModel.js
+// models/businessTypesModel.js
 const db = require("../config/db");
 const moment = require("moment-timezone");
 
-/* ========== helpers (same style as businessTypesModel) ========== */
+/* ========== helpers ========== */
 const bhutanNow = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
 function toIntOrNull(v) {
@@ -16,251 +16,210 @@ function toStrOrNull(v) {
   return s.length ? s : null;
 }
 
-// admin_logs write; never throws
+// allow array or CSV string; normalize to "a,b,c"
+function normalizeTypes(input) {
+  if (input == null) return null;
+  if (Array.isArray(input)) {
+    return input.map((x) => String(x).trim()).filter(Boolean).join(",");
+  }
+  return (
+    String(input)
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .join(",") || null
+  );
+}
+
+/** Log admin action into admin_logs in Bhutan time; never throws */
 async function logAdminAction(user_id, admin_name, activity) {
   try {
+    // Optional: ensure user_id exists; if not, store NULL
     let uid = toIntOrNull(user_id);
     if (uid) {
-      const [chk] = await db.query(
-        `SELECT 1 FROM users WHERE user_id = ? LIMIT 1`,
-        [uid]
-      );
-      if (chk.length === 0) uid = null;
+      const [chk] = await db.query(`SELECT 1 FROM users WHERE user_id = ? LIMIT 1`, [uid]);
+      if (!chk.length) uid = null;
     }
     await db.query(
       `INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
        VALUES (?, ?, ?, ?)`,
       [uid, toStrOrNull(admin_name), toStrOrNull(activity), bhutanNow()]
     );
-  } catch (e) {
-    console.warn("admin_logs insert failed:", e.message);
+  } catch (_e) {
+    // swallow
   }
 }
 
-/* ========== table resolution ========== */
-const TABLE_BY_KIND = {
-  food: "food_category",
-  mart: "mart_category",
-};
+/* ========== queries used by controller ========== */
 
-function tableForKind(kind) {
-  const k = String(kind || "").toLowerCase();
-  const t = TABLE_BY_KIND[k];
-  if (!t) throw new Error("Invalid kind; must be 'food' or 'mart'");
-  return t;
-}
-
-/* ========== queries for categories ========== */
-
-// List all (ordered by name)
-async function getAllCategories(kind) {
-  const table = tableForKind(kind);
+/** List all business types */
+async function getAllBusinessTypes() {
   const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
-      ORDER BY category_name ASC`
+    `SELECT id, name, image, description, types, created_at, updated_at
+       FROM business_types
+      ORDER BY name ASC`
   );
-  if (!rows.length)
-    return { success: false, message: "No categories found.", data: [] };
+  if (!rows.length) return { success: false, message: "No business types found.", data: [] };
   return { success: true, data: rows };
 }
 
-// Get one by id
-async function getCategoryById(kind, id) {
-  const table = tableForKind(kind);
+/** Get one by ID */
+async function getBusinessTypeById(id) {
   const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
+    `SELECT id, name, image, description, types, created_at, updated_at
+       FROM business_types
       WHERE id = ?`,
     [id]
   );
-  if (!rows.length)
-    return { success: false, message: `Category (kind=${kind}) id ${id} not found.` };
+  if (!rows.length) {
+    return { success: false, message: `Business type with ID ${id} not found.` };
+  }
   return { success: true, data: rows[0] };
 }
 
-// Get by business_type (within table)
-async function getCategoriesByBusinessType(kind, business_type) {
-  const table = tableForKind(kind);
-  const bt = String(business_type || kind).toLowerCase();
+/** Get business types filtered by single token in 'types' (e.g., 'food' or 'mart') */
+async function getBusinessTypesByType(typeToken) {
+  const token = String(typeToken || "").toLowerCase().trim();
+  if (!token) return { success: false, message: "Type is required.", data: [] };
+
+  // If your schema stores a single token like 'food' or 'mart' in types,
+  // equality is enough. If you sometimes store comma-separated values,
+  // you can switch to the LIKE pattern shown in older versions.
   const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
-      WHERE business_type = ?
-      ORDER BY category_name ASC`,
-    [bt]
+    `SELECT id, name, image, description, types, created_at, updated_at
+       FROM business_types
+      WHERE types IS NOT NULL
+        AND LOWER(types) = ?`,
+    [token]
   );
-  if (!rows.length)
-    return {
-      success: false,
-      message: `No categories found for business_type="${bt}" in ${table}.`,
-      data: [],
-    };
+
+  if (!rows.length) {
+    return { success: false, message: `No business types found for type "${token}".`, data: [] };
+  }
   return { success: true, data: rows };
 }
 
-/* ========== create / update / delete with admin_logs ========== */
+/** Create */
+async function addBusinessType(name, description, types, image, user_id, admin_name) {
+  const n = toStrOrNull(name);
+  const d = toStrOrNull(description);
+  // For your use-case, types should typically be 'food' or 'mart' (single token).
+  // We still normalize to be tolerant of input format.
+  const t = toStrOrNull(normalizeTypes(types));
+  const img = toStrOrNull(image);
 
-// Create
-async function addCategory(kind, { category_name, business_type, description, category_image }, user_id, admin_name) {
-  const table = tableForKind(kind);
-  const name = toStrOrNull(category_name);
-  const bt = toStrOrNull((business_type || kind).toLowerCase());
-  const desc = toStrOrNull(description);
-  const img = toStrOrNull(category_image);
+  if (!n) return { success: false, message: "Name is required." };
 
-  if (!name) return { success: false, message: "category_name is required." };
-
-  // uniqueness: (business_type, category_name)
+  // uniqueness: block duplicate (name + types) ignoring case
   const [dups] = await db.query(
-    `SELECT 1 FROM ${table}
-      WHERE business_type = ? AND category_name = ?
+    `SELECT 1 FROM business_types
+      WHERE LOWER(name) = LOWER(?)
+        AND (
+             (types IS NULL AND ? IS NULL)
+          OR LOWER(types) = LOWER(?)
+        )
       LIMIT 1`,
-    [bt, name]
+    [n, t, t]
   );
   if (dups.length) {
     return {
       success: false,
-      message: `Category "${name}" already exists for business_type "${bt}".`,
+      message: `Business type "${n}" with types "${t || "-"}" already exists.`,
     };
   }
 
   const now = bhutanNow();
   const [res] = await db.query(
-    `INSERT INTO ${table} (category_name, business_type, description, category_image, created_at, updated_at)
+    `INSERT INTO business_types (name, image, description, types, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [name, bt, desc, img, now, now]
+    [n, img, d, t, now, now]
   );
 
   await logAdminAction(
     user_id,
     admin_name,
-    `CREATE ${table}: "${name}" (business_type=${bt}, image=${img || "-"})`
+    `CREATE business_types: "${n}" (types: ${t || "-"}, image: ${img || "-"})`
   );
 
-  const created = await getCategoryById(kind, res.insertId);
   return {
     success: true,
-    message: `Category "${name}" created successfully.`,
-    data: created.success ? created.data : { id: res.insertId, category_name: name, business_type: bt, description: desc, category_image: img },
+    message: `Business type "${n}" added successfully.`,
+    insertedId: res.insertId,
   };
 }
 
-// Update (partial)
-async function updateCategory(kind, id, { category_name, business_type, description, category_image }, user_id, admin_name) {
-  const table = tableForKind(kind);
+/** Update */
+async function updateBusinessType(id, name, description, types, image, user_id, admin_name) {
+  const current = await getBusinessTypeById(id);
+  if (!current.success) return current;
 
-  const existing = await getCategoryById(kind, id);
-  if (!existing.success) return { success: false, message: existing.message };
-  const prev = existing.data;
+  const n = toStrOrNull(name);
+  const d = toStrOrNull(description);
+  const t = toStrOrNull(normalizeTypes(types));
+  const img = toStrOrNull(image);
 
-  const name = category_name !== undefined ? toStrOrNull(category_name) : undefined;
-  const bt   = business_type   !== undefined ? toStrOrNull(String(business_type).toLowerCase()) : undefined;
-  const desc = description     !== undefined ? toStrOrNull(description) : undefined;
-  const img  = category_image  !== undefined ? toStrOrNull(category_image) : undefined;
+  if (!n) return { success: false, message: "Name is required." };
 
-  if (name === null) return { success: false, message: "category_name cannot be empty." };
-
-  const finalName = name !== undefined ? name : prev.category_name;
-  const finalBT   = bt   !== undefined ? bt   : prev.business_type;
-
-  if (finalName && finalBT) {
-    const [dups] = await db.query(
-      `SELECT 1 FROM ${table}
-        WHERE business_type = ? AND category_name = ? AND id <> ?
-        LIMIT 1`,
-      [finalBT, finalName, id]
-    );
-    if (dups.length) {
-      return {
-        success: false,
-        message: `Another category "${finalName}" already exists for business_type "${finalBT}".`,
-      };
-    }
+  // uniqueness check excluding current row
+  const [dups] = await db.query(
+    `SELECT 1 FROM business_types
+      WHERE LOWER(name) = LOWER(?)
+        AND (
+             (types IS NULL AND ? IS NULL)
+          OR LOWER(types) = LOWER(?)
+        )
+        AND id <> ?
+      LIMIT 1`,
+    [n, t, t, id]
+  );
+  if (dups.length) {
+    return {
+      success: false,
+      message: `Another business type "${n}" with types "${t || "-"}" already exists.`,
+    };
   }
 
-  const sets = [];
-  const params = [];
-  const setIf = (col, val) => {
-    if (val !== undefined) {
-      sets.push(`${col} = ?`);
-      params.push(val);
-    }
-  };
-  setIf("category_name", name);
-  setIf("business_type", bt);
-  setIf("description", desc);
-  setIf("category_image", img);
-
-  if (!sets.length) {
-    return { success: true, message: "No changes.", data: prev, old_image: prev.category_image, new_image: prev.category_image };
-  }
-
-  sets.push("updated_at = ?");
-  params.push(bhutanNow());
-  params.push(id);
-
+  const now = bhutanNow();
   await db.query(
-    `UPDATE ${table} SET ${sets.join(", ")} WHERE id = ?`,
-    params
+    `UPDATE business_types
+        SET name = ?, image = ?, description = ?, types = ?, updated_at = ?
+      WHERE id = ?`,
+    [n, img, d, t, now, id]
   );
-
-  const updated = await getCategoryById(kind, id);
 
   await logAdminAction(
     user_id,
     admin_name,
-    `UPDATE ${table}: id=${id} "${finalName}" (business_type=${finalBT}, image=${img !== undefined ? (img || "-") : "(unchanged)"})`
+    `UPDATE business_types: id=${id} -> name="${n}", types="${t || "-"}", image=${img || "-"}`
   );
 
-  return {
-    success: true,
-    message: `Category updated successfully.`,
-    data: updated.success ? updated.data : null,
-    old_image: prev.category_image,
-    new_image: updated.success ? updated.data.category_image : prev.category_image,
-  };
+  return { success: true, message: `Business type "${n}" updated successfully.` };
 }
 
-// Delete
-async function deleteCategory(kind, id, user_id, admin_name) {
-  const table = tableForKind(kind);
-  const cat = await getCategoryById(kind, id);
-  if (!cat.success) return { success: false, message: cat.message };
+/** Delete */
+async function deleteBusinessType(id, user_id, admin_name) {
+  const bt = await getBusinessTypeById(id);
+  if (!bt.success) return bt;
 
-  await db.query(`DELETE FROM ${table} WHERE id = ?`, [id]);
+  await db.query(`DELETE FROM business_types WHERE id = ?`, [id]);
 
   await logAdminAction(
     user_id,
     admin_name,
-    `DELETE ${table}: id=${id} "${cat.data.category_name}" (business_type=${cat.data.business_type})`
+    `DELETE business_types: id=${id} ("${bt.data.name}")`
   );
 
   return {
     success: true,
-    message: `Category "${cat.data.category_name}" deleted successfully.`,
-    old_image: cat.data.category_image || null,
+    message: `Business type "${bt.data.name}" deleted successfully.`,
   };
-}
-
-/* ========== business types fetch for categories UI ========== */
-async function getAllBusinessTypes() {
-  const [rows] = await db.query(
-    `SELECT id, name, image, description, types
-       FROM business_types
-      ORDER BY name ASC`
-  );
-  if (!rows.length)
-    return { success: false, message: "No business types found.", data: [] };
-  return { success: true, data: rows };
 }
 
 module.exports = {
-  getAllCategories,
-  getCategoryById,
-  getCategoriesByBusinessType,
-  addCategory,
-  updateCategory,
-  deleteCategory,
-  getAllBusinessTypes,   // 👈 new
+  getAllBusinessTypes,
+  getBusinessTypeById,
+  getBusinessTypesByType,
+  addBusinessType,
+  updateBusinessType,
+  deleteBusinessType,
 };

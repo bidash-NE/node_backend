@@ -3,12 +3,20 @@ const db = require("../config/db");
 const moment = require("moment-timezone");
 
 /* ========== helpers ========== */
-const bhutanNow = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
+const bhutanNow = () =>
+  moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
 function toStrOrNull(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s.length ? s : null;
+}
+
+function toIntOrThrow(v, name = "id") {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0)
+    throw new Error(`${name} must be a positive integer`);
+  return n;
 }
 
 const TABLE_BY_KIND = {
@@ -26,7 +34,9 @@ function tableForKind(kind) {
 /** Verify admin identity: user exists and user_name matches admin_name (case-insensitive). */
 async function verifyAdmin(user_id, admin_name) {
   if (!user_id || !admin_name) {
-    throw new Error("admin verification failed: user_id and admin_name are required");
+    throw new Error(
+      "admin verification failed: user_id and admin_name are required"
+    );
   }
   const [rows] = await db.query(
     `SELECT user_id, user_name FROM users WHERE user_id = ? LIMIT 1`,
@@ -35,7 +45,8 @@ async function verifyAdmin(user_id, admin_name) {
   if (!rows.length) {
     throw new Error("admin verification failed: user not found");
   }
-  const matches = rows[0].user_name?.toLowerCase() === String(admin_name).toLowerCase();
+  const matches =
+    rows[0].user_name?.toLowerCase() === String(admin_name).toLowerCase();
   if (!matches) {
     throw new Error("admin verification failed: admin_name does not match user");
   }
@@ -52,7 +63,7 @@ async function resolveBusinessTypeByNameOrThrow(kind, business_type_name) {
     `SELECT id, name, types
        FROM business_types
       WHERE LOWER(name) = LOWER(?)
-        AND (types IS NULL OR LOWER(types) = ?) 
+        AND (types IS NULL OR LOWER(types) = ?)
       LIMIT 1`,
     [name, k]
   );
@@ -111,7 +122,6 @@ async function getCategoriesByBusinessType(kind, business_type_name) {
   if (!name) {
     return { success: false, message: "business_type (name) is required", data: [] };
   }
-  // exact case-insensitive match on the stored name in category.business_type
   const [rows] = await db.query(
     `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
        FROM ${table}
@@ -131,7 +141,12 @@ async function getCategoriesByBusinessType(kind, business_type_name) {
 /* ========== create / update / delete with verifications and admin_logs ========== */
 
 // Create (requires valid admin + valid business_type name)
-async function addCategory(kind, { category_name, business_type, description, category_image }, user_id, admin_name) {
+async function addCategory(
+  kind,
+  { category_name, business_type, description, category_image },
+  user_id,
+  admin_name
+) {
   const table = tableForKind(kind);
 
   // 1) verify admin
@@ -177,12 +192,20 @@ async function addCategory(kind, { category_name, business_type, description, ca
   return {
     success: true,
     message: `Category "${name}" created successfully.`,
-    data: created.success ? created.data : { id: res.insertId, category_name: name, business_type: btRow.name, description: desc, category_image: img },
+    data: created.success
+      ? created.data
+      : { id: res.insertId, category_name: name, business_type: btRow.name, description: desc, category_image: img },
   };
 }
 
 // Update (partial) — verifies admin, and if business_type provided, it must exist by name
-async function updateCategory(kind, id, { category_name, business_type, description, category_image }, user_id, admin_name) {
+async function updateCategory(
+  kind,
+  id,
+  { category_name, business_type, description, category_image },
+  user_id,
+  admin_name
+) {
   const table = tableForKind(kind);
 
   // verify admin
@@ -289,6 +312,118 @@ async function deleteCategory(kind, id, user_id, admin_name) {
   };
 }
 
+/* ==================== NEW: categories by business_id flow ==================== */
+/**
+ * 1) Find all business_type_ids for a business (merchant_business_types)
+ * 2) Map to business_types rows → {id, name, types}
+ * 3) For each kind (types=food|mart), fetch categories from the right table by NAME
+ * Returns grouped structure:
+ * {
+ *   business_id,
+ *   types: [
+ *     {
+ *       kind: 'food'|'mart',
+ *       business_type_id,
+ *       business_type_name,
+ *       categories: [ { id, category_name, business_type, description, category_image, created_at, updated_at }, ... ]
+ *     },
+ *     ...
+ *   ]
+ * }
+ */
+async function getCategoriesForBusiness(business_id) {
+  const bid = toIntOrThrow(business_id, "business_id");
+
+  // ensure business exists
+  const [biz] = await db.query(
+    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+    [bid]
+  );
+  if (!biz.length) throw new Error("Business not found");
+
+  // Step 1+2: get business_type (id, name, types)
+  const [btRows] = await db.query(
+    `SELECT mbt.business_type_id AS id, bt.name, LOWER(bt.types) AS kind
+       FROM merchant_business_types mbt
+       JOIN business_types bt ON bt.id = mbt.business_type_id
+      WHERE mbt.business_id = ?`,
+    [bid]
+  );
+  if (!btRows.length) {
+    return { business_id: bid, types: [] };
+  }
+
+  // group names per kind
+  const byKind = { food: [], mart: [] };
+  for (const r of btRows) {
+    const kind = r.kind === "mart" ? "mart" : "food"; // default to food if null/other
+    byKind[kind].push({ id: r.id, name: r.name });
+  }
+
+  // helper: (?, ?, ?)
+  const makeQs = (n) => Array(n).fill("?").join(",");
+
+  const result = { business_id: bid, types: [] };
+
+  // FOOD categories
+  if (byKind.food.length) {
+    const names = byKind.food.map((x) => x.name.toLowerCase());
+    const [rows] = await db.query(
+      `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
+         FROM ${TABLE_BY_KIND.food}
+        WHERE LOWER(business_type) IN (${makeQs(names.length)})
+        ORDER BY business_type ASC, category_name ASC`,
+      names
+    );
+
+    const map = new Map();
+    for (const { id, name } of byKind.food) {
+      map.set(name.toLowerCase(), {
+        kind: "food",
+        business_type_id: id,
+        business_type_name: name,
+        categories: [],
+      });
+    }
+    for (const r of rows) {
+      const key = String(r.business_type || "").toLowerCase();
+      const bucket = map.get(key);
+      if (bucket) bucket.categories.push(r);
+    }
+    result.types.push(...[...map.values()]);
+  }
+
+  // MART categories
+  if (byKind.mart.length) {
+    const names = byKind.mart.map((x) => x.name.toLowerCase());
+    const [rows] = await db.query(
+      `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
+         FROM ${TABLE_BY_KIND.mart}
+        WHERE LOWER(business_type) IN (${makeQs(names.length)})
+        ORDER BY business_type ASC, category_name ASC`,
+      names
+    );
+
+    const map = new Map();
+    for (const { id, name } of byKind.mart) {
+      map.set(name.toLowerCase(), {
+        kind: "mart",
+        business_type_id: id,
+        business_type_name: name,
+        categories: [],
+      });
+    }
+    for (const r of rows) {
+      const key = String(r.business_type || "").toLowerCase();
+      const bucket = map.get(key);
+      if (bucket) bucket.categories.push(r);
+    }
+    result.types.push(...[...map.values()]);
+  }
+
+  return result;
+}
+
 module.exports = {
   getAllCategories,
   getCategoryById,
@@ -296,4 +431,6 @@ module.exports = {
   addCategory,
   updateCategory,
   deleteCategory,
+  // NEW export
+  getCategoriesForBusiness,
 };

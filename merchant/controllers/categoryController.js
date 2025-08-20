@@ -8,12 +8,15 @@ const {
   getCategoryById,
   updateCategory,
   deleteCategory,
+  getCategoriesForBusiness, // NEW
 } = require("../models/categoryModel");
 
 const { toWebPathFromFile } = require("../middlewares/categoryImage");
 
-const isUploadsPath = (p) => typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
-const toAbsPath = (webPath) => path.join(process.cwd(), webPath.replace(/^\//, ""));
+const isUploadsPath = (p) =>
+  typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
+const toAbsPath = (webPath) =>
+  path.join(process.cwd(), webPath.replace(/^\//, ""));
 
 function safeDeleteFile(oldWebPath) {
   if (!oldWebPath) return;
@@ -37,16 +40,12 @@ async function createCategoryCtrl(req, res) {
 
     const payload = {
       category_name: body.category_name,
-      business_type: body.business_type, // NAME to validate in business_types
+      business_type: body.business_type, // NAME
       description: body.description || null,
       category_image: fileWebPath || body.category_image || null,
     };
 
-    // require admin verification fields
-    const user_id = body.user_id;
-    const admin_name = body.admin_name;
-
-    const out = await addCategory(kind, payload, user_id, admin_name);
+    const out = await addCategory(kind, payload, body.user_id, body.admin_name);
     return res.status(201).json({ message: out.message, data: out.data });
   } catch (e) {
     return res.status(400).json({ error: e.message || "Create failed" });
@@ -65,7 +64,7 @@ async function listCategoriesCtrl(req, res) {
   }
 }
 
-/* ---------- GET by business_type NAME ---------- */
+/* ---------- GET by business_type NAME within kind ---------- */
 async function listByBusinessTypeCtrl(req, res) {
   try {
     const kind = req.params.kind;
@@ -92,18 +91,13 @@ async function updateCategoryCtrl(req, res) {
 
     const fields = {};
     if (body.category_name !== undefined) fields.category_name = body.category_name;
-    if (body.business_type !== undefined) fields.business_type = body.business_type; // NAME to validate
+    if (body.business_type !== undefined) fields.business_type = body.business_type;
     if (body.description !== undefined) fields.description = body.description;
     if (fileWebPath) fields.category_image = fileWebPath;
     else if (body.category_image !== undefined) fields.category_image = body.category_image || null;
 
-    // admin verification fields
-    const user_id = body.user_id;
-    const admin_name = body.admin_name;
+    const out = await updateCategory(kind, id, fields, body.user_id, body.admin_name);
 
-    const out = await updateCategory(kind, id, fields, user_id, admin_name);
-
-    // auto-delete replaced image if changed
     if (out.old_image && out.new_image && out.old_image !== out.new_image) {
       safeDeleteFile(out.old_image);
     }
@@ -139,10 +133,25 @@ async function deleteCategoryCtrl(req, res) {
   }
 }
 
+/* ---------- NEW: FETCH categories for a business ---------- */
+async function getCategoriesForBusinessCtrl(req, res) {
+  try {
+    const businessId = Number(req.params.businessId);
+    if (!Number.isInteger(businessId) || businessId <= 0) {
+      return res.status(400).json({ error: "Invalid businessId" });
+    }
+    const data = await getCategoriesForBusiness(businessId);
+    return res.status(200).json(data);
+  } catch (e) {
+    return res.status(400).json({ error: e.message || "Fetch failed" });
+  }
+}
+
 module.exports = {
   createCategoryCtrl,
   listCategoriesCtrl,
   listByBusinessTypeCtrl,
   updateCategoryCtrl,
   deleteCategoryCtrl,
+  getCategoriesForBusinessCtrl, // NEW
 };

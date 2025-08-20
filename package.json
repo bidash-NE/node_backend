@@ -7,7 +7,8 @@
     "map_and_location_services",
     "ride_management",
     "admin",
-    "merchant"
+    "merchant",
+    "food"
   ],
   "scripts": {
     "start:registration": "npm run dev --workspace=driver",
@@ -15,7 +16,8 @@
     "start:ride": "npm run dev --workspace=ride_management",
     "start:admin": "npm run dev --workspace=admin",
     "start:merchant": "npm run dev --workspace=merchant",
-    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\" \"npm run start:merchant\""
+    "start:food": "npm run dev --workspace=food",
+    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\" \"npm run start:merchant\" \"npm run start:food\""
   },
   "devDependencies": {
     "concurrently": "^9.2.0"

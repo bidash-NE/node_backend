@@ -25,6 +25,6 @@ app.use("/api/admin", businessTypesRoutes);
 app.use("/api/category", categoryRoutes);
 
 
-app.listen(PORT, () => {
+app.listen(PORT,"0.0.0.0", () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });

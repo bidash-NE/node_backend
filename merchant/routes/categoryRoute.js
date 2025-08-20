@@ -8,6 +8,7 @@ const {
   listByBusinessTypeCtrl,
   updateCategoryCtrl,
   deleteCategoryCtrl,
+  getCategoriesForBusinessCtrl
 } = require("../controllers/categoryController");
 
 const { uploadCategoryImage } = require("../middlewares/categoryImage");
@@ -29,4 +30,6 @@ router.get("/:kind", listCategoriesCtrl);
 // FETCH BY business_type (within kind) — query param ?business_type=food|mart (defaults to :kind)
 router.get("/:kind/by-type", listByBusinessTypeCtrl);
 
+
+router.get("/business/:businessId", getCategoriesForBusinessCtrl);
 module.exports = router;
