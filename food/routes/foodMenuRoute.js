@@ -5,27 +5,27 @@ const router = express.Router();
 const {
   createFoodMenuCtrl,
   listFoodMenuCtrl,
-  listFoodMenuByBusinessCtrl, // NEW
+  listFoodMenuByBusinessCtrl,
   getFoodMenuByIdCtrl,
   updateFoodMenuCtrl,
   deleteFoodMenuCtrl,
 } = require("../controllers/foodMenuController");
 
-const { uploadFoodMenuImage } = require("../middleware/uploadFoodMenuImage");
+const { uploadFoodMenuImage } = require("../middlewares/uploadFoodMenuImage");
 
-// Create (supports multipart/form-data for item_image or image)
+// Create (multipart OR JSON with base64)
 router.post("/", uploadFoodMenuImage(), createFoodMenuCtrl);
 
-// List (supports filters ?business_id=&category_name=)
+// List (supports ?business_id=&category_name=)
 router.get("/", listFoodMenuCtrl);
 
-// Get ALL by business (clean path)
+// All by business
 router.get("/business/:business_id", listFoodMenuByBusinessCtrl);
 
-// Get single by id
+// One by id
 router.get("/:id", getFoodMenuByIdCtrl);
 
-// Update (supports image replacement)
+// Update (supports image replacement, server path, or clearing NULL; JSON base64 also OK)
 router.put("/:id", uploadFoodMenuImage(), updateFoodMenuCtrl);
 
 // Delete

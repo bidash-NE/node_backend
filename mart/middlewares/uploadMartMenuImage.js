@@ -1,11 +1,11 @@
-// middlewares/uploadFoodMenuImage.js
+// middleware/uploadMartMenuImage.js
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
 const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
-const SUBFOLDER = "food-menu";
+const SUBFOLDER = "mart-menu";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
 function ensureDirSync(dir) {
@@ -21,13 +21,13 @@ const storage = multer.diskStorage({
   filename: function (req, file, cb) {
     const ext = path.extname(file.originalname || "").toLowerCase();
     const base =
-      (req.body?.item_name || "item")
+      (req.body?.item_name || "mart-item")
         .toString()
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "")
-        .slice(0, 60) || "item";
+        .slice(0, 60) || "mart-item";
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
     cb(null, `${unique}-${base}${ext || ""}`);
   },
@@ -45,29 +45,19 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-function uploadFoodMenuImage() {
-  // Accept either "item_image" or generic "image"
-  const upload = multer({
-    storage,
-    fileFilter,
-    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  }).any();
-
-  return (req, res, next) => {
-    upload(req, res, (err) => {
-      if (err) return next(err);
-      const allowed = new Set(["item_image", "image"]);
-      const files = Array.isArray(req.files) ? req.files : [];
-      const picked = files.find((f) => allowed.has(f.fieldname));
-      req.file = picked || null;
-      next();
-    });
-  };
-}
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = { uploadFoodMenuImage, toWebPath, DEST };
+module.exports = {
+  uploadMartMenuImage: upload.single("item_image"),
+  toWebPath,
+  SUBFOLDER,
+};
