@@ -8,10 +8,10 @@ router.get("/users", adminController.getAllNormalUsers);
 router.get("/drivers", adminController.getAllDrivers);
 router.get("/admins", adminController.getAllAdmins);
 
+// Merchants + business details + profile image
+router.get("/merchants", adminController.getAllMerchantsWithDetails);
+
 // Mutations (admin-only endpoints typically)
-// Pass acting admin via auth middleware (sets req.user) OR headers:
-//   x-admin-id: <number>
-//   x-admin-name: <string>
 router.post("/deactivate/:user_id", adminController.deactivateUser);
 router.post("/activate/:user_id", adminController.activateUser);
 router.delete("/delete/:user_id", adminController.deleteUser);

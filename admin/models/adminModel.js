@@ -28,25 +28,27 @@ async function logAdmin(conn, actorUserId, adminName, activity) {
   ]);
 }
 
-// ===== existing queries =====
+// ===== existing + updated queries =====
 
-// ✅ Fetch users with role 'user'
+// ✅ Fetch users with role 'user' (now includes profile_image)
 async function fetchUsersByRole() {
   const sql = `
-    SELECT user_name, email, phone, is_active
+    SELECT user_id, user_name, email, phone, is_active, role, profile_image
     FROM users
     WHERE role = 'user'
+    ORDER BY user_name ASC
   `;
   const [rows] = await pool.query(sql);
   return rows;
 }
 
-// ✅ Fetch drivers with license and vehicle info
+// ✅ Fetch drivers with license and vehicle info (now includes profile_image)
 async function fetchDrivers() {
   const userQuery = `
-    SELECT user_id, user_name, email, phone, is_active
+    SELECT user_id, user_name, email, phone, is_active, role, profile_image
     FROM users
     WHERE role = 'driver'
+    ORDER BY user_name ASC
   `;
   const [users] = await pool.query(userQuery);
 
@@ -64,7 +66,7 @@ async function fetchDrivers() {
       let vehicles = [];
       if (driver_id) {
         const [vehicleRows] = await pool.query(
-          `SELECT make, color, license_plate FROM driver_vehicles WHERE driver_id = ?`,
+          `SELECT vehicle_id, make, color, license_plate FROM driver_vehicles WHERE driver_id = ?`,
           [driver_id]
         );
         vehicles = vehicleRows;
@@ -76,6 +78,8 @@ async function fetchDrivers() {
         email: user.email,
         phone: user.phone,
         is_active: user.is_active,
+        role: user.role,
+        profile_image: user.profile_image || null,
         driver_id,
         license_number,
         vehicles,
@@ -86,10 +90,10 @@ async function fetchDrivers() {
   return detailedDrivers;
 }
 
-// ✅ Fetch admins (admin + superadmin)
+// ✅ Fetch admins (admin + superadmin) (now includes profile_image)
 async function fetchAdmins() {
   const sql = `
-    SELECT user_id, user_name, email, phone, is_active, role
+    SELECT user_id, user_name, email, phone, is_active, role, profile_image
     FROM users
     WHERE role IN ('admin', 'superadmin')
     ORDER BY user_name ASC
@@ -98,7 +102,34 @@ async function fetchAdmins() {
   return rows;
 }
 
-// ===== new admin ops =====
+// ===== Merchants list with business details (uses business_logo as profile_image fallback) =====
+async function fetchMerchantsWithBusiness() {
+  const sql = `
+    SELECT
+      u.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
+      u.is_active,
+      u.role,
+      COALESCE(u.profile_image, mbd.business_logo) AS profile_image,
+      mbd.business_id,
+      mbd.business_name,
+      mbd.owner_type,
+      mbd.business_logo,
+      mbd.created_at AS business_created_at,
+      mbd.updated_at AS business_updated_at
+    FROM users u
+    JOIN merchant_business_details mbd
+      ON mbd.user_id = u.user_id
+    WHERE u.role = 'merchant'
+    ORDER BY mbd.created_at DESC, u.user_name ASC
+  `;
+  const [rows] = await pool.query(sql);
+  return rows;
+}
+
+// ===== admin ops =====
 
 async function deactivateUser(user_id, actorUserId = null, adminName = null) {
   const conn = await pool.getConnection();
@@ -227,6 +258,7 @@ module.exports = {
   fetchUsersByRole,
   fetchDrivers,
   fetchAdmins,
+  fetchMerchantsWithBusiness,
   deactivateUser,
   activateUser,
   deleteUser,

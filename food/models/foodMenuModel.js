@@ -30,7 +30,7 @@ const toBizId = (v) => {
   return n;
 };
 
-/* -------- validations -------- */
+/* -------- validations & resolvers -------- */
 
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
@@ -40,16 +40,52 @@ async function assertBusinessExists(business_id) {
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
 }
 
-async function assertFoodCategoryExists(category_name) {
-  const name = toStrOrNull(category_name);
-  if (!name) throw new Error("category_name is required");
+/** Return array of FOOD business type names that the merchant (business_id) is registered for. */
+async function getMerchantFoodTypeNames(business_id) {
   const [rows] = await db.query(
-    `SELECT id FROM food_category WHERE LOWER(category_name) = LOWER(?) LIMIT 1`,
-    [name]
+    `SELECT DISTINCT bt.name
+       FROM merchant_business_types mbt
+       JOIN business_types bt ON bt.id = mbt.business_type_id
+      WHERE mbt.business_id = ?
+        AND LOWER(bt.types) = 'food'`,
+    [business_id]
   );
-  if (!rows.length) {
-    throw new Error(`category "${name}" does not exist in food_category`);
+  return rows.map(r => String(r.name).trim()).filter(Boolean);
+}
+
+/** Resolve a food category row by name; returns {id, category_name, business_type, description, category_image} */
+async function getFoodCategoryByName(category_name) {
+  const [rows] = await db.query(
+    `SELECT id, category_name, business_type, description, category_image
+       FROM food_category
+      WHERE LOWER(category_name) = LOWER(?)
+      LIMIT 1`,
+    [category_name]
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Enforce: merchant can only add/update items in categories that belong
+ * to one of the FOOD business types they registered for.
+ */
+async function assertCategoryAllowedForBusiness(business_id, category_name) {
+  const catRow = await getFoodCategoryByName(category_name);
+  if (!catRow) {
+    throw new Error(`Category "${category_name}" does not exist in food_category`);
   }
+  const merchantFoodTypes = await getMerchantFoodTypeNames(business_id);
+  if (!merchantFoodTypes.length) {
+    throw new Error(`Business ${business_id} is not registered under any FOOD business type`);
+  }
+  const allowed = merchantFoodTypes.map(n => n.toLowerCase()).includes(String(catRow.business_type).toLowerCase());
+  if (!allowed) {
+    throw new Error(
+      `Category "${category_name}" belongs to business_type "${catRow.business_type}", ` +
+      `which this business (${business_id}) is not registered for`
+    );
+  }
+  return catRow; // can be useful to caller
 }
 
 // prevent duplicates per (business_id, category_name, item_name)
@@ -76,7 +112,7 @@ async function assertUniquePerBusinessCategory(business_id, category_name, item_
 
 async function createFoodMenuItem(payload) {
   const {
-    business_id,          // NEW required
+    business_id,
     category_name,
     item_name,
     description,
@@ -92,9 +128,13 @@ async function createFoodMenuItem(payload) {
 
   const bizId = toBizId(business_id);
   await assertBusinessExists(bizId);
-  await assertFoodCategoryExists(category_name);
 
   const cat = toStrOrNull(category_name);
+  if (!cat) throw new Error("category_name is required");
+
+  // ✅ strictly enforce merchant↔FOOD type↔category relationship
+  await assertCategoryAllowedForBusiness(bizId, cat);
+
   const name = toStrOrNull(item_name);
   if (!name) throw new Error("item_name is required");
 
@@ -121,22 +161,8 @@ async function createFoodMenuItem(payload) {
        base_price, tax_rate, is_veg, spice_level, is_available,
        stock_limit, sort_order, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      bizId,
-      cat,
-      name,
-      desc,
-      img,
-      price,
-      tax,
-      veg,
-      spice,
-      available,
-      stock,
-      sort,
-      now,
-      now,
-    ]
+
+    [bizId, cat, name, desc, img, price, tax, veg, spice, available, stock, sort, now, now]
   );
 
   const item = await getFoodMenuItemById(res.insertId);
@@ -219,7 +245,6 @@ async function updateFoodMenuItem(id, fields) {
   if ("category_name" in fields) {
     const cat = toStrOrNull(fields.category_name);
     if (!cat) throw new Error("category_name cannot be empty");
-    await assertFoodCategoryExists(cat);
     updates.category_name = cat;
   }
 
@@ -264,10 +289,15 @@ async function updateFoodMenuItem(id, fields) {
       ? Number(fields.sort_order)
       : 0;
 
-  // uniqueness check (per biz + category + name) if any of those changed
+  // Determine final biz/category for validation
   const finalBiz = updates.business_id ?? prev.business_id;
   const finalCat = updates.category_name ?? prev.category_name;
   const finalName = updates.item_name ?? prev.item_name;
+
+  // ✅ Enforce merchant↔FOOD type↔category relationship on update too
+  await assertCategoryAllowedForBusiness(finalBiz, finalCat);
+
+  // uniqueness check
   await assertUniquePerBusinessCategory(finalBiz, finalCat, finalName, id);
 
   const setClauses = [];
@@ -320,7 +350,7 @@ module.exports = {
   createFoodMenuItem,
   getFoodMenuItemById,
   listFoodMenuItems,
-  listFoodMenuByBusiness,   // NEW
+  listFoodMenuByBusiness,
   updateFoodMenuItem,
   deleteFoodMenuItem,
 };
