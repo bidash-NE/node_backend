@@ -7,6 +7,9 @@ const {
 } = require("../controllers/foodMenuBrowseController");
 
 // Example: GET http://localhost:9090/api/food/businesses/101/menu-grouped
-router.get("/businesses/:business_id/menu-grouped", listFoodMenuGroupedByCategoryCtrl);
+router.get(
+  "/businesses/:business_id/menu-grouped",
+  listFoodMenuGroupedByCategoryCtrl
+);
 
 module.exports = router;

@@ -1,17 +1,18 @@
-// controllers/merchantController.js
+// controllers/merchantRegistrationController.js
 const fs = require("fs");
 const path = require("path");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const db = require("../config/db");
+
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
   findUserByUsername,
-} = require("../models/merchantRegistrationModel"); // ensure this path matches your project
-const db = require("../config/db"); // ⬅️ add this at top if not present
+} = require("../models/merchantRegistrationModel");
 
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+/* ---------------- file path helpers ---------------- */
 
-// Convert multer file to stored relative path like "/uploads/xxx/filename.png"
 const toRelPath = (fileObj) => {
   if (!fileObj) return null;
   let p = String(fileObj.path || "").replace(/\\/g, "/");
@@ -21,7 +22,6 @@ const toRelPath = (fileObj) => {
   return `/${p}`;
 };
 
-// Accept body value and return a stored relative path (no host)
 const fromBodyToStoredPath = (val) => {
   if (!val) return null;
   const s = String(val).trim();
@@ -35,43 +35,28 @@ const fromBodyToStoredPath = (val) => {
   }
 };
 
-// ---- helpers to safely delete old uploaded files (after successful DB update)
-const UPLOAD_ROOT_ABS = path.join(process.cwd(), "uploads");
-const isUploadsPath = (p) => typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
-const toAbsPath = (webPath) => path.join(process.cwd(), webPath.replace(/^\//, "")); // "/uploads/..." -> absolute
+/* ---------------- register ---------------- */
 
-function deleteIfReplaced(oldPath, newPath) {
-  // Only delete if:
-  //  - old exists
-  //  - old !== new (different file)
-  //  - path is under /uploads
-  if (!oldPath || !newPath) return;
-  const oldNorm = String(oldPath).trim();
-  const newNorm = String(newPath).trim();
-  if (!oldNorm || !isUploadsPath(oldNorm)) return;
-  if (oldNorm === newNorm) return;
-
-  const abs = toAbsPath(oldNorm);
-  // Guardrail: ensure inside uploads root
-  if (!abs.startsWith(UPLOAD_ROOT_ABS)) return;
-
-  fs.stat(abs, (err, st) => {
-    if (err || !st?.isFile()) return;
-    fs.unlink(abs, () => {}); // best-effort delete
-  });
-}
-
-/* -------------------- register (unchanged) -------------------- */
 async function registerMerchant(req, res) {
   try {
     const f = req.files || {};
     const b = req.body || {};
 
-    const license_image = f.license_image?.[0] ? toRelPath(f.license_image[0]) : fromBodyToStoredPath(b.license_image);
-    const business_logo = f.business_logo?.[0] ? toRelPath(f.business_logo[0]) : fromBodyToStoredPath(b.business_logo);
-    const bank_card_front_image = f.bank_card_front_image?.[0] ? toRelPath(f.bank_card_front_image[0]) : fromBodyToStoredPath(b.bank_card_front_image);
-    const bank_card_back_image = f.bank_card_back_image?.[0] ? toRelPath(f.bank_card_back_image[0]) : fromBodyToStoredPath(b.bank_card_back_image);
-    const bank_qr_code_image = f.bank_qr_code_image?.[0] ? toRelPath(f.bank_qr_code_image[0]) : fromBodyToStoredPath(b.bank_qr_code_image);
+    const license_image = f.license_image?.[0]
+      ? toRelPath(f.license_image[0])
+      : fromBodyToStoredPath(b.license_image);
+    const business_logo = f.business_logo?.[0]
+      ? toRelPath(f.business_logo[0])
+      : fromBodyToStoredPath(b.business_logo);
+    const bank_card_front_image = f.bank_card_front_image?.[0]
+      ? toRelPath(f.bank_card_front_image[0])
+      : fromBodyToStoredPath(b.bank_card_front_image);
+    const bank_card_back_image = f.bank_card_back_image?.[0]
+      ? toRelPath(f.bank_card_back_image[0])
+      : fromBodyToStoredPath(b.bank_card_back_image);
+    const bank_qr_code_image = f.bank_qr_code_image?.[0]
+      ? toRelPath(f.bank_qr_code_image[0])
+      : fromBodyToStoredPath(b.bank_qr_code_image);
 
     const payload = {
       // users
@@ -87,16 +72,23 @@ async function registerMerchant(req, res) {
       business_types: Array.isArray(b.business_types)
         ? b.business_types
         : typeof b.business_types === "string" && b.business_types.trim()
-        ? b.business_types.split(",").map((x) => x.trim()).filter(Boolean)
+        ? b.business_types
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
         : undefined,
       business_license_number: b.business_license_number,
       license_image,
       latitude:
-        b.latitude !== undefined && b.latitude !== "" && !isNaN(Number(b.latitude))
+        b.latitude !== undefined &&
+        b.latitude !== "" &&
+        !isNaN(Number(b.latitude))
           ? Number(b.latitude)
           : null,
       longitude:
-        b.longitude !== undefined && b.longitude !== "" && !isNaN(Number(b.longitude))
+        b.longitude !== undefined &&
+        b.longitude !== "" &&
+        !isNaN(Number(b.longitude))
           ? Number(b.longitude)
           : null,
       address: b.address || null,
@@ -123,11 +115,14 @@ async function registerMerchant(req, res) {
   } catch (err) {
     console.error(err.message || err);
     const isClientErr = /exists|required|invalid/i.test(err.message || "");
-    res.status(isClientErr ? 400 : 500).json({ error: err.message || "Merchant registration failed" });
+    res
+      .status(isClientErr ? 400 : 500)
+      .json({ error: err.message || "Merchant registration failed" });
   }
 }
 
-/* -------------------- UPDATE business details (supports single-field, deletes old image) -------------------- */
+/* ---------------- update business details ---------------- */
+
 async function updateMerchant(req, res) {
   try {
     const business_id = Number(req.params.businessId);
@@ -135,75 +130,92 @@ async function updateMerchant(req, res) {
       return res.status(400).json({ error: "Invalid businessId" });
     }
 
-    // Fetch existing to know old image paths
-    const [rows] = await require("../config/db").query(
+    const [rows] = await db.query(
       `SELECT license_image, business_logo FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
       [business_id]
     );
-    if (!rows.length) return res.status(404).json({ error: "Business not found" });
+    if (!rows.length)
+      return res.status(404).json({ error: "Business not found" });
     const oldLicense = rows[0].license_image || null;
     const oldLogo = rows[0].business_logo || null;
 
     const f = req.files || {};
     const b = req.body || {};
 
-    // optional file overrides (new values)
-    const newLicenseImage = f.license_image?.[0] ? toRelPath(f.license_image[0]) : fromBodyToStoredPath(b.license_image);
-    const newBusinessLogo = f.business_logo?.[0] ? toRelPath(f.business_logo[0]) : fromBodyToStoredPath(b.business_logo);
+    const newLicenseImage = f.license_image?.[0]
+      ? toRelPath(f.license_image[0])
+      : fromBodyToStoredPath(b.license_image);
+    const newBusinessLogo = f.business_logo?.[0]
+      ? toRelPath(f.business_logo[0])
+      : fromBodyToStoredPath(b.business_logo);
 
-    // Build partial update payload — include ONLY fields you send
     const updatePayload = {};
-
-    // simple scalars (send one field? it's fine—only that one is updated)
-    ["business_name","business_license_number","address","delivery_option","owner_type","opening_time","closing_time"].forEach((k) => {
+    [
+      "business_name",
+      "business_license_number",
+      "address",
+      "delivery_option",
+      "owner_type",
+      "opening_time",
+      "closing_time",
+    ].forEach((k) => {
       if (b[k] !== undefined) updatePayload[k] = b[k];
     });
 
-    // files
     if (b.license_image !== undefined || f.license_image?.length) {
-      updatePayload.license_image = newLicenseImage; // may be null if invalid path
+      updatePayload.license_image = newLicenseImage;
     }
     if (b.business_logo !== undefined || f.business_logo?.length) {
       updatePayload.business_logo = newBusinessLogo;
     }
-
-    // numeric
     if (b.latitude !== undefined) {
       updatePayload.latitude = b.latitude === "" ? null : Number(b.latitude);
     }
     if (b.longitude !== undefined) {
       updatePayload.longitude = b.longitude === "" ? null : Number(b.longitude);
     }
-
-    // holidays: accept array, CSV, or JSON array string
     if (b.holidays !== undefined) {
-      if (Array.isArray(b.holidays)) {
-        updatePayload.holidays = b.holidays;
-      } else if (typeof b.holidays === "string") {
-        updatePayload.holidays = b.holidays; // model will parse
-      } else {
-        updatePayload.holidays = []; // fallback to empty
-      }
+      updatePayload.holidays = Array.isArray(b.holidays)
+        ? b.holidays
+        : String(b.holidays);
     }
-
-    // categories replace (optional)
-    if (b.business_type_ids !== undefined) updatePayload.business_type_ids = b.business_type_ids;
+    if (b.business_type_ids !== undefined)
+      updatePayload.business_type_ids = b.business_type_ids;
     if (b.business_types !== undefined) {
       updatePayload.business_types = Array.isArray(b.business_types)
         ? b.business_types
-        : String(b.business_types).split(",").map((x) => x.trim()).filter(Boolean);
+        : String(b.business_types)
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean);
     }
 
-    // Perform DB update (partial)
     const out = await updateMerchantDetailsModel(business_id, updatePayload);
 
-    // After successful DB commit: delete replaced images (safely)
-    if (updatePayload.license_image) {
+    // delete replaced images
+    const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+    const isUploadsPath = (p) =>
+      typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
+    const toAbsPath = (webPath) =>
+      path.join(process.cwd(), webPath.replace(/^\//, ""));
+
+    const deleteIfReplaced = (oldPath, newPath) => {
+      if (!oldPath || !newPath) return;
+      const oldNorm = String(oldPath).trim();
+      const newNorm = String(newPath).trim();
+      if (!oldNorm || !isUploadsPath(oldNorm) || oldNorm === newNorm) return;
+      const abs = toAbsPath(oldNorm);
+      if (!abs.startsWith(UPLOAD_ROOT)) return;
+      fs.stat(abs, (err, st) => {
+        if (err || !st?.isFile()) return;
+        fs.unlink(abs, () => {});
+      });
+    };
+
+    if (updatePayload.license_image)
       deleteIfReplaced(oldLicense, updatePayload.license_image);
-    }
-    if (updatePayload.business_logo) {
+    if (updatePayload.business_logo)
       deleteIfReplaced(oldLogo, updatePayload.business_logo);
-    }
 
     return res.status(200).json({
       message: "Business details updated",
@@ -212,53 +224,14 @@ async function updateMerchant(req, res) {
   } catch (err) {
     console.error("updateMerchant error:", err);
     const isClientErr = /not found|invalid/i.test(err.message || "");
-    return res.status(isClientErr ? 404 : 500).json({ error: err.message || "Update failed" });
+    return res
+      .status(isClientErr ? 404 : 500)
+      .json({ error: err.message || "Update failed" });
   }
 }
 
-/* -------------------- login (unchanged) -------------------- */
-// async function loginByUsername(req, res) {
-//   try {
-//     const { user_name, password } = req.body || {};
-//     if (!user_name || !password) {
-//       return res.status(400).json({ error: "user_name and password are required" });
-//     }
+/* ---------------- login ---------------- */
 
-//     const user = await findUserByUsername(user_name);
-//     if (!user) return res.status(404).json({ error: "User not found" });
-
-//     if (user.is_active !== undefined && Number(user.is_active) === 0) {
-//       return res.status(403).json({ error: "Account is deactivated. Please contact support." });
-//     }
-
-//     const ok = await bcrypt.compare(password, user.password_hash);
-//     if (!ok) return res.status(401).json({ error: "Incorrect password" });
-
-//     const payload = { user_id: user.user_id, role: user.role, user_name: user.user_name };
-//     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: "1m" });
-//     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: "10m" });
-
-//     return res.status(200).json({
-//       message: "Login successful",
-//       token: {
-//         access_token,
-//         access_token_time: 1,
-//         refresh_token,
-//         refresh_token_time: 10,
-//       },
-//       user: {
-//         user_id: user.user_id,
-//         user_name: user.user_name,
-//         phone: user.phone,
-//         role: user.role,
-//         email: user.email,
-//       },
-//     });
-//   } catch (err) {
-//     console.error("loginByUsername error:", err);
-//     return res.status(500).json({ error: "Login failed due to server error" });
-//   }
-// }
 async function loginByUsername(req, res) {
   try {
     const { user_name, password } = req.body || {};
@@ -280,10 +253,8 @@ async function loginByUsername(req, res) {
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: "Incorrect password" });
 
-    // 🔎 Fetch owner_type (and business_id) from merchant_business_details
-    // If multiple businesses exist, take the latest by created_at (fallback to highest business_id).
-    const [bizRows] = await db.query(
-      `SELECT business_id,business_name, owner_type, business_logo,address
+    const [[biz]] = await db.query(
+      `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
         WHERE user_id = ?
         ORDER BY created_at DESC, business_id DESC
@@ -291,19 +262,10 @@ async function loginByUsername(req, res) {
       [user.user_id]
     );
 
-    const owner_type = bizRows[0]?.owner_type ?? null;
-    const business_id = bizRows[0]?.business_id ?? null;
-    const business_name = bizRows[0]?.business_name ?? null;
-    const business_logo = bizRows[0]?.business_logo ?? null;
-    const address = bizRows[0]?.address ?? null;
-
-
-
     const payload = {
       user_id: user.user_id,
       role: user.role,
       user_name: user.user_name,
-    
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
@@ -327,11 +289,11 @@ async function loginByUsername(req, res) {
         phone: user.phone,
         role: user.role,
         email: user.email,
-        owner_type,   // ⬅️ added
-        business_id,  // ⬅️ handy to have alongside owner_type
-      business_name,
-      business_logo,
-      address
+        owner_type: biz?.owner_type ?? null,
+        business_id: biz?.business_id ?? null,
+        business_name: biz?.business_name ?? null,
+        business_logo: biz?.business_logo ?? null,
+        address: biz?.address ?? null,
       },
     });
   } catch (err) {
@@ -339,4 +301,78 @@ async function loginByUsername(req, res) {
     return res.status(500).json({ error: "Login failed due to server error" });
   }
 }
-module.exports = { registerMerchant, updateMerchant, loginByUsername };
+
+/* ---------------- NEW: owners list (food/mart) ---------------- */
+
+async function listOwnersByKind(req, res, kind) {
+  try {
+    const q = (req.query.q || "").toString().trim().toLowerCase();
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit || "50", 10), 1),
+      200
+    );
+    const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
+
+    const params = [kind];
+    let whereSearch = "";
+    if (q) {
+      whereSearch = ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    params.push(limit, offset);
+
+    const [rows] = await db.query(
+      `
+      SELECT
+        mbd.business_id,
+        mbd.business_name,
+        mbd.owner_type,
+        mbd.business_logo,
+        mbd.address,
+        mbd.latitude,
+        mbd.longitude,
+        u.user_id,
+        u.user_name,
+        u.email,
+        u.phone,
+        u.profile_image
+      FROM merchant_business_details mbd
+      JOIN merchant_business_types mbt
+        ON mbt.business_id = mbd.business_id
+      JOIN business_types bt
+        ON bt.id = mbt.business_type_id
+      JOIN users u
+        ON u.user_id = mbd.user_id
+      WHERE LOWER(bt.types) = ?
+      ${whereSearch}
+      GROUP BY mbd.business_id
+      ORDER BY mbd.created_at DESC, mbd.business_id DESC
+      LIMIT ? OFFSET ?
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      kind,
+      count: rows.length,
+      data: rows,
+    });
+  } catch (err) {
+    console.error(`listOwnersByKind(${kind}) error:`, err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch owners." });
+  }
+}
+
+const listFoodOwners = (req, res) => listOwnersByKind(req, res, "food");
+const listMartOwners = (req, res) => listOwnersByKind(req, res, "mart");
+
+module.exports = {
+  registerMerchant,
+  updateMerchant,
+  loginByUsername,
+  listFoodOwners,
+  listMartOwners,
+};

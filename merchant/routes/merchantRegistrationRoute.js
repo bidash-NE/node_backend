@@ -1,13 +1,15 @@
-// routes/merchantRoute.js
+// routes/merchantRegistrationRoute.js
 const express = require("express");
+const router = express.Router();
 const upload = require("../middlewares/upload");
+
 const {
   registerMerchant,
   loginByUsername,
   updateMerchant,
+  listFoodOwners,
+  listMartOwners,
 } = require("../controllers/merchantRegistrationController");
-
-const router = express.Router();
 
 // If Content-Type is multipart/form-data -> use Multer; otherwise skip (JSON body)
 const maybeMulter = (req, res, next) => {
@@ -16,7 +18,6 @@ const maybeMulter = (req, res, next) => {
     return upload.fields([
       { name: "license_image", maxCount: 1 },
       { name: "business_logo", maxCount: 1 },
-      // The register route also uses these; update route ignores unknown fields
       { name: "bank_card_front_image", maxCount: 1 },
       { name: "bank_card_back_image", maxCount: 1 },
       { name: "bank_qr_code_image", maxCount: 1 },
@@ -25,11 +26,17 @@ const maybeMulter = (req, res, next) => {
   next();
 };
 
+// Register
 router.post("/register", maybeMulter, registerMerchant);
 
-/** Update business details (name, address, coords, logo, hours, holidays, types) */
+// Update business (partial)
 router.put("/update/:businessId", maybeMulter, updateMerchant);
 
+// Login
 router.post("/login-username", loginByUsername);
+
+// NEW: owners by kind
+router.get("/owners/food", listFoodOwners);
+router.get("/owners/mart", listMartOwners);
 
 module.exports = router;

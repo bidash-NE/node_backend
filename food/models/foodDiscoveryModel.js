@@ -3,9 +3,12 @@ const db = require("../config/db");
 
 /**
  * Flow:
- * 1) business_types: ensure the given :business_type_id exists AND types='food'
- * 2) merchant_business_types: collect all business_id for that business_type_id
- * 3) merchant_business_details: fetch distinct business rows
+ * 1) Validate the :business_type_id exists and belongs to FOOD
+ * 2) merchant_business_types → collect all business_id for that business_type_id
+ * 3) merchant_business_details
+ *    LEFT JOIN food_menu (by business_id)
+ *    LEFT JOIN food_menu_ratings (by menu_id)
+ *    → aggregated avg_rating + total_comments per business
  */
 
 function toPositiveIntOrThrow(v, msg) {
@@ -44,7 +47,7 @@ async function getFoodBusinessesByBusinessTypeId(business_type_id) {
     };
   }
 
-  // 2) Get business_ids mapped to that type
+  // 2) business_ids mapped to that type
   const [mapRows] = await db.query(
     `SELECT DISTINCT business_id
        FROM merchant_business_types
@@ -56,6 +59,7 @@ async function getFoodBusinessesByBusinessTypeId(business_type_id) {
       success: true,
       data: [],
       meta: {
+        kind: "food",
         business_type_id: btId,
         business_type_name: bt.name,
         businesses_count: 0,
@@ -66,7 +70,7 @@ async function getFoodBusinessesByBusinessTypeId(business_type_id) {
   const bizIds = mapRows.map((r) => r.business_id);
   const placeholders = bizIds.map(() => "?").join(",");
 
-  // 3) Fetch business details
+  // 3) Fetch business details + aggregates from food_menu_ratings (per product)
   const [bizRows] = await db.query(
     `
     SELECT
@@ -76,10 +80,26 @@ async function getFoodBusinessesByBusinessTypeId(business_type_id) {
       mbd.business_logo,
       mbd.opening_time,
       mbd.closing_time,
-      mbd.delivery_option
+      mbd.delivery_option,
+      mbd.complementary,
+      mbd.complementary_details,
+      mbd.latitude,
+      mbd.longitude,
+      -- averages/counts based on menu-item ratings
+      COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
+      SUM(CASE WHEN fmr.comment IS NOT NULL AND fmr.comment <> '' THEN 1 ELSE 0 END) AS total_comments
     FROM merchant_business_details mbd
+    LEFT JOIN food_menu fm
+      ON fm.business_id = mbd.business_id
+    LEFT JOIN food_menu_ratings fmr
+      ON fmr.menu_id = fm.id
     WHERE mbd.business_id IN (${placeholders})
-    ORDER BY mbd.business_name ASC
+    GROUP BY
+      mbd.business_id, mbd.business_name, mbd.address, mbd.business_logo,
+      mbd.opening_time, mbd.closing_time, mbd.delivery_option,
+      mbd.complementary, mbd.complementary_details,
+      mbd.latitude, mbd.longitude
+    ORDER BY avg_rating DESC, total_comments DESC, mbd.business_name ASC
     `,
     bizIds
   );
