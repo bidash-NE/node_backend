@@ -1,4 +1,3 @@
-// controllers/martMenuController.js
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
@@ -25,6 +24,7 @@ const safeUnlink = async (abs) => {
     return false;
   }
 };
+
 const extractIncomingImage = (req) => {
   if (req.file) return toWebPath(req.file);
   const raw = (req.body?.item_image || "").toString().trim();
@@ -49,7 +49,8 @@ exports.createMartMenu = async (req, res) => {
       item_name: req.body.item_name,
       description: req.body.description,
       item_image: img,
-      base_price: req.body.base_price,
+      actual_price: req.body.actual_price,
+      discount_percentage: req.body.discount_percentage,
       tax_rate: req.body.tax_rate,
       is_veg: req.body.is_veg,
       spice_level: req.body.spice_level,
@@ -60,7 +61,6 @@ exports.createMartMenu = async (req, res) => {
     const out = await createMartMenuItem(payload);
     return res.status(201).json(out);
   } catch (e) {
-    // cleanup uploaded file if any
     const img = extractIncomingImage(req);
     if (req.file && isLocalUploadsPath(img)) await safeUnlink(toAbs(img));
     return res.status(400).json({
@@ -78,7 +78,7 @@ exports.listMartMenu = async (req, res) => {
       category_name: req.query.category_name,
     });
     return res.status(200).json(out);
-  } catch (e) {
+  } catch {
     return res
       .status(500)
       .json({ success: false, message: "Unable to fetch mart menu" });
@@ -103,14 +103,14 @@ exports.getMartMenuItem = async (req, res) => {
   try {
     const out = await getMartMenuItemById(req.params.id);
     return res.status(out.success ? 200 : 404).json(out);
-  } catch (e) {
+  } catch {
     return res
       .status(500)
       .json({ success: false, message: "Unable to fetch mart menu item" });
   }
 };
 
-// Update (multipart supported; delete old img if changed)
+// Update
 exports.updateMartMenu = async (req, res) => {
   let current = null;
   try {
@@ -125,7 +125,8 @@ exports.updateMartMenu = async (req, res) => {
       item_name: req.body.item_name,
       description: req.body.description,
       item_image: incomingImage ?? undefined,
-      base_price: req.body.base_price,
+      actual_price: req.body.actual_price,
+      discount_percentage: req.body.discount_percentage,
       tax_rate: req.body.tax_rate,
       is_veg: req.body.is_veg,
       spice_level: req.body.spice_level,
@@ -136,7 +137,6 @@ exports.updateMartMenu = async (req, res) => {
 
     const out = await updateMartMenuItem(req.params.id, fields);
 
-    // delete old image if replaced and was local
     if (
       incomingImage &&
       incomingImage !== current.item_image &&
@@ -147,7 +147,6 @@ exports.updateMartMenu = async (req, res) => {
 
     return res.status(out.success ? 200 : 400).json(out);
   } catch (e) {
-    // cleanup new uploaded if error
     const incomingImage = extractIncomingImage(req);
     if (req.file && isLocalUploadsPath(incomingImage))
       await safeUnlink(toAbs(incomingImage));
@@ -174,7 +173,7 @@ exports.deleteMartMenu = async (req, res) => {
     }
 
     return res.status(200).json(out);
-  } catch (e) {
+  } catch {
     return res
       .status(500)
       .json({ success: false, message: "Unable to delete mart menu" });

@@ -1,26 +1,25 @@
-// routes/martMenuRoutes.js
 const express = require("express");
 const router = express.Router();
-const ctrl = require("../controllers/martMenuController");
+
 const { uploadMartMenuImage } = require("../middlewares/uploadMartMenuImage");
+const ctrl = require("../controllers/martMenuController");
 
-// Create (multipart supported)
-// field name: item_image
-router.post("/", uploadMartMenuImage, ctrl.createMartMenu);
+// CREATE (multipart supported)
+router.post("/", uploadMartMenuImage(), ctrl.createMartMenu);
 
-// List with filters
+// LIST (filters ?business_id=&category_name=)
 router.get("/", ctrl.listMartMenu);
 
-// List by business
+// BY BUSINESS
 router.get("/business/:business_id", ctrl.listMartMenuByBusiness);
 
-// Get one
+// GET ONE
 router.get("/:id", ctrl.getMartMenuItem);
 
-// Update (multipart supported)
-router.put("/:id", uploadMartMenuImage, ctrl.updateMartMenu);
+// UPDATE (multipart supported)
+router.put("/:id", uploadMartMenuImage(), ctrl.updateMartMenu);
 
-// Delete
+// DELETE
 router.delete("/:id", ctrl.deleteMartMenu);
 
 module.exports = router;

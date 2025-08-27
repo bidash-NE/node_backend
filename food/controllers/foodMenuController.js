@@ -96,7 +96,8 @@ async function createFoodMenuCtrl(req, res) {
       item_name: b.item_name,
       description: b.description,
       item_image: img,
-      base_price: b.base_price,
+      actual_price: b.actual_price, // <— changed
+      discount_percentage: b.discount_percentage, // <— new
       tax_rate: b.tax_rate,
       is_veg: b.is_veg,
       spice_level: b.spice_level, // 'None'|'Mild'|'Medium'|'Hot'
@@ -191,7 +192,10 @@ async function updateFoodMenuCtrl(req, res) {
       ...(b.category_name !== undefined && { category_name: b.category_name }),
       ...(b.item_name !== undefined && { item_name: b.item_name }),
       ...(b.description !== undefined && { description: b.description }),
-      ...(b.base_price !== undefined && { base_price: b.base_price }),
+      ...(b.actual_price !== undefined && { actual_price: b.actual_price }), // <— changed
+      ...(b.discount_percentage !== undefined && {
+        discount_percentage: b.discount_percentage,
+      }), // <— new
       ...(b.tax_rate !== undefined && { tax_rate: b.tax_rate }),
       ...(b.is_veg !== undefined && { is_veg: b.is_veg }),
       ...(b.spice_level !== undefined && { spice_level: b.spice_level }),

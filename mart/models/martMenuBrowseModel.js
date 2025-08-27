@@ -1,4 +1,3 @@
-// models/martMenuBrowseModel.js
 const db = require("../config/db");
 
 function toBizIdOrThrow(v) {
@@ -7,6 +6,7 @@ function toBizIdOrThrow(v) {
     throw new Error("business_id must be a positive integer");
   return n;
 }
+
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
     `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
@@ -15,14 +15,6 @@ async function assertBusinessExists(business_id) {
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
 }
 
-/**
- * Flow (MART):
- * 1) business -> merchant_business_types -> business_types (types='mart') -> names
- * 2) mart_category: categories whose business_type IN those names
- * 3) mart_menu: all items for this business across those categories
- * 4) Group under categories
- * 5) Exclude categories with zero items
- */
 async function getMartMenuGroupedByCategoryForBusiness(business_id) {
   const bid = toBizIdOrThrow(business_id);
   await assertBusinessExists(bid);
@@ -31,7 +23,8 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
     `SELECT DISTINCT bt.id, bt.name
        FROM merchant_business_types mbt
        JOIN business_types bt ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id = ? AND LOWER(bt.types) = 'mart'`,
+      WHERE mbt.business_id = ?
+        AND LOWER(bt.types) = 'mart'`,
     [bid]
   );
   if (!btRows.length) {
@@ -63,7 +56,7 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
   const catPh = catNames.map(() => "?").join(",");
   const [itemRows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
-            base_price, tax_rate, is_veg, spice_level, is_available,
+            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM mart_menu
       WHERE business_id = ?
@@ -79,26 +72,26 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
     itemsByCat.get(key).push(it);
   }
 
-  const grouped = catRows.map((cat) => {
-    const key = String(cat.category_name || "").toLowerCase();
-    return {
-      category_id: cat.id,
-      category_name: cat.category_name,
-      business_type: cat.business_type,
-      category_image: cat.category_image,
-      description: cat.description,
-      items: itemsByCat.get(key) || [],
-    };
-  });
-
-  const groupedNonEmpty = grouped.filter((g) => g.items && g.items.length > 0);
+  const grouped = catRows
+    .map((cat) => {
+      const key = String(cat.category_name || "").toLowerCase();
+      return {
+        category_id: cat.id,
+        category_name: cat.category_name,
+        business_type: cat.business_type,
+        category_image: cat.category_image,
+        description: cat.description,
+        items: itemsByCat.get(key) || [],
+      };
+    })
+    .filter((g) => g.items.length > 0);
 
   return {
     success: true,
-    data: groupedNonEmpty,
+    data: grouped,
     meta: {
       business_id: bid,
-      categories_count: groupedNonEmpty.length,
+      categories_count: grouped.length,
       items_count: itemRows.length,
     },
   };

@@ -1,5 +1,7 @@
 // controllers/foodMenuBrowseController.js
-const { getFoodMenuGroupedByCategoryForBusiness } = require("../models/foodMenuBrowseModel");
+const {
+  getFoodMenuGroupedByCategoryForBusiness,
+} = require("../models/foodMenuBrowseModel");
 
 // GET /api/food/businesses/:business_id/menu-grouped
 async function listFoodMenuGroupedByCategoryCtrl(req, res) {
@@ -13,9 +15,10 @@ async function listFoodMenuGroupedByCategoryCtrl(req, res) {
       meta: out.meta,
     });
   } catch (e) {
-    return res
-      .status(400)
-      .json({ success: false, message: e.message || "Failed to fetch grouped menu." });
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to fetch grouped menu.",
+    });
   }
 }
 

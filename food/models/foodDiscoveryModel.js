@@ -8,7 +8,7 @@ const db = require("../config/db");
  * 3) merchant_business_details
  *    LEFT JOIN food_menu (by business_id)
  *    LEFT JOIN food_menu_ratings (by menu_id)
- *    → aggregated avg_rating + total_comments per business
+ *    → aggregated avg_rating + total_comments (+ total_ratings) per business
  */
 
 function toPositiveIntOrThrow(v, msg) {
@@ -85,8 +85,8 @@ async function getFoodBusinessesByBusinessTypeId(business_type_id) {
       mbd.complementary_details,
       mbd.latitude,
       mbd.longitude,
-      -- averages/counts based on menu-item ratings
       COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
+      COUNT(fmr.id) AS total_ratings,
       SUM(CASE WHEN fmr.comment IS NOT NULL AND fmr.comment <> '' THEN 1 ELSE 0 END) AS total_comments
     FROM merchant_business_details mbd
     LEFT JOIN food_menu fm

@@ -1,4 +1,3 @@
-// models/merchantModel.js
 const db = require("../config/db");
 const bcrypt = require("bcrypt");
 
@@ -317,6 +316,7 @@ async function getOwnersByKind(kind) {
         mbd.latitude, mbd.longitude, mbd.address,
         mbd.business_logo, mbd.delivery_option,
         mbd.opening_time, mbd.closing_time, mbd.holidays,
+        mbd.complementary AS complement, mbd.complementary_details AS complement_details,
         mbd.created_at, mbd.updated_at,
         u.user_name, u.email, u.phone, u.profile_image
      FROM merchant_business_details mbd
@@ -336,6 +336,7 @@ async function getOwnersByKind(kind) {
 
   const ids = bizRows.map((b) => b.business_id);
   const ph = ids.map(() => "?").join(",");
+
   const [typeRows] = await db.query(
     `SELECT mbt.business_id, bt.id AS business_type_id, bt.name
        FROM merchant_business_types mbt
@@ -354,6 +355,26 @@ async function getOwnersByKind(kind) {
       .push({ business_type_id: r.business_type_id, name: r.name });
   }
 
+  const [ratingRows] = await db.query(
+    `SELECT
+        fm.business_id,
+        AVG(fmr.rating) AS avg_rating,
+        COUNT(fmr.comment) AS total_comments
+     FROM food_menu fm
+     LEFT JOIN food_menu_ratings fmr ON fmr.menu_id = fm.id
+     WHERE fm.business_id IN (${ph})
+     GROUP BY fm.business_id`,
+    ids
+  );
+
+  const ratingsByBiz = new Map();
+  for (const row of ratingRows) {
+    ratingsByBiz.set(row.business_id, {
+      avg_rating: row.avg_rating || 0,
+      total_comments: row.total_comments || 0,
+    });
+  }
+
   return bizRows.map((b) => ({
     business_id: b.business_id,
     owner_type: b.owner_type,
@@ -368,6 +389,8 @@ async function getOwnersByKind(kind) {
     opening_time: b.opening_time,
     closing_time: b.closing_time,
     holidays: b.holidays,
+    complement: b.complement,
+    complement_details: b.complement_details,
     created_at: b.created_at,
     updated_at: b.updated_at,
     user: {
@@ -378,6 +401,8 @@ async function getOwnersByKind(kind) {
       profile_image: b.profile_image || null,
     },
     business_types: typesByBiz.get(b.business_id) || [],
+    avg_rating: ratingsByBiz.get(b.business_id)?.avg_rating || 0,
+    total_comments: ratingsByBiz.get(b.business_id)?.total_comments || 0,
   }));
 }
 
@@ -392,7 +417,6 @@ module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
   findUserByUsername,
-  // NEW
   getOwnersByKind,
   getFoodOwners,
   getMartOwners,

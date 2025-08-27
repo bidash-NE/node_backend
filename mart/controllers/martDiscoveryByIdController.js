@@ -1,18 +1,17 @@
-// controllers/martDiscoveryByIdController.js
 const {
   getMartBusinessesByBusinessTypeId,
 } = require("../models/martDiscoveryByIdModel");
 
-exports.getBusinessesByBusinessTypeId = async (req, res) => {
+async function listMartBusinessesByBusinessTypeIdCtrl(req, res) {
   try {
-    const out = await getMartBusinessesByBusinessTypeId(
-      req.params.business_type_id
-    );
+    const { business_type_id } = req.params;
+    const out = await getMartBusinessesByBusinessTypeId(business_type_id);
     return res.status(out.success ? 200 : 404).json(out);
   } catch (e) {
-    return res.status(400).json({
-      success: false,
-      message: e.message || "Unable to fetch mart businesses",
-    });
+    const msg = e?.message || "Failed to fetch MART businesses.";
+    const code = /positive integer|must be/i.test(msg) ? 400 : 500;
+    return res.status(code).json({ success: false, message: msg });
   }
-};
+}
+
+module.exports = { listMartBusinessesByBusinessTypeIdCtrl };

@@ -3,7 +3,8 @@ const db = require("../config/db");
 
 function toBizIdOrThrow(v) {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0) throw new Error("business_id must be a positive integer");
+  if (!Number.isInteger(n) || n <= 0)
+    throw new Error("business_id must be a positive integer");
   return n;
 }
 
@@ -68,7 +69,7 @@ async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
   const catPh = catNames.map(() => "?").join(",");
   const [itemRows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
-            base_price, tax_rate, is_veg, spice_level, is_available,
+            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM food_menu
       WHERE business_id = ?

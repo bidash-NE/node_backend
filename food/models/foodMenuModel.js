@@ -26,7 +26,8 @@ const toBool01 = (v, def = 0) => {
 };
 const toBizId = (v) => {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0) throw new Error("business_id must be a positive integer");
+  if (!Number.isInteger(n) || n <= 0)
+    throw new Error("business_id must be a positive integer");
   return n;
 };
 
@@ -50,7 +51,7 @@ async function getMerchantFoodTypeNames(business_id) {
         AND LOWER(bt.types) = 'food'`,
     [business_id]
   );
-  return rows.map(r => String(r.name).trim()).filter(Boolean);
+  return rows.map((r) => String(r.name).trim()).filter(Boolean);
 }
 
 /** Resolve a food category row by name; returns {id, category_name, business_type, description, category_image} */
@@ -72,24 +73,35 @@ async function getFoodCategoryByName(category_name) {
 async function assertCategoryAllowedForBusiness(business_id, category_name) {
   const catRow = await getFoodCategoryByName(category_name);
   if (!catRow) {
-    throw new Error(`Category "${category_name}" does not exist in food_category`);
+    throw new Error(
+      `Category "${category_name}" does not exist in food_category`
+    );
   }
   const merchantFoodTypes = await getMerchantFoodTypeNames(business_id);
   if (!merchantFoodTypes.length) {
-    throw new Error(`Business ${business_id} is not registered under any FOOD business type`);
+    throw new Error(
+      `Business ${business_id} is not registered under any FOOD business type`
+    );
   }
-  const allowed = merchantFoodTypes.map(n => n.toLowerCase()).includes(String(catRow.business_type).toLowerCase());
+  const allowed = merchantFoodTypes
+    .map((n) => n.toLowerCase())
+    .includes(String(catRow.business_type).toLowerCase());
   if (!allowed) {
     throw new Error(
       `Category "${category_name}" belongs to business_type "${catRow.business_type}", ` +
-      `which this business (${business_id}) is not registered for`
+        `which this business (${business_id}) is not registered for`
     );
   }
-  return catRow; // can be useful to caller
+  return catRow;
 }
 
 // prevent duplicates per (business_id, category_name, item_name)
-async function assertUniquePerBusinessCategory(business_id, category_name, item_name, excludeId = null) {
+async function assertUniquePerBusinessCategory(
+  business_id,
+  category_name,
+  item_name,
+  excludeId = null
+) {
   const sql = `
     SELECT id FROM food_menu
      WHERE business_id = ?
@@ -117,7 +129,8 @@ async function createFoodMenuItem(payload) {
     item_name,
     description,
     item_image,
-    base_price,
+    actual_price,
+    discount_percentage,
     tax_rate,
     is_veg,
     spice_level,
@@ -132,7 +145,7 @@ async function createFoodMenuItem(payload) {
   const cat = toStrOrNull(category_name);
   if (!cat) throw new Error("category_name is required");
 
-  // ✅ strictly enforce merchant↔FOOD type↔category relationship
+  // enforce merchant↔FOOD type↔category relationship
   await assertCategoryAllowedForBusiness(bizId, cat);
 
   const name = toStrOrNull(item_name);
@@ -142,8 +155,17 @@ async function createFoodMenuItem(payload) {
 
   const desc = toStrOrNull(description);
   const img = toStrOrNull(item_image);
-  const price = toNumOrNull(base_price);
-  if (price === null) throw new Error("base_price must be a valid number");
+
+  // prices
+  const price = toNumOrNull(actual_price);
+  if (price === null || price < 0)
+    throw new Error("actual_price must be a non-negative number");
+
+  let discount = toNumOrNull(discount_percentage);
+  if (discount === null) discount = 0;
+  if (discount < 0 || discount > 100)
+    throw new Error("discount_percentage must be between 0 and 100");
+
   const tax = toNumOrNull(tax_rate) ?? 0;
   const veg = toBool01(is_veg, 0);
   const spice = toStrOrNull(spice_level) || "None";
@@ -158,11 +180,26 @@ async function createFoodMenuItem(payload) {
   const [res] = await db.query(
     `INSERT INTO food_menu
       (business_id, category_name, item_name, description, item_image,
-       base_price, tax_rate, is_veg, spice_level, is_available,
+       actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
        stock_limit, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-
-    [bizId, cat, name, desc, img, price, tax, veg, spice, available, stock, sort, now, now]
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      bizId,
+      cat,
+      name,
+      desc,
+      img,
+      price,
+      discount,
+      tax,
+      veg,
+      spice,
+      available,
+      stock,
+      sort,
+      now,
+      now,
+    ]
   );
 
   const item = await getFoodMenuItemById(res.insertId);
@@ -176,7 +213,7 @@ async function createFoodMenuItem(payload) {
 async function getFoodMenuItemById(id) {
   const [rows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
-            base_price, tax_rate, is_veg, spice_level, is_available,
+            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM food_menu
       WHERE id = ?`,
@@ -205,7 +242,7 @@ async function listFoodMenuItems({ business_id, category_name } = {}) {
   const where = parts.length ? `WHERE ${parts.join(" AND ")}` : "";
   const [rows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
-            base_price, tax_rate, is_veg, spice_level, is_available,
+            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM food_menu
        ${where}
@@ -219,7 +256,7 @@ async function listFoodMenuByBusiness(business_id) {
   const bid = toBizId(business_id);
   const [rows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
-            base_price, tax_rate, is_veg, spice_level, is_available,
+            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM food_menu
       WHERE business_id = ?
@@ -254,13 +291,23 @@ async function updateFoodMenuItem(id, fields) {
     updates.item_name = n;
   }
 
-  if ("description" in fields) updates.description = toStrOrNull(fields.description);
-  if ("item_image" in fields) updates.item_image = toStrOrNull(fields.item_image);
+  if ("description" in fields)
+    updates.description = toStrOrNull(fields.description);
+  if ("item_image" in fields)
+    updates.item_image = toStrOrNull(fields.item_image);
 
-  if ("base_price" in fields) {
-    const price = toNumOrNull(fields.base_price);
-    if (price === null) throw new Error("base_price must be a valid number");
-    updates.base_price = price;
+  if ("actual_price" in fields) {
+    const price = toNumOrNull(fields.actual_price);
+    if (price === null || price < 0)
+      throw new Error("actual_price must be a non-negative number");
+    updates.actual_price = price;
+  }
+
+  if ("discount_percentage" in fields) {
+    const disc = toNumOrNull(fields.discount_percentage);
+    if (disc === null || disc < 0 || disc > 100)
+      throw new Error("discount_percentage must be between 0 and 100");
+    updates.discount_percentage = disc;
   }
 
   if ("tax_rate" in fields) {
@@ -278,7 +325,8 @@ async function updateFoodMenuItem(id, fields) {
     updates.spice_level = spice || "None";
   }
 
-  if ("is_available" in fields) updates.is_available = toBool01(fields.is_available);
+  if ("is_available" in fields)
+    updates.is_available = toBool01(fields.is_available);
   if ("stock_limit" in fields)
     updates.stock_limit = Number.isInteger(Number(fields.stock_limit))
       ? Number(fields.stock_limit)
@@ -294,7 +342,7 @@ async function updateFoodMenuItem(id, fields) {
   const finalCat = updates.category_name ?? prev.category_name;
   const finalName = updates.item_name ?? prev.item_name;
 
-  // ✅ Enforce merchant↔FOOD type↔category relationship on update too
+  // enforce category assignment for this business
   await assertCategoryAllowedForBusiness(finalBiz, finalCat);
 
   // uniqueness check

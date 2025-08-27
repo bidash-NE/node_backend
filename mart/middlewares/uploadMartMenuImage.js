@@ -1,4 +1,3 @@
-// middleware/uploadMartMenuImage.js
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
@@ -15,49 +14,67 @@ ensureDirSync(DEST);
 
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
-    ensureDirSync(DEST);
-    cb(null, DEST);
+    try {
+      ensureDirSync(DEST);
+      cb(null, DEST);
+    } catch (e) {
+      cb(e);
+    }
   },
   filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
+    let ext = (path.extname(file.originalname || "") || "").toLowerCase();
+    if (!ext || ext.length > 6) ext = ".jpg";
     const base =
-      (req.body?.item_name || "mart-item")
+      (req.body?.item_name || "item")
         .toString()
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "")
-        .slice(0, 60) || "mart-item";
+        .slice(0, 60) || "item";
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
-    cb(null, `${unique}-${base}${ext || ""}`);
+    cb(null, `${unique}-${base}${ext}`);
   },
 });
 
+const allowedMimes = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml",
+  "image/svg",
+]);
+
 const fileFilter = (_req, file, cb) => {
-  const allowed = [
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "image/svg+xml",
-  ];
-  if (allowed.includes(file.mimetype)) return cb(null, true);
+  if (allowedMimes.has(file.mimetype)) return cb(null, true);
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 },
-});
+function uploadMartMenuImage() {
+  const uploader = multer({
+    storage,
+    fileFilter,
+    limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  }).single("item_image");
+
+  return (req, res, next) => {
+    const ct = String(req.headers["content-type"] || "").toLowerCase();
+    if (!ct.includes("multipart/form-data")) return next(); // JSON only
+    uploader(req, res, (err) => {
+      if (err) {
+        err.statusCode = 400;
+        return next(err);
+      }
+      next();
+    });
+  };
+}
 
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = {
-  uploadMartMenuImage: upload.single("item_image"),
-  toWebPath,
-  SUBFOLDER,
-};
+module.exports = { uploadMartMenuImage, toWebPath, DEST };

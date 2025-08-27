@@ -1,4 +1,3 @@
-// controllers/merchantRegistrationController.js
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
@@ -256,7 +255,7 @@ async function loginByUsername(req, res) {
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
-        WHERE user_id = ?
+        WHERE user_id = ? 
         ORDER BY created_at DESC, business_id DESC
         LIMIT 1`,
       [user.user_id]
@@ -335,7 +334,12 @@ async function listOwnersByKind(req, res, kind) {
         u.user_name,
         u.email,
         u.phone,
-        u.profile_image
+        u.profile_image,
+        mbd.complementary AS complement,
+        mbd.complementary_details AS complement_details,
+        COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
+        COUNT(fmr.comment) AS total_comments,
+        GROUP_CONCAT(DISTINCT bt.name) AS tags
       FROM merchant_business_details mbd
       JOIN merchant_business_types mbt
         ON mbt.business_id = mbd.business_id
@@ -343,6 +347,10 @@ async function listOwnersByKind(req, res, kind) {
         ON bt.id = mbt.business_type_id
       JOIN users u
         ON u.user_id = mbd.user_id
+      LEFT JOIN food_menu fmn
+        ON fmn.business_id = mbd.business_id
+      LEFT JOIN food_menu_ratings fmr
+        ON fmr.menu_id = fmn.id
       WHERE LOWER(bt.types) = ?
       ${whereSearch}
       GROUP BY mbd.business_id

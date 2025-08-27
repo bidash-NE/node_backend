@@ -8,16 +8,18 @@
     "ride_management",
     "admin",
     "merchant",
-    "food"
+    "food",
+    "mart"
   ],
   "scripts": {
-    "start:registration": "npm run dev --workspace=driver",
-    "start:location": "npm run dev --workspace=map_and_location_services",
-    "start:ride": "npm run dev --workspace=ride_management",
-    "start:admin": "npm run dev --workspace=admin",
-    "start:merchant": "npm run dev --workspace=merchant",
-    "start:food": "npm run dev --workspace=food",
-    "start:all": "concurrently \"npm run start:registration\" \"npm run start:location\" \"npm run start:ride\" \"npm run start:admin\" \"npm run start:merchant\" \"npm run start:food\""
+    "start:driver": "npm -w driver run dev",
+    "start:location": "npm -w map_and_location_services run dev",
+    "start:ride": "npm -w ride_management run dev",
+    "start:admin": "npm -w admin run dev",
+    "start:merchant": "npm -w merchant run dev",
+    "start:food": "npm -w food run dev",
+    "start:mart": "npm -w mart run dev",
+    "start:all": "concurrently -k --names \"driver,location,ride,admin,merchant,food,mart\" -c \"cyan,magenta,green,yellow,blue,white,gray\" \"npm -w driver run dev\" \"npm -w map_and_location_services run dev\" \"npm -w ride_management run dev\" \"npm -w admin run dev\" \"npm -w merchant run dev\" \"npm -w food run dev\" \"npm -w mart run dev\""
   },
   "devDependencies": {
     "concurrently": "^9.2.0"
