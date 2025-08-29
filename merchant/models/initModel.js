@@ -124,22 +124,127 @@ async function ensureColumnTypeMatches({
 
 /* --------------- creators (unchanged parts) --------------- */
 async function ensureBusinessTypesTable() {
-  /* ...unchanged... */
+  const table = "business_types";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        name VARCHAR(100) NOT NULL,
+        image VARCHAR(255),
+        types VARCHAR(255),
+        description TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_name (name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
+
 async function ensureMerchantBusinessDetailsTable() {
-  /* ...unchanged... */
+  const table = "merchant_business_details";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        business_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NOT NULL,
+        owner_type VARCHAR(50),
+        business_name VARCHAR(255) NOT NULL,
+        business_license_number VARCHAR(100),
+        license_image VARCHAR(255),
+        latitude DECIMAL(10,7),
+        longitude DECIMAL(10,7),
+        address TEXT,
+        business_logo VARCHAR(255),
+        delivery_option VARCHAR(50),
+        complementary VARCHAR(100),
+        complementary_details TEXT,
+        opening_time TIME,
+        closing_time TIME,
+        holidays JSON,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (business_id),
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
+
 async function ensureMerchantBusinessTypesTable() {
-  /* ...unchanged... */
+  const table = "merchant_business_types";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        business_type_id BIGINT UNSIGNED NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id) ON DELETE CASCADE ON UPDATE CASCADE,
+        FOREIGN KEY (business_type_id) REFERENCES business_types(id) ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
+
 async function ensureFoodCategoryTable() {
-  /* ...unchanged... */
+  const table = "food_category";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        category_name VARCHAR(100) NOT NULL,
+        business_type VARCHAR(100),
+        description TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_category_name (category_name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
+
 async function ensureMartCategoryTable() {
-  /* ...unchanged... */
+  const table = "mart_category";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        category_name VARCHAR(100) NOT NULL,
+        business_type VARCHAR(100),
+        description TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uk_category_name (category_name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
+
 async function ensureBusinessBannersTable() {
-  /* ...unchanged... */
+  const table = "business_banners";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        title VARCHAR(255),
+        description TEXT,
+        banner_image VARCHAR(255),
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        start_date DATE,
+        end_date DATE,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id) ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
 }
 
 /* ---------- ratings per menu item (food & mart) with dynamic type matching ---------- */
