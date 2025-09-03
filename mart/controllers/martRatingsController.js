@@ -1,15 +1,17 @@
+// controllers/martRatingsController.js
 const {
-  createMartMenuRating,
-  getMartMenuRatingSummary,
+  upsertMartMenuRating,
+  fetchMartMenuRatings,
 } = require("../models/martRatingsModel");
 
-async function createRatingCtrl(req, res) {
+exports.createOrUpdateMartRating = async (req, res) => {
   try {
-    const out = await createMartMenuRating({
-      menu_id: req.body.menu_id,
-      user_id: req.body.user_id,
-      rating: req.body.rating,
-      comment: req.body.comment,
+    const { menu_id, user_id, rating, comment } = req.body || {};
+    const out = await upsertMartMenuRating({
+      menu_id,
+      user_id,
+      rating,
+      comment,
     });
     return res.status(201).json(out);
   } catch (e) {
@@ -17,18 +19,18 @@ async function createRatingCtrl(req, res) {
       .status(400)
       .json({ success: false, message: e.message || "Failed to save rating." });
   }
-}
+};
 
-async function getRatingSummaryCtrl(req, res) {
+exports.getMartRatings = async (req, res) => {
   try {
-    const out = await getMartMenuRatingSummary(req.params.menu_id);
+    const { menu_id } = req.params;
+    const { page, limit } = req.query;
+    const out = await fetchMartMenuRatings(menu_id, { page, limit });
     return res.status(200).json(out);
   } catch (e) {
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch rating summary.",
+      message: e.message || "Failed to fetch ratings.",
     });
   }
-}
-
-module.exports = { createRatingCtrl, getRatingSummaryCtrl };
+};

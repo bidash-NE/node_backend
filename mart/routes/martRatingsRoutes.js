@@ -1,15 +1,12 @@
+// routes/martRatingsRoutes.js
 const express = require("express");
 const router = express.Router();
+const ctrl = require("../controllers/martRatingsController");
 
-const {
-  createRatingCtrl,
-  getRatingSummaryCtrl,
-} = require("../controllers/martRatingsController");
+// Create/Update rating
+router.post("/", ctrl.createOrUpdateMartRating);
 
-// POST /api/mart/ratings
-router.post("/", createRatingCtrl);
-
-// GET /api/mart/ratings/menu/:menu_id/summary
-router.get("/menu/:menu_id/summary", getRatingSummaryCtrl);
+// Get ratings for a menu item (with aggregates)
+router.get("/:menu_id", ctrl.getMartRatings);
 
 module.exports = router;

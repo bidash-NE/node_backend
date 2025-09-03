@@ -8,6 +8,9 @@ const {
 
 // Fetch FOOD businesses by business_type_id (no category lookup)
 // Example: GET /api/food/business-types/3/businesses
-router.get("/business-types/businesses/:business_type_id", listFoodBusinessesByBusinessTypeIdCtrl);
+router.get(
+  "/business-types/businesses/:business_type_id",
+  listFoodBusinessesByBusinessTypeIdCtrl
+);
 
 module.exports = router;

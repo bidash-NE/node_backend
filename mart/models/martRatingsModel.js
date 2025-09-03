@@ -1,50 +1,104 @@
+// models/martRatingsModel.js
 const db = require("../config/db");
 
-function toPosIntOrThrow(v, name) {
+/* ---------- helpers ---------- */
+function toIntOrThrow(v, msg) {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0)
-    throw new Error(`${name} must be a positive integer`);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(msg);
   return n;
 }
+function toRatingOrThrow(v) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 5)
+    throw new Error("rating must be an integer 1..5");
+  return n;
+}
+const normStr = (s) => (s == null ? null : String(s).trim());
 
-async function createMartMenuRating({ menu_id, user_id, rating, comment }) {
-  const mid = toPosIntOrThrow(menu_id, "menu_id");
-  const uid = toPosIntOrThrow(user_id, "user_id");
-  const r = Number(rating);
-  if (!(r >= 1 && r <= 5)) throw new Error("rating must be 1..5");
-  const c = comment == null ? null : String(comment).trim();
-
-  // upsert per (menu_id, user_id)
-  await db.query(
-    `
-    INSERT INTO mart_menu_ratings (menu_id, user_id, rating, comment)
-    VALUES (?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE rating = VALUES(rating), comment = VALUES(comment), updated_at = CURRENT_TIMESTAMP
-    `,
-    [mid, uid, r, c]
+async function assertUserExists(user_id) {
+  const [r] = await db.query(
+    `SELECT user_id FROM users WHERE user_id = ? LIMIT 1`,
+    [user_id]
   );
+  if (!r.length) throw new Error("user not found");
+}
+async function assertMartMenuExists(menu_id) {
+  const [r] = await db.query(`SELECT id FROM mart_menu WHERE id = ? LIMIT 1`, [
+    menu_id,
+  ]);
+  if (!r.length) throw new Error("menu item not found");
+}
+
+/* ---------- upsert rating ---------- */
+async function upsertMartMenuRating({ menu_id, user_id, rating, comment }) {
+  const mid = toIntOrThrow(menu_id, "menu_id must be a positive integer");
+  const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
+  const r = toRatingOrThrow(rating);
+  const c = normStr(comment);
+
+  await assertUserExists(uid);
+  await assertMartMenuExists(mid);
+
+  // unique (menu_id,user_id)
+  const [exists] = await db.query(
+    `SELECT id FROM mart_menu_ratings WHERE menu_id = ? AND user_id = ? LIMIT 1`,
+    [mid, uid]
+  );
+
+  if (exists.length) {
+    await db.query(
+      `UPDATE mart_menu_ratings
+          SET rating = ?, comment = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
+      [r, c, exists[0].id]
+    );
+  } else {
+    await db.query(
+      `INSERT INTO mart_menu_ratings (menu_id, user_id, rating, comment)
+       VALUES (?, ?, ?, ?)`,
+      [mid, uid, r, c]
+    );
+  }
 
   return { success: true, message: "Rating saved." };
 }
 
-async function getMartMenuRatingSummary(menu_id) {
-  const mid = toPosIntOrThrow(menu_id, "menu_id");
+/* ---------- fetch ratings list + aggregates ---------- */
+async function fetchMartMenuRatings(menu_id, { page = 1, limit = 20 } = {}) {
+  const mid = toIntOrThrow(menu_id, "menu_id must be a positive integer");
+  await assertMartMenuExists(mid);
+
+  const p = Math.max(1, Number(page) || 1);
+  const l = Math.min(100, Math.max(1, Number(limit) || 20));
+  const offset = (p - 1) * l;
+
+  const [[agg]] = await db.query(
+    `SELECT
+       COALESCE(ROUND(AVG(rating),2),0) AS avg_rating,
+       COUNT(*)                         AS total_ratings,
+       SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments
+     FROM mart_menu_ratings
+     WHERE menu_id = ?`,
+    [mid]
+  );
+
   const [rows] = await db.query(
-    `
-    SELECT
-      COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
-      COUNT(*) AS total_ratings,
-      SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments
-    FROM mart_menu_ratings
-    WHERE menu_id = ?
-    `,
-    [mid]
+    `SELECT
+       r.id, r.menu_id, r.user_id, r.rating, r.comment, r.created_at,
+       u.user_name
+     FROM mart_menu_ratings r
+     JOIN users u ON u.user_id = r.user_id
+     WHERE r.menu_id = ?
+     ORDER BY r.created_at DESC
+     LIMIT ? OFFSET ?`,
+    [mid, l, offset]
   );
-  const [list] = await db.query(
-    `SELECT user_id, rating, comment, created_at FROM mart_menu_ratings WHERE menu_id = ? ORDER BY created_at DESC LIMIT 50`,
-    [mid]
-  );
-  return { success: true, data: { summary: rows[0], latest: list } };
+
+  return {
+    success: true,
+    data: rows,
+    meta: { menu_id: mid, page: p, limit: l, ...agg },
+  };
 }
 
-module.exports = { createMartMenuRating, getMartMenuRatingSummary };
+module.exports = { upsertMartMenuRating, fetchMartMenuRatings };

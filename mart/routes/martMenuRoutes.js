@@ -1,25 +1,34 @@
+// routes/martMenuRoute.js
 const express = require("express");
 const router = express.Router();
 
+const {
+  createMartMenuCtrl,
+  listMartMenuCtrl,
+  listMartMenuByBusinessCtrl,
+  getMartMenuByIdCtrl,
+  updateMartMenuCtrl,
+  deleteMartMenuCtrl,
+} = require("../controllers/martMenuController");
+
 const { uploadMartMenuImage } = require("../middlewares/uploadMartMenuImage");
-const ctrl = require("../controllers/martMenuController");
 
-// CREATE (multipart supported)
-router.post("/", uploadMartMenuImage(), ctrl.createMartMenu);
+// Create (multipart OR JSON with base64)
+router.post("/", uploadMartMenuImage(), createMartMenuCtrl);
 
-// LIST (filters ?business_id=&category_name=)
-router.get("/", ctrl.listMartMenu);
+// List (supports ?business_id=&category_name=)
+router.get("/", listMartMenuCtrl);
 
-// BY BUSINESS
-router.get("/business/:business_id", ctrl.listMartMenuByBusiness);
+// All by business
+router.get("/business/:business_id", listMartMenuByBusinessCtrl);
 
-// GET ONE
-router.get("/:id", ctrl.getMartMenuItem);
+// One by id
+router.get("/:id", getMartMenuByIdCtrl);
 
-// UPDATE (multipart supported)
-router.put("/:id", uploadMartMenuImage(), ctrl.updateMartMenu);
+// Update (supports image replacement, server path, or clearing NULL; JSON base64 also OK)
+router.put("/:id", uploadMartMenuImage(), updateMartMenuCtrl);
 
-// DELETE
-router.delete("/:id", ctrl.deleteMartMenu);
+// Delete
+router.delete("/:id", deleteMartMenuCtrl);
 
 module.exports = router;

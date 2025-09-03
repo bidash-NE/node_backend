@@ -1,88 +1,170 @@
-const db = require("../../config/db");
+// models/martCartModel.js
+const db = require("../config/db");
 
-async function addToCartMart(cart_id, menu_id, quantity, special_instructions) {
-  const [menuRow] = await db.query(
-    "SELECT id, actual_price, item_name FROM mart_menu WHERE id = ?",
-    [menu_id]
-  );
+async function addToCartMart(cartData) {
+  try {
+    const {
+      user_id,
+      business_id,
+      owner_type,
+      fulfillment,
+      business_name_snapshot,
+      business_logo_snapshot,
+      cart_items,
+    } = cartData;
 
-  if (!menuRow.length) {
-    throw new Error("Menu item not found");
+    if (
+      !user_id ||
+      !business_id ||
+      !owner_type ||
+      !cart_items ||
+      !cart_items.length
+    ) {
+      throw new Error("Missing required fields");
+    }
+
+    // Check if cart exists for this user and owner_type
+    const [cart] = await db.query(
+      "SELECT id FROM carts WHERE user_id = ? AND owner_type = ? AND is_active = 1",
+      [user_id, owner_type]
+    );
+
+    let cart_id;
+    if (cart.length === 0) {
+      // Create new cart
+      const [newCart] = await db.query(
+        `INSERT INTO carts 
+         (user_id, business_id, owner_type, fulfillment, business_name_snapshot, business_logo_snapshot, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        [
+          user_id,
+          business_id,
+          owner_type,
+          fulfillment,
+          business_name_snapshot,
+          business_logo_snapshot,
+        ]
+      );
+      cart_id = newCart.insertId;
+    } else {
+      cart_id = cart[0].id;
+
+      // Update business snapshot if changed
+      await db.query(
+        `UPDATE carts SET 
+           business_id = ?, fulfillment = ?, business_name_snapshot = ?, business_logo_snapshot = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          business_id,
+          fulfillment,
+          business_name_snapshot,
+          business_logo_snapshot,
+          cart_id,
+        ]
+      );
+    }
+
+    // Insert/update each item (MART)
+    for (const item of cart_items) {
+      const {
+        menu_id,
+        item_name_snapshot,
+        item_image_snapshot,
+        actual_price_snapshot,
+        discount_pct_snapshot,
+        quantity,
+        special_instructions,
+      } = item;
+
+      const [existingItem] = await db.query(
+        "SELECT * FROM cart_items_mart WHERE cart_id = ? AND menu_id = ?",
+        [cart_id, menu_id]
+      );
+
+      if (existingItem.length > 0) {
+        // Update quantity
+        await db.query(
+          "UPDATE cart_items_mart SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE cart_id = ? AND menu_id = ?",
+          [quantity, cart_id, menu_id]
+        );
+      } else {
+        await db.query(
+          `INSERT INTO cart_items_mart
+             (cart_id, menu_id, item_name_snapshot, item_image_snapshot, actual_price_snapshot, discount_pct_snapshot, quantity, special_instructions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            cart_id,
+            menu_id,
+            item_name_snapshot,
+            item_image_snapshot,
+            actual_price_snapshot,
+            discount_pct_snapshot,
+            quantity,
+            special_instructions,
+          ]
+        );
+      }
+    }
+
+    return { cart_id };
+  } catch (error) {
+    console.error("addToCartMart error:", error);
+    throw error;
   }
-
-  const { actual_price, item_name } = menuRow[0];
-
-  await db.query(
-    `
-    INSERT INTO cart_items_mart (cart_id, menu_id, item_name_snapshot, actual_price_snapshot, quantity, special_instructions)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `,
-    [cart_id, menu_id, item_name, actual_price, quantity, special_instructions]
-  );
-
-  return { cart_id, menu_id, quantity, special_instructions, item_name };
 }
 
-async function getCartMart(user_id) {
-  const [cartRows] = await db.query(
-    `
-    SELECT id, business_id, owner_type, is_active, note_for_merchant
-    FROM carts
-    WHERE user_id = ? AND is_active = 1
-  `,
+// Get cart by user_id (MART)
+async function getCartByUserMart(user_id) {
+  if (!user_id) throw new Error("user_id is required");
+
+  const [cart] = await db.query(
+    "SELECT * FROM carts WHERE user_id = ? AND is_active = 1",
     [user_id]
   );
 
-  return cartRows;
-}
+  if (!cart || cart.length === 0) return null;
 
-async function getCartItemsMart(cart_id) {
-  const [itemsRows] = await db.query(
-    `
-    SELECT ci.id, ci.item_name_snapshot, ci.actual_price_snapshot, ci.quantity, ci.special_instructions, m.item_image
-    FROM cart_items_mart ci
-    JOIN mart_menu m ON ci.menu_id = m.id
-    WHERE ci.cart_id = ?
-  `,
-    [cart_id]
+  const [items] = await db.query(
+    "SELECT * FROM cart_items_mart WHERE cart_id = ?",
+    [cart[0].id]
   );
 
-  return itemsRows;
+  return { cart: cart[0], items };
 }
 
-async function deleteCartItemMart(cart_item_id) {
-  await db.query("DELETE FROM cart_items_mart WHERE id = ?", [cart_item_id]);
+// Update item quantity (MART)
+async function updateCartItemMart(cart_id, menu_id, quantity) {
+  if (!cart_id || !menu_id || !quantity)
+    throw new Error("Missing required fields");
+  await db.query(
+    "UPDATE cart_items_mart SET quantity = ? WHERE cart_id = ? AND menu_id = ?",
+    [quantity, cart_id, menu_id]
+  );
+  return true;
 }
 
+// Delete single item (MART)
+async function deleteCartItemMart(cart_id, menu_id) {
+  if (!cart_id || !menu_id) throw new Error("Missing required fields");
+  await db.query(
+    "DELETE FROM cart_items_mart WHERE cart_id = ? AND menu_id = ?",
+    [cart_id, menu_id]
+  );
+  return true;
+}
+
+// Delete entire cart (MART)
 async function deleteCartMart(cart_id) {
+  if (!cart_id) throw new Error("cart_id required");
   await db.query("DELETE FROM cart_items_mart WHERE cart_id = ?", [cart_id]);
   await db.query("DELETE FROM carts WHERE id = ?", [cart_id]);
-}
-
-async function updateCartMart(cart_item_id, quantity, special_instructions) {
-  const [itemRow] = await db.query(
-    "SELECT id FROM cart_items_mart WHERE id = ?",
-    [cart_item_id]
-  );
-  if (!itemRow.length) throw new Error("Cart item not found");
-
-  await db.query(
-    `
-    UPDATE cart_items_mart
-    SET quantity = ?, special_instructions = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `,
-    [quantity, special_instructions, cart_item_id]
-  );
-
-  return { cart_item_id, quantity, special_instructions };
+  return true;
 }
 
 module.exports = {
   addToCartMart,
-  getCartMart,
-  getCartItemsMart,
+  getCartByUserMart,
+  updateCartItemMart,
   deleteCartItemMart,
   deleteCartMart,
-  updateCartMart,
 };

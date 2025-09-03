@@ -1,6 +1,8 @@
+// models/martMenuModel.js
 const db = require("../config/db");
 const moment = require("moment-timezone");
 
+/* -------- helpers -------- */
 const bhutanNow = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
 const toStrOrNull = (v) => {
@@ -29,6 +31,8 @@ const toBizId = (v) => {
   return n;
 };
 
+/* -------- validations & resolvers -------- */
+
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
     `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
@@ -37,6 +41,7 @@ async function assertBusinessExists(business_id) {
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
 }
 
+/** Return array of MART business type names that the merchant (business_id) is registered for. */
 async function getMerchantMartTypeNames(business_id) {
   const [rows] = await db.query(
     `SELECT DISTINCT bt.name
@@ -49,6 +54,7 @@ async function getMerchantMartTypeNames(business_id) {
   return rows.map((r) => String(r.name).trim()).filter(Boolean);
 }
 
+/** Resolve a mart category row by name; returns {id, category_name, business_type, description, category_image} */
 async function getMartCategoryByName(category_name) {
   const [rows] = await db.query(
     `SELECT id, category_name, business_type, description, category_image
@@ -60,6 +66,10 @@ async function getMartCategoryByName(category_name) {
   return rows[0] || null;
 }
 
+/**
+ * Enforce: merchant can only add/update items in categories that belong
+ * to one of the MART business types they registered for.
+ */
 async function assertCategoryAllowedForBusiness(business_id, category_name) {
   const catRow = await getMartCategoryByName(category_name);
   if (!catRow) {
@@ -67,23 +77,25 @@ async function assertCategoryAllowedForBusiness(business_id, category_name) {
       `Category "${category_name}" does not exist in mart_category`
     );
   }
-  const martTypes = await getMerchantMartTypeNames(business_id);
-  if (!martTypes.length) {
+  const merchantMartTypes = await getMerchantMartTypeNames(business_id);
+  if (!merchantMartTypes.length) {
     throw new Error(
       `Business ${business_id} is not registered under any MART business type`
     );
   }
-  const allowed = martTypes
+  const allowed = merchantMartTypes
     .map((n) => n.toLowerCase())
     .includes(String(catRow.business_type).toLowerCase());
   if (!allowed) {
     throw new Error(
-      `Category "${category_name}" belongs to business_type "${catRow.business_type}", which this business (${business_id}) is not registered for`
+      `Category "${category_name}" belongs to business_type "${catRow.business_type}", ` +
+        `which this business (${business_id}) is not registered for`
     );
   }
   return catRow;
 }
 
+// prevent duplicates per (business_id, category_name, item_name)
 async function assertUniquePerBusinessCategory(
   business_id,
   category_name,
@@ -108,6 +120,8 @@ async function assertUniquePerBusinessCategory(
   }
 }
 
+/* -------- queries -------- */
+
 async function createMartMenuItem(payload) {
   const {
     business_id,
@@ -131,6 +145,7 @@ async function createMartMenuItem(payload) {
   const cat = toStrOrNull(category_name);
   if (!cat) throw new Error("category_name is required");
 
+  // enforce merchant↔MART type↔category relationship
   await assertCategoryAllowedForBusiness(bizId, cat);
 
   const name = toStrOrNull(item_name);
@@ -141,10 +156,16 @@ async function createMartMenuItem(payload) {
   const desc = toStrOrNull(description);
   const img = toStrOrNull(item_image);
 
+  // prices
   const price = toNumOrNull(actual_price);
-  if (price === null) throw new Error("actual_price must be a valid number");
+  if (price === null || price < 0)
+    throw new Error("actual_price must be a non-negative number");
 
-  const discount = toNumOrNull(discount_percentage) ?? 0;
+  let discount = toNumOrNull(discount_percentage);
+  if (discount === null) discount = 0;
+  if (discount < 0 || discount > 100)
+    throw new Error("discount_percentage must be between 0 and 100");
+
   const tax = toNumOrNull(tax_rate) ?? 0;
   const veg = toBool01(is_veg, 0);
   const spice = toStrOrNull(spice_level) || "None";
@@ -182,7 +203,11 @@ async function createMartMenuItem(payload) {
   );
 
   const item = await getMartMenuItemById(res.insertId);
-  return { success: true, message: "Mart menu item created.", data: item.data };
+  return {
+    success: true,
+    message: "Mart menu item created successfully.",
+    data: item.data,
+  };
 }
 
 async function getMartMenuItemById(id) {
@@ -199,9 +224,11 @@ async function getMartMenuItemById(id) {
   return { success: true, data: rows[0] };
 }
 
+// list with optional filters: business_id & category_name
 async function listMartMenuItems({ business_id, category_name } = {}) {
   const parts = [];
   const params = [];
+
   if (business_id !== undefined) {
     const bid = toBizId(business_id);
     parts.push("business_id = ?");
@@ -211,6 +238,7 @@ async function listMartMenuItems({ business_id, category_name } = {}) {
     parts.push("LOWER(category_name) = LOWER(?)");
     params.push(category_name);
   }
+
   const where = parts.length ? `WHERE ${parts.join(" AND ")}` : "";
   const [rows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
@@ -270,14 +298,15 @@ async function updateMartMenuItem(id, fields) {
 
   if ("actual_price" in fields) {
     const price = toNumOrNull(fields.actual_price);
-    if (price === null) throw new Error("actual_price must be a valid number");
+    if (price === null || price < 0)
+      throw new Error("actual_price must be a non-negative number");
     updates.actual_price = price;
   }
 
   if ("discount_percentage" in fields) {
     const disc = toNumOrNull(fields.discount_percentage);
-    if (disc === null)
-      throw new Error("discount_percentage must be a valid number");
+    if (disc === null || disc < 0 || disc > 100)
+      throw new Error("discount_percentage must be between 0 and 100");
     updates.discount_percentage = disc;
   }
 
@@ -308,19 +337,24 @@ async function updateMartMenuItem(id, fields) {
       ? Number(fields.sort_order)
       : 0;
 
+  // Determine final biz/category for validation
   const finalBiz = updates.business_id ?? prev.business_id;
   const finalCat = updates.category_name ?? prev.category_name;
   const finalName = updates.item_name ?? prev.item_name;
 
+  // enforce category assignment for this business
   await assertCategoryAllowedForBusiness(finalBiz, finalCat);
+
+  // uniqueness check
   await assertUniquePerBusinessCategory(finalBiz, finalCat, finalName, id);
 
   const setClauses = [];
   const params = [];
-  for (const [k, v] of Object.entries(updates)) {
+  Object.entries(updates).forEach(([k, v]) => {
     setClauses.push(`${k} = ?`);
     params.push(v);
-  }
+  });
+
   if (!setClauses.length) {
     return {
       success: true,
@@ -330,6 +364,7 @@ async function updateMartMenuItem(id, fields) {
       new_image: prev.item_image,
     };
   }
+
   setClauses.push("updated_at = ?");
   params.push(bhutanNow(), id);
 
