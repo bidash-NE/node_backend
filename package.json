@@ -9,7 +9,8 @@
     "admin",
     "merchant",
     "food",
-    "mart"
+    "mart",
+    "order_management"
   ],
   "scripts": {
     "start:driver": "npm -w driver run dev",
@@ -19,7 +20,8 @@
     "start:merchant": "npm -w merchant run dev",
     "start:food": "npm -w food run dev",
     "start:mart": "npm -w mart run dev",
-    "start:all": "concurrently -k --names \"driver,location,ride,admin,merchant,food,mart\" -c \"cyan,magenta,green,yellow,blue,white,gray\" \"npm -w driver run dev\" \"npm -w map_and_location_services run dev\" \"npm -w ride_management run dev\" \"npm -w admin run dev\" \"npm -w merchant run dev\" \"npm -w food run dev\" \"npm -w mart run dev\""
+    "start:order_management": "npm -w order_management run dev",
+    "start:all": "concurrently -k --names \"driver,location,ride,admin,merchant,food,mart\" -c \"cyan,magenta,green,yellow,blue,white,gray\" \"npm -w driver run dev\" \"npm -w map_and_location_services run dev\" \"npm -w ride_management run dev\" \"npm -w admin run dev\" \"npm -w merchant run dev\" \"npm -w food run dev\" \"npm -w mart run dev\" \"npm -w order_management run dev\""
   },
   "devDependencies": {
     "concurrently": "^9.2.0"

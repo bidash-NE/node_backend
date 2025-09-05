@@ -230,19 +230,23 @@ async function ensureBusinessBannersTable() {
   if (!(await tableExists(table))) {
     await db.query(`
       CREATE TABLE ${table} (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        business_id BIGINT UNSIGNED NOT NULL,
-        title VARCHAR(255),
-        description TEXT,
-        banner_image VARCHAR(255),
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
-        start_date DATE,
-        end_date DATE,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id) ON DELETE CASCADE ON UPDATE CASCADE
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      business_id BIGINT UNSIGNED NOT NULL,
+      title VARCHAR(255),
+      description TEXT,
+      banner_image VARCHAR(255),
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      start_date DATE,
+      end_date DATE,
+      owner_type ENUM('food','mart') NOT NULL,  -- NEW
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_business_owner_created (business_id, owner_type, created_at),
+      FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id)
+        ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
     `);
   }
 }

@@ -1,13 +1,14 @@
-// merchant/controllers/bannerController.js
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
 const {
+  sweepExpiredBanners,
   createBanner,
   getBannerById,
   listBanners,
-  listActiveBannersForBusiness,
+  listAllBannersForBusiness, // <-- import NEW
+  listActiveByKind,
   updateBanner,
   deleteBanner,
 } = require("../models/bannerModel");
@@ -80,7 +81,7 @@ function extractStorableImagePath(req) {
   return null;
 }
 
-/* controllers */
+/* --------------- CONTROLLERS --------------- */
 
 // POST /api/banners
 async function createBannerCtrl(req, res) {
@@ -96,6 +97,7 @@ async function createBannerCtrl(req, res) {
       is_active: b.is_active,
       start_date: b.start_date,
       end_date: b.end_date,
+      owner_type: b.owner_type,
     };
 
     const out = await createBanner(payload);
@@ -113,11 +115,11 @@ async function createBannerCtrl(req, res) {
   }
 }
 
-// GET /api/banners?business_id=&active_only=true
+// (Kept for admin/debug)
 async function listBannersCtrl(req, res) {
   try {
-    const { business_id, active_only } = req.query || {};
-    const out = await listBanners({ business_id, active_only });
+    const { business_id, active_only, owner_type } = req.query || {};
+    const out = await listBanners({ business_id, active_only, owner_type });
     return res.status(200).json({
       success: true,
       message: "Banners fetched successfully.",
@@ -131,7 +133,62 @@ async function listBannersCtrl(req, res) {
   }
 }
 
-// GET /api/banners/:id
+/* NEW: GET /api/banners/business/:business_id  -> fetch ALL (active + inactive) */
+async function listAllBannersByBusinessCtrl(req, res) {
+  try {
+    const { owner_type } = req.query || {};
+    const out = await listAllBannersForBusiness(
+      req.params.business_id,
+      owner_type
+    );
+    return res.status(200).json({
+      success: true,
+      message: "All banners fetched successfully.",
+      data: out.data,
+    });
+  } catch (e) {
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to fetch banners.",
+    });
+  }
+}
+
+// Kinded active endpoints
+async function listActiveFoodCtrl(req, res) {
+  try {
+    const { business_id } = req.query || {};
+    const out = await listActiveByKind("food", business_id);
+    return res.status(200).json({
+      success: true,
+      message: "Active food banners fetched successfully.",
+      data: out.data,
+    });
+  } catch (e) {
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to fetch food banners.",
+    });
+  }
+}
+async function listActiveMartCtrl(req, res) {
+  try {
+    const { business_id } = req.query || {};
+    const out = await listActiveByKind("mart", business_id);
+    return res.status(200).json({
+      success: true,
+      message: "Active mart banners fetched successfully.",
+      data: out.data,
+    });
+  } catch (e) {
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to fetch mart banners.",
+    });
+  }
+}
+
+// Single (no active filter)
 async function getBannerCtrl(req, res) {
   try {
     const out = await getBannerById(req.params.id);
@@ -144,24 +201,7 @@ async function getBannerCtrl(req, res) {
   }
 }
 
-// GET /api/banners/business/:business_id (active, latest first)
-async function listActiveBannersByBusinessCtrl(req, res) {
-  try {
-    const out = await listActiveBannersForBusiness(req.params.business_id);
-    return res.status(200).json({
-      success: true,
-      message: "Active banners fetched successfully.",
-      data: out.data,
-    });
-  } catch (e) {
-    return res.status(400).json({
-      success: false,
-      message: e.message || "Failed to fetch active banners.",
-    });
-  }
-}
-
-// PUT /api/banners/:id
+// Update
 async function updateBannerCtrl(req, res) {
   try {
     const id = Number(req.params.id);
@@ -179,6 +219,7 @@ async function updateBannerCtrl(req, res) {
       ...(b.is_active !== undefined && { is_active: b.is_active }),
       ...(b.start_date !== undefined && { start_date: b.start_date }),
       ...(b.end_date !== undefined && { end_date: b.end_date }),
+      ...(b.owner_type !== undefined && { owner_type: b.owner_type }),
     };
     if (newImg) fields.banner_image = newImg;
     else if (wantsClear) fields.banner_image = null;
@@ -186,7 +227,11 @@ async function updateBannerCtrl(req, res) {
     const out = await updateBanner(id, fields);
     if (!out.success) return res.status(400).json(out);
 
-    if (out.old_image && out.new_image && out.old_image !== out.new_image) {
+    if (
+      out.old_image &&
+      out.data?.banner_image &&
+      out.old_image !== out.data.banner_image
+    ) {
       safeDeleteFile(out.old_image);
     }
     if (fields.banner_image === null && out.old_image) {
@@ -206,7 +251,7 @@ async function updateBannerCtrl(req, res) {
   }
 }
 
-// DELETE /api/banners/:id
+// Delete
 async function deleteBannerCtrl(req, res) {
   try {
     const out = await deleteBanner(req.params.id);
@@ -224,11 +269,19 @@ async function deleteBannerCtrl(req, res) {
 }
 
 module.exports = {
-  uploadBannerImage, // export for routes
+  uploadBannerImage,
+
   createBannerCtrl,
   listBannersCtrl,
+
+  // business-scoped: ALL banners (active + inactive)
+  listAllBannersByBusinessCtrl,
+
+  // kinded active-only
+  listActiveFoodCtrl,
+  listActiveMartCtrl,
+
   getBannerCtrl,
-  listActiveBannersByBusinessCtrl,
   updateBannerCtrl,
   deleteBannerCtrl,
 };

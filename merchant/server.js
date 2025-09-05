@@ -26,7 +26,6 @@ app.use("/api/merchant", merchantRoutes);
 app.use("/api/admin", businessTypesRoutes);
 app.use("/api/category", categoryRoutes);
 app.use("/api/banners", bannerRoutes);
-app.use("/api/banners", bannerRoutes);
 app.use("/api", updateMerchantRoute);
 
 app.listen(PORT, "0.0.0.0", () => {
