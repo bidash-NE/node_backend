@@ -1,13 +1,46 @@
+// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
-const orderController = require("../controllers/orderControllers");
+const orderCtrl = require("../controllers/orderControllers");
 
-router.post("/", orderController.createOrder);
-router.get("/", orderController.getOrders);
-router.get("/:order_id", orderController.getOrderById);
-router.get("/business/:business_id", orderController.getOrdersByBusinessId);
-router.put("/:order_id", orderController.updateOrder);
-router.patch("/:order_id/status", orderController.updateOrderStatus);
-router.delete("/:order_id", orderController.deleteOrder);
+/* validators */
+const validateOrderId = (req, res, next) => {
+  const oid = String(req.params.order_id || "").trim();
+  if (oid.startsWith("ORD-") && oid.length >= 8) return next();
+  return res.status(400).json({ message: "Invalid order_id" });
+};
+const validateBusinessId = (req, res, next) => {
+  const bid = Number(req.params.business_id);
+  if (Number.isFinite(bid) && bid > 0) return next();
+  return res.status(400).json({ message: "Invalid business_id" });
+};
+
+/* CRUD */
+router.post("/orders", orderCtrl.createOrder);
+router.get("/orders", orderCtrl.getOrders);
+router.get("/orders/:order_id", validateOrderId, orderCtrl.getOrderById);
+router.put("/orders/:order_id", validateOrderId, orderCtrl.updateOrder);
+router.delete("/orders/:order_id", validateOrderId, orderCtrl.deleteOrder);
+
+/* Status-only update */
+router.put(
+  "/orders/:order_id/status",
+  validateOrderId,
+  orderCtrl.updateOrderStatus
+);
+
+/* Business-scoped */
+router.get(
+  "/orders/business/:business_id",
+  validateBusinessId,
+  orderCtrl.getOrdersByBusinessId
+);
+
+/* Grouped by user (includes user name) */
+router.get(
+  "/orders/business/:business_id/grouped",
+  validateBusinessId,
+  orderCtrl.getBusinessOrdersGroupedByUser
+);
 
 module.exports = router;

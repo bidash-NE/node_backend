@@ -21,7 +21,7 @@ app.get("/", (req, res) => {
   res.send("Order Management API is running!");
 });
 
-app.use("/orders", orderRoutes);
+app.use("/", orderRoutes);
 
 const PORT = process.env.PORT || 1001;
 app.listen(PORT, () => {
