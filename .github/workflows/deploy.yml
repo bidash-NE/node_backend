@@ -3,7 +3,6 @@ name: Build & Deploy (Changed Services Only)
 on:
   push:
     branches: [main]
-    # Only run this workflow when relevant paths change
     paths:
       - "food/**"
       - "mart/**"
@@ -34,22 +33,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Detect which folders changed in this push
       - name: Paths filter
         id: filter
         uses: dorny/paths-filter@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           filters: |
-            food:                       'food/**'
-            mart:                       'mart/**'
-            merchant:                   'merchant/**'
-            order_management:           'order_management/**'
-            ride_management:            'ride_management/**'
-            driver:                     'driver/**'
-            admin:                      'admin/**'
-            map_location:               'Map_and_location_services/**'
-            k8s:                        'k8s/**'
+            food:                 'food/**'
+            mart:                 'mart/**'
+            merchant:             'merchant/**'
+            order_management:     'order_management/**'
+            ride_management:      'ride_management/**'
+            driver:               'driver/**'
+            admin:                'admin/**'
+            map_location:         'Map_and_location_services/**'
+            k8s:                  'k8s/**'
             any:
               - 'food/**'
               - 'mart/**'
@@ -75,8 +73,7 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Build & push only if that service changed.
-      # We push two tags: :latest and :<git-sha> (immutable)
+      # Build & push only changed services (latest + immutable SHA tag)
       - name: Build & push Food
         if: needs.changes.outputs.food == 'true'
         uses: docker/build-push-action@v6
@@ -170,82 +167,65 @@ jobs:
         with:
           version: v1.29.0
 
-      - name: Write kubeconfig
+      - name: Configure kubeconfig
+        shell: bash
         run: |
-          echo "${{ secrets.KUBE_CONFIG }}" > kubeconfig
-          chmod 600 kubeconfig
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
+          mkdir -p "$HOME/.kube"
+          printf '%s\n' "${{ secrets.KUBE_CONFIG }}" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
 
-      # If k8s manifests changed, re-apply them (idempotent)
+      - name: Sanity check cluster access
+        run: kubectl get nodes
+
       - name: Apply manifests (if k8s/ changed)
         if: needs.changes.outputs.k8s == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: kubectl apply -f k8s/
 
-      # Roll only the Deployments whose images changed.
-      # We set the image to the immutable :<git-sha> tag to force rollout.
-      - name: Deploy Food
+      - name: Deploy Food (if changed)
         if: needs.changes.outputs.food == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/food food=${{ secrets.DOCKER_USERNAME }}/superapp-food:${{ github.sha }}
           kubectl -n superapp rollout status deploy/food
 
-      - name: Deploy Mart
+      - name: Deploy Mart (if changed)
         if: needs.changes.outputs.mart == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/mart mart=${{ secrets.DOCKER_USERNAME }}/superapp-mart:${{ github.sha }}
           kubectl -n superapp rollout status deploy/mart
 
-      - name: Deploy Merchant
+      - name: Deploy Merchant (if changed)
         if: needs.changes.outputs.merchant == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/merchant merchant=${{ secrets.DOCKER_USERNAME }}/superapp-merchant:${{ github.sha }}
           kubectl -n superapp rollout status deploy/merchant
 
-      - name: Deploy Order Management
+      - name: Deploy Order Management (if changed)
         if: needs.changes.outputs.order_management == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/order-management order-management=${{ secrets.DOCKER_USERNAME }}/superapp-order-management:${{ github.sha }}
           kubectl -n superapp rollout status deploy/order-management
 
-      - name: Deploy Ride Management
+      - name: Deploy Ride Management (if changed)
         if: needs.changes.outputs.ride_management == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/ride-management ride-management=${{ secrets.DOCKER_USERNAME }}/superapp-ride-management:${{ github.sha }}
           kubectl -n superapp rollout status deploy/ride-management
 
-      - name: Deploy Driver
+      - name: Deploy Driver (if changed)
         if: needs.changes.outputs.driver == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/driver driver=${{ secrets.DOCKER_USERNAME }}/superapp-driver:${{ github.sha }}
           kubectl -n superapp rollout status deploy/driver
 
-      - name: Deploy Admin
+      - name: Deploy Admin (if changed)
         if: needs.changes.outputs.admin == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/admin admin=${{ secrets.DOCKER_USERNAME }}/superapp-admin:${{ github.sha }}
           kubectl -n superapp rollout status deploy/admin
 
-      - name: Deploy Map & Location Services
+      - name: Deploy Map & Location Services (if changed)
         if: needs.changes.outputs.map_location == 'true'
-        env:
-          KUBECONFIG: ${{ github.workspace }}/kubeconfig
         run: |
           kubectl -n superapp set image deploy/map-location-services map-location-services=${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:${{ github.sha }}
           kubectl -n superapp rollout status deploy/map-location-services
