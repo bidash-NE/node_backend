@@ -9,7 +9,7 @@ const { initAdminLogsTable } = require("./models/initModel.js"); // Initialize D
 const app = express();
 
 // Use port from env or fallback to 6000
-const PORT = process.env.PORT || 6060;
+const PORT = process.env.PORT || 3000;
 
 // Enable CORS for all origins (you can restrict origins here if needed)
 app.use(

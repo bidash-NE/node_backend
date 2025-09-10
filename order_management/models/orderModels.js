@@ -15,7 +15,7 @@ const Order = {
       user_id: orderData.user_id,
       total_amount: orderData.total_amount,
       discount_amount: orderData.discount_amount,
-      payment_method: orderData.payment_method,
+      payment_method: orderData.payment_method, // e.g. "CASH", "CARD"
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant,
       status: (orderData.status || "PENDING").toUpperCase(),
@@ -27,13 +27,13 @@ const Order = {
       await db.query(`INSERT INTO order_items SET ?`, {
         order_id,
         business_id: item.business_id,
-        business_name: item.business_name,
+        business_name: item.business_name, // used to show "Restaurant"
         menu_id: item.menu_id,
         item_name: item.item_name,
         item_image: item.item_image,
         quantity: item.quantity,
         price: item.price,
-        subtotal: item.subtotal,
+        subtotal: item.subtotal, // price * qty (or overridden)
         platform_fee: item.platform_fee,
         delivery_fee: item.delivery_fee,
       });
@@ -64,7 +64,7 @@ const Order = {
     return orders;
   },
 
-  // Legacy raw-by-id (kept; not used by controller anymore)
+  // --- legacy raw by id (kept) ---
   findById: async (order_id) => {
     const [orders] = await db.query(`SELECT * FROM orders WHERE order_id = ?`, [
       order_id,
@@ -79,7 +79,7 @@ const Order = {
     return orders[0];
   },
 
-  // Flat list of items for a business (legacy/simple)
+  // Flat items by business (legacy/simple)
   findByBusinessId: async (business_id) => {
     const [items] = await db.query(
       `SELECT * FROM order_items WHERE business_id = ? ORDER BY order_id DESC, menu_id ASC`,
@@ -88,7 +88,7 @@ const Order = {
     return items;
   },
 
-  // Orders for a business, grouped by user with user name and items for that business only
+  // Business → grouped by user (merchant dashboard use)
   findByBusinessGroupedByUser: async (business_id) => {
     const [orders] = await db.query(
       `
@@ -139,12 +139,9 @@ const Order = {
       itemsByOrder.get(it.order_id).push(it);
     }
 
-    for (const o of orders) {
-      o.items = itemsByOrder.get(o.order_id) || [];
-    }
-
     const grouped = new Map(); // user_id -> { user, orders: [] }
     for (const o of orders) {
+      const its = itemsByOrder.get(o.order_id) || [];
       if (!grouped.has(o.user_id)) {
         grouped.set(o.user_id, {
           user: {
@@ -168,23 +165,14 @@ const Order = {
         priority: o.priority,
         created_at: o.created_at,
         updated_at: o.updated_at,
-        items: o.items,
+        items: its,
       });
     }
 
     return Array.from(grouped.values());
   },
 
-  /**
-   * NEW: Same grouped-by-user shape but fetched by order_id.
-   * Returns [] if not found, or:
-   * [
-   *   {
-   *     user: { user_id, name, email, phone },
-   *     orders: [ { ...orderFields, items: [...] } ]
-   *   }
-   * ]
-   */
+  // Order → grouped shape by order_id (we used earlier)
   findByOrderIdGrouped: async (order_id) => {
     const [orders] = await db.query(
       `
@@ -211,7 +199,6 @@ const Order = {
       `,
       [order_id]
     );
-
     if (!orders.length) return [];
 
     const [items] = await db.query(
@@ -227,7 +214,6 @@ const Order = {
     const o = orders[0];
     o.items = items;
 
-    // group into the same structure used by findByBusinessGroupedByUser
     return [
       {
         user: {
@@ -256,13 +242,129 @@ const Order = {
     ];
   },
 
+  // === NEW: USER-FACING FETCH ===
+  // Get all orders for a user_id with screen-ready shape
+  findByUserIdForApp: async (user_id) => {
+    // 1) All orders for user
+    const [orders] = await db.query(
+      `
+      SELECT
+        o.order_id,
+        o.user_id,
+        o.total_amount,
+        o.discount_amount,
+        o.payment_method,
+        o.delivery_address,
+        o.note_for_restaurant,
+        o.status,
+        o.fulfillment_type,
+        o.priority,
+        o.created_at,
+        o.updated_at
+      FROM orders o
+      WHERE o.user_id = ?
+      ORDER BY o.created_at DESC
+      `,
+      [user_id]
+    );
+    if (!orders.length) return [];
+
+    // 2) Load all items for these orders
+    const orderIds = orders.map((o) => o.order_id);
+    const [items] = await db.query(
+      `
+      SELECT
+        order_id,
+        business_id,
+        business_name,
+        menu_id,
+        item_name,
+        item_image,
+        quantity,
+        price,
+        subtotal,
+        platform_fee,
+        delivery_fee
+      FROM order_items
+      WHERE order_id IN (?)
+      ORDER BY order_id ASC, business_id ASC, menu_id ASC
+      `,
+      [orderIds]
+    );
+
+    // 3) Index items by order_id
+    const itemsByOrder = new Map();
+    for (const it of items) {
+      if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
+      itemsByOrder.get(it.order_id).push(it);
+    }
+
+    // 4) Build user-side response objects
+    const result = [];
+    for (const o of orders) {
+      const its = itemsByOrder.get(o.order_id) || [];
+
+      // Pick restaurant/business summary (first item wins — most orders are single-restaurant)
+      const primaryBiz = its[0] || null;
+
+      // Totals: compute from items when order.total_amount is null
+      let items_subtotal = 0;
+      let platform_fee_total = 0;
+      let delivery_fee_total = 0;
+      for (const it of its) {
+        items_subtotal += Number(it.subtotal || 0);
+        platform_fee_total += Number(it.platform_fee || 0);
+        delivery_fee_total += Number(it.delivery_fee || 0);
+      }
+      const discount = Number(o.discount_amount || 0);
+      const computed_total =
+        items_subtotal + platform_fee_total + delivery_fee_total - discount;
+      const total_amount =
+        o.total_amount != null ? Number(o.total_amount) : computed_total;
+
+      result.push({
+        order_id: o.order_id,
+        status: o.status, // e.g. PENDING/CONFIRMED/...
+        payment_method: o.payment_method, // e.g. "CASH" -> "Cash on Delivery" in UI
+        fulfillment_type: o.fulfillment_type, // Delivery / Pickup
+        created_at: o.created_at,
+
+        restaurant: primaryBiz
+          ? {
+              business_id: primaryBiz.business_id,
+              name: primaryBiz.business_name,
+            }
+          : null,
+
+        deliver_to: o.delivery_address, // "Fetching location..." if your app fills it later
+
+        totals: {
+          items_subtotal,
+          platform_fee: platform_fee_total,
+          delivery_fee: delivery_fee_total,
+          discount_amount: discount,
+          total_amount,
+        },
+
+        items: its.map((it) => ({
+          menu_id: it.menu_id,
+          name: it.item_name,
+          image: it.item_image,
+          quantity: it.quantity,
+          unit_price: it.price,
+          line_subtotal: it.subtotal,
+        })),
+      });
+    }
+
+    return result;
+  },
+
   update: async (order_id, orderData) => {
     if (!orderData || !Object.keys(orderData).length) return 0;
-
     if (orderData.status) {
       orderData.status = String(orderData.status).toUpperCase();
     }
-
     const fields = Object.keys(orderData);
     const values = Object.values(orderData);
     const setClause = fields.map((f) => `\`${f}\` = ?`).join(", ");

@@ -17,7 +17,7 @@ const redis = require("./config/redis");
 const db = require("./config/db");
 
 const app = express();
-const PORT = process.env.PORT || 7000;
+const PORT = process.env.PORT || 3000;
 
 // ✅ CORS setup: Allow all origins (any device, any IP)
 const corsOptions = {

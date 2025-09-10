@@ -5,8 +5,8 @@ const ALLOWED_STATUSES = new Set([
   "PENDING",
   "CONFIRMED",
   "PREPARING",
-  "ON_THE_WAY",
-  "DELIVERED",
+  "OUT_FOR_DELIVERY",
+  "COMPLETED",
   "CANCELLED",
 ]);
 
@@ -28,12 +28,7 @@ exports.getOrders = async (req, res) => {
   }
 };
 
-/**
- * Return the SAME grouped-by-user format as business-grouped:
- * [
- *   { user: {...}, orders: [ { ...order, items: [...] } ] }
- * ]
- */
+/** Same grouped shape by order_id (merchant/admin) */
 exports.getOrderById = async (req, res) => {
   try {
     const grouped = await Order.findByOrderIdGrouped(req.params.order_id);
@@ -45,7 +40,7 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
-// Flat items by business (legacy/simple)
+/** Flat items by business (legacy) */
 exports.getOrdersByBusinessId = async (req, res) => {
   try {
     const businessId = req.params.business_id;
@@ -56,11 +51,25 @@ exports.getOrdersByBusinessId = async (req, res) => {
   }
 };
 
-// Business-grouped by user
+/** Business grouped by user (merchant dashboard) */
 exports.getBusinessOrdersGroupedByUser = async (req, res) => {
   try {
     const businessId = req.params.business_id;
     const data = await Order.findByBusinessGroupedByUser(businessId);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/** === NEW: USER-FACING ===
+ *  GET /api/users/:user_id/orders
+ *  Returns array of orders with fields needed for the user app.
+ */
+exports.getOrdersForUser = async (req, res) => {
+  try {
+    const userId = req.params.user_id;
+    const data = await Order.findByUserIdForApp(userId);
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

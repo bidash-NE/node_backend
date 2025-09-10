@@ -23,7 +23,7 @@ app.use("/api/mart/ratings", martRatingsRoutes);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-const PORT = process.env.MART_PORT || 9009;
+const PORT = process.env.MART_PORT || 3000;
 app.listen(PORT, () =>
   console.log(`MART API listening on http://localhost:${PORT}`)
 );

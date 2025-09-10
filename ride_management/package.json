@@ -2,7 +2,7 @@
   "name": "ride_management",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
@@ -19,7 +19,9 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.1",
     "joi": "^17.13.3",
+    "moment-timezone": "^0.6.0",
     "mongoose": "^8.16.4",
+    "multer": "^2.0.2",
     "mysql2": "^3.14.2",
     "new-edge": "file:..",
     "socket.io": "^4.8.1"

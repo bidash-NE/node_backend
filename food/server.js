@@ -21,7 +21,8 @@ app.use("/api/food/discovery", foodDiscoveryRoute);
 app.use("/api/food", foodMenuBrowseRoute);
 app.use("/api/food/ratings", foodRatingsRoutes);
 app.use("/api/food/cart", cartRoutes);
+const PORT = process.env.PORT || 3000;
 
-app.listen(9090, "0.0.0.0", () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log("🚀 Server running on port 9090");
 });

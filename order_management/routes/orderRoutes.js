@@ -14,6 +14,11 @@ const validateBusinessId = (req, res, next) => {
   if (Number.isFinite(bid) && bid > 0) return next();
   return res.status(400).json({ message: "Invalid business_id" });
 };
+const validateUserId = (req, res, next) => {
+  const uid = Number(req.params.user_id);
+  if (Number.isFinite(uid) && uid > 0) return next();
+  return res.status(400).json({ message: "Invalid user_id" });
+};
 
 /* CRUD */
 router.post("/orders", orderCtrl.createOrder);
@@ -35,12 +40,17 @@ router.get(
   validateBusinessId,
   orderCtrl.getOrdersByBusinessId
 );
-
-/* Grouped by user (includes user name) */
 router.get(
   "/orders/business/:business_id/grouped",
   validateBusinessId,
   orderCtrl.getBusinessOrdersGroupedByUser
+);
+
+/* === User-facing === */
+router.get(
+  "/users/:user_id/orders",
+  validateUserId,
+  orderCtrl.getOrdersForUser
 );
 
 module.exports = router;

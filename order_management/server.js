@@ -23,7 +23,7 @@ app.get("/", (req, res) => {
 
 app.use("/", orderRoutes);
 
-const PORT = process.env.PORT || 1001;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
