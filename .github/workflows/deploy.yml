@@ -1,0 +1,75 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & push Food
+        uses: docker/build-push-action@v6
+        with:
+          context: ./food
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-food:latest
+
+      - name: Build & push Mart
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mart
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-mart:latest
+
+      - name: Build & push Merchant
+        uses: docker/build-push-action@v6
+        with:
+          context: ./merchant
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-merchant:latest
+
+      - name: Build & push Order Management
+        uses: docker/build-push-action@v6
+        with:
+          context: ./order_management
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:latest
+
+      - name: Build & push Ride Management
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ride_management
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-ride-management:latest
+
+      - name: Build & push Driver
+        uses: docker/build-push-action@v6
+        with:
+          context: ./driver
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-driver:latest
+
+      - name: Build & push Admin
+        uses: docker/build-push-action@v6
+        with:
+          context: ./admin
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-admin:latest
+
+      - name: Build & push Map & Location Services
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Map_and_location_services
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:latest
