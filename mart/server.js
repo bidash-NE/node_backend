@@ -24,6 +24,6 @@ app.use("/api/mart/ratings", martRatingsRoutes);
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.MART_PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`MART API listening on http://localhost:${PORT}`)
-);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
