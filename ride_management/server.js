@@ -60,6 +60,7 @@ app.locals.io = io;
 
 // ✅ Load your socket handlers
 require("./socket")(io);
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ✅ Main Startup Function
 async function startServer() {
@@ -69,9 +70,10 @@ async function startServer() {
     await warmupRideTypesIfNeeded(); // Warm up ride types if needed
 
     // ✅ Bind to 0.0.0.0 so it's accessible from other devices on LAN/WAN
-    server.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server API running at port ${PORT}`);
-    });
+
+    app.listen(PORT, "0.0.0.0", () =>
+      console.log(`🚀 Server running at ${PORT}`)
+    );
   } catch (error) {
     console.error("❌ Failed to start server:", error);
     process.exit(1);

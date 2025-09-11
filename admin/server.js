@@ -30,15 +30,16 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/admin-logs", adminLogRoutes);
 
 // Simple healthcheck endpoint
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Start server only after DB initialization
 async function start() {
   try {
     await initAdminLogsTable();
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server running and accessible at port ${PORT}`);
-    });
+
+    app.listen(PORT, "0.0.0.0", () =>
+      console.log(`🚀 Server running at ${PORT}`)
+    );
   } catch (err) {
     console.error("❌ Startup failed:", err);
     process.exit(1);
