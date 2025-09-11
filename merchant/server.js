@@ -28,6 +28,7 @@ app.use("/api/category", categoryRoutes);
 app.use("/api/banners", bannerRoutes);
 app.use("/api", updateMerchantRoute);
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running at ${PORT}`);
-});
+// near the other routes:
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server running at ${PORT}`));
