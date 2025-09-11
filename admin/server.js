@@ -37,8 +37,7 @@ async function start() {
   try {
     await initAdminLogsTable();
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server running and accessible at http://0.0.0.0:${PORT}`);
-      console.log(`🌐 Use your server IP or localhost:${PORT} to access it`);
+      console.log(`🚀 Server running and accessible at port ${PORT}`);
     });
   } catch (err) {
     console.error("❌ Startup failed:", err);

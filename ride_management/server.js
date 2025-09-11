@@ -70,8 +70,7 @@ async function startServer() {
 
     // ✅ Bind to 0.0.0.0 so it's accessible from other devices on LAN/WAN
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server API running at: http://localhost:${PORT}`);
-      console.log(`📡 Socket.IO server listening on port ${PORT}`);
+      console.log(`🚀 Server API running at port ${PORT}`);
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);
