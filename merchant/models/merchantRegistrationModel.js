@@ -1,5 +1,5 @@
 const db = require("../config/db");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 
 /* ------------------------ helpers ------------------------ */
 
@@ -38,7 +38,7 @@ async function filterValidTypeIds(typeIds) {
   return typeIds.filter((id) => valid.has(id));
 }
 
-/* ------------------------ create/register (existing) ------------------------ */
+/* ------------------------ create/register ------------------------ */
 
 async function registerMerchantModel(data) {
   const conn = await db.getConnection();
@@ -60,7 +60,7 @@ async function registerMerchantModel(data) {
       address,
       business_logo,
       delivery_option,
-      owner_type,
+      owner_type, // e.g., "food" / "mart"
       bank_name,
       account_holder_name,
       account_number,
@@ -69,17 +69,21 @@ async function registerMerchantModel(data) {
       bank_qr_code_image,
     } = data;
 
+    const role = (data.role || "merchant").toLowerCase();
+    const ownerType = String(owner_type || "").toLowerCase();
+
     if (!user_name) throw new Error("user_name is required");
     if (!email) throw new Error("email is required");
     if (!phone) throw new Error("phone is required");
     if (!password) throw new Error("password is required");
     if (!business_name) throw new Error("business_name is required");
-    if (!owner_type) throw new Error("owner_type is required");
+    if (!ownerType) throw new Error("owner_type is required");
     if (!bank_name) throw new Error("bank_name is required");
     if (!account_holder_name)
       throw new Error("account_holder_name is required");
     if (!account_number) throw new Error("account_number is required");
 
+    // Business type resolution
     let incomingIds = toIdArray(business_type_ids);
     if (
       !incomingIds.length &&
@@ -94,8 +98,9 @@ async function registerMerchantModel(data) {
         "At least one business type is required (provide business_type_ids)."
       );
 
+    // Duplicate checks (email/phone)
     const [emailDup] = await conn.query(
-      `SELECT user_id FROM users WHERE email = ? LIMIT 1`,
+      `SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`,
       [email]
     );
     if (emailDup.length)
@@ -108,23 +113,36 @@ async function registerMerchantModel(data) {
     if (phoneDup.length)
       throw new Error("Phone number already exists. Please use another phone.");
 
-    const [acctDup] = await conn.query(
-      `SELECT bank_detail_id FROM merchant_bank_details WHERE account_number = ? LIMIT 1`,
-      [account_number]
+    // Username *scoped* duplicate: reject only if SAME username + SAME role already has a business with SAME owner_type
+    const [scopedUserDup] = await conn.query(
+      `
+      SELECT u.user_id
+        FROM users u
+        JOIN merchant_business_details mbd
+          ON mbd.user_id = u.user_id
+       WHERE LOWER(TRIM(u.user_name)) = LOWER(TRIM(?))
+         AND LOWER(u.role) = LOWER(?)
+         AND LOWER(TRIM(mbd.owner_type)) = LOWER(TRIM(?))
+       LIMIT 1
+      `,
+      [user_name, role, ownerType]
     );
-    if (acctDup.length)
+    if (scopedUserDup.length) {
       throw new Error(
-        "Bank account number already exists. Please use another account."
+        "Username already exists for this owner type. Choose another username or change owner_type."
       );
+    }
 
+    // Create user row (we allow same username for different owner_types/roles)
     const password_hash = await bcrypt.hash(password, 10);
     const [uRes] = await conn.query(
-      `INSERT INTO users (user_name, email, phone, password_hash, role)
-       VALUES (?, ?, ?, ?, ?)`,
-      [user_name, email, phone, password_hash, data.role || "merchant"]
+      `INSERT INTO users (user_name, email, phone, password_hash, role, is_active)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [user_name, email, phone, password_hash, role]
     );
     const user_id = uRes.insertId;
 
+    // Create business for that user (binds the owner_type)
     const [mbdRes] = await conn.query(
       `INSERT INTO merchant_business_details
         (user_id, business_name, business_license_number, license_image,
@@ -140,7 +158,7 @@ async function registerMerchantModel(data) {
         address || null,
         business_logo || null,
         delivery_option || "SELF",
-        owner_type || null,
+        ownerType || null,
       ]
     );
     const business_id = mbdRes.insertId;
@@ -219,7 +237,10 @@ async function updateMerchantDetailsModel(business_id, data) {
     setIfProvided("address", data.address);
     setIfProvided("business_logo", data.business_logo);
     setIfProvided("delivery_option", data.delivery_option);
-    setIfProvided("owner_type", data.owner_type);
+    setIfProvided(
+      "owner_type",
+      data.owner_type ? String(data.owner_type).toLowerCase() : undefined
+    );
     setIfProvided("opening_time", data.opening_time);
     setIfProvided("closing_time", data.closing_time);
 
@@ -291,18 +312,27 @@ async function updateMerchantDetailsModel(business_id, data) {
   }
 }
 
-async function findUserByUsername(user_name) {
-  const sql = `
+/* ------------------------ FINDERS ------------------------ */
+
+/**
+ * Return ALL accounts whose username matches (case/space-insensitive),
+ * newest first. Controller decides which one matches the password.
+ */
+async function findCandidatesByUsername(user_name) {
+  const uname = String(user_name || "");
+  const [rows] = await db.query(
+    `
     SELECT user_id, user_name, email, phone, role, password_hash, is_active
       FROM users
-     WHERE user_name = ?
-     LIMIT 1
-  `;
-  const [rows] = await db.query(sql, [user_name]);
-  return rows[0] || null;
+     WHERE LOWER(TRIM(user_name)) = LOWER(TRIM(?))
+     ORDER BY user_id DESC
+    `,
+    [uname]
+  );
+  return rows || [];
 }
 
-/* ------------------------ NEW: fetch owners by kind ------------------------ */
+/* ------------------------ owners by kind (unchanged) ------------------------ */
 
 async function getOwnersByKind(kind) {
   const k = String(kind || "").toLowerCase();
@@ -390,7 +420,7 @@ async function getOwnersByKind(kind) {
     closing_time: b.closing_time,
     holidays: b.holidays,
     complement: b.complement,
-    complement_details: b.complement_details,
+    complement_details: b.complementary_details,
     created_at: b.created_at,
     updated_at: b.updated_at,
     user: {
@@ -416,7 +446,7 @@ async function getMartOwners() {
 module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findUserByUsername,
+  findCandidatesByUsername, // ← export new finder
   getOwnersByKind,
   getFoodOwners,
   getMartOwners,

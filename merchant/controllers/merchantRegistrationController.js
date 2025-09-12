@@ -7,7 +7,7 @@ const db = require("../config/db");
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findUserByUsername,
+  findCandidatesByUsername, // ← new
 } = require("../models/merchantRegistrationModel");
 
 /* ---------------- file path helpers ---------------- */
@@ -63,7 +63,7 @@ async function registerMerchant(req, res) {
       email: b.email,
       phone: b.phone,
       password: b.password,
-      role: "merchant",
+      role: (b.role || "merchant").toLowerCase(),
 
       // business
       business_name: b.business_name,
@@ -93,7 +93,7 @@ async function registerMerchant(req, res) {
       address: b.address || null,
       business_logo,
       delivery_option: b.delivery_option,
-      owner_type: b.owner_type || "individual",
+      owner_type: (b.owner_type || "individual").toLowerCase(), // e.g., "food" / "mart" for scoping
 
       // bank
       bank_name: b.bank_name,
@@ -113,7 +113,9 @@ async function registerMerchant(req, res) {
     });
   } catch (err) {
     console.error(err.message || err);
-    const isClientErr = /exists|required|invalid/i.test(err.message || "");
+    const isClientErr = /exists|required|invalid|username/i.test(
+      err.message || ""
+    );
     res
       .status(isClientErr ? 400 : 500)
       .json({ error: err.message || "Merchant registration failed" });
@@ -158,7 +160,9 @@ async function updateMerchant(req, res) {
       "opening_time",
       "closing_time",
     ].forEach((k) => {
-      if (b[k] !== undefined) updatePayload[k] = b[k];
+      if (b[k] !== undefined)
+        updatePayload[k] =
+          k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
     });
 
     if (b.license_image !== undefined || f.license_image?.length) {
@@ -167,10 +171,10 @@ async function updateMerchant(req, res) {
     if (b.business_logo !== undefined || f.business_logo?.length) {
       updatePayload.business_logo = newBusinessLogo;
     }
-    if (b.latitude !== undefined) {
+    if (typeof b.latitude !== "undefined") {
       updatePayload.latitude = b.latitude === "" ? null : Number(b.latitude);
     }
-    if (b.longitude !== undefined) {
+    if (typeof b.longitude !== "undefined") {
       updatePayload.longitude = b.longitude === "" ? null : Number(b.longitude);
     }
     if (b.holidays !== undefined) {
@@ -229,7 +233,7 @@ async function updateMerchant(req, res) {
   }
 }
 
-/* ---------------- login ---------------- */
+/* ---------------- login (username+password ONLY) ---------------- */
 
 async function loginByUsername(req, res) {
   try {
@@ -240,27 +244,48 @@ async function loginByUsername(req, res) {
         .json({ error: "user_name and password are required" });
     }
 
-    const user = await findUserByUsername(user_name);
-    if (!user) return res.status(404).json({ error: "User not found" });
+    // 1) Fetch all candidate accounts for this username (case/space-insensitive)
+    const candidates = await findCandidatesByUsername(user_name); // newest first
 
-    if (user.is_active !== undefined && Number(user.is_active) === 0) {
+    if (!candidates.length) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // 2) Compare password against each candidate's hash (newest → oldest)
+    const matched = [];
+    for (const u of candidates) {
+      if (!u?.password_hash) continue;
+      const ok = await bcrypt.compare(password, u.password_hash);
+      if (ok) matched.push(u);
+    }
+
+    if (!matched.length) {
+      // None of the accounts with that username accepted the password
+      return res.status(401).json({ error: "Incorrect password" });
+    }
+
+    // If multiple match (rare), prefer the newest user_id
+    matched.sort((a, b) => b.user_id - a.user_id);
+    const user = matched[0];
+
+    // 3) Block only if this exact matched account is deactivated
+    if (user.is_active === 0) {
       return res
         .status(403)
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "Incorrect password" });
-
+    // 4) Get the most recent business for this user (this also yields owner_type)
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
-        WHERE user_id = ? 
+        WHERE user_id = ?
         ORDER BY created_at DESC, business_id DESC
         LIMIT 1`,
       [user.user_id]
     );
 
+    // 5) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -301,7 +326,7 @@ async function loginByUsername(req, res) {
   }
 }
 
-/* ---------------- NEW: owners list (food/mart) ---------------- */
+/* ---------------- owners list (unchanged) ---------------- */
 
 async function listOwnersByKind(req, res, kind) {
   try {

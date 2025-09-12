@@ -6,6 +6,7 @@ const martMenuRoutes = require("./routes/martMenuRoutes");
 const martMenuBrowseRoutes = require("./routes/martMenuBrowseRoutes");
 const martDiscoveryRoutes = require("./routes/martDiscoveryRoutes");
 const martRatingsRoutes = require("./routes/martRatingsRoutes");
+const cartRoutes = require("./routes/cartRoute");
 
 const app = express();
 app.use(cors());
@@ -20,6 +21,7 @@ app.use("/api/mart-menu", martMenuRoutes);
 app.use("/api/mart/browse", martMenuBrowseRoutes);
 app.use("/api/mart/discovery", martDiscoveryRoutes);
 app.use("/api/mart/ratings", martRatingsRoutes);
+app.use("/api/mart/cart", cartRoutes);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
