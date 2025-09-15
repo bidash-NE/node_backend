@@ -5,6 +5,7 @@ const ALLOWED_STATUSES = new Set([
   "PENDING",
   "CONFIRMED",
   "PREPARING",
+  "READY",
   "OUT_FOR_DELIVERY",
   "COMPLETED",
   "CANCELLED",
