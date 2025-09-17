@@ -1,3 +1,4 @@
+// controllers/merchantController.js
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
@@ -7,7 +8,7 @@ const db = require("../config/db");
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByUsername, // ← new
+  findCandidatesByUsername, // ← from ../models/merchantRegistrationModel
 } = require("../models/merchantRegistrationModel");
 
 /* ---------------- file path helpers ---------------- */
@@ -93,7 +94,7 @@ async function registerMerchant(req, res) {
       address: b.address || null,
       business_logo,
       delivery_option: b.delivery_option,
-      owner_type: (b.owner_type || "individual").toLowerCase(), // e.g., "food" / "mart" for scoping
+      owner_type: (b.owner_type || "individual").toLowerCase(), // app-specific: you also filter by business_types below
 
       // bank
       bank_name: b.bank_name,
@@ -215,7 +216,7 @@ async function updateMerchant(req, res) {
       });
     };
 
-    if (updatePayload.license_image)
+    if (updatePayload.icense_image)
       deleteIfReplaced(oldLicense, updatePayload.license_image);
     if (updatePayload.business_logo)
       deleteIfReplaced(oldLogo, updatePayload.business_logo);
@@ -260,22 +261,18 @@ async function loginByUsername(req, res) {
     }
 
     if (!matched.length) {
-      // None of the accounts with that username accepted the password
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // If multiple match (rare), prefer the newest user_id
     matched.sort((a, b) => b.user_id - a.user_id);
     const user = matched[0];
 
-    // 3) Block only if this exact matched account is deactivated
     if (user.is_active === 0) {
       return res
         .status(403)
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
-    // 4) Get the most recent business for this user (this also yields owner_type)
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
@@ -285,7 +282,6 @@ async function loginByUsername(req, res) {
       [user.user_id]
     );
 
-    // 5) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -326,18 +322,28 @@ async function loginByUsername(req, res) {
   }
 }
 
-/* ---------------- owners list (unchanged) ---------------- */
+/* ---------------- owners list (split by vertical) ---------------- */
+/**
+ * Common search + paging parsing
+ */
+function parseOwnersQuery(req) {
+  const q = (req.query.q || "").toString().trim().toLowerCase();
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit || "50", 10), 1),
+    200
+  );
+  const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
+  return { q, limit, offset };
+}
 
-async function listOwnersByKind(req, res, kind) {
+/**
+ * FOOD owners — uses food_menu + food_menu_ratings
+ */
+async function listFoodOwners(req, res) {
   try {
-    const q = (req.query.q || "").toString().trim().toLowerCase();
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit || "50", 10), 1),
-      200
-    );
-    const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
+    const { q, limit, offset } = parseOwnersQuery(req);
 
-    const params = [kind];
+    const params = [];
     let whereSearch = "";
     if (q) {
       whereSearch = ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
@@ -349,22 +355,22 @@ async function listOwnersByKind(req, res, kind) {
       `
       SELECT
         mbd.business_id,
-        mbd.business_name,
-        mbd.owner_type,
-        mbd.business_logo,
-        mbd.address,
-        mbd.latitude,
-        mbd.longitude,
-        u.user_id,
-        u.user_name,
-        u.email,
-        u.phone,
-        u.profile_image,
-        mbd.complementary AS complement,
-        mbd.complementary_details AS complement_details,
-        COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
-        COUNT(fmr.comment) AS total_comments,
-        GROUP_CONCAT(DISTINCT bt.name) AS tags
+        MAX(mbd.business_name)            AS business_name,
+        MAX(mbd.owner_type)              AS owner_type,
+        MAX(mbd.business_logo)           AS business_logo,
+        MAX(mbd.address)                 AS address,
+        MAX(mbd.latitude)                AS latitude,
+        MAX(mbd.longitude)               AS longitude,
+        MAX(u.user_id)                   AS user_id,
+        MAX(u.user_name)                 AS user_name,
+        MAX(u.email)                     AS email,
+        MAX(u.phone)                     AS phone,
+        MAX(u.profile_image)             AS profile_image,
+        MAX(mbd.complementary)           AS complement,
+        MAX(mbd.complementary_details)   AS complement_details,
+        COALESCE(ROUND(AVG(fmr.rating), 2), 0)           AS avg_rating,
+        COUNT(fmr.comment)                               AS total_comments,
+        GROUP_CONCAT(DISTINCT bt.name)                   AS tags
       FROM merchant_business_details mbd
       JOIN merchant_business_types mbt
         ON mbt.business_id = mbd.business_id
@@ -376,10 +382,10 @@ async function listOwnersByKind(req, res, kind) {
         ON fmn.business_id = mbd.business_id
       LEFT JOIN food_menu_ratings fmr
         ON fmr.menu_id = fmn.id
-      WHERE LOWER(bt.types) = ?
+      WHERE LOWER(bt.types) = 'food'
       ${whereSearch}
       GROUP BY mbd.business_id
-      ORDER BY mbd.created_at DESC, mbd.business_id DESC
+      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
       LIMIT ? OFFSET ?
       `,
       params
@@ -387,20 +393,86 @@ async function listOwnersByKind(req, res, kind) {
 
     return res.status(200).json({
       success: true,
-      kind,
+      kind: "food",
       count: rows.length,
       data: rows,
     });
   } catch (err) {
-    console.error(`listOwnersByKind(${kind}) error:`, err);
+    console.error("listFoodOwners error:", err);
     return res
       .status(500)
-      .json({ success: false, message: "Failed to fetch owners." });
+      .json({ success: false, message: "Failed to fetch food owners." });
   }
 }
 
-const listFoodOwners = (req, res) => listOwnersByKind(req, res, "food");
-const listMartOwners = (req, res) => listOwnersByKind(req, res, "mart");
+/**
+ * MART owners — uses mart_menu + mart_menu_ratings
+ */
+async function listMartOwners(req, res) {
+  try {
+    const { q, limit, offset } = parseOwnersQuery(req);
+
+    const params = [];
+    let whereSearch = "";
+    if (q) {
+      whereSearch = ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    params.push(limit, offset);
+
+    const [rows] = await db.query(
+      `
+      SELECT
+        mbd.business_id,
+        MAX(mbd.business_name)            AS business_name,
+        MAX(mbd.owner_type)              AS owner_type,
+        MAX(mbd.business_logo)           AS business_logo,
+        MAX(mbd.address)                 AS address,
+        MAX(mbd.latitude)                AS latitude,
+        MAX(mbd.longitude)               AS longitude,
+        MAX(u.user_id)                   AS user_id,
+        MAX(u.user_name)                 AS user_name,
+        MAX(u.email)                     AS email,
+        MAX(u.phone)                     AS phone,
+        MAX(u.profile_image)             AS profile_image,
+        MAX(mbd.complementary)           AS complement,
+        MAX(mbd.complementary_details)   AS complement_details,
+        COALESCE(ROUND(AVG(mmr.rating), 2), 0)           AS avg_rating,
+        COUNT(mmr.comment)                               AS total_comments,
+        GROUP_CONCAT(DISTINCT bt.name)                   AS tags
+      FROM merchant_business_details mbd
+      JOIN merchant_business_types mbt
+        ON mbt.business_id = mbd.business_id
+      JOIN business_types bt
+        ON bt.id = mbt.business_type_id
+      JOIN users u
+        ON u.user_id = mbd.user_id
+      LEFT JOIN mart_menu mmn
+        ON mmn.business_id = mbd.business_id
+      LEFT JOIN mart_menu_ratings mmr
+        ON mmr.menu_id = mmn.id
+      WHERE LOWER(bt.types) = 'mart'
+      ${whereSearch}
+      GROUP BY mbd.business_id
+      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
+      LIMIT ? OFFSET ?
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      kind: "mart",
+      count: rows.length,
+      data: rows,
+    });
+  } catch (err) {
+    console.error("listMartOwners error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch mart owners." });
+  }
+}
 
 module.exports = {
   registerMerchant,
