@@ -4,7 +4,7 @@ const cors = require("cors");
 
 dotenv.config();
 
-const { initAdminLogsTable } = require("./models/initModel.js"); // Initialize DB table
+const { initAdminLogsTable } = require("./models/initModel.js");
 
 const app = express();
 
@@ -26,8 +26,11 @@ app.use(express.json());
 // Routes
 const adminLogRoutes = require("./routes/adminLogsRoute");
 const adminRoutes = require("./routes/adminRoute");
+const orderReport = require("./routes/ordersReportRoutes");
+
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin-logs", adminLogRoutes);
+app.use("/api/orders", orderReport);
 
 // Simple healthcheck endpoint
 app.get("/health", (_req, res) => res.json({ ok: true }));
