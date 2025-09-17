@@ -1,6 +1,5 @@
 // models/adminModel.js
 const pool = require("../config/db");
-const moment = require("moment-timezone");
 
 // ===== helpers =====
 function toDbIntOrNull(v) {
@@ -12,19 +11,22 @@ function toDbStrOrNull(v) {
   const s = String(v).trim();
   return s.length ? s : null;
 }
-function bhutanNow() {
-  return moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
-}
+
+/**
+ * IMPORTANT:
+ * For TIMESTAMP columns, always insert UTC at the DB layer.
+ * MySQL will convert to the client's/session time zone on SELECT.
+ * This avoids the +6h double-shift you saw.
+ */
 async function logAdmin(conn, actorUserId, adminName, activity) {
   const sql = `
     INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
-    VALUES (?, ?, ?, ?)
+    VALUES (?, ?, ?, UTC_TIMESTAMP())
   `;
   await conn.query(sql, [
     toDbIntOrNull(actorUserId),
     toDbStrOrNull(adminName),
     toDbStrOrNull(activity),
-    bhutanNow(),
   ]);
 }
 
