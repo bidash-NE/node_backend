@@ -117,6 +117,9 @@ async function fetchMerchantsWithBusiness() {
       mbd.business_name,
       mbd.owner_type,
       mbd.business_logo,
+      mbd.opening_time,
+      mbd.closing_time,
+      mbd.address,
       mbd.created_at AS business_created_at,
       mbd.updated_at AS business_updated_at
     FROM users u
