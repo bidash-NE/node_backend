@@ -1,8 +1,17 @@
 // models/ordersReportModel.js
 const db = require("../config/db");
 
-async function fetchOrdersReport({
-  businessIds = [],
+// Adjust these if your actual names differ:
+const MERCHANT_TABLE = "merchant_business_details"; // <-- your real table name
+const OWNER_TYPE_COL = "owner_type"; // <-- change if it's 'type'/'ownerType'
+
+/**
+ * Returns one row per order with item names + quantities merged.
+ * Filters by owner type from merchant_business_details (food|mart).
+ */
+async function fetchOrdersReportByOwnerType({
+  ownerType, // 'food' | 'mart' (required)
+  businessIds = [], // optional: restrict to certain business_ids
   userId,
   status,
   dateFrom,
@@ -10,8 +19,18 @@ async function fetchOrdersReport({
   limit = 100,
   offset = 0,
 }) {
+  if (!ownerType) throw new Error("ownerType is required (food|mart)");
+  const ownerTypeNorm = String(ownerType).toLowerCase().trim();
+  if (!["food", "mart"].includes(ownerTypeNorm)) {
+    throw new Error('ownerType must be "food" or "mart"');
+  }
+
   const where = [];
   const params = [];
+
+  // Owner type (case-insensitive)
+  where.push(`LOWER(mbd.${OWNER_TYPE_COL}) = ?`);
+  params.push(ownerTypeNorm);
 
   if (businessIds.length) {
     where.push(`ai.business_id IN (${businessIds.map(() => "?").join(",")})`);
@@ -59,27 +78,27 @@ async function fetchOrdersReport({
       GROUP BY order_id, business_id, business_name, item_name
     ) ai ON ai.order_id = o.order_id
     LEFT JOIN users u ON u.user_id = o.user_id
+    JOIN \`${MERCHANT_TABLE}\` mbd ON mbd.business_id = ai.business_id  -- << using merchant_business_details
     ${whereSql}
     GROUP BY o.order_id
     ORDER BY o.created_at DESC
     LIMIT ? OFFSET ?;
   `;
 
-  params.push(Number(limit), Number(offset));
-
-  const [rows] = await db.query(sql, params);
+  const paramsWithLimit = [...params, Number(limit), Number(offset)];
+  const [rows] = await db.query(sql, paramsWithLimit);
 
   return rows.map((r) => ({
     Order_ID: r.Order_ID,
     Customer_Name: r.Customer_Name,
     Business_Name: r.Business_Name,
     Items_Name: r.Items_Name, // "Pizza x2, Burger x1"
-    Total_Quantity: Number(r.Total_Quantity), // total items count
+    Total_Quantity: Number(r.Total_Quantity),
     Total_Amount: Number(r.Total_Amount),
-    Payment: r.Payment,
-    Status: r.Status,
-    Placed_At: r.Placed_At,
+    Payment: r.Payment, // 'COD' | 'Wallet' | 'Card'
+    Status: r.Status, // 'PENDING' | 'CONFIRMED' | ...
+    Placed_At: r.Placed_At, // DATETIME
   }));
 }
 
-module.exports = { fetchOrdersReport };
+module.exports = { fetchOrdersReportByOwnerType };

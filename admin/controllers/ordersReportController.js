@@ -13,7 +13,6 @@ function parseQuery(req) {
     offset,
   } = req.query;
 
-  // Normalize business_ids into an array of numbers
   let businessIdList = [];
   if (business_ids) {
     businessIdList = String(business_ids)
@@ -40,7 +39,10 @@ function parseQuery(req) {
 exports.getFoodOrdersReport = async (req, res) => {
   try {
     const args = parseQuery(req);
-    const rows = await Reports.fetchOrdersReport({ ...args });
+    const rows = await Reports.fetchOrdersReportByOwnerType({
+      ...args,
+      ownerType: "food",
+    });
     res.json({ count: rows.length, data: rows });
   } catch (err) {
     console.error("[getFoodOrdersReport] Error:", err);
@@ -51,7 +53,10 @@ exports.getFoodOrdersReport = async (req, res) => {
 exports.getMartOrdersReport = async (req, res) => {
   try {
     const args = parseQuery(req);
-    const rows = await Reports.fetchOrdersReport({ ...args });
+    const rows = await Reports.fetchOrdersReportByOwnerType({
+      ...args,
+      ownerType: "mart",
+    });
     res.json({ count: rows.length, data: rows });
   } catch (err) {
     console.error("[getMartOrdersReport] Error:", err);
