@@ -3,6 +3,7 @@ const Order = require("../models/orderModels");
 
 const ALLOWED_STATUSES = new Set([
   "PENDING",
+  "REJECTED",
   "CONFIRMED",
   "PREPARING",
   "READY",
@@ -63,9 +64,9 @@ exports.getBusinessOrdersGroupedByUser = async (req, res) => {
   }
 };
 
-/** === NEW: USER-FACING ===
+/** === USER-FACING ===
  *  GET /api/users/:user_id/orders
- *  Returns array of orders with fields needed for the user app.
+ *  Returns array of orders with fields needed for the user app, including status_reason.
  */
 exports.getOrdersForUser = async (req, res) => {
   try {
@@ -88,10 +89,14 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
+/**
+ * Update status — NOW requires a `reason` in body.
+ * Body: { status: 'CONFIRMED' | 'CANCELLED' | ..., reason: '...' }
+ */
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order_id = req.params.order_id;
-    const { status } = req.body;
+    const { status, reason } = req.body || {};
 
     if (!status) return res.status(400).json({ message: "Status is required" });
 
@@ -104,7 +109,15 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    const affected = await Order.updateStatus(order_id, normalized);
+    // Require a non-empty reason for any status change
+    const reasonStr = (reason ?? "").toString().trim();
+    if (!reasonStr) {
+      return res
+        .status(400)
+        .json({ message: "Reason is required for status change" });
+    }
+
+    const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
     res.json({ message: "Order status updated successfully" });

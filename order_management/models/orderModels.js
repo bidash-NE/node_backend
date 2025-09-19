@@ -6,6 +6,23 @@ function generateOrderId() {
   return `ORD-${randomNum}`;
 }
 
+/** Cache whether orders.status_reason exists */
+let _hasStatusReason = null;
+async function ensureStatusReasonSupport() {
+  if (_hasStatusReason !== null) return _hasStatusReason;
+  const [rows] = await db.query(
+    `
+    SELECT 1
+      FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'orders'
+       AND COLUMN_NAME = 'status_reason'
+    `
+  );
+  _hasStatusReason = rows.length > 0;
+  return _hasStatusReason;
+}
+
 const Order = {
   create: async (orderData) => {
     const order_id = generateOrderId();
@@ -15,7 +32,7 @@ const Order = {
       user_id: orderData.user_id,
       total_amount: orderData.total_amount,
       discount_amount: orderData.discount_amount,
-      payment_method: orderData.payment_method, // e.g. "CASH", "CARD"
+      payment_method: orderData.payment_method, // e.g. "COD", "Wallet", "Card"
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant,
       status: (orderData.status || "PENDING").toUpperCase(),
@@ -27,13 +44,13 @@ const Order = {
       await db.query(`INSERT INTO order_items SET ?`, {
         order_id,
         business_id: item.business_id,
-        business_name: item.business_name, // used to show "Restaurant"
+        business_name: item.business_name,
         menu_id: item.menu_id,
         item_name: item.item_name,
         item_image: item.item_image,
         quantity: item.quantity,
         price: item.price,
-        subtotal: item.subtotal, // price * qty (or overridden)
+        subtotal: item.subtotal,
         platform_fee: item.platform_fee,
         delivery_fee: item.delivery_fee,
       });
@@ -42,8 +59,15 @@ const Order = {
   },
 
   findAll: async () => {
+    const hasReason = await ensureStatusReasonSupport();
+
     const [orders] = await db.query(
-      `SELECT * FROM orders ORDER BY created_at DESC`
+      `
+      SELECT
+        o.* ${hasReason ? "" : ""} ${/* o has all columns; fine */ ""}
+      FROM orders o
+      ORDER BY o.created_at DESC
+      `
     );
     if (!orders.length) return [];
 
@@ -66,9 +90,29 @@ const Order = {
 
   // --- legacy raw by id (kept) ---
   findById: async (order_id) => {
-    const [orders] = await db.query(`SELECT * FROM orders WHERE order_id = ?`, [
-      order_id,
-    ]);
+    const hasReason = await ensureStatusReasonSupport();
+
+    const [orders] = await db.query(
+      `
+      SELECT
+        o.order_id,
+        o.user_id,
+        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
+        o.total_amount,
+        o.discount_amount,
+        o.payment_method,
+        o.delivery_address,
+        o.note_for_restaurant,
+        o.status,
+        o.fulfillment_type,
+        o.priority,
+        o.created_at,
+        o.updated_at
+      FROM orders o
+      WHERE o.order_id = ?
+      `,
+      [order_id]
+    );
     if (!orders.length) return null;
 
     const [items] = await db.query(
@@ -90,6 +134,8 @@ const Order = {
 
   // Business → grouped by user (merchant dashboard use)
   findByBusinessGroupedByUser: async (business_id) => {
+    const hasReason = await ensureStatusReasonSupport();
+
     const [orders] = await db.query(
       `
       SELECT DISTINCT
@@ -98,6 +144,7 @@ const Order = {
         u.user_name AS user_name,
         u.email     AS user_email,
         u.phone     AS user_phone,
+        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
         o.payment_method,
@@ -156,6 +203,7 @@ const Order = {
       grouped.get(o.user_id).orders.push({
         order_id: o.order_id,
         status: o.status,
+        status_reason: o.status_reason || null, // include reason
         total_amount: o.total_amount,
         discount_amount: o.discount_amount,
         payment_method: o.payment_method,
@@ -172,8 +220,10 @@ const Order = {
     return Array.from(grouped.values());
   },
 
-  // Order → grouped shape by order_id (we used earlier)
+  // Order → grouped shape by order_id (used earlier)
   findByOrderIdGrouped: async (order_id) => {
+    const hasReason = await ensureStatusReasonSupport();
+
     const [orders] = await db.query(
       `
       SELECT
@@ -182,6 +232,7 @@ const Order = {
         u.user_name AS user_name,
         u.email     AS user_email,
         u.phone     AS user_phone,
+        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
         o.payment_method,
@@ -226,6 +277,7 @@ const Order = {
           {
             order_id: o.order_id,
             status: o.status,
+            status_reason: o.status_reason || null, // include reason
             total_amount: o.total_amount,
             discount_amount: o.discount_amount,
             payment_method: o.payment_method,
@@ -242,15 +294,18 @@ const Order = {
     ];
   },
 
-  // === NEW: USER-FACING FETCH ===
-  // Get all orders for a user_id with screen-ready shape
+  // === USER-FACING FETCH ===
+  // Get all orders for a user_id with screen-ready shape (now includes status_reason)
   findByUserIdForApp: async (user_id) => {
+    const hasReason = await ensureStatusReasonSupport();
+
     // 1) All orders for user
     const [orders] = await db.query(
       `
       SELECT
         o.order_id,
         o.user_id,
+        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
         o.payment_method,
@@ -324,9 +379,10 @@ const Order = {
 
       result.push({
         order_id: o.order_id,
-        status: o.status, // e.g. PENDING/CONFIRMED/...
-        payment_method: o.payment_method, // e.g. "CASH" -> "Cash on Delivery" in UI
-        fulfillment_type: o.fulfillment_type, // Delivery / Pickup
+        status: o.status,
+        status_reason: o.status_reason || null, // <-- shown in user app
+        payment_method: o.payment_method,
+        fulfillment_type: o.fulfillment_type,
         created_at: o.created_at,
 
         restaurant: primaryBiz
@@ -336,7 +392,7 @@ const Order = {
             }
           : null,
 
-        deliver_to: o.delivery_address, // "Fetching location..." if your app fills it later
+        deliver_to: o.delivery_address,
 
         totals: {
           items_subtotal,
@@ -376,12 +432,23 @@ const Order = {
     return result.affectedRows;
   },
 
-  updateStatus: async (order_id, status) => {
-    const [result] = await db.query(
-      `UPDATE orders SET status = ?, updated_at = NOW() WHERE order_id = ?`,
-      [String(status).toUpperCase(), order_id]
-    );
-    return result.affectedRows;
+  /** Update status (+ optional reason if column exists) */
+  updateStatus: async (order_id, status, reason) => {
+    const hasReason = await ensureStatusReasonSupport();
+    if (hasReason) {
+      const [result] = await db.query(
+        `UPDATE orders SET status = ?, status_reason = ?, updated_at = NOW() WHERE order_id = ?`,
+        [String(status).toUpperCase(), String(reason || "").trim(), order_id]
+      );
+      return result.affectedRows;
+    } else {
+      // Fallback: update status only
+      const [result] = await db.query(
+        `UPDATE orders SET status = ?, updated_at = NOW() WHERE order_id = ?`,
+        [String(status).toUpperCase(), order_id]
+      );
+      return result.affectedRows;
+    }
   },
 
   delete: async (order_id) => {
