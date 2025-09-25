@@ -353,41 +353,41 @@ async function listFoodOwners(req, res) {
 
     const [rows] = await db.query(
       `
-      SELECT
-        mbd.business_id,
-        MAX(mbd.business_name)            AS business_name,
-        MAX(mbd.owner_type)              AS owner_type,
-        MAX(mbd.business_logo)           AS business_logo,
-        MAX(mbd.address)                 AS address,
-        MAX(mbd.latitude)                AS latitude,
-        MAX(mbd.longitude)               AS longitude,
-        MAX(u.user_id)                   AS user_id,
-        MAX(u.user_name)                 AS user_name,
-        MAX(u.email)                     AS email,
-        MAX(u.phone)                     AS phone,
-        MAX(u.profile_image)             AS profile_image,
-        MAX(mbd.complementary)           AS complement,
-        MAX(mbd.complementary_details)   AS complement_details,
-        COALESCE(ROUND(AVG(fmr.rating), 2), 0)           AS avg_rating,
-        COUNT(fmr.comment)                               AS total_comments,
-        GROUP_CONCAT(DISTINCT bt.name)                   AS tags
-      FROM merchant_business_details mbd
-      JOIN merchant_business_types mbt
-        ON mbt.business_id = mbd.business_id
-      JOIN business_types bt
-        ON bt.id = mbt.business_type_id
-      JOIN users u
-        ON u.user_id = mbd.user_id
-      LEFT JOIN food_menu fmn
-        ON fmn.business_id = mbd.business_id
-      LEFT JOIN food_menu_ratings fmr
-        ON fmr.menu_id = fmn.id
-      WHERE LOWER(bt.types) = 'food'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?
-      `,
+  SELECT
+    mbd.business_id,
+    MAX(mbd.business_name)            AS business_name,
+    MAX(mbd.owner_type)               AS owner_type,
+    MAX(mbd.business_logo)            AS business_logo,
+    MAX(mbd.address)                  AS address,
+    MAX(mbd.latitude)                 AS latitude,
+    MAX(mbd.longitude)                AS longitude,
+    MAX(u.user_id)                    AS user_id,
+    MAX(u.user_name)                  AS user_name,
+    MAX(u.email)                      AS email,
+    MAX(u.phone)                      AS phone,
+    MAX(u.profile_image)              AS profile_image,
+    MAX(mbd.complementary)            AS complement,
+    MAX(mbd.complementary_details)    AS complement_details,
+    COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
+    COUNT(fmr.comment)                       AS total_comments,
+    GROUP_CONCAT(DISTINCT bt.name)           AS tags
+  FROM merchant_business_details mbd
+  JOIN users u
+    ON u.user_id = mbd.user_id
+  LEFT JOIN merchant_business_types mbt
+    ON mbt.business_id = mbd.business_id
+  LEFT JOIN business_types bt
+    ON bt.id = mbt.business_type_id
+  LEFT JOIN food_menu fmn
+    ON fmn.business_id = mbd.business_id
+  LEFT JOIN food_menu_ratings fmr
+    ON fmr.menu_id = fmn.id
+  WHERE TRIM(LOWER(mbd.owner_type)) = 'food'
+  ${whereSearch}
+  GROUP BY mbd.business_id
+  ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
+  LIMIT ? OFFSET ?
+  `,
       params
     );
 
@@ -422,41 +422,41 @@ async function listMartOwners(req, res) {
 
     const [rows] = await db.query(
       `
-      SELECT
-        mbd.business_id,
-        MAX(mbd.business_name)            AS business_name,
-        MAX(mbd.owner_type)              AS owner_type,
-        MAX(mbd.business_logo)           AS business_logo,
-        MAX(mbd.address)                 AS address,
-        MAX(mbd.latitude)                AS latitude,
-        MAX(mbd.longitude)               AS longitude,
-        MAX(u.user_id)                   AS user_id,
-        MAX(u.user_name)                 AS user_name,
-        MAX(u.email)                     AS email,
-        MAX(u.phone)                     AS phone,
-        MAX(u.profile_image)             AS profile_image,
-        MAX(mbd.complementary)           AS complement,
-        MAX(mbd.complementary_details)   AS complement_details,
-        COALESCE(ROUND(AVG(mmr.rating), 2), 0)           AS avg_rating,
-        COUNT(mmr.comment)                               AS total_comments,
-        GROUP_CONCAT(DISTINCT bt.name)                   AS tags
-      FROM merchant_business_details mbd
-      JOIN merchant_business_types mbt
-        ON mbt.business_id = mbd.business_id
-      JOIN business_types bt
-        ON bt.id = mbt.business_type_id
-      JOIN users u
-        ON u.user_id = mbd.user_id
-      LEFT JOIN mart_menu mmn
-        ON mmn.business_id = mbd.business_id
-      LEFT JOIN mart_menu_ratings mmr
-        ON mmr.menu_id = mmn.id
-      WHERE LOWER(bt.types) = 'mart'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?
-      `,
+  SELECT
+    mbd.business_id,
+    MAX(mbd.business_name)            AS business_name,
+    MAX(mbd.owner_type)               AS owner_type,
+    MAX(mbd.business_logo)            AS business_logo,
+    MAX(mbd.address)                  AS address,
+    MAX(mbd.latitude)                 AS latitude,
+    MAX(mbd.longitude)                AS longitude,
+    MAX(u.user_id)                    AS user_id,
+    MAX(u.user_name)                  AS user_name,
+    MAX(u.email)                      AS email,
+    MAX(u.phone)                      AS phone,
+    MAX(u.profile_image)              AS profile_image,
+    MAX(mbd.complementary)            AS complement,
+    MAX(mbd.complementary_details)    AS complement_details,
+    COALESCE(ROUND(AVG(mmr.rating), 2), 0) AS avg_rating,
+    COUNT(mmr.comment)                       AS total_comments,
+    GROUP_CONCAT(DISTINCT bt.name)           AS tags
+  FROM merchant_business_details mbd
+  JOIN users u
+    ON u.user_id = mbd.user_id
+  LEFT JOIN merchant_business_types mbt
+    ON mbt.business_id = mbd.business_id
+  LEFT JOIN business_types bt
+    ON bt.id = mbt.business_type_id
+  LEFT JOIN mart_menu mmn
+    ON mmn.business_id = mbd.business_id
+  LEFT JOIN mart_menu_ratings mmr
+    ON mmr.menu_id = mmn.id
+  WHERE TRIM(LOWER(mbd.owner_type)) = 'mart'
+  ${whereSearch}
+  GROUP BY mbd.business_id
+  ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
+  LIMIT ? OFFSET ?
+  `,
       params
     );
 
