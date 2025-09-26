@@ -1,3 +1,4 @@
+// models/merchantRegistrationModel.js
 const db = require("../config/db");
 const bcrypt = require("bcryptjs");
 
@@ -98,7 +99,8 @@ async function registerMerchantModel(data) {
         "At least one business type is required (provide business_type_ids)."
       );
 
-    // Duplicate checks (email/phone)
+    // Duplicate checks
+    // Email: case-insensitive
     const [emailDup] = await conn.query(
       `SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`,
       [email]
@@ -106,6 +108,7 @@ async function registerMerchantModel(data) {
     if (emailDup.length)
       throw new Error("Email already exists. Please use another email.");
 
+    // Phone: exact
     const [phoneDup] = await conn.query(
       `SELECT user_id FROM users WHERE phone = ? LIMIT 1`,
       [phone]
@@ -113,14 +116,14 @@ async function registerMerchantModel(data) {
     if (phoneDup.length)
       throw new Error("Phone number already exists. Please use another phone.");
 
-    // Username *scoped* duplicate: reject only if SAME username + SAME role already has a business with SAME owner_type
+    // Username duplicate *scoped* by role+owner_type, and now **case-sensitive** on username
     const [scopedUserDup] = await conn.query(
       `
       SELECT u.user_id
         FROM users u
         JOIN merchant_business_details mbd
           ON mbd.user_id = u.user_id
-       WHERE LOWER(TRIM(u.user_name)) = LOWER(TRIM(?))
+       WHERE BINARY TRIM(u.user_name) = BINARY TRIM(?)
          AND LOWER(u.role) = LOWER(?)
          AND LOWER(TRIM(mbd.owner_type)) = LOWER(TRIM(?))
        LIMIT 1
@@ -133,7 +136,7 @@ async function registerMerchantModel(data) {
       );
     }
 
-    // Create user row (we allow same username for different owner_types/roles)
+    // Create user row (same spelling/case allowed only across different scopes as defined above)
     const password_hash = await bcrypt.hash(password, 10);
     const [uRes] = await conn.query(
       `INSERT INTO users (user_name, email, phone, password_hash, role, is_active)
@@ -315,7 +318,7 @@ async function updateMerchantDetailsModel(business_id, data) {
 /* ------------------------ FINDERS ------------------------ */
 
 /**
- * Return ALL accounts whose username matches (case/space-insensitive),
+ * Return ALL accounts whose username matches EXACT CASE (case-sensitive),
  * newest first. Controller decides which one matches the password.
  */
 async function findCandidatesByUsername(user_name) {
@@ -324,7 +327,7 @@ async function findCandidatesByUsername(user_name) {
     `
     SELECT user_id, user_name, email, phone, role, password_hash, is_active
       FROM users
-     WHERE LOWER(TRIM(user_name)) = LOWER(TRIM(?))
+     WHERE BINARY TRIM(user_name) = BINARY TRIM(?)
      ORDER BY user_id DESC
     `,
     [uname]
@@ -446,7 +449,7 @@ async function getMartOwners() {
 module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByUsername, // ← export new finder
+  findCandidatesByUsername, // case-sensitive now
   getOwnersByKind,
   getFoodOwners,
   getMartOwners,

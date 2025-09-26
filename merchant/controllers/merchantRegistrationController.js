@@ -94,7 +94,7 @@ async function registerMerchant(req, res) {
       address: b.address || null,
       business_logo,
       delivery_option: b.delivery_option,
-      owner_type: (b.owner_type || "individual").toLowerCase(), // app-specific: you also filter by business_types below
+      owner_type: (b.owner_type || "individual").toLowerCase(),
 
       // bank
       bank_name: b.bank_name,
@@ -216,7 +216,8 @@ async function updateMerchant(req, res) {
       });
     };
 
-    if (updatePayload.icense_image)
+    // ✅ fix: license_image key spelling
+    if (updatePayload.license_image)
       deleteIfReplaced(oldLicense, updatePayload.license_image);
     if (updatePayload.business_logo)
       deleteIfReplaced(oldLogo, updatePayload.business_logo);
@@ -245,7 +246,7 @@ async function loginByUsername(req, res) {
         .json({ error: "user_name and password are required" });
     }
 
-    // 1) Fetch all candidate accounts for this username (case/space-insensitive)
+    // 1) Fetch exact-case username candidates (case-sensitive)
     const candidates = await findCandidatesByUsername(user_name); // newest first
 
     if (!candidates.length) {
@@ -323,9 +324,6 @@ async function loginByUsername(req, res) {
 }
 
 /* ---------------- owners list (split by vertical) ---------------- */
-/**
- * Common search + paging parsing
- */
 function parseOwnersQuery(req) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
   const limit = Math.min(
@@ -336,9 +334,6 @@ function parseOwnersQuery(req) {
   return { q, limit, offset };
 }
 
-/**
- * FOOD owners — uses food_menu + food_menu_ratings
- */
 async function listFoodOwners(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
@@ -405,9 +400,6 @@ async function listFoodOwners(req, res) {
   }
 }
 
-/**
- * MART owners — uses mart_menu + mart_menu_ratings
- */
 async function listMartOwners(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
