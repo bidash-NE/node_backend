@@ -15,12 +15,20 @@ on:
       - "k8s/**"
       - ".github/workflows/deploy.yml"
 
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   changes:
     name: Detect changed services
     runs-on: ubuntu-latest
     outputs:
       any: ${{ steps.filter.outputs.any }}
+      any_images: ${{ steps.filter.outputs.any_images }}
       food: ${{ steps.filter.outputs.food }}
       mart: ${{ steps.filter.outputs.mart }}
       merchant: ${{ steps.filter.outputs.merchant }}
@@ -47,6 +55,15 @@ jobs:
             admin:                'admin/**'
             map_location:         'Map_and_location_services/**'
             k8s:                  'k8s/**'
+            any_images:
+              - 'food/**'
+              - 'mart/**'
+              - 'merchant/**'
+              - 'order_management/**'
+              - 'ride_management/**'
+              - 'driver/**'
+              - 'admin/**'
+              - 'Map_and_location_services/**'
             any:
               - 'food/**'
               - 'mart/**'
@@ -62,9 +79,10 @@ jobs:
     name: Build & push changed images
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.any == 'true'
+    if: needs.changes.outputs.any_images == 'true'
     steps:
       - uses: actions/checkout@v4
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -152,67 +170,83 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:${{ github.sha }}
 
   deploy:
-    name: Deploy changed services to k3s
-    runs-on: self-hosted # <— runs on YOUR server
+    name: Deploy changed services to k3s (prod)
+    runs-on: self-hosted # your runner on the k3s server (ip .33)
     needs: [changes, build]
     if: needs.changes.outputs.any == 'true'
     env:
-      # Use k3s’s kubeconfig that already works on the server
       KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      NAMESPACE: prod
+      DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
+      SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Sanity check cluster
-        run: kubectl get nodes
+        run: |
+          set -e
+          kubectl get nodes
+          kubectl get ns "${NAMESPACE}"
 
       - name: Apply manifests (if k8s/ changed)
         if: needs.changes.outputs.k8s == 'true'
-        run: kubectl apply -f k8s/
+        run: |
+          set -e
+          kubectl apply -f k8s/
+          kubectl -n "${NAMESPACE}" get ingress,svc,deploy,pods -o wide
 
       - name: Deploy Food (if changed)
         if: needs.changes.outputs.food == 'true'
         run: |
-          kubectl -n superapp set image deploy/food food=${{ secrets.DOCKER_USERNAME }}/superapp-food:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/food
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/food food="${DOCKER_USER}/superapp-food:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/food --timeout=180s
 
       - name: Deploy Mart (if changed)
         if: needs.changes.outputs.mart == 'true'
         run: |
-          kubectl -n superapp set image deploy/mart mart=${{ secrets.DOCKER_USERNAME }}/superapp-mart:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/mart
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/mart mart="${DOCKER_USER}/superapp-mart:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/mart --timeout=180s
 
       - name: Deploy Merchant (if changed)
         if: needs.changes.outputs.merchant == 'true'
         run: |
-          kubectl -n superapp set image deploy/merchant merchant=${{ secrets.DOCKER_USERNAME }}/superapp-merchant:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/merchant
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/merchant merchant="${DOCKER_USER}/superapp-merchant:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/merchant --timeout=180s
 
       - name: Deploy Order Management (if changed)
         if: needs.changes.outputs.order_management == 'true'
         run: |
-          kubectl -n superapp set image deploy/order-management order-management=${{ secrets.DOCKER_USERNAME }}/superapp-order-management:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/order-management
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/order-management order-management="${DOCKER_USER}/superapp-order-management:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/order-management --timeout=180s
 
       - name: Deploy Ride Management (if changed)
         if: needs.changes.outputs.ride_management == 'true'
         run: |
-          kubectl -n superapp set image deploy/ride-management ride-management=${{ secrets.DOCKER_USERNAME }}/superapp-ride-management:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/ride-management
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/ride-management ride-management="${DOCKER_USER}/superapp-ride-management:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/ride-management --timeout=180s
 
       - name: Deploy Driver (if changed)
         if: needs.changes.outputs.driver == 'true'
         run: |
-          kubectl -n superapp set image deploy/driver driver=${{ secrets.DOCKER_USERNAME }}/superapp-driver:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/driver
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/driver driver="${DOCKER_USER}/superapp-driver:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/driver --timeout=180s
 
       - name: Deploy Admin (if changed)
         if: needs.changes.outputs.admin == 'true'
         run: |
-          kubectl -n superapp set image deploy/admin admin=${{ secrets.DOCKER_USERNAME }}/superapp-admin:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/admin
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/admin admin="${DOCKER_USER}/superapp-admin:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/admin --timeout=180s
 
       - name: Deploy Map & Location Services (if changed)
         if: needs.changes.outputs.map_location == 'true'
         run: |
-          kubectl -n superapp set image deploy/map-location-services map-location-services=${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:${{ github.sha }}
-          kubectl -n superapp rollout status deploy/map-location-services
+          set -e
+          kubectl -n "${NAMESPACE}" set image deploy/map-location-services map-location-services="${DOCKER_USER}/superapp-map-location-services:${SHA}"
+          kubectl -n "${NAMESPACE}" rollout status deploy/map-location-services --timeout=180s

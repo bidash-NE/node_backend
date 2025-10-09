@@ -1,10 +1,7 @@
 // models/adminLogModel.js
 const pool = require("../config/db");
 
-/**
- * Return ALL admin logs (latest first).
- * Keep it simple as requested—no pagination/filters.
- */
+/** Return ALL admin logs (latest first). */
 async function getAll() {
   const sql = `
     SELECT
@@ -25,4 +22,21 @@ async function getAll() {
   }
 }
 
-module.exports = { getAll };
+/** Add new admin log */
+/**
+ * Save a descriptive activity log.
+ * @param {Object} log
+ * @param {number} log.user_id
+ * @param {string} log.admin_name
+ * @param {string} log.activity
+ */
+async function addLog({ user_id, admin_name, activity }) {
+  if (!activity) return;
+  await pool.query(
+    `INSERT INTO admin_logs (user_id, admin_name, activity)
+     VALUES (?, ?, ?)`,
+    [user_id, admin_name, activity]
+  );
+}
+
+module.exports = { getAll, addLog };

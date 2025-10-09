@@ -2,10 +2,10 @@
 const db = require("../config/db");
 
 /**
- * Initialize the order_management tables if they do not exist.
+ * Initialize the order management tables if they do not exist.
  */
 async function initOrderManagementTable() {
-  // Orders table (added: status_reason)
+  // ---------------- Orders table ----------------
   await db.query(`
     CREATE TABLE IF NOT EXISTS orders (
       order_id VARCHAR(12) PRIMARY KEY,
@@ -24,7 +24,7 @@ async function initOrderManagementTable() {
     );
   `);
 
-  // Order items table
+  // ---------------- Order items table ----------------
   await db.query(`
     CREATE TABLE IF NOT EXISTS order_items (
       item_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -43,7 +43,30 @@ async function initOrderManagementTable() {
     );
   `);
 
-  console.log("✅ orders and order_items tables are ready.");
+  // ---------------- Order notification table ----------------
+  // Order notification (merchant inbox) — NO FK on order_id (we notify before order exists)
+  await db.query(`
+  CREATE TABLE IF NOT EXISTS order_notification (
+    notification_id CHAR(36) PRIMARY KEY,    -- UUID
+    order_id VARCHAR(12) NOT NULL,
+    merchant_id INT NOT NULL,
+    user_id INT NOT NULL,
+    type VARCHAR(64) NOT NULL,               -- 'order:create','order:status', etc.
+    title VARCHAR(160) NOT NULL,             -- e.g. 'New order #10235'
+    body_preview VARCHAR(220) NOT NULL,      -- e.g. '2× Chicken Rice · Nu 27.50'
+    is_read TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP NULL,
+    seen_at TIMESTAMP NULL,
+    INDEX idx_notif_merchant_time (merchant_id, created_at DESC),
+    INDEX idx_notif_merchant_unread (merchant_id, is_read, created_at DESC),
+    INDEX idx_notif_order (order_id)
+  );
+`);
+
+  console.log(
+    "✅ orders, order_items, and order_notification tables are ready."
+  );
 }
 
 module.exports = { initOrderManagementTable };

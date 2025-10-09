@@ -1,4 +1,3 @@
-// routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
 const orderCtrl = require("../controllers/orderControllers");
@@ -46,7 +45,7 @@ router.get(
   orderCtrl.getBusinessOrdersGroupedByUser
 );
 
-/* === User-facing === */
+/* User-facing */
 router.get(
   "/users/:user_id/orders",
   validateUserId,
