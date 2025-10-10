@@ -32,8 +32,7 @@ jobs:
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
-      - name: Paths filter
-        id: filter
+      - id: filter
         uses: dorny/paths-filter@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -65,9 +64,7 @@ jobs:
     if: needs.changes.outputs.any == 'true'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -162,69 +159,53 @@ jobs:
       NAMESPACE: prod
       DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
       SHA: ${{ github.sha }}
+      FOOD_CHANGED: ${{ needs.changes.outputs.food }}
+      MART_CHANGED: ${{ needs.changes.outputs.mart }}
+      MERCHANT_CHANGED: ${{ needs.changes.outputs.merchant }}
+      ORDER_CHANGED: ${{ needs.changes.outputs.order_management }}
+      RIDE_CHANGED: ${{ needs.changes.outputs.ride_management }}
+      DRIVER_CHANGED: ${{ needs.changes.outputs.driver }}
+      ADMIN_CHANGED: ${{ needs.changes.outputs.admin }}
+      MAP_CHANGED: ${{ needs.changes.outputs.map_location }}
+      K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sanity check cluster
+      - name: Apply manifests (only if k8s/ changed)
+        if: env.K8S_CHANGED == 'true'
         run: |
-          set -e
-          kubectl get nodes
-          echo "Namespace: ${NAMESPACE}"
-          kubectl -n "${NAMESPACE}" get deploy -o name || true
-
-      - name: Apply manifests (if k8s/ changed)
-        if: needs.changes.outputs.k8s == 'true'
-        run: |
-          set -e
+          set -euo pipefail
           kubectl apply -f k8s/
-          kubectl -n "${NAMESPACE}" get ingress,svc,deploy,pods -o wide
+          kubectl -n "${NAMESPACE}" get ingress,svc,deploy -o wide || true
 
-      - name: Helper - deploy function
+      - name: Deploy changed services
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          echo "Deploying to namespace: ${NAMESPACE}"
+          kubectl get nodes
+          kubectl -n "${NAMESPACE}" get deploy -o name || true
+
           deploy_if_exists () {
             local name="$1"      # deployment name
-            local container="$2" # container name in the pod spec
-            local image="$3"     # full image:tag
+            local container="$2" # container name
+            local image="$3"     # image:tag
             if kubectl -n "${NAMESPACE}" get deploy/"${name}" >/dev/null 2>&1; then
-              echo "Updating ${name} -> ${image}"
+              echo "Updating ${name} (${container}) -> ${image}"
               kubectl -n "${NAMESPACE}" set image deploy/"${name}" "${container}"="${image}"
               kubectl -n "${NAMESPACE}" rollout status deploy/"${name}" --timeout=180s
             else
-              echo "WARN: deployment ${name} not found in namespace ${NAMESPACE}, skipping."
+              echo "WARN: deployment ${name} not found in ${NAMESPACE}, skipping."
             fi
           }
-          export -f deploy_if_exists
 
-      - name: Deploy Food (if changed)
-        if: needs.changes.outputs.food == 'true'
-        run: deploy_if_exists food food "${DOCKER_USER}/superapp-food:${SHA}"
-
-      - name: Deploy Mart (if changed)
-        if: needs.changes.outputs.mart == 'true'
-        run: deploy_if_exists mart mart "${DOCKER_USER}/superapp-mart:${SHA}"
-
-      - name: Deploy Merchant (if changed)
-        if: needs.changes.outputs.merchant == 'true'
-        run: deploy_if_exists merchant merchant "${DOCKER_USER}/superapp-merchant:${SHA}"
-
-      - name: Deploy Order Management (if changed)
-        if: needs.changes.outputs.order_management == 'true'
-        run: deploy_if_exists order-management order-management "${DOCKER_USER}/superapp-order-management:${SHA}"
-
-      - name: Deploy Ride Management (if changed)
-        if: needs.changes.outputs.ride_management == 'true'
-        run: deploy_if_exists ride-management ride-management "${DOCKER_USER}/superapp-ride-management:${SHA}"
-
-      - name: Deploy Driver (if changed)
-        if: needs.changes.outputs.driver == 'true'
-        run: deploy_if_exists driver driver "${DOCKER_USER}/superapp-driver:${SHA}"
-
-      - name: Deploy Admin (if changed)
-        if: needs.changes.outputs.admin == 'true'
-        run: deploy_if_exists admin admin "${DOCKER_USER}/superapp-admin:${SHA}"
-
-      - name: Deploy Map & Location Services (if changed)
-        if: needs.changes.outputs.map_location == 'true'
-        run: deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
+          # Call per changed flag
+          [[ "${FOOD_CHANGED}"     == "true" ]] && deploy_if_exists food                 food                 "${DOCKER_USER}/superapp-food:${SHA}"
+          [[ "${MART_CHANGED}"     == "true" ]] && deploy_if_exists mart                 mart                 "${DOCKER_USER}/superapp-mart:${SHA}"
+          [[ "${MERCHANT_CHANGED}" == "true" ]] && deploy_if_exists merchant             merchant             "${DOCKER_USER}/superapp-merchant:${SHA}"
+          [[ "${ORDER_CHANGED}"    == "true" ]] && deploy_if_exists order-management     order-management     "${DOCKER_USER}/superapp-order-management:${SHA}"
+          [[ "${RIDE_CHANGED}"     == "true" ]] && deploy_if_exists ride-management      ride-management      "${DOCKER_USER}/superapp-ride-management:${SHA}"
+          [[ "${DRIVER_CHANGED}"   == "true" ]] && deploy_if_exists driver               driver               "${DOCKER_USER}/superapp-driver:${SHA}"
+          [[ "${ADMIN_CHANGED}"    == "true" ]] && deploy_if_exists admin                admin                "${DOCKER_USER}/superapp-admin:${SHA}"
+          [[ "${MAP_CHANGED}"      == "true" ]] && deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
