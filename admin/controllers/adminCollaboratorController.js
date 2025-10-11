@@ -1,20 +1,44 @@
 // controllers/adminCollaboratorController.js
 const Collab = require("../models/adminCollaboratorModel");
-const { addLog } = require("../models/adminLogModel");
+const { addLog } = require("../models/adminlogModel");
+const { findPrivilegedByIdAndName } = require("../models/userModel");
 
-/* ───────── Helper: Create readable log message ───────── */
-function formatLog(action, table, recordId, fields) {
-  const formatted = Object.entries(fields)
-    .map(([k, v]) => `${k}="${v ?? "(null)"}"`)
-    .join(", ");
-  return `${action} ${table}: id=${recordId} (${formatted})`;
+// ─────────── AUTH HELPER ───────────
+async function requireAdmin(req) {
+  const { auth } = req.body || {};
+  if (!auth || !auth.user_id || !auth.admin_name) {
+    const e = new Error("Missing admin credentials");
+    e.status = 401;
+    throw e;
+  }
+
+  const actor = await findPrivilegedByIdAndName(auth.user_id, auth.admin_name);
+  if (!actor) {
+    const e = new Error("Forbidden: Admin or Super Admin required");
+    e.status = 403;
+    throw e;
+  }
+
+  return {
+    user_id: actor.user_id,
+    admin_name: actor.user_name || actor.email || auth.admin_name,
+    role: actor.role,
+  };
 }
 
-/* ───────── CREATE ───────── */
+// ─────────── LOG FORMATTER ───────────
+function formatLog(action, table, id, fields) {
+  const parts = Object.entries(fields).map(
+    ([k, v]) => `${k}="${v ?? "(null)"}"`
+  );
+  return `${action} ${table}: id=${id} (${parts.join(", ")})`;
+}
+
+// ─────────── CREATE ───────────
 exports.create = async (req, res) => {
   try {
-    const { user_id, admin_name } = req.admin;
-    const payload = req.body || {};
+    const admin = await requireAdmin(req);
+    const payload = req.body;
 
     if (
       await Collab.existsByEmailOrCid(payload.email, payload.cid ?? "", null)
@@ -26,58 +50,64 @@ exports.create = async (req, res) => {
 
     const data = await Collab.create(payload);
 
-    const fields = {
-      full_name: data.full_name,
-      contact: data.contact,
-      email: data.email,
-      service: data.service,
-      role: data.role,
-    };
-
     await addLog({
-      user_id,
-      admin_name,
+      user_id: admin.user_id,
+      admin_name: admin.admin_name,
       activity: formatLog(
         "CREATE",
         "admin_collaborators",
         data.collaborator_id,
-        fields
+        {
+          full_name: data.full_name,
+          contact: data.contact,
+          email: data.email,
+          service: data.service,
+          role: data.role,
+        }
       ),
     });
 
     res.status(201).json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };
 
-/* ───────── READ LIST ───────── */
-exports.list = async (req, res) => {
+// ─────────── LIST (PUBLIC) ───────────
+exports.list = async (_req, res) => {
   try {
-    const data = await Collab.list(req.query);
-    res.json({ success: true, ...data });
+    const data = await Collab.list();
+    res.json({ success: true, data: data.data, total: data.total });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
-/* ───────── READ ONE ───────── */
+// ─────────── GET ONE (PUBLIC) ───────────
 exports.getOne = async (req, res) => {
   try {
-    const data = await Collab.findById(req.params.id);
+    const id = req.params.id;
+    if (!id)
+      return res.status(400).json({ success: false, error: "Missing id" });
+
+    const data = await Collab.findById(id);
     if (!data)
       return res.status(404).json({ success: false, error: "Not found" });
+
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
-/* ───────── UPDATE ───────── */
+// ─────────── UPDATE ───────────
 exports.update = async (req, res) => {
   try {
-    const { user_id, admin_name } = req.admin;
+    const admin = await requireAdmin(req);
     const id = req.params.id;
+    if (!id)
+      return res.status(400).json({ success: false, error: "Missing id" });
+
     const before = await Collab.findById(id);
     if (!before)
       return res.status(404).json({ success: false, error: "Not found" });
@@ -93,7 +123,6 @@ exports.update = async (req, res) => {
 
     const after = await Collab.updateById(id, req.body || {});
 
-    // Detect changed fields for logging
     const changes = {};
     for (const k of [
       "full_name",
@@ -106,49 +135,51 @@ exports.update = async (req, res) => {
     ]) {
       const oldVal = before[k];
       const newVal = after[k];
-      if (oldVal === newVal) changes[k] = "(unchanged)";
-      else changes[k] = newVal ?? "(null)";
+      changes[k] = oldVal === newVal ? "(unchanged)" : newVal ?? "(null)";
     }
 
     await addLog({
-      user_id,
-      admin_name,
+      user_id: admin.user_id,
+      admin_name: admin.admin_name,
       activity: formatLog("UPDATE", "admin_collaborators", id, changes),
     });
 
     res.json({ success: true, data: after });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };
 
-/* ───────── DELETE ───────── */
+// ─────────── DELETE ───────────
 exports.remove = async (req, res) => {
   try {
-    const { user_id, admin_name } = req.admin;
+    const admin = await requireAdmin(req);
     const id = req.params.id;
+    if (!id)
+      return res.status(400).json({ success: false, error: "Missing id" });
+
     const before = await Collab.findById(id);
     if (!before)
       return res.status(404).json({ success: false, error: "Not found" });
 
-    await Collab.removeById(id);
-
-    const fields = {
-      full_name: before.full_name,
-      contact: before.contact,
-      email: before.email,
-      service: before.service,
-      role: before.role,
-    };
+    const ok = await Collab.removeById(id);
+    if (!ok)
+      return res.status(404).json({ success: false, error: "Not found" });
 
     await addLog({
-      user_id,
-      admin_name,
-      activity: formatLog("DELETE", "admin_collaborators", id, fields),
+      user_id: admin.user_id,
+      admin_name: admin.admin_name,
+      activity: formatLog("DELETE", "admin_collaborators", id, {
+        full_name: before.full_name,
+        contact: before.contact,
+        email: before.email,
+        service: before.service,
+        role: before.role,
+      }),
     });
 
     res.json({ success: true, deleted: true });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };

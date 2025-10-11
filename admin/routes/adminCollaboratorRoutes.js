@@ -1,15 +1,21 @@
 // routes/adminCollaboratorRoutes.js
 const express = require("express");
 const router = express.Router();
-
-const ensureAdmin = require("../middleware/ensureAdmin");
 const ctrl = require("../controllers/adminCollaboratorController");
 
-// Protect ALL CRUD with ensureAdmin (role + identity check)
-router.get("/", ensureAdmin, ctrl.list);
-router.get("/:id", ensureAdmin, ctrl.getOne);
-router.post("", ensureAdmin, ctrl.create);
-router.put("/:id", ensureAdmin, ctrl.update);
-router.delete("/:id", ensureAdmin, ctrl.remove);
+/**
+ * JSON-based auth:
+ * - POST, PUT, DELETE require { auth: { user_id, admin_name } }
+ * - GET routes are public (no admin check)
+ */
+
+// Public routes
+router.get("/", ctrl.list); // GET all collaborators
+router.get("/:id", ctrl.getOne); // GET one collaborator by ID
+
+// Protected routes (require admin verification)
+router.post("/", ctrl.create); // POST new collaborator
+router.put("/:id", ctrl.update); // PUT update collaborator
+router.delete("/:id", ctrl.remove); // DELETE collaborator
 
 module.exports = router;

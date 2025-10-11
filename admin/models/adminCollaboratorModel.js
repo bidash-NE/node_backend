@@ -2,15 +2,8 @@
 const db = require("../config/db");
 
 function toDbRow(payload = {}) {
-  const {
-    full_name = undefined,
-    contact = undefined,
-    email = undefined,
-    service = undefined,
-    role = undefined,
-    current_address = undefined,
-    cid = undefined,
-  } = payload;
+  const { full_name, contact, email, service, role, current_address, cid } =
+    payload;
   return { full_name, contact, email, service, role, current_address, cid };
 }
 
@@ -35,10 +28,7 @@ async function create(collab) {
 
 async function findById(id) {
   const [rows] = await db.query(
-    `SELECT collaborator_id, full_name, contact, email, service, role,
-            current_address, cid, created_at, updated_at
-       FROM admin_collaborators
-      WHERE collaborator_id = ?`,
+    `SELECT * FROM admin_collaborators WHERE collaborator_id = ?`,
     [id]
   );
   return rows[0] || null;
@@ -56,46 +46,11 @@ async function existsByEmailOrCid(email, cid, excludeId = null) {
   return !!rows.length;
 }
 
-async function list({ page = 1, pageSize = 10, q = "" } = {}) {
-  page = Math.max(1, Number(page));
-  pageSize = Math.min(100, Math.max(1, Number(pageSize)));
-  const offset = (page - 1) * pageSize;
-
-  const where = [];
-  const params = [];
-
-  if (q && String(q).trim()) {
-    const like = `%${q.trim()}%`;
-    where.push(
-      `(full_name LIKE ? OR email LIKE ? OR contact LIKE ? OR cid LIKE ? OR service LIKE ? OR role LIKE ?)`
-    );
-    params.push(like, like, like, like, like, like);
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
+async function list() {
   const [rows] = await db.query(
-    `SELECT collaborator_id, full_name, contact, email, service, role,
-            current_address, cid, created_at, updated_at
-       FROM admin_collaborators
-       ${whereSql}
-       ORDER BY created_at DESC
-       LIMIT ? OFFSET ?`,
-    [...params, pageSize, offset]
+    `SELECT * FROM admin_collaborators ORDER BY created_at DESC`
   );
-
-  const [countRows] = await db.query(
-    `SELECT COUNT(*) AS total FROM admin_collaborators ${whereSql}`,
-    params
-  );
-
-  return {
-    data: rows,
-    page,
-    pageSize,
-    total: countRows[0].total,
-    totalPages: Math.ceil(countRows[0].total / pageSize),
-  };
+  return { data: rows, total: rows.length };
 }
 
 async function updateById(id, changes) {

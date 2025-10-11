@@ -1,3 +1,4 @@
+// routes/merchantRegistrationRoutes.js
 const express = require("express");
 const router = express.Router();
 const upload = require("../middlewares/upload");
@@ -17,9 +18,7 @@ const maybeMulter = (req, res, next) => {
     return upload.fields([
       { name: "license_image", maxCount: 1 },
       { name: "business_logo", maxCount: 1 },
-      { name: "bank_card_front_image", maxCount: 1 },
-      { name: "bank_card_back_image", maxCount: 1 },
-      { name: "bank_qr_code_image", maxCount: 1 },
+      { name: "bank_qr_code_image", maxCount: 1 }, // kept
     ])(req, res, next);
   }
   next();

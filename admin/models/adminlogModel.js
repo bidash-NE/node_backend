@@ -30,11 +30,10 @@ async function getAll() {
  * @param {string} log.admin_name
  * @param {string} log.activity
  */
-async function addLog({ user_id, admin_name, activity }) {
-  if (!activity) return;
+async function addLog({ user_id = null, admin_name = "API", activity }) {
+  if (!activity || !String(activity).trim()) return;
   await pool.query(
-    `INSERT INTO admin_logs (user_id, admin_name, activity)
-     VALUES (?, ?, ?)`,
+    `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
     [user_id, admin_name, activity]
   );
 }

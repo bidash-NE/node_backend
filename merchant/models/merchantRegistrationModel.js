@@ -65,9 +65,7 @@ async function registerMerchantModel(data) {
       bank_name,
       account_holder_name,
       account_number,
-      bank_card_front_image,
-      bank_card_back_image,
-      bank_qr_code_image,
+      bank_qr_code_image, // kept
     } = data;
 
     const role = (data.role || "merchant").toLowerCase();
@@ -100,7 +98,6 @@ async function registerMerchantModel(data) {
       );
 
     // Duplicate checks
-    // Email: case-insensitive
     const [emailDup] = await conn.query(
       `SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`,
       [email]
@@ -108,7 +105,6 @@ async function registerMerchantModel(data) {
     if (emailDup.length)
       throw new Error("Email already exists. Please use another email.");
 
-    // Phone: exact
     const [phoneDup] = await conn.query(
       `SELECT user_id FROM users WHERE phone = ? LIMIT 1`,
       [phone]
@@ -116,7 +112,7 @@ async function registerMerchantModel(data) {
     if (phoneDup.length)
       throw new Error("Phone number already exists. Please use another phone.");
 
-    // Username duplicate *scoped* by role+owner_type, and now **case-sensitive** on username
+    // Username duplicate *scoped* by role+owner_type (case-sensitive username)
     const [scopedUserDup] = await conn.query(
       `
       SELECT u.user_id
@@ -136,7 +132,7 @@ async function registerMerchantModel(data) {
       );
     }
 
-    // Create user row (same spelling/case allowed only across different scopes as defined above)
+    // Create user
     const password_hash = await bcrypt.hash(password, 10);
     const [uRes] = await conn.query(
       `INSERT INTO users (user_name, email, phone, password_hash, role, is_active)
@@ -145,7 +141,7 @@ async function registerMerchantModel(data) {
     );
     const user_id = uRes.insertId;
 
-    // Create business for that user (binds the owner_type)
+    // Create business
     const [mbdRes] = await conn.query(
       `INSERT INTO merchant_business_details
         (user_id, business_name, business_license_number, license_image,
@@ -175,18 +171,16 @@ async function registerMerchantModel(data) {
       [values]
     );
 
+    // Bank details (front/back removed; only QR optional)
     await conn.query(
       `INSERT INTO merchant_bank_details
-         (user_id, bank_name, account_holder_name, account_number,
-          bank_card_front_image, bank_card_back_image, bank_qr_code_image)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (user_id, bank_name, account_holder_name, account_number, bank_qr_code_image)
+       VALUES (?, ?, ?, ?, ?)`,
       [
         user_id,
         bank_name,
         account_holder_name,
         account_number,
-        bank_card_front_image || null,
-        bank_card_back_image || null,
         bank_qr_code_image || null,
       ]
     );
@@ -317,10 +311,6 @@ async function updateMerchantDetailsModel(business_id, data) {
 
 /* ------------------------ FINDERS ------------------------ */
 
-/**
- * Return ALL accounts whose username matches EXACT CASE (case-sensitive),
- * newest first. Controller decides which one matches the password.
- */
 async function findCandidatesByUsername(user_name) {
   const uname = String(user_name || "");
   const [rows] = await db.query(

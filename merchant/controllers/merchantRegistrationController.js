@@ -1,4 +1,4 @@
-// controllers/merchantController.js
+// controllers/merchantRegistrationController.js
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
@@ -45,15 +45,11 @@ async function registerMerchant(req, res) {
     const license_image = f.license_image?.[0]
       ? toRelPath(f.license_image[0])
       : fromBodyToStoredPath(b.license_image);
+
     const business_logo = f.business_logo?.[0]
       ? toRelPath(f.business_logo[0])
       : fromBodyToStoredPath(b.business_logo);
-    const bank_card_front_image = f.bank_card_front_image?.[0]
-      ? toRelPath(f.bank_card_front_image[0])
-      : fromBodyToStoredPath(b.bank_card_front_image);
-    const bank_card_back_image = f.bank_card_back_image?.[0]
-      ? toRelPath(f.bank_card_back_image[0])
-      : fromBodyToStoredPath(b.bank_card_back_image);
+
     const bank_qr_code_image = f.bank_qr_code_image?.[0]
       ? toRelPath(f.bank_qr_code_image[0])
       : fromBodyToStoredPath(b.bank_qr_code_image);
@@ -96,12 +92,10 @@ async function registerMerchant(req, res) {
       delivery_option: b.delivery_option,
       owner_type: (b.owner_type || "individual").toLowerCase(),
 
-      // bank
+      // bank (front/back removed)
       bank_name: b.bank_name,
       account_holder_name: b.account_holder_name,
       account_number: b.account_number,
-      bank_card_front_image,
-      bank_card_back_image,
       bank_qr_code_image,
     };
 
@@ -216,7 +210,6 @@ async function updateMerchant(req, res) {
       });
     };
 
-    // ✅ fix: license_image key spelling
     if (updatePayload.license_image)
       deleteIfReplaced(oldLicense, updatePayload.license_image);
     if (updatePayload.business_logo)
@@ -248,22 +241,18 @@ async function loginByUsername(req, res) {
 
     // 1) Fetch exact-case username candidates (case-sensitive)
     const candidates = await findCandidatesByUsername(user_name); // newest first
-
-    if (!candidates.length) {
+    if (!candidates.length)
       return res.status(404).json({ error: "User not found" });
-    }
 
-    // 2) Compare password against each candidate's hash (newest → oldest)
+    // 2) Compare password
     const matched = [];
     for (const u of candidates) {
       if (!u?.password_hash) continue;
       const ok = await bcrypt.compare(password, u.password_hash);
       if (ok) matched.push(u);
     }
-
-    if (!matched.length) {
+    if (!matched.length)
       return res.status(401).json({ error: "Incorrect password" });
-    }
 
     matched.sort((a, b) => b.user_id - a.user_id);
     const user = matched[0];
@@ -324,6 +313,7 @@ async function loginByUsername(req, res) {
 }
 
 /* ---------------- owners list (split by vertical) ---------------- */
+
 function parseOwnersQuery(req) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
   const limit = Math.min(

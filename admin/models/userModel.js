@@ -3,23 +3,14 @@ const db = require("../config/db");
 
 /**
  * Verify (user_id, admin_name) belongs to an admin/superadmin.
- * Uses users.user_name (your schema) and also accepts email.
+ * Uses users.user_name (your schema) and also accepts users.email.
  */
 async function findPrivilegedByIdAndName(user_id, admin_name) {
-  const roles = [
-    "admin",
-    "superadmin",
-    "super admin",
-    "super_admin",
-    "super-admin",
-  ];
+  const roles = ["admin", "superadmin", "super admin", "super-admin"];
 
   const [rows] = await db.query(
     `
-    SELECT user_id,
-           user_name,
-           email,
-           role
+    SELECT user_id, user_name, email, role
       FROM users
      WHERE user_id = ?
        AND (user_name = ? OR email = ?)
