@@ -64,7 +64,8 @@ jobs:
     if: needs.changes.outputs.any == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -151,8 +152,6 @@ jobs:
 
   deploy:
     name: Deploy changed services to k3s (prod)
-    # You can target a specific runner with labels like:
-    # runs-on: [self-hosted, prod, k3s, ip33]
     runs-on: self-hosted
     needs: [changes, build]
     if: needs.changes.outputs.any == 'true'
@@ -161,7 +160,6 @@ jobs:
       NAMESPACE: prod
       DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
       SHA: ${{ github.sha }}
-      ROLLOUT_TIMEOUT: 600s
       FOOD_CHANGED: ${{ needs.changes.outputs.food }}
       MART_CHANGED: ${{ needs.changes.outputs.mart }}
       MERCHANT_CHANGED: ${{ needs.changes.outputs.merchant }}
@@ -190,43 +188,43 @@ jobs:
           kubectl get nodes
           kubectl -n "${NAMESPACE}" get deploy -o name || true
 
-          diagnose_on_failure () {
-            local name="$1"
-            echo "---- DIAG: describe deployment/${name} ----"
-            kubectl -n "${NAMESPACE}" describe deploy/"${name}" || true
-            echo "---- DIAG: pods for ${name} ----"
-            kubectl -n "${NAMESPACE}" get pods -l app="${name}" -o wide || true
-            # grab logs from newest pod if any
-            POD=$(kubectl -n "${NAMESPACE}" get pods -l app="${name}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)
-            if [ -n "${POD}" ]; then
-              echo "---- DIAG: last 200 lines of ${POD} ----"
-              kubectl -n "${NAMESPACE}" logs "${POD}" --tail=200 || true
-            fi
-          }
-
           deploy_if_exists () {
             local name="$1"      # deployment name
-            local container="$2" # container name
+            local container="$2" # container name in pod spec
             local image="$3"     # image:tag
             if kubectl -n "${NAMESPACE}" get deploy/"${name}" >/dev/null 2>&1; then
               echo "Updating ${name} (${container}) -> ${image}"
               kubectl -n "${NAMESPACE}" set image deploy/"${name}" "${container}"="${image}"
-              if ! kubectl -n "${NAMESPACE}" rollout status deploy/"${name}" --timeout="${ROLLOUT_TIMEOUT}"; then
-                echo "::warning::Rollout for ${name} timed out; collecting diagnostics."
-                diagnose_on_failure "${name}"
-                exit 1
-              fi
+              kubectl -n "${NAMESPACE}" rollout status deploy/"${name}" --timeout=600s
             else
               echo "WARN: deployment ${name} not found in ${NAMESPACE}, skipping."
             fi
           }
 
-          # Call per changed flag
-          [[ "${FOOD_CHANGED}"     == "true" ]] && deploy_if_exists food                  food                  "${DOCKER_USER}/superapp-food:${SHA}"
-          [[ "${MART_CHANGED}"     == "true" ]] && deploy_if_exists mart                  mart                  "${DOCKER_USER}/superapp-mart:${SHA}"
-          [[ "${MERCHANT_CHANGED}" == "true" ]] && deploy_if_exists merchant              merchant              "${DOCKER_USER}/superapp-merchant:${SHA}"
-          [[ "${ORDER_CHANGED}"    == "true" ]] && deploy_if_exists order-management      order-management      "${DOCKER_USER}/superapp-order-management:${SHA}"
-          [[ "${RIDE_CHANGED}"     == "true" ]] && deploy_if_exists ride-management       ride-management       "${DOCKER_USER}/superapp-ride-management:${SHA}"
-          [[ "${DRIVER_CHANGED}"   == "true" ]] && deploy_if_exists driver                driver                "${DOCKER_USER}/superapp-driver:${SHA}"
-          [[ "${ADMIN_CHANGED}"    == "true" ]] && deploy_if_exists admin                 admin                 "${DOCKER_USER}/superapp-admin:${SHA}"
-          [[ "${MAP_CHANGED}"      == "true" ]] && deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
+          if [ "${FOOD_CHANGED:-}" = "true" ]; then
+            deploy_if_exists food food "${DOCKER_USER}/superapp-food:${SHA}"
+          fi
+          if [ "${MART_CHANGED:-}" = "true" ]; then
+            deploy_if_exists mart mart "${DOCKER_USER}/superapp-mart:${SHA}"
+          fi
+          if [ "${MERCHANT_CHANGED:-}" = "true" ]; then
+            deploy_if_exists merchant merchant "${DOCKER_USER}/superapp-merchant:${SHA}"
+          fi
+          if [ "${ORDER_CHANGED:-}" = "true" ]; then
+            deploy_if_exists order-management order-management "${DOCKER_USER}/superapp-order-management:${SHA}"
+          fi
+          if [ "${RIDE_CHANGED:-}" = "true" ]; then
+            deploy_if_exists ride-management ride-management "${DOCKER_USER}/superapp-ride-management:${SHA}"
+          fi
+          if [ "${DRIVER_CHANGED:-}" = "true" ]; then
+            deploy_if_exists driver driver "${DOCKER_USER}/superapp-driver:${SHA}"
+          fi
+          if [ "${ADMIN_CHANGED:-}" = "true" ]; then
+            deploy_if_exists admin admin "${DOCKER_USER}/superapp-admin:${SHA}"
+          fi
+          if [ "${MAP_CHANGED:-}" = "true" ]; then
+            deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
+          fi
+
+          # Ensure step success even if none were changed
+          exit 0
