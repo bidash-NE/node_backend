@@ -31,4 +31,6 @@ app.use("/api", updateMerchantRoute);
 // near the other routes:
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server running at ${PORT}`));
+app.listen(PORT, "0.0.0.0", () =>
+  console.log(`🚀 Server running at port ${PORT}`)
+);
