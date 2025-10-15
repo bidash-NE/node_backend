@@ -4,11 +4,16 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// ✅ Root configurable via env (default: ./uploads)
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+
+// 🔧 ensure directory exists
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+// 🗂️ decide which subfolder to use
 function subfolderFor(kind) {
   const k = String(kind || "").toLowerCase();
   if (k === "food") return "food-category";
@@ -16,6 +21,7 @@ function subfolderFor(kind) {
   return "category";
 }
 
+// 🧩 extension safety
 function safeExt(originalName = "", mimetype = "") {
   const fromName = (path.extname(originalName || "") || "").toLowerCase();
   if (fromName && fromName.length <= 6) return fromName;
@@ -30,6 +36,7 @@ function safeExt(originalName = "", mimetype = "") {
   return map[mimetype] || ".jpg";
 }
 
+// 🧱 slugify base name
 function slugBase(v = "cat") {
   return (
     (String(v) || "cat")
@@ -41,6 +48,7 @@ function slugBase(v = "cat") {
   );
 }
 
+// 💾 create storage engine
 function storageFactory() {
   return multer.diskStorage({
     destination: function (req, _file, cb) {
@@ -58,6 +66,7 @@ function storageFactory() {
   });
 }
 
+// 🛡️ filter
 const fileFilter = (_req, file, cb) => {
   const allowed = new Set([
     "image/png",
@@ -71,21 +80,17 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-/**
- * Accepts either "category_image" or "image".
- * Exposes the picked file at req.file (like .single()).
- */
+// 🖼️ main middleware
 function uploadCategoryImage() {
   const uploader = multer({
     storage: storageFactory(),
     fileFilter,
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  }).any(); // accept any field names; we'll pick allowed ones
+  }).any();
 
   return (req, res, next) => {
     uploader(req, res, (err) => {
       if (err) return next(err);
-
       const allowedNames = new Set(["category_image", "image"]);
       const files = Array.isArray(req.files) ? req.files : [];
       const picked = files.find((f) => allowedNames.has(f.fieldname));
@@ -95,6 +100,7 @@ function uploadCategoryImage() {
   };
 }
 
+// 🌐 build web path
 function toWebPathFromFile(req, fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   const sub = subfolderFor(req.params.kind || req.query.kind);
