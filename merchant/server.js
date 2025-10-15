@@ -21,7 +21,11 @@ initMerchantTables()
   .then(() => console.log("✅ Merchant tables initialized"))
   .catch((err) => console.error("❌ Error initializing merchant tables:", err));
 
-app.use("/uploads", express.static("uploads"));
+// ✅ Load upload root from .env (default to ./uploads for local dev)
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
+
+// ✅ Ensure consistent serving of uploaded files
+app.use("/uploads", express.static(UPLOAD_ROOT));
 app.use("/api/merchant", merchantRoutes);
 app.use("/api/admin", businessTypesRoutes);
 app.use("/api/category", categoryRoutes);

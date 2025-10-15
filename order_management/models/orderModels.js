@@ -1,16 +1,13 @@
+// models/orderModels.js
 const db = require("../config/db");
 
+/** ORD-######## -> 12 chars fits VARCHAR(12) */
 function generateOrderId() {
-  const randomNum = Math.floor(10000000 + Math.random() * 90000000);
-  return `ORD-${randomNum}`;
+  const n = Math.floor(10000000 + Math.random() * 90000000); // 8 digits
+  return `ORD-${n}`;
 }
 
-/** allow controller to preview an order id before inserting */
-function peekNewOrderId() {
-  return generateOrderId();
-}
-
-/** Cache whether orders.status_reason exists */
+/** Cache whether orders.status_reason exists (schema supports it, but keep dynamic) */
 let _hasStatusReason = null;
 async function ensureStatusReasonSupport() {
   if (_hasStatusReason !== null) return _hasStatusReason;
@@ -25,17 +22,38 @@ async function ensureStatusReasonSupport() {
 }
 
 const Order = {
-  peekNewOrderId,
+  peekNewOrderId: () => generateOrderId(),
 
+  /** Inserts into orders (NOT NULL: total_amount, payment_method) then order_items */
   create: async (orderData) => {
     const order_id = generateOrderId();
+
+    // Compute totals if missing, to satisfy NOT NULL(total_amount)
+    let items_subtotal = 0,
+      platform_fee_total = 0,
+      delivery_fee_total = 0;
+
+    for (const it of orderData.items || []) {
+      items_subtotal += Number(it.subtotal || 0);
+      platform_fee_total += Number(it.platform_fee || 0);
+      delivery_fee_total += Number(it.delivery_fee || 0);
+    }
+
+    const discount = Number(orderData.discount_amount || 0);
+    const computed_total =
+      items_subtotal + platform_fee_total + delivery_fee_total - discount;
+
+    const total_amount =
+      orderData.total_amount != null
+        ? Number(orderData.total_amount)
+        : Number(computed_total);
 
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-      total_amount: orderData.total_amount,
-      discount_amount: orderData.discount_amount || 0,
-      payment_method: orderData.payment_method, // 'COD' | 'Wallet' | 'Card'
+      total_amount: total_amount, // NOT NULL
+      discount_amount: discount,
+      payment_method: orderData.payment_method || "COD", // NOT NULL ENUM
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
       status: (orderData.status || "PENDING").toUpperCase(),

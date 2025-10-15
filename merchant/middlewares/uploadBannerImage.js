@@ -13,6 +13,31 @@ function ensureDirSync(dir) {
 }
 ensureDirSync(DEST);
 
+function safeExt(originalName = "", mimetype = "") {
+  const fromName = (path.extname(originalName || "") || "").toLowerCase();
+  if (fromName && fromName.length <= 6) return fromName;
+  const map = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+  };
+  return map[mimetype] || ".jpg";
+}
+
+function slugBase(v = "banner") {
+  return (
+    (String(v) || "banner")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "")
+      .slice(0, 60) || "banner"
+  );
+}
+
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     try {
@@ -23,16 +48,8 @@ const storage = multer.diskStorage({
     }
   },
   filename: function (req, file, cb) {
-    let ext = (path.extname(file.originalname || "") || "").toLowerCase();
-    if (!ext || ext.length > 6) ext = ".jpg";
-    const base =
-      (req.body?.title || "banner")
-        .toString()
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/(^-|-$)/g, "")
-        .slice(0, 60) || "banner";
+    const ext = safeExt(file.originalname, file.mimetype);
+    const base = slugBase(req.body?.title || "banner");
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
     cb(null, `${unique}-${base}${ext}`);
   },
@@ -52,6 +69,9 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
+/**
+ * Accept either "banner_image" or "image", and expose the picked file on req.file.
+ */
 function uploadBannerImage() {
   const uploader = multer({
     storage,
@@ -83,4 +103,4 @@ function toWebPath(fileObj) {
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = { uploadBannerImage, toWebPath, DEST };
+module.exports = { uploadBannerImage, toWebPath, DEST, SUBFOLDER };

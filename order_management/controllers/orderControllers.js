@@ -3,7 +3,7 @@ const db = require("../config/db");
 const Order = require("../models/orderModels");
 const {
   insertAndEmitNotification,
-  broadcastOrderatusToMany,
+  broadcastOrderStatusToMany,
 } = require("../realtime");
 
 const ALLOWED_STATUSES = new Set([
@@ -62,11 +62,12 @@ exports.createOrder = async (req, res) => {
 
     // 3) Insert notification row(s) first, then emit (no online check)
     for (const merchant_id of merchantIds) {
+      // ensure merchant exists (adjust this query if your schema differs)
       const [[biz]] = await db.query(
         `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
         [merchant_id]
       );
-      if (!biz) continue; // skip unknown business
+      if (!biz) continue;
 
       const its = byBiz.get(merchant_id);
       const preview = buildPreview(its);
@@ -184,7 +185,7 @@ exports.updateOrderStatus = async (req, res) => {
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // Find all merchants linked to this order (via items) to push status
+    // merchants linked to this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]

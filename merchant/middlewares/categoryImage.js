@@ -16,71 +16,80 @@ function subfolderFor(kind) {
   return "category";
 }
 
+function safeExt(originalName = "", mimetype = "") {
+  const fromName = (path.extname(originalName || "") || "").toLowerCase();
+  if (fromName && fromName.length <= 6) return fromName;
+  const map = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+  };
+  return map[mimetype] || ".jpg";
+}
+
+function slugBase(v = "cat") {
+  return (
+    (String(v) || "cat")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "")
+      .slice(0, 60) || "cat"
+  );
+}
+
 function storageFactory() {
   return multer.diskStorage({
-    destination: function (req, file, cb) {
+    destination: function (req, _file, cb) {
       const kind = req.params.kind || req.query.kind || "category";
       const dest = path.join(UPLOAD_ROOT, subfolderFor(kind));
       ensureDirSync(dest);
       cb(null, dest);
     },
     filename: function (req, file, cb) {
-      const ext = path.extname(file.originalname || "").toLowerCase();
-      const base =
-        (req.body?.category_name || "cat")
-          .toString()
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/(^-|-$)/g, "")
-          .slice(0, 60) || "cat";
+      const ext = safeExt(file.originalname, file.mimetype);
+      const base = slugBase(req.body?.category_name || "cat");
       const unique = `${Date.now()}-${crypto.randomUUID()}`;
-      cb(null, `${unique}-${base}${ext || ""}`);
+      cb(null, `${unique}-${base}${ext}`);
     },
   });
 }
 
 const fileFilter = (_req, file, cb) => {
-  const allowed = [
+  const allowed = new Set([
     "image/png",
     "image/jpeg",
+    "image/jpg",
     "image/webp",
     "image/gif",
     "image/svg+xml",
-  ];
-  if (allowed.includes(file.mimetype)) return cb(null, true);
+  ]);
+  if (allowed.has(file.mimetype)) return cb(null, true);
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
 /**
  * Accepts either "category_image" or "image".
- * Will expose the picked file at req.file (like .single()).
+ * Exposes the picked file at req.file (like .single()).
  */
 function uploadCategoryImage() {
   const uploader = multer({
     storage: storageFactory(),
     fileFilter,
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  }).any(); // accept any field names, we’ll pick allowed ones
+  }).any(); // accept any field names; we'll pick allowed ones
 
   return (req, res, next) => {
     uploader(req, res, (err) => {
       if (err) return next(err);
 
-      // pick the first allowed file field
       const allowedNames = new Set(["category_image", "image"]);
       const files = Array.isArray(req.files) ? req.files : [];
       const picked = files.find((f) => allowedNames.has(f.fieldname));
-      if (picked) {
-        req.file = picked; // so your controller keeps working
-      } else {
-        req.file = null; // no file sent (that’s fine)
-      }
-
-      // If a file was sent with a disallowed name (and you want to reject), uncomment:
-      // const disallowed = files.find((f) => !allowedNames.has(f.fieldname));
-      // if (disallowed) return next(new Error(`Unexpected file field "${disallowed.fieldname}"`));
-
+      req.file = picked || null;
       next();
     });
   };

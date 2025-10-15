@@ -8,53 +8,77 @@ const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
 const SUBFOLDER = "ride-types";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
-// ensure folder exists
+/* ---------- ensure target dir ---------- */
 function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(DEST);
 
+/* ---------- helpers ---------- */
+function safeExt(originalName = "", mimetype = "") {
+  const fromName = (path.extname(originalName || "") || "").toLowerCase();
+  if (fromName && fromName.length <= 6) return fromName;
+  const map = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+    "image/svg": ".svg",
+  };
+  return map[mimetype] || ".jpg";
+}
+
+function slugBase(v = "ride-type") {
+  return (
+    (String(v) || "ride-type")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "")
+      .slice(0, 60) || "ride-type"
+  );
+}
+
+/* ---------- storage ---------- */
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: function (_req, _file, cb) {
     ensureDirSync(DEST);
     cb(null, DEST);
   },
   filename: function (req, file, cb) {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const base =
-      (req.body?.name || "ride-type")
-        .toString()
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/(^-|-$)/g, "")
-        .slice(0, 60) || "ride-type";
+    const ext = safeExt(file.originalname, file.mimetype);
+    const base = slugBase(req.body?.name || "ride-type");
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
-    cb(null, `${unique}-${base}${ext || ""}`);
+    cb(null, `${unique}-${base}${ext}`);
   },
 });
 
-const fileFilter = (req, file, cb) => {
-  const allowed = [
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "image/svg+xml",
-  ];
-  if (allowed.includes(file.mimetype)) return cb(null, true);
+/* ---------- validation ---------- */
+const allowed = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/svg+xml",
+  "image/svg",
+]);
+
+const fileFilter = (_req, file, cb) => {
+  if (allowed.has(file.mimetype)) return cb(null, true);
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
+/* ---------- uploader ---------- */
 const upload = multer({
   storage,
   fileFilter,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
 });
 
-// Return a clean web path like: /uploads/ride-types/filename.jpg
+/* ---------- helpers for controllers ---------- */
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
@@ -64,4 +88,5 @@ module.exports = {
   uploadRideTypeImage: upload.single("image"),
   toWebPath,
   SUBFOLDER,
+  DEST,
 };

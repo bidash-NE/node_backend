@@ -13,8 +13,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// serve uploaded images
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+// ✅ Load upload root from .env (default to ./uploads for local dev)
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
+
+// ✅ Ensure consistent serving of uploaded files
+app.use("/uploads", express.static(UPLOAD_ROOT));
 
 // mount mart APIs
 app.use("/api/mart-menu", martMenuRoutes);

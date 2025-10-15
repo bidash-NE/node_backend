@@ -16,7 +16,7 @@ async function attachRealtime(server) {
     path: "/socket.io",
   });
 
-  // 🔓 Force dev no-auth for easy local testing (flip off in prod)
+  // 🔓 dev no-auth (switch off in prod)
   const DEV_NOAUTH = true;
 
   io.use((socket, next) => {
@@ -51,7 +51,7 @@ async function attachRealtime(server) {
 
     if (role === "merchant") {
       let mids = [];
-      if (DEV_NOAUTH && socket.handshake.auth?.merchantId) {
+      if (typeof socket.handshake.auth?.merchantId !== "undefined") {
         mids = [Number(socket.handshake.auth.merchantId)];
       } else {
         mids = await getMerchantIdsForUser(user_id);
@@ -59,7 +59,7 @@ async function attachRealtime(server) {
       mids.forEach((mid) => socket.join(`merchant:${mid}`));
       console.log("[SOCKET] merchant joined rooms", mids);
 
-      // Replay undelivered notifications for this merchant
+      // Replay undelivered notifications
       for (const mid of mids) {
         const [rows] = await db.query(
           `SELECT notification_id, order_id, type, title, body_preview, created_at
@@ -71,7 +71,6 @@ async function attachRealtime(server) {
         );
 
         for (const n of rows) {
-          // emit replay
           socket.emit("notify", {
             id: n.notification_id,
             type: n.type,
@@ -79,7 +78,6 @@ async function attachRealtime(server) {
             createdAt: new Date(n.created_at).getTime(),
             data: { title: n.title, body: n.body_preview },
           });
-          // mark as delivered immediately on replay since the merchant is online now
           await db.query(
             `UPDATE order_notification SET delivered_at = NOW() WHERE notification_id = ?`,
             [n.notification_id]
@@ -87,7 +85,6 @@ async function attachRealtime(server) {
         }
       }
 
-      // Merchant acknowledges they RECEIVED a notification (for live emits)
       socket.on("merchant:notify:delivered", async ({ id }) => {
         if (!id) return;
         try {
@@ -101,7 +98,6 @@ async function attachRealtime(server) {
         }
       });
 
-      // ACKs kept for potential future workflows (server-only)
       socket.on("merchant:preorder:ack", (ack) => {
         console.log("[SOCKET] ACK from merchant", ack);
         events.emit("preorder:ack", { ...ack, _by: socket.id });
@@ -123,8 +119,8 @@ async function attachRealtime(server) {
 }
 
 /* ---------------- helpers ---------------- */
-
 async function getMerchantIdsForUser(user_id) {
+  // expects merchant_business_details(user_id, business_id)
   const [rows] = await db.query(
     `SELECT business_id FROM merchant_business_details WHERE user_id = ?`,
     [user_id]
@@ -132,11 +128,7 @@ async function getMerchantIdsForUser(user_id) {
   return rows.map((r) => r.business_id);
 }
 
-/**
- * Insert durable notification row, then emit WITHOUT checking online status.
- * delivered_at is set later when the merchant client emits 'merchant:notify:delivered',
- * or during replay-on-connect (we set delivered_at immediately after replay emit).
- */
+/** Durable notification + emit (replay covers offline merchants) */
 async function insertAndEmitNotification({
   merchant_id,
   user_id,
@@ -147,7 +139,6 @@ async function insertAndEmitNotification({
 }) {
   const notification_id = randomUUID();
 
-  // 1) Persist row first
   await db.query(
     `INSERT INTO order_notification
       (notification_id, order_id, merchant_id, user_id, type, title, body_preview, delivered_at)
@@ -155,7 +146,6 @@ async function insertAndEmitNotification({
     [notification_id, order_id, merchant_id, user_id, type, title, body_preview]
   );
 
-  // 2) Emit unconditionally (if merchant is offline, event is dropped; replay covers it)
   const payload = {
     id: notification_id,
     type,
@@ -163,20 +153,17 @@ async function insertAndEmitNotification({
     createdAt: Date.now(),
     data: { title, body: body_preview },
   };
-  // send to the merchant's room
-  const room = `merchant:${merchant_id}`;
-  io.to(room).emit("notify", payload);
+
+  io.to(`merchant:${merchant_id}`).emit("notify", payload);
   console.log("[SOCKET] notify emitted (no online check)", {
-    room,
+    room: `merchant:${merchant_id}`,
     notification_id,
   });
 
   return { notification_id };
 }
 
-/**
- * Broadcast an order status to user, each merchant room, and order room
- */
+/** Broadcast order status to user, merchants, and order room */
 function broadcastOrderStatusToMany({
   order_id,
   user_id,

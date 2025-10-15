@@ -35,7 +35,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/uploads", express.static("uploads"));
+// ✅ Load upload root from .env (default to ./uploads for local dev)
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
+
+// ✅ Ensure consistent serving of uploaded files
+app.use("/uploads", express.static(UPLOAD_ROOT));
 // ✅ API routes
 app.use("/api", popularLocationRoute);
 app.use("/api/ridetypes", rideTypeRoutes);
