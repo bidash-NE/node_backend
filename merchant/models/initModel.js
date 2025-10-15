@@ -198,6 +198,7 @@ async function ensureFoodCategoryTable() {
         category_name VARCHAR(100) NOT NULL,
         business_type VARCHAR(100),
         description TEXT,
+        category_image VARCHAR(255),
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
@@ -216,6 +217,8 @@ async function ensureMartCategoryTable() {
         category_name VARCHAR(100) NOT NULL,
         business_type VARCHAR(100),
         description TEXT,
+        category_image VARCHAR(255),
+
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
