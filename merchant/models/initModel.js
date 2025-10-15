@@ -52,7 +52,7 @@ async function executeIgnoreErr(sql, params = []) {
   } catch {}
 }
 
-// NEW: read the exact COLUMN_TYPE string (e.g. "BIGINT UNSIGNED", "INT(10) UNSIGNED")
+// Read the exact COLUMN_TYPE (e.g., "BIGINT UNSIGNED", "INT(10) UNSIGNED")
 async function getColumnType(table, column) {
   const [r] = await db.query(
     `SELECT COLUMN_TYPE
@@ -66,13 +66,13 @@ async function getColumnType(table, column) {
   return r[0]?.COLUMN_TYPE || null;
 }
 
-// Convenience: ensure a table column matches a reference type; drop & re-add FK if needed
+// Ensure a table column matches a reference type; drop & re-add FK if needed
 async function ensureColumnTypeMatches({
   table,
   column,
   refTable,
   refColumn,
-  desiredType, // if null, we’ll read ref’s COLUMN_TYPE
+  desiredType, // if null, read ref’s COLUMN_TYPE
   fkName, // FK name to (re)create
 }) {
   const refType = desiredType || (await getColumnType(refTable, refColumn));
@@ -93,7 +93,7 @@ async function ensureColumnTypeMatches({
   );
   const curType = r[0]?.COLUMN_TYPE || null;
 
-  // If FK exists, drop it (we’ll recreate)
+  // Drop any existing FKs on the column
   const fks = await fkConstraintNamesForColumn(table, column);
   for (const name of fks) {
     await executeIgnoreErr(
@@ -101,7 +101,7 @@ async function ensureColumnTypeMatches({
     );
   }
 
-  // If column doesn’t exist, add it; else modify it to match
+  // Add/modify column to match referenced type
   if (curType == null) {
     await db.query(
       `ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${refType} NOT NULL`
@@ -112,7 +112,7 @@ async function ensureColumnTypeMatches({
     );
   }
 
-  // Re-add FK with provided name
+  // Re-add FK
   await db.query(
     `ALTER TABLE \`${table}\`
        ADD CONSTRAINT \`${fkName}\`
@@ -122,7 +122,7 @@ async function ensureColumnTypeMatches({
   );
 }
 
-/* --------------- creators (unchanged parts) --------------- */
+/* --------------- creators --------------- */
 async function ensureBusinessTypesTable() {
   const table = "business_types";
   if (!(await tableExists(table))) {
@@ -218,7 +218,6 @@ async function ensureMartCategoryTable() {
         business_type VARCHAR(100),
         description TEXT,
         category_image VARCHAR(255),
-
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
@@ -233,32 +232,29 @@ async function ensureBusinessBannersTable() {
   if (!(await tableExists(table))) {
     await db.query(`
       CREATE TABLE ${table} (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      business_id BIGINT UNSIGNED NOT NULL,
-      title VARCHAR(255),
-      description TEXT,
-      banner_image VARCHAR(255),
-      is_active TINYINT(1) NOT NULL DEFAULT 1,
-      start_date DATE,
-      end_date DATE,
-      owner_type ENUM('food','mart') NOT NULL,  -- NEW
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (id),
-      KEY idx_business_owner_created (business_id, owner_type, created_at),
-      FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id)
-        ON DELETE CASCADE ON UPDATE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        title VARCHAR(255),
+        description TEXT,
+        banner_image VARCHAR(255),
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        start_date DATE,
+        end_date DATE,
+        owner_type ENUM('food','mart') NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_business_owner_created (business_id, owner_type, created_at),
+        FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id)
+          ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
   }
 }
 
-/* ---------- ratings per menu item (food & mart) with dynamic type matching ---------- */
 async function ensureFoodMenuRatingsTable() {
   const table = "food_menu_ratings";
   if (!(await tableExists(table))) {
-    // create with a placeholder type; we’ll normalize right after
     await db.query(`
       CREATE TABLE ${table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -277,7 +273,6 @@ async function ensureFoodMenuRatingsTable() {
     `);
   }
 
-  // Make menu_id EXACTLY the same as food_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -287,7 +282,6 @@ async function ensureFoodMenuRatingsTable() {
     fkName: "fk_fmr_menu",
   });
 
-  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -323,7 +317,6 @@ async function ensureMartMenuRatingsTable() {
     `);
   }
 
-  // Make menu_id EXACTLY the same as mart_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -333,7 +326,6 @@ async function ensureMartMenuRatingsTable() {
     fkName: "fk_mmr_menu",
   });
 
-  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -348,12 +340,78 @@ async function ensureMartMenuRatingsTable() {
   );
 }
 
-/* --------------- migration (unchanged) --------------- */
-async function migrateLegacyBusinessTypeId() {
-  /* ...unchanged... */
-}
+/* -------- UPDATED: merchant_bank_details now includes user_id -------- */
 async function ensureMerchantBankDetailsTable() {
-  /* ...unchanged... */
+  const table = "merchant_bank_details";
+
+  if (!(await tableExists(table))) {
+    await db.query(`
+       CREATE TABLE ${table} (
+        bank_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT UNSIGNED NOT NULL,
+        business_id BIGINT UNSIGNED NULL DEFAULT NULL,
+        bank_name VARCHAR(255) NOT NULL,
+        account_holder_name VARCHAR(255) NOT NULL,
+        account_number VARCHAR(50) NOT NULL,
+        bank_qr_code_image TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (bank_id),
+        KEY idx_mbd_user (user_id),
+        KEY idx_mbd_business (business_id),
+        CONSTRAINT fk_mbd_user
+          FOREIGN KEY (user_id)
+          REFERENCES users(user_id)
+          ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT fk_mbd_business
+          FOREIGN KEY (business_id)
+          REFERENCES merchant_business_details(business_id)
+          ON DELETE SET NULL ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  } else {
+    // Ensure types & FKs for both business_id and user_id
+    await ensureColumnTypeMatches({
+      table,
+      column: "business_id",
+      refTable: "merchant_business_details",
+      refColumn: "business_id",
+      desiredType: null,
+      fkName: "fk_mbd_business",
+    });
+
+    await ensureColumnTypeMatches({
+      table,
+      column: "user_id",
+      refTable: "users",
+      refColumn: "user_id",
+      desiredType: null,
+      fkName: "fk_mbd_user",
+    });
+
+    // Indexes (idempotent)
+    if (!(await indexExists(table, "idx_mbd_business"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_business (business_id)`
+      );
+    }
+    if (!(await indexExists(table, "idx_mbd_user"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_user (user_id)`
+      );
+    }
+  }
+}
+
+/* --------------- migrations (safe no-ops / guards) --------------- */
+async function migrateLegacyBusinessTypeId() {
+  try {
+    const table = "merchant_business_details";
+    const hasOld = await columnExists(table, "business_type_id");
+    if (hasOld) {
+      // Intentionally left as a no-op placeholder.
+    }
+  } catch {}
 }
 
 /* --------------- entrypoint --------------- */
@@ -362,14 +420,15 @@ async function initMerchantTables() {
   await ensureMerchantBusinessDetailsTable();
   await ensureMerchantBusinessTypesTable();
   await migrateLegacyBusinessTypeId();
-  await ensureMerchantBankDetailsTable();
+
+  await ensureMerchantBankDetailsTable(); // includes user_id
 
   await ensureFoodCategoryTable();
   await ensureMartCategoryTable();
 
   await ensureBusinessBannersTable();
 
-  // ratings — now dynamically matched to the FK column types
+  // ratings — dynamically matched to FK column types
   await ensureFoodMenuRatingsTable();
   await ensureMartMenuRatingsTable();
 }
