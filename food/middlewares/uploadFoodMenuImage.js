@@ -4,7 +4,8 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// ✅ Use environment variable or default to /uploads
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || "/uploads";
 const SUBFOLDER = "food-menu";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
@@ -23,7 +24,6 @@ const storage = multer.diskStorage({
     }
   },
   filename: function (req, file, cb) {
-    // Fallback ext if client did not provide a valid filename
     let ext = (path.extname(file.originalname || "") || "").toLowerCase();
     if (!ext || ext.length > 6) ext = ".jpg";
 
@@ -83,6 +83,13 @@ function uploadFoodMenuImage() {
         (Array.isArray(any.item_image) && any.item_image[0]) ||
         (Array.isArray(any.image) && any.image[0]) ||
         null;
+
+      console.log(
+        "✅ Uploaded to:",
+        DEST,
+        "UPLOAD_ROOT=",
+        process.env.UPLOAD_ROOT
+      );
       next();
     });
   };

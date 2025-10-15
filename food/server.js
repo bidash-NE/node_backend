@@ -21,8 +21,11 @@ app.use(cors({ origin: true, credentials: true }));
 // JSON parsing
 app.use(express.json());
 
-// Static files
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+// ✅ Load upload root from .env (default to ./uploads for local dev)
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
+
+// ✅ Ensure consistent serving of uploaded files
+app.use("/uploads", express.static(UPLOAD_ROOT));
 
 // Init DB tables
 initMenuTables();
