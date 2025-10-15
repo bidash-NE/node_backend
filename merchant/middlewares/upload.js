@@ -1,4 +1,4 @@
-// middleware/upload.js
+// middlewares/upload.js
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -11,8 +11,7 @@ const UPLOAD_ROOT =
 const SUBFOLDERS = {
   license_image: "licenses",
   business_logo: "logos",
-  bank_card_front_image: "bank_cards",
-  bank_card_back_image: "bank_cards",
+
   bank_qr_code_image: "bank_qr",
   default: "misc",
 };
@@ -22,7 +21,7 @@ function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-// 🧰 Create all known upload subfolders at startup
+// 🧰 Create all known upload subfolders at startup (kept same)
 Object.values(SUBFOLDERS).forEach((sub) => {
   ensureDirSync(path.join(UPLOAD_ROOT, sub));
 });
@@ -48,7 +47,7 @@ const storage = multer.diskStorage({
   },
 });
 
-// 🧤 File filter
+// 🧤 File filter (extensions)
 const fileFilter = (_req, file, cb) => {
   const allowed = [".jpg", ".jpeg", ".png", ".webp"];
   const ext = (path.extname(file.originalname || "") || "").toLowerCase();
@@ -73,4 +72,16 @@ function toWebPath(fieldname, filename) {
   return `/uploads/${sub}/${filename}`;
 }
 
-module.exports = { upload, toWebPath, UPLOAD_ROOT };
+/* =========================
+   EXPORTS (important part)
+   =========================
+   Export the Multer instance directly so router code:
+     const upload = require("../middlewares/upload");
+     upload.single("business_logo")
+   works without changes.
+*/
+upload.toWebPath = toWebPath; // optional: accessible as upload.toWebPath
+upload.UPLOAD_ROOT = UPLOAD_ROOT; // optional: accessible as upload.UPLOAD_ROOT
+upload.SUBFOLDERS = SUBFOLDERS; // optional
+
+module.exports = upload;
