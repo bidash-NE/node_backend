@@ -11,29 +11,29 @@ const {
   listMartOwners,
 } = require("../controllers/merchantRegistrationController");
 
-// If Content-Type is multipart/form-data -> use Multer; otherwise skip (JSON body)
+// Middleware to detect multipart/form-data
 const maybeMulter = (req, res, next) => {
   const ct = String(req.headers["content-type"] || "").toLowerCase();
   if (ct.includes("multipart/form-data")) {
     return upload.fields([
       { name: "license_image", maxCount: 1 },
       { name: "business_logo", maxCount: 1 },
-      { name: "bank_qr_code_image", maxCount: 1 }, // kept
+      { name: "bank_qr_code_image", maxCount: 1 },
     ])(req, res, next);
   }
   next();
 };
 
-// Register
+// Register merchant
 router.post("/register", maybeMulter, registerMerchant);
 
-// Update business (partial)
+// Update business
 router.put("/update/:businessId", maybeMulter, updateMerchant);
 
-// Login
+// Login by username
 router.post("/login-username", loginByUsername);
 
-// NEW: owners by kind
+// List business owners
 router.get("/owners/food", listFoodOwners);
 router.get("/owners/mart", listMartOwners);
 

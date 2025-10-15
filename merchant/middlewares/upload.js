@@ -3,33 +3,31 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-// ✅ Root folder (defaults to ./uploads locally, /uploads in k8s)
+// ✅ Define upload root (K8s: /uploads | local: ./uploads)
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 
-// 🔧 Ensure directory exists
-function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-// 🗂️ Mapping of fields → subfolders
+// 🧩 Map field names → subfolders
 const SUBFOLDERS = {
   license_image: "licenses",
   business_logo: "logos",
   bank_card_front_image: "bank_cards",
   bank_card_back_image: "bank_cards",
   bank_qr_code_image: "bank_qr",
-  // fallback
   default: "misc",
 };
 
-// 🏗️ Pre-create all known subfolders at startup
+// 🧱 Ensure a directory exists
+function ensureDirSync(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+// 🧰 Create all known upload subfolders at startup
 Object.values(SUBFOLDERS).forEach((sub) => {
-  const dir = path.join(UPLOAD_ROOT, sub);
-  ensureDirSync(dir);
+  ensureDirSync(path.join(UPLOAD_ROOT, sub));
 });
 
-// 💾 Storage definition
+// ⚙️ Multer Storage Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const sub = SUBFOLDERS[file.fieldname] || SUBFOLDERS.default;
@@ -45,17 +43,16 @@ const storage = multer.diskStorage({
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "")
       .slice(0, 60);
-
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     cb(null, `${unique}-${base}${ext}`);
   },
 });
 
-// 🛡️ File filter
+// 🧤 File filter
 const fileFilter = (_req, file, cb) => {
-  const allowedExts = [".jpg", ".jpeg", ".png", ".webp"];
+  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
   const ext = (path.extname(file.originalname || "") || "").toLowerCase();
-  if (!allowedExts.includes(ext)) {
+  if (!allowed.includes(ext)) {
     return cb(
       new Error("Only image files are allowed (jpg, jpeg, png, webp).")
     );
@@ -63,21 +60,17 @@ const fileFilter = (_req, file, cb) => {
   cb(null, true);
 };
 
-// ⚙️ Multer config
+// 🚀 Initialize Multer instance
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
 });
 
-// 🌐 Utility to build public web path
+// 🌍 Utility to generate public web paths
 function toWebPath(fieldname, filename) {
   const sub = SUBFOLDERS[fieldname] || SUBFOLDERS.default;
   return `/uploads/${sub}/${filename}`;
 }
 
-module.exports = {
-  upload,
-  toWebPath,
-  UPLOAD_ROOT,
-};
+module.exports = { upload, toWebPath, UPLOAD_ROOT };
