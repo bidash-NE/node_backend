@@ -22,8 +22,11 @@ app.use(cors()); // <-- Allow all origins
 // Middleware to parse JSON
 app.use(express.json());
 
-// Serve static files like images and documents
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// ✅ Load upload root from .env (default to ./uploads for local dev)
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
+
+// ✅ Ensure consistent serving of uploaded files
+app.use("/uploads", express.static(UPLOAD_ROOT));
 
 // Connect to MongoDB and check/create MySQL tables
 connectMongo();
