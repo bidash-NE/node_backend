@@ -4,15 +4,19 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// ✅ Root upload dir: use env (k8s mounts /uploads) or fallback to ./uploads locally
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 const SUBFOLDER = "banners";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
+// Ensure dir exists
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(DEST);
 
+// Pick a safe extension if missing/odd
 function safeExt(originalName = "", mimetype = "") {
   const fromName = (path.extname(originalName || "") || "").toLowerCase();
   if (fromName && fromName.length <= 6) return fromName;
@@ -27,6 +31,7 @@ function safeExt(originalName = "", mimetype = "") {
   return map[mimetype] || ".jpg";
 }
 
+// Slugify part of filename
 function slugBase(v = "banner") {
   return (
     (String(v) || "banner")
@@ -38,6 +43,7 @@ function slugBase(v = "banner") {
   );
 }
 
+// Multer storage
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     try {
@@ -55,6 +61,7 @@ const storage = multer.diskStorage({
   },
 });
 
+// Allow only images
 const allowedMimes = new Set([
   "image/png",
   "image/jpeg",
@@ -70,7 +77,7 @@ const fileFilter = (_req, file, cb) => {
 };
 
 /**
- * Accept either "banner_image" or "image", and expose the picked file on req.file.
+ * Accept either "banner_image" or "image", normalize to req.file
  */
 function uploadBannerImage() {
   const uploader = multer({
@@ -98,9 +105,10 @@ function uploadBannerImage() {
   };
 }
 
+// Build public URL path
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = { uploadBannerImage, toWebPath, DEST, SUBFOLDER };
+module.exports = { uploadBannerImage, toWebPath, DEST, SUBFOLDER, UPLOAD_ROOT };
