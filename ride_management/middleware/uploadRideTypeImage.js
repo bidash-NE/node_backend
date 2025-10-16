@@ -4,7 +4,9 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// ✅ Root upload dir: env first (/uploads in k8s), fallback to ./uploads locally
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 const SUBFOLDER = "ride-types";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
@@ -44,8 +46,12 @@ function slugBase(v = "ride-type") {
 /* ---------- storage ---------- */
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
-    ensureDirSync(DEST);
-    cb(null, DEST);
+    try {
+      ensureDirSync(DEST);
+      cb(null, DEST);
+    } catch (e) {
+      cb(e);
+    }
   },
   filename: function (req, file, cb) {
     const ext = safeExt(file.originalname, file.mimetype);
@@ -71,12 +77,32 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-/* ---------- uploader ---------- */
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
-});
+/* ---------- uploader (accepts 'image' or 'icon', normalizes to req.file) ---------- */
+function uploadRideTypeImage() {
+  const uploader = multer({
+    storage,
+    fileFilter,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  }).fields([
+    { name: "image", maxCount: 1 },
+    { name: "icon", maxCount: 1 },
+  ]);
+
+  return (req, res, next) => {
+    uploader(req, res, (err) => {
+      if (err) {
+        err.statusCode = 400;
+        return next(err);
+      }
+      const any = req.files || {};
+      req.file =
+        (Array.isArray(any.image) && any.image[0]) ||
+        (Array.isArray(any.icon) && any.icon[0]) ||
+        null;
+      next();
+    });
+  };
+}
 
 /* ---------- helpers for controllers ---------- */
 function toWebPath(fileObj) {
@@ -85,8 +111,9 @@ function toWebPath(fileObj) {
 }
 
 module.exports = {
-  uploadRideTypeImage: upload.single("image"),
+  uploadRideTypeImage: uploadRideTypeImage(),
   toWebPath,
   SUBFOLDER,
   DEST,
+  UPLOAD_ROOT,
 };
