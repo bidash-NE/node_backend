@@ -4,16 +4,19 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-// ✅ Use environment variable or default to /uploads
-const UPLOAD_ROOT = process.env.UPLOAD_ROOT || "/uploads";
+// ✅ Use environment variable or default to /uploads (k8s) / ./uploads (local)
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 const SUBFOLDER = "food-menu";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
+/* ensure target dir exists */
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(DEST);
 
+/* storage */
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     try {
@@ -41,6 +44,7 @@ const storage = multer.diskStorage({
   },
 });
 
+/* validation */
 const allowedMimes = new Set([
   "image/png",
   "image/jpeg",
@@ -84,20 +88,23 @@ function uploadFoodMenuImage() {
         (Array.isArray(any.image) && any.image[0]) ||
         null;
 
-      console.log(
-        "✅ Uploaded to:",
-        DEST,
-        "UPLOAD_ROOT=",
-        process.env.UPLOAD_ROOT
-      );
+      // optional debug
+      // console.log("✅ Uploaded into:", DEST, "UPLOAD_ROOT=", UPLOAD_ROOT);
       next();
     });
   };
 }
 
+/* web path helper */
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = { uploadFoodMenuImage, toWebPath, DEST };
+module.exports = {
+  uploadFoodMenuImage: uploadFoodMenuImage(),
+  toWebPath,
+  DEST,
+  SUBFOLDER,
+  UPLOAD_ROOT,
+};

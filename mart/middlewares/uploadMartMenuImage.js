@@ -4,20 +4,18 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-/** Root folder where all uploads are stored */
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+// ✅ Root uploads directory (k8s: /uploads; local: ./uploads)
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 
-/** Ensure a directory exists (recursive) */
+/* ---------- utils ---------- */
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-/** Derive a safe extension from original name and/or mimetype */
 function safeExt(originalName = "", mimetype = "") {
   const fromName = (path.extname(originalName || "") || "").toLowerCase();
   if (fromName && fromName.length <= 6) return fromName;
-
-  // fallback by mimetype
   const map = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -30,7 +28,6 @@ function safeExt(originalName = "", mimetype = "") {
   return map[mimetype] || ".jpg";
 }
 
-/** Slugify base filename from item name (or fallback) */
 function slugBase(v = "item") {
   return (
     (String(v) || "item")
@@ -42,7 +39,6 @@ function slugBase(v = "item") {
   );
 }
 
-/** Allowed mimetypes for menu images */
 const allowedMimes = new Set([
   "image/png",
   "image/jpeg",
@@ -54,10 +50,8 @@ const allowedMimes = new Set([
 ]);
 
 /**
- * Factory: create a multer-based uploader for Mart menu images.
- * - subfolder: stored inside /uploads/<subfolder>
- * - fieldName: multipart field, defaults to "item_image"
- * - maxSizeMB: file size limit (MB), default 5MB
+ * Factory for Mart menu uploader.
+ * Stores files under `${UPLOAD_ROOT}/${subfolder}` (default: mart-menu)
  */
 function createMartMenuUploader({
   subfolder = "mart-menu",
@@ -95,33 +89,32 @@ function createMartMenuUploader({
     limits: { fileSize: maxSizeMB * 1024 * 1024, files: 1 },
   }).single(fieldName);
 
-  /** Express middleware */
+  // Express middleware (skips if not multipart)
   const middleware = (req, res, next) => {
     const ct = String(req.headers["content-type"] || "").toLowerCase();
-    if (!ct.includes("multipart/form-data")) return next(); // allow JSON-only requests
+    if (!ct.includes("multipart/form-data")) return next();
     uploader(req, res, (err) => {
       if (err) {
         err.statusCode = 400;
         return next(err);
       }
-      return next();
+      next();
     });
   };
 
-  /** Convert multer file object → relative web path */
+  // Build a public web path like /uploads/mart-menu/<file>
   const toWebPath = (fileObj) => {
     if (!fileObj || !fileObj.filename) return null;
-    return `/uploads/${subfolder}/${fileObj.filename}`; // keep it relative; frontend will prefix host
+    return `/uploads/${subfolder}/${fileObj.filename}`;
   };
 
-  return { middleware, toWebPath, DEST, subfolder, fieldName };
+  return { middleware, toWebPath, DEST, subfolder, fieldName, UPLOAD_ROOT };
 }
 
 /**
- * Mount static serving for /uploads if you haven’t already.
- * Usage:
- *   const { serveUploads } = require('./middleware/uploadMartMenuImage');
- *   serveUploads(app); // AFTER creating express app
+ * Optional: mount static serving for /uploads once in your server.js
+ *   const { serveUploads } = require("./middleware/uploadMartMenuImage");
+ *   serveUploads(app);
  */
 function serveUploads(app) {
   ensureDirSync(UPLOAD_ROOT);
@@ -134,6 +127,6 @@ function serveUploads(app) {
 module.exports = {
   createMartMenuUploader,
   serveUploads,
-  // For convenience: default mart uploader (same behavior as your previous file)
+  // Convenience: same behavior as before — use in routes as: uploadMartMenuImage()
   uploadMartMenuImage: () => createMartMenuUploader().middleware,
 };
