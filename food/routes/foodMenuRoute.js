@@ -1,4 +1,3 @@
-// routes/foodMenuRoute.js
 const express = require("express");
 const router = express.Router();
 
@@ -13,22 +12,12 @@ const {
 
 const { uploadFoodMenuImage } = require("../middlewares/uploadFoodMenuImage");
 
-// Create (multipart OR JSON with base64)
-router.post("/", uploadFoodMenuImage(), createFoodMenuCtrl);
-
-// List (supports ?business_id=&category_name=)
+// ✅ Note: Use middleware directly, DO NOT call it with ()
+router.post("/", uploadFoodMenuImage, createFoodMenuCtrl);
 router.get("/", listFoodMenuCtrl);
-
-// All by business
 router.get("/business/:business_id", listFoodMenuByBusinessCtrl);
-
-// One by id
 router.get("/:id", getFoodMenuByIdCtrl);
-
-// Update (supports image replacement, server path, or clearing NULL; JSON base64 also OK)
-router.put("/:id", uploadFoodMenuImage(), updateFoodMenuCtrl);
-
-// Delete
+router.put("/:id", uploadFoodMenuImage, updateFoodMenuCtrl);
 router.delete("/:id", deleteFoodMenuCtrl);
 
 module.exports = router;

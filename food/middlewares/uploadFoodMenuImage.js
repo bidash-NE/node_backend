@@ -1,22 +1,36 @@
-// middlewares/uploadFoodMenuImage.js
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-// ✅ Use environment variable or default to /uploads (k8s) / ./uploads (local)
+// ✅ Use environment variable or fallback for local
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 const SUBFOLDER = "food-menu";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
-/* ensure target dir exists */
+// 🔧 Ensure folder exists
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 ensureDirSync(DEST);
 
-/* storage */
+// 🎯 Safe extension mapping
+function safeExt(originalName = "", mimetype = "") {
+  const fromName = (path.extname(originalName || "") || "").toLowerCase();
+  if (fromName && fromName.length <= 6) return fromName;
+  const map = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+  };
+  return map[mimetype] || ".jpg";
+}
+
+// 🏗️ Storage setup
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     try {
@@ -27,9 +41,7 @@ const storage = multer.diskStorage({
     }
   },
   filename: function (req, file, cb) {
-    let ext = (path.extname(file.originalname || "") || "").toLowerCase();
-    if (!ext || ext.length > 6) ext = ".jpg";
-
+    const ext = safeExt(file.originalname, file.mimetype);
     const base =
       (req.body?.item_name || "item")
         .toString()
@@ -38,13 +50,12 @@ const storage = multer.diskStorage({
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "")
         .slice(0, 60) || "item";
-
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
     cb(null, `${unique}-${base}${ext}`);
   },
 });
 
-/* validation */
+// 🧾 File validation
 const allowedMimes = new Set([
   "image/png",
   "image/jpeg",
@@ -52,21 +63,17 @@ const allowedMimes = new Set([
   "image/webp",
   "image/gif",
   "image/svg+xml",
-  "image/svg",
 ]);
-
 const fileFilter = (_req, file, cb) => {
   if (allowedMimes.has(file.mimetype)) return cb(null, true);
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-/**
- * Accept either field:
- *   - item_image (preferred)
- *   - image (fallback)
- * Normalizes to req.file
- */
-function uploadFoodMenuImage() {
+// 🚀 Main upload middleware
+function uploadFoodMenuImage(req, res, next) {
+  const ct = String(req.headers["content-type"] || "").toLowerCase();
+  if (!ct.includes("multipart/form-data")) return next(); // skip for JSON requests
+
   const uploader = multer({
     storage,
     fileFilter,
@@ -76,33 +83,32 @@ function uploadFoodMenuImage() {
     { name: "image", maxCount: 1 },
   ]);
 
-  return (req, res, next) => {
-    uploader(req, res, (err) => {
-      if (err) {
-        err.statusCode = 400;
-        return next(err);
-      }
-      const any = req.files || {};
-      req.file =
-        (Array.isArray(any.item_image) && any.item_image[0]) ||
-        (Array.isArray(any.image) && any.image[0]) ||
-        null;
+  uploader(req, res, (err) => {
+    if (err) {
+      err.statusCode = 400;
+      return next(err);
+    }
 
-      // optional debug
-      // console.log("✅ Uploaded into:", DEST, "UPLOAD_ROOT=", UPLOAD_ROOT);
-      next();
-    });
-  };
+    const any = req.files || {};
+    req.file =
+      (Array.isArray(any.item_image) && any.item_image[0]) ||
+      (Array.isArray(any.image) && any.image[0]) ||
+      null;
+
+    // Optional debug
+    // console.log("✅ File saved to:", DEST);
+    next();
+  });
 }
 
-/* web path helper */
+// 🌐 Helper to return web-accessible path
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
 module.exports = {
-  uploadFoodMenuImage: uploadFoodMenuImage(),
+  uploadFoodMenuImage,
   toWebPath,
   DEST,
   SUBFOLDER,

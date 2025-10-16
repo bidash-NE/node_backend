@@ -3,7 +3,7 @@ const dotenv = require("dotenv");
 const path = require("path");
 const cors = require("cors");
 
-const initMenuTables = require("./models/initModel");
+// const initMenuTables = require("./models/initModel");
 const foodMenuRoute = require("./routes/foodMenuRoute");
 const foodDiscoveryRoute = require("./routes/foodDiscoveryRoute");
 const foodMenuBrowseRoute = require("./routes/foodMenuBrowseRoute");
@@ -28,7 +28,7 @@ const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
 app.use("/uploads", express.static(UPLOAD_ROOT));
 
 // Init DB tables
-initMenuTables();
+// initMenuTables();
 
 // Health endpoints (for ingress and checks)
 app.get("/health", (_req, res) => res.json({ ok: true }));
