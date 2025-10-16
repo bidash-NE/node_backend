@@ -52,7 +52,7 @@ async function executeIgnoreErr(sql, params = []) {
   } catch {}
 }
 
-// Read the exact COLUMN_TYPE (e.g., "BIGINT UNSIGNED", "INT(10) UNSIGNED")
+// Read the exact COLUMN_TYPE (e.g., "BIGINT UNSIGNED")
 async function getColumnType(table, column) {
   const [r] = await db.query(
     `SELECT COLUMN_TYPE
@@ -72,8 +72,8 @@ async function ensureColumnTypeMatches({
   column,
   refTable,
   refColumn,
-  desiredType, // if null, read ref’s COLUMN_TYPE
-  fkName, // FK name to (re)create
+  desiredType,
+  fkName,
 }) {
   const refType = desiredType || (await getColumnType(refTable, refColumn));
   if (!refType) {
@@ -252,7 +252,7 @@ async function ensureBusinessBannersTable() {
   }
 }
 
-/* ---------- NEW: base menu tables (needed by controllers & ratings) ---------- */
+/* ---------- FOOD MENU (full schema your model uses) ---------- */
 async function ensureFoodMenuTable() {
   const table = "food_menu";
   if (!(await tableExists(table))) {
@@ -260,22 +260,95 @@ async function ensureFoodMenuTable() {
       CREATE TABLE ${table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         business_id BIGINT UNSIGNED NOT NULL,
+        category_name VARCHAR(100) NOT NULL,
         item_name VARCHAR(255) NOT NULL,
         description TEXT,
-        price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        item_image VARCHAR(255),
+        actual_price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        discount_percentage DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        is_veg TINYINT(1) NOT NULL DEFAULT 0,
+        spice_level ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None',
+        is_available TINYINT(1) NOT NULL DEFAULT 1,
+        stock_limit INT NOT NULL DEFAULT 0,
+        sort_order INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY idx_food_menu_business (business_id),
+        KEY idx_food_menu_cat (category_name),
+        KEY idx_food_menu_available (is_available),
+        UNIQUE KEY uk_foodmenu_biz_cat_name (business_id, category_name, item_name),
         FOREIGN KEY (business_id)
           REFERENCES merchant_business_details(business_id)
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
+    return;
+  }
+
+  // Migration: add any missing columns
+  const addCol = async (name, defSql) => {
+    if (!(await columnExists(table, name))) {
+      await db.query(`ALTER TABLE \`${table}\` ADD COLUMN ${defSql}`);
+    }
+  };
+  await addCol("category_name", "VARCHAR(100) NOT NULL AFTER business_id");
+  await addCol("item_name", "VARCHAR(255) NOT NULL AFTER category_name");
+  await addCol("description", "TEXT NULL AFTER item_name");
+  await addCol("item_image", "VARCHAR(255) NULL AFTER description");
+  await addCol(
+    "actual_price",
+    "DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER item_image"
+  );
+  await addCol(
+    "discount_percentage",
+    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER actual_price"
+  );
+  await addCol(
+    "tax_rate",
+    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER discount_percentage"
+  );
+  await addCol("is_veg", "TINYINT(1) NOT NULL DEFAULT 0 AFTER tax_rate");
+  await addCol(
+    "spice_level",
+    "ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None' AFTER is_veg"
+  );
+  await addCol(
+    "is_available",
+    "TINYINT(1) NOT NULL DEFAULT 1 AFTER spice_level"
+  );
+  await addCol("stock_limit", "INT NOT NULL DEFAULT 0 AFTER is_available");
+  await addCol("sort_order", "INT NOT NULL DEFAULT 0 AFTER stock_limit");
+  await addCol("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await addCol(
+    "updated_at",
+    "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+  );
+
+  if (!(await indexExists(table, "idx_food_menu_business"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_business (business_id)`
+    );
+  }
+  if (!(await indexExists(table, "idx_food_menu_cat"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_cat (category_name)`
+    );
+  }
+  if (!(await indexExists(table, "idx_food_menu_available"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_available (is_available)`
+    );
+  }
+  if (!(await indexExists(table, "uk_foodmenu_biz_cat_name"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD UNIQUE KEY uk_foodmenu_biz_cat_name (business_id, category_name, item_name)`
+    );
   }
 }
 
+/* ---------- MART MENU (IDENTICAL to food_menu) ---------- */
 async function ensureMartMenuTable() {
   const table = "mart_menu";
   if (!(await tableExists(table))) {
@@ -283,19 +356,91 @@ async function ensureMartMenuTable() {
       CREATE TABLE ${table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         business_id BIGINT UNSIGNED NOT NULL,
+        category_name VARCHAR(100) NOT NULL,
         item_name VARCHAR(255) NOT NULL,
         description TEXT,
-        price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        item_image VARCHAR(255),
+        actual_price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        discount_percentage DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        tax_rate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        is_veg TINYINT(1) NOT NULL DEFAULT 0,
+        spice_level ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None',
+        is_available TINYINT(1) NOT NULL DEFAULT 1,
+        stock_limit INT NOT NULL DEFAULT 0,
+        sort_order INT NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         KEY idx_mart_menu_business (business_id),
+        KEY idx_mart_menu_cat (category_name),
+        KEY idx_mart_menu_available (is_available),
+        UNIQUE KEY uk_martmenu_biz_cat_name (business_id, category_name, item_name),
         FOREIGN KEY (business_id)
           REFERENCES merchant_business_details(business_id)
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
+    return;
+  }
+
+  // Migration: add any missing columns to mirror food_menu
+  const addCol = async (name, defSql) => {
+    if (!(await columnExists(table, name))) {
+      await db.query(`ALTER TABLE \`${table}\` ADD COLUMN ${defSql}`);
+    }
+  };
+  await addCol("category_name", "VARCHAR(100) NOT NULL AFTER business_id");
+  await addCol("item_name", "VARCHAR(255) NOT NULL AFTER category_name");
+  await addCol("description", "TEXT NULL AFTER item_name");
+  await addCol("item_image", "VARCHAR(255) NULL AFTER description");
+  await addCol(
+    "actual_price",
+    "DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER item_image"
+  );
+  await addCol(
+    "discount_percentage",
+    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER actual_price"
+  );
+  await addCol(
+    "tax_rate",
+    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER discount_percentage"
+  );
+  await addCol("is_veg", "TINYINT(1) NOT NULL DEFAULT 0 AFTER tax_rate");
+  await addCol(
+    "spice_level",
+    "ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None' AFTER is_veg"
+  );
+  await addCol(
+    "is_available",
+    "TINYINT(1) NOT NULL DEFAULT 1 AFTER spice_level"
+  );
+  await addCol("stock_limit", "INT NOT NULL DEFAULT 0 AFTER is_available");
+  await addCol("sort_order", "INT NOT NULL DEFAULT 0 AFTER stock_limit");
+  await addCol("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  await addCol(
+    "updated_at",
+    "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+  );
+
+  if (!(await indexExists(table, "idx_mart_menu_business"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_business (business_id)`
+    );
+  }
+  if (!(await indexExists(table, "idx_mart_menu_cat"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_cat (category_name)`
+    );
+  }
+  if (!(await indexExists(table, "idx_mart_menu_available"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_available (is_available)`
+    );
+  }
+  if (!(await indexExists(table, "uk_martmenu_biz_cat_name"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${table}\` ADD UNIQUE KEY uk_martmenu_biz_cat_name (business_id, category_name, item_name)`
+    );
   }
 }
 
@@ -321,12 +466,8 @@ async function ensureFoodMenuRatingsTable() {
     `);
   }
 
-  // Make sure food_menu exists before matching type
-  if (!(await tableExists("food_menu"))) {
-    await ensureFoodMenuTable();
-  }
+  if (!(await tableExists("food_menu"))) await ensureFoodMenuTable();
 
-  // Match menu_id type to food_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -336,7 +477,6 @@ async function ensureFoodMenuRatingsTable() {
     fkName: "fk_fmr_menu",
   });
 
-  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -372,12 +512,8 @@ async function ensureMartMenuRatingsTable() {
     `);
   }
 
-  // Make sure mart_menu exists before matching type
-  if (!(await tableExists("mart_menu"))) {
-    await ensureMartMenuTable();
-  }
+  if (!(await tableExists("mart_menu"))) await ensureMartMenuTable();
 
-  // Match menu_id type to mart_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -387,7 +523,6 @@ async function ensureMartMenuRatingsTable() {
     fkName: "fk_mmr_menu",
   });
 
-  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -432,7 +567,6 @@ async function ensureMerchantBankDetailsTable() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
   } else {
-    // Ensure types & FKs for both business_id and user_id
     await ensureColumnTypeMatches({
       table,
       column: "business_id",
@@ -451,7 +585,6 @@ async function ensureMerchantBankDetailsTable() {
       fkName: "fk_mbd_user",
     });
 
-    // Indexes (idempotent)
     if (!(await indexExists(table, "idx_mbd_business"))) {
       await executeIgnoreErr(
         `ALTER TABLE \`${table}\` ADD KEY idx_mbd_business (business_id)`
@@ -471,7 +604,7 @@ async function migrateLegacyBusinessTypeId() {
     const table = "merchant_business_details";
     const hasOld = await columnExists(table, "business_type_id");
     if (hasOld) {
-      // Intentionally left as a no-op placeholder.
+      // no-op placeholder
     }
   } catch {}
 }
@@ -494,7 +627,7 @@ async function initMerchantTables() {
 
   // Base menu tables (MUST exist before ratings & before controllers query them)
   await ensureFoodMenuTable();
-  await ensureMartMenuTable();
+  await ensureMartMenuTable(); // <- now identical to food_menu
 
   // Ratings (FKs to menu tables)
   await ensureFoodMenuRatingsTable();

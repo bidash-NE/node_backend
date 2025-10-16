@@ -14,7 +14,7 @@ const {
 const { uploadMartMenuImage } = require("../middlewares/uploadMartMenuImage");
 
 // Create (multipart OR JSON with base64)
-router.post("/", uploadMartMenuImage(), createMartMenuCtrl);
+router.post("/", uploadMartMenuImage, createMartMenuCtrl);
 
 // List (supports ?business_id=&category_name=)
 router.get("/", listMartMenuCtrl);
@@ -26,7 +26,7 @@ router.get("/business/:business_id", listMartMenuByBusinessCtrl);
 router.get("/:id", getMartMenuByIdCtrl);
 
 // Update (supports image replacement, server path, or clearing NULL; JSON base64 also OK)
-router.put("/:id", uploadMartMenuImage(), updateMartMenuCtrl);
+router.put("/:id", uploadMartMenuImage, updateMartMenuCtrl);
 
 // Delete
 router.delete("/:id", deleteMartMenuCtrl);
