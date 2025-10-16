@@ -252,6 +252,54 @@ async function ensureBusinessBannersTable() {
   }
 }
 
+/* ---------- NEW: base menu tables (needed by controllers & ratings) ---------- */
+async function ensureFoodMenuTable() {
+  const table = "food_menu";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        item_name VARCHAR(255) NOT NULL,
+        description TEXT,
+        price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_food_menu_business (business_id),
+        FOREIGN KEY (business_id)
+          REFERENCES merchant_business_details(business_id)
+          ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
+}
+
+async function ensureMartMenuTable() {
+  const table = "mart_menu";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        item_name VARCHAR(255) NOT NULL,
+        description TEXT,
+        price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_mart_menu_business (business_id),
+        FOREIGN KEY (business_id)
+          REFERENCES merchant_business_details(business_id)
+          ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
+}
+
+/* ---------- ratings per menu item (food & mart) ---------- */
 async function ensureFoodMenuRatingsTable() {
   const table = "food_menu_ratings";
   if (!(await tableExists(table))) {
@@ -273,6 +321,12 @@ async function ensureFoodMenuRatingsTable() {
     `);
   }
 
+  // Make sure food_menu exists before matching type
+  if (!(await tableExists("food_menu"))) {
+    await ensureFoodMenuTable();
+  }
+
+  // Match menu_id type to food_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -282,6 +336,7 @@ async function ensureFoodMenuRatingsTable() {
     fkName: "fk_fmr_menu",
   });
 
+  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -317,6 +372,12 @@ async function ensureMartMenuRatingsTable() {
     `);
   }
 
+  // Make sure mart_menu exists before matching type
+  if (!(await tableExists("mart_menu"))) {
+    await ensureMartMenuTable();
+  }
+
+  // Match menu_id type to mart_menu.id and add FK
   await ensureColumnTypeMatches({
     table,
     column: "menu_id",
@@ -326,6 +387,7 @@ async function ensureMartMenuRatingsTable() {
     fkName: "fk_mmr_menu",
   });
 
+  // Ensure FK to users + CHECK
   const userFks = await fkConstraintNamesForColumn(table, "user_id");
   if (!userFks.length) {
     await db.query(
@@ -340,13 +402,13 @@ async function ensureMartMenuRatingsTable() {
   );
 }
 
-/* -------- UPDATED: merchant_bank_details now includes user_id -------- */
+/* -------- merchant_bank_details (user_id required, business_id optional) -------- */
 async function ensureMerchantBankDetailsTable() {
   const table = "merchant_bank_details";
 
   if (!(await tableExists(table))) {
     await db.query(`
-       CREATE TABLE ${table} (
+      CREATE TABLE ${table} (
         bank_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id BIGINT UNSIGNED NOT NULL,
         business_id BIGINT UNSIGNED NULL DEFAULT NULL,
@@ -416,19 +478,25 @@ async function migrateLegacyBusinessTypeId() {
 
 /* --------------- entrypoint --------------- */
 async function initMerchantTables() {
+  // Core business taxonomy
   await ensureBusinessTypesTable();
   await ensureMerchantBusinessDetailsTable();
   await ensureMerchantBusinessTypesTable();
   await migrateLegacyBusinessTypeId();
 
-  await ensureMerchantBankDetailsTable(); // includes user_id
+  // Bank details
+  await ensureMerchantBankDetailsTable();
 
+  // Categories & banners
   await ensureFoodCategoryTable();
   await ensureMartCategoryTable();
-
   await ensureBusinessBannersTable();
 
-  // ratings — dynamically matched to FK column types
+  // Base menu tables (MUST exist before ratings & before controllers query them)
+  await ensureFoodMenuTable();
+  await ensureMartMenuTable();
+
+  // Ratings (FKs to menu tables)
   await ensureFoodMenuRatingsTable();
   await ensureMartMenuRatingsTable();
 }
