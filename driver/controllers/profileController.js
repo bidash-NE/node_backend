@@ -28,26 +28,26 @@ exports.getProfile = async (req, res) => {
 exports.updateProfile = async (req, res) => {
   try {
     const userId = req.params.user_id;
-    const { user_name, phone } = req.body;
+    const { email, phone } = req.body;
     let newProfileImage = null;
 
+    // 1. Handle new uploaded profile image
     if (req.file) {
       newProfileImage = `/uploads/profiles/${req.file.filename}`;
 
-      // 1. Get old image from DB
+      // Fetch existing profile image from DB
       const [userRows] = await db.query(
         "SELECT profile_image FROM users WHERE user_id = ?",
         [userId]
       );
 
+      // Delete old profile image if it exists
       if (userRows.length > 0 && userRows[0].profile_image) {
         const oldImagePath = path.join(
           __dirname,
           "..",
           userRows[0].profile_image
         );
-
-        // 2. Delete old image if it exists
         fs.unlink(oldImagePath, (err) => {
           if (err && err.code !== "ENOENT") {
             console.error("❌ Failed to delete old profile image:", err);
@@ -56,19 +56,35 @@ exports.updateProfile = async (req, res) => {
       }
     }
 
-    // 3. Construct query and values dynamically
-    let query = `UPDATE users SET user_name = ?, phone = ?, `;
-    const values = [user_name, phone];
+    // 2. Build update query dynamically
+    let query = `UPDATE users SET `;
+    const updates = [];
+    const values = [];
+
+    if (email) {
+      updates.push("email = ?");
+      values.push(email);
+    }
+
+    if (phone) {
+      updates.push("phone = ?");
+      values.push(phone);
+    }
 
     if (newProfileImage) {
-      query += `profile_image = ?, `;
+      updates.push("profile_image = ?");
       values.push(newProfileImage);
     }
 
-    query += `updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`;
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No fields provided to update." });
+    }
+
+    query += updates.join(", ");
+    query += `, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`;
     values.push(userId);
 
-    // 4. Execute update
+    // 3. Execute the update
     await db.query(query, values);
 
     res.status(200).json({ message: "✅ Profile updated successfully." });
