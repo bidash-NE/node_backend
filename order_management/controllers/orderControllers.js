@@ -1,6 +1,10 @@
 // controllers/orderControllers.js
 const db = require("../config/db");
 const Order = require("../models/orderModels");
+const {
+  insertAndEmitNotification,
+  broadcastOrderStatusToMany,
+} = require("../realtime");
 
 const ALLOWED_STATUSES = new Set([
   "PENDING",
@@ -22,25 +26,6 @@ function buildPreview(items = []) {
     .reduce((a, it) => a + Number(it.subtotal || 0), 0)
     .toFixed(2);
   return `${parts.join(", ")}${more} · Subtotal Nu ${total}`;
-}
-
-// Minimal helper to insert order notifications without any socket emit
-async function insertNotification({
-  merchant_id,
-  user_id,
-  order_id,
-  title,
-  body_preview,
-  type,
-}) {
-  await db.query(
-    `
-    INSERT INTO order_notification
-      (merchant_id, user_id, order_id, title, body_preview, type, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, NOW())
-    `,
-    [merchant_id, user_id, order_id, title, body_preview, type]
-  );
 }
 
 exports.createOrder = async (req, res) => {
@@ -75,7 +60,7 @@ exports.createOrder = async (req, res) => {
     }
     const merchantIds = Array.from(byBiz.keys());
 
-    // 3) Insert notification row(s) (no online check, no emit)
+    // 3) Insert notification row(s) first, then emit (no online check)
     for (const merchant_id of merchantIds) {
       // ensure merchant exists (adjust this query if your schema differs)
       const [[biz]] = await db.query(
@@ -88,7 +73,7 @@ exports.createOrder = async (req, res) => {
       const preview = buildPreview(its);
       const title = `New order #${order_id}`;
 
-      insertNotification({
+      insertAndEmitNotification({
         merchant_id,
         user_id,
         order_id,
@@ -98,7 +83,14 @@ exports.createOrder = async (req, res) => {
       }).catch((e) => console.warn("notify error:", e.message));
     }
 
-    // 4) No broadcast—just return success
+    // 4) Broadcast initial status PENDING to user + all merchant rooms
+    broadcastOrderStatusToMany({
+      order_id,
+      user_id,
+      merchant_ids: merchantIds,
+      status: "PENDING",
+    });
+
     return res
       .status(201)
       .json({ order_id, message: "Order created successfully" });
@@ -170,7 +162,7 @@ exports.updateOrder = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order_id = req.params.order_id;
-    const { status, reason } = req.body || {};
+    const { status, reason, user_id } = req.body || {};
 
     if (!status) return res.status(400).json({ message: "Status is required" });
 
@@ -193,7 +185,20 @@ exports.updateOrderStatus = async (req, res) => {
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // No realtime broadcast—just success
+    // merchants linked to this order
+    const [bizRows] = await db.query(
+      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+      [order_id]
+    );
+    const merchant_ids = bizRows.map((r) => r.business_id);
+
+    broadcastOrderStatusToMany({
+      order_id,
+      user_id,
+      merchant_ids,
+      status: normalized,
+    });
+
     res.json({ message: "Order status updated successfully" });
   } catch (err) {
     res.status(500).json({ error: err.message });
