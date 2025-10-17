@@ -7,7 +7,7 @@ function generateOrderId() {
   return `ORD-${n}`;
 }
 
-/** Cache whether orders.status_reason exists (schema supports it, but keep dynamic) */
+/** Cache whether orders.status_reason exists (schema supports it) */
 let _hasStatusReason = null;
 async function ensureStatusReasonSupport() {
   if (_hasStatusReason !== null) return _hasStatusReason;
@@ -22,38 +22,30 @@ async function ensureStatusReasonSupport() {
 }
 
 /**
- * ✅ AUTHORITATIVE TOTALS (mirror the user frontend):
- * - We ONLY trust order-level fees the app shows to the user:
- *      platform_fee  → order-level number (default 0)
- *      delivery_fee  → order-level number (default 0)
- * - We ignore per-item platform_fee / delivery_fee to avoid double counting.
- * - Item subtotal = (line.subtotal) OR (price * quantity) if subtotal missing.
- * - discount_amount from order-level (default 0).
- * - total_amount uses order-level if provided, otherwise computed.
+ * ✅ Mirror user UI:
+ * - Use ONLY order-level platform_fee / delivery_fee / discount_amount
+ * - Ignore any per-item platform_fee / delivery_fee
+ * - If order.total_amount provided, respect it; else compute.
  */
 function computeTotals(orderData) {
   const items = Array.isArray(orderData.items) ? orderData.items : [];
 
-  // Items subtotal strictly from lines (no hidden fees baked in)
   let items_subtotal = 0;
   for (const it of items) {
-    const lineSubtotal =
+    const sub =
       it.subtotal != null
         ? Number(it.subtotal)
         : Number(it.price || 0) * Number(it.quantity || 0);
-    items_subtotal += Number(lineSubtotal || 0);
+    items_subtotal += Number(sub || 0);
   }
 
-  // 🔴 Key change: ONLY use order-level fees; ignore per-item fields completely
   const platform_fee_total = Number(orderData.platform_fee || 0);
   const delivery_fee_total = Number(orderData.delivery_fee || 0);
-
   const discount_amount = Number(orderData.discount_amount || 0);
 
   const computed_total =
     items_subtotal + platform_fee_total + delivery_fee_total - discount_amount;
 
-  // If the app sent an explicit grand total, respect it; else use computed
   const total_amount =
     orderData.total_amount != null
       ? Number(orderData.total_amount)
@@ -71,18 +63,17 @@ function computeTotals(orderData) {
 const Order = {
   peekNewOrderId: () => generateOrderId(),
 
-  /** Inserts into orders (NOT NULL: total_amount, payment_method) then order_items */
+  /** Insert order then order_items (store per-item fees as 0 to avoid drift) */
   create: async (orderData) => {
     const order_id = generateOrderId();
-
     const totals = computeTotals(orderData);
 
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-      total_amount: totals.total_amount, // NOT NULL
+      total_amount: totals.total_amount,
       discount_amount: totals.discount_amount,
-      payment_method: orderData.payment_method || "COD", // NOT NULL ENUM
+      payment_method: orderData.payment_method || "COD",
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
       status: (orderData.status || "PENDING").toUpperCase(),
@@ -90,8 +81,6 @@ const Order = {
       priority: !!orderData.priority,
     });
 
-    // Persist items. We DO NOT store per-item platform/delivery fees here
-    // (or we store them as 0) to keep DB in sync with the UI calculation.
     for (const item of orderData.items || []) {
       await db.query(`INSERT INTO order_items SET ?`, {
         order_id,
@@ -106,8 +95,6 @@ const Order = {
           item.subtotal != null
             ? Number(item.subtotal)
             : Number(item.price || 0) * Number(item.quantity || 0),
-
-        // 🔒 Force-zero so nothing can accidentally double-count later
         platform_fee: 0,
         delivery_fee: 0,
       });
@@ -117,10 +104,9 @@ const Order = {
 
   findAll: async () => {
     await ensureStatusReasonSupport();
-    const [orders] = await db.query(`
-      SELECT o.* FROM orders o
-      ORDER BY o.created_at DESC
-    `);
+    const [orders] = await db.query(
+      `SELECT o.* FROM orders o ORDER BY o.created_at DESC`
+    );
     if (!orders.length) return [];
 
     const ids = orders.map((o) => o.order_id);
@@ -375,17 +361,8 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
-      // Rebuild a clean breakdown that mirrors the UI (fees from order-level only)
       let items_subtotal = 0;
-      for (const it of its) {
-        items_subtotal += Number(it.subtotal || 0);
-      }
-      const platform_fee_total = 0; // items hold 0 by design
-      const delivery_fee_total = 0; // items hold 0 by design
-      const discount = Number(o.discount_amount || 0);
-
-      // total_amount on order already includes order-level fees; show that
-      const total_amount = Number(o.total_amount || 0);
+      for (const it of its) items_subtotal += Number(it.subtotal || 0);
 
       result.push({
         order_id: o.order_id,
@@ -405,10 +382,10 @@ const Order = {
 
         totals: {
           items_subtotal,
-          platform_fee: platform_fee_total,
-          delivery_fee: delivery_fee_total,
-          discount_amount: discount,
-          total_amount,
+          platform_fee: 0,
+          delivery_fee: 0,
+          discount_amount: Number(o.discount_amount || 0),
+          total_amount: Number(o.total_amount || 0),
         },
 
         items: its.map((it) => ({
@@ -465,7 +442,6 @@ const Order = {
     return r.affectedRows;
   },
 
-  // Exported so controllers can reuse the *same* math for previews/sockets
   computeTotals,
 };
 

@@ -17,22 +17,13 @@ const ALLOWED_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-function buildPreview(items = [], totals = null) {
+function buildPreview(items = [], totals) {
   const parts = items
     .slice(0, 2)
     .map((it) => `${it.quantity}× ${it.item_name}`);
   const more = items.length > 2 ? `, +${items.length - 2} more` : "";
-
-  if (totals && totals.total_amount != null) {
-    const t = Number(totals.total_amount).toFixed(2);
-    return `${parts.join(", ")}${more} · Total Nu ${t}`;
-  }
-
-  const itemsSubtotal = items.reduce(
-    (a, it) => a + Number(it.subtotal || 0),
-    0
-  );
-  return `${parts.join(", ")}${more} · Subtotal Nu ${itemsSubtotal.toFixed(2)}`;
+  const total = (totals?.total_amount ?? 0).toFixed(2);
+  return `${parts.join(", ")}${more} · Total Nu ${total}`;
 }
 
 exports.createOrder = async (req, res) => {
@@ -51,16 +42,18 @@ exports.createOrder = async (req, res) => {
         .json({ message: "Missing user_id, items or delivery_address" });
     }
 
-    // 1) Persist order immediately (always saved)
+    // compute totals exactly like the UI
+    const totals = Order.computeTotals(payload);
+
+    // 1) Persist order (always saved)
     const order_id = await Order.create({
       ...payload,
       status: "PENDING",
+      total_amount: totals.total_amount, // ensure stored
+      discount_amount: totals.discount_amount, // ensure stored
     });
 
-    // Compute totals for preview/socket payload (uses the same logic as the model)
-    const totals = Order.computeTotals(payload);
-
-    // 2) Group items by business_id (one notification per merchant)
+    // 2) Group items by business_id
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -70,16 +63,15 @@ exports.createOrder = async (req, res) => {
     }
     const merchantIds = Array.from(byBiz.keys());
 
-    // 3) Insert notification row(s) first, then emit (+ include totals)
+    // 3) Insert notification row(s) first, then emit (conditional)
     for (const merchant_id of merchantIds) {
-      // ensure merchant exists
       const [[biz]] = await db.query(
         `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
         [merchant_id]
       );
       if (!biz) continue;
 
-      const its = byBiz.get(merchant_id);
+      const its = byBiz.get(merchant_id) || [];
       const title = `New order #${order_id}`;
       const preview = buildPreview(its, totals);
 
@@ -90,8 +82,8 @@ exports.createOrder = async (req, res) => {
         title,
         body_preview: preview,
         type: "order:create",
-        totals, // ⬅ add totals to socket payload
-      }).catch((e) => console.warn("notify error:", e.message));
+        totals, // ⬅️ pass to socket payload for exact display (Nu 115.70)
+      });
     }
 
     // 4) Broadcast initial status PENDING to user + all merchant rooms
@@ -196,7 +188,6 @@ exports.updateOrderStatus = async (req, res) => {
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // merchants linked to this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
