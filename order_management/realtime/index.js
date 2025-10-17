@@ -71,24 +71,33 @@ async function attachRealtime(server) {
     socket.join(roomUser(user_id));
 
     if (role === "merchant") {
-      // determine merchant business rooms
+      // accept any of: business_id (number), merchantId (legacy), or business_ids (array)
       let mids = [];
-      if (typeof socket.handshake.auth?.merchantId !== "undefined") {
-        mids = [Number(socket.handshake.auth.merchantId)];
+      const auth = socket.handshake.auth || {};
+
+      if (Array.isArray(auth.business_ids)) {
+        mids = auth.business_ids.map(Number);
+      } else if (auth.business_id != null) {
+        mids = [Number(auth.business_id)];
+      } else if (auth.merchantId != null) {
+        // legacy support
+        mids = [Number(auth.merchantId)];
       } else {
+        // fallback: fetch all businesses for this merchant user
         mids = await getMerchantIdsForUser(user_id);
       }
+
       mids = mids.filter((m) => Number.isFinite(m) && m > 0);
       mids.forEach((mid) => socket.join(roomMerchant(mid)));
 
-      // Replay undelivered notifications (at-most-once; mark delivered_at on emit)
+      // Replay undelivered notifications
       for (const mid of mids) {
         const [rows] = await db.query(
           `SELECT notification_id, order_id, type, title, body_preview, created_at
-             FROM order_notification
-            WHERE merchant_id = ? AND delivered_at IS NULL
-            ORDER BY created_at ASC
-            LIMIT 100`,
+           FROM order_notification
+          WHERE merchant_id = ? AND delivered_at IS NULL
+          ORDER BY created_at ASC
+          LIMIT 100`,
           [mid]
         );
 
