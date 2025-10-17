@@ -155,7 +155,7 @@ exports.updateOrder = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order_id = req.params.order_id;
-    const { status, reason, user_id } = req.body || {};
+    const { status, reason } = req.body || {}; // ⬅️ stop relying on req.body.user_id
 
     if (!status) return res.status(400).json({ message: "Status is required" });
 
@@ -175,20 +175,28 @@ exports.updateOrderStatus = async (req, res) => {
         .json({ message: "Reason is required for status change" });
     }
 
+    // Update status in DB
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // find linked merchants for this order
+    // ⬇️ NEW: get user_id from orders (do NOT trust client body)
+    const [[orderRow]] = await db.query(
+      `SELECT user_id FROM orders WHERE order_id = ? LIMIT 1`,
+      [order_id]
+    );
+    const userIdToNotify = orderRow ? orderRow.user_id : null;
+
+    // merchants linked to this order (unchanged)
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const merchant_ids = bizRows.map((r) => r.business_id);
 
-    // Realtime broadcast (function itself checks who is online)
+    // Broadcast
     broadcastOrderStatusToMany({
       order_id,
-      user_id,
+      user_id: userIdToNotify, // ⬅️ reliable user_id
       merchant_ids,
       status: normalized,
     });
