@@ -17,15 +17,33 @@ const ALLOWED_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-function buildPreview(items = []) {
+function buildPreview(items = [], orderLevelFees = {}) {
   const parts = items
     .slice(0, 2)
     .map((it) => `${it.quantity}× ${it.item_name}`);
   const more = items.length > 2 ? `, +${items.length - 2} more` : "";
-  const total = items
-    .reduce((a, it) => a + Number(it.subtotal || 0), 0)
-    .toFixed(2);
-  return `${parts.join(", ")}${more} · Subtotal Nu ${total}`;
+
+  // items subtotal
+  const itemsSubtotal = items.reduce(
+    (a, it) => a + Number(it.subtotal || 0),
+    0
+  );
+
+  // If you switch to order-level fees, read from orderLevelFees. Otherwise, keep summing per-line.
+  const platform =
+    orderLevelFees.platform_fee != null
+      ? Number(orderLevelFees.platform_fee)
+      : items.reduce((a, it) => a + Number(it.platform_fee || 0), 0);
+
+  const delivery =
+    orderLevelFees.delivery_fee != null
+      ? Number(orderLevelFees.delivery_fee)
+      : items.reduce((a, it) => a + Number(it.delivery_fee || 0), 0);
+
+  const discount = Number(orderLevelFees.discount_amount || 0);
+  const total = (itemsSubtotal + platform + delivery - discount).toFixed(2);
+
+  return `${parts.join(", ")}${more} · Total Nu ${total}`;
 }
 
 exports.createOrder = async (req, res) => {
@@ -70,7 +88,11 @@ exports.createOrder = async (req, res) => {
       if (!biz) continue;
 
       const its = byBiz.get(merchant_id);
-      const preview = buildPreview(its);
+      const preview = buildPreview(its, {
+        platform_fee: orderData.platform_fee, // if using Option A
+        delivery_fee: orderData.delivery_fee,
+        discount_amount: orderData.discount_amount,
+      });
       const title = `New order #${order_id}`;
 
       insertAndEmitNotification({

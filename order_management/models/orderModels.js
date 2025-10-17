@@ -38,10 +38,16 @@ const Order = {
         delivery_fee_total = 0;
 
       for (const it of orderData.items || []) {
-        items_subtotal += Number(it.subtotal || 0);
-        platform_fee_total += Number(it.platform_fee || 0);
-        delivery_fee_total += Number(it.delivery_fee || 0);
+        // prefer subtotal, else price*qty
+        const lineSub =
+          it.subtotal != null
+            ? Number(it.subtotal)
+            : Number(it.price || 0) * Number(it.quantity || 0);
+        items_subtotal += lineSub;
       }
+
+      platform_fee_total = Number(orderData.platform_fee || 0);
+      delivery_fee_total = Number(orderData.delivery_fee || 0);
 
       const discount = Number(orderData.discount_amount || 0);
       const computed_total =
