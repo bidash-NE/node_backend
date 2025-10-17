@@ -8,15 +8,9 @@ let io = null;
 const events = new EventEmitter();
 events.setMaxListeners(0);
 
-function roomUser(userId) {
-  return `user:${userId}`;
-}
-function roomMerchant(businessId) {
-  return `merchant:${businessId}`;
-}
-function roomOrder(orderId) {
-  return `order:${orderId}`;
-}
+const roomUser = (id) => `user:${id}`;
+const roomMerchant = (bid) => `merchant:${bid}`;
+const roomOrder = (oid) => `order:${oid}`;
 
 function isMerchantOnline(merchant_id) {
   if (!io) return false;
@@ -44,7 +38,6 @@ async function attachRealtime(server) {
         }
         return next(new Error("dev no-auth: provide devUserId & devRole"));
       }
-
       const token =
         socket.handshake.auth?.token ||
         socket.handshake.headers["x-access-token"];
@@ -59,49 +52,30 @@ async function attachRealtime(server) {
 
   io.on("connection", async (socket) => {
     const { user_id, role } = socket.user || {};
-    if (!user_id) {
-      socket.disconnect(true);
-      return;
-    }
+    if (!user_id) return socket.disconnect(true);
 
     socket.join(roomUser(user_id));
 
     if (role === "merchant") {
       const auth = socket.handshake.auth || {};
       let mids = [];
-      if (Array.isArray(auth.business_ids)) {
+      if (Array.isArray(auth.business_ids))
         mids = auth.business_ids.map(Number);
-      } else if (auth.business_id != null) {
-        mids = [Number(auth.business_id)];
-      } else if (auth.merchantId != null) {
-        mids = [Number(auth.merchantId)]; // legacy
-      }
+      else if (auth.business_id != null) mids = [Number(auth.business_id)];
+      else if (auth.merchantId != null) mids = [Number(auth.merchantId)];
       mids = mids.filter((m) => Number.isFinite(m) && m > 0);
       mids.forEach((mid) => socket.join(roomMerchant(mid)));
 
-      socket.on("merchant:notify:delivered", async (_payload) => {
-        // no-op (you can enable delivered_at if needed)
-      });
-
-      socket.on("merchant:preorder:ack", (ack) => {
-        events.emit("preorder:ack", { ...ack, _by: socket.id });
-      });
+      socket.on("merchant:notify:delivered", () => {}); // no-op
     }
 
     socket.on("order:join", ({ orderId }) => {
       if (orderId) socket.join(roomOrder(orderId));
     });
-
-    socket.on("inbox:seen", async ({ ids = [] }) => {
-      // hook if you want to persist read status
-    });
   });
 }
 
-/**
- * Durable notification + conditional emit (merchant must be online to receive).
- * `totals` is forwarded so merchant UI can render the exact user-facing total (e.g., 115.70).
- */
+/** Sends notify with exact totals coming from controller */
 async function insertAndEmitNotification({
   merchant_id,
   user_id,
@@ -113,19 +87,8 @@ async function insertAndEmitNotification({
 }) {
   const notification_id = randomUUID();
 
-  // Persist row (you may store body_preview only; totals can be derived from orders if needed)
-  // Keep simple here — no delivered_at changes.
-  // (If you have an order_notification table, insert there.)
-  // Example (commented out if you don't use that table):
-  // await db.query(
-  //   `INSERT INTO order_notification
-  //     (notification_id, order_id, merchant_id, user_id, type, title, body_preview, delivered_at, created_at)
-  //    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NOW())`,
-  //   [notification_id, order_id, merchant_id, user_id, type, title, body_preview]
-  // );
-
   if (io && isMerchantOnline(merchant_id)) {
-    const payload = {
+    io.to(roomMerchant(merchant_id)).emit("notify", {
       id: notification_id,
       type,
       orderId: order_id,
@@ -143,14 +106,11 @@ async function insertAndEmitNotification({
             }
           : null,
       },
-    };
-    io.to(roomMerchant(merchant_id)).emit("notify", payload);
+    });
   }
-
   return { notification_id };
 }
 
-/** Broadcast order status to user + merchant rooms (only if online). */
 function broadcastOrderStatusToMany({
   order_id,
   user_id,
@@ -164,14 +124,12 @@ function broadcastOrderStatusToMany({
     createdAt: Date.now(),
     data: { status },
   };
-
   io?.to(roomOrder(order_id)).emit("order:status", ev);
 
   if (io && user_id) {
     const set = io.sockets.adapter.rooms.get(roomUser(user_id));
     if (set?.size) io.to(roomUser(user_id)).emit("order:status", ev);
   }
-
   if (io) {
     const mids = Array.isArray(merchant_ids) ? merchant_ids : [merchant_ids];
     for (const mid of mids) {
