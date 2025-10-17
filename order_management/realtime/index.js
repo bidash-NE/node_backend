@@ -5,22 +5,9 @@ const { randomUUID } = require("node:crypto");
 const { EventEmitter } = require("events");
 const db = require("../config/db");
 
-/* ---------------- constants / helpers ---------------- */
 let io = null;
 const events = new EventEmitter();
 events.setMaxListeners(0);
-
-// must match your REST controller statuses
-const ALLOWED_STATUSES = new Set([
-  "PENDING",
-  "REJECTED",
-  "CONFIRMED",
-  "PREPARING",
-  "READY",
-  "OUT_FOR_DELIVERY",
-  "COMPLETED",
-  "CANCELLED",
-]);
 
 function roomUser(userId) {
   return `user:${userId}`;
@@ -32,13 +19,13 @@ function roomOrder(orderId) {
   return `order:${orderId}`;
 }
 
+// online check for a merchant business room
 function isMerchantOnline(merchant_id) {
   if (!io) return false;
   const set = io.sockets.adapter.rooms.get(roomMerchant(merchant_id));
   return !!(set && set.size > 0);
 }
 
-/* ---------------- DB lookups ---------------- */
 async function getMerchantIdsForUser(user_id) {
   const [rows] = await db.query(
     `SELECT business_id FROM merchant_business_details WHERE user_id = ?`,
@@ -63,10 +50,9 @@ async function getMerchantIdsForOrder(order_id) {
   return rows.map((r) => r.business_id);
 }
 
-/* ---------------- attachRealtime ---------------- */
 async function attachRealtime(server) {
   io = new Server(server, {
-    transports: ["websocket"], // comment this out if you want to allow polling fallback
+    transports: ["websocket"], // allow polling by removing this line if needed
     cors: { origin: true, credentials: true },
     path: "/socket.io",
   });
@@ -105,11 +91,9 @@ async function attachRealtime(server) {
       return;
     }
 
-    // Each connection joins its private user room
     socket.join(roomUser(user_id));
 
     if (role === "merchant") {
-      // Accept business_id, legacy merchantId, or business_ids[]
       const auth = socket.handshake.auth || {};
       let mids = [];
       if (Array.isArray(auth.business_ids)) {
@@ -117,45 +101,42 @@ async function attachRealtime(server) {
       } else if (auth.business_id != null) {
         mids = [Number(auth.business_id)];
       } else if (auth.merchantId != null) {
-        mids = [Number(auth.merchantId)]; // legacy
+        mids = [Number(auth.merchantId)]; // legacy alias
       } else {
-        // Fallback: fetch all businesses for this merchant user
         mids = await getMerchantIdsForUser(user_id);
       }
       mids = mids.filter((m) => Number.isFinite(m) && m > 0);
       mids.forEach((mid) => socket.join(roomMerchant(mid)));
 
-      // No delivered_at replay / no auto update (by your request)
       socket.on("merchant:notify:delivered", async (_payload) => {
-        // no-op; keep for forward compatibility if needed
+        // no-op; keep for future if you want to mark delivered_at
       });
 
-      socket.on("merchant:preorder:ack", (ack) => {
-        events.emit("preorder:ack", { ...ack, _by: socket.id });
-      });
-
-      /**
-       * (Optional fast path) Merchant emits a status update over the socket.
-       * We validate, look up user_id and merchant_ids from DB, and broadcast.
-       * This complements (doesn't replace) the REST path.
-       */
+      // Allow merchant to emit status over socket (optional fast path)
       socket.on("order:status", async ({ orderId, status, reason }) => {
         try {
           if (!orderId || !status) return;
-
+          const ALLOWED_STATUSES = new Set([
+            "PENDING",
+            "REJECTED",
+            "CONFIRMED",
+            "PREPARING",
+            "READY",
+            "OUT_FOR_DELIVERY",
+            "COMPLETED",
+            "CANCELLED",
+          ]);
           const normalized = String(status).trim().toUpperCase();
           if (!ALLOWED_STATUSES.has(normalized)) return;
 
-          // Look up user_id and the order’s merchants from DB (do NOT trust client body)
-          const [userIdToNotify, merchantIds] = await Promise.all([
+          const [uid, midsForOrder] = await Promise.all([
             getUserIdForOrder(orderId),
             getMerchantIdsForOrder(orderId),
           ]);
-
           broadcastOrderStatusToMany({
             order_id: orderId,
-            user_id: userIdToNotify,
-            merchant_ids: merchantIds,
+            user_id: uid,
+            merchant_ids: midsForOrder,
             status: normalized,
           });
         } catch (e) {
@@ -178,7 +159,9 @@ async function attachRealtime(server) {
   });
 }
 
-/* ---------------- durable notify (no replay) ---------------- */
+/** Durable notification + conditional emit (only if merchant online)
+ * totals: { items_subtotal, platform_fee_total, delivery_fee_total, discount_amount, total_amount }
+ */
 async function insertAndEmitNotification({
   merchant_id,
   user_id,
@@ -186,10 +169,10 @@ async function insertAndEmitNotification({
   title,
   body_preview,
   type = "order:create",
+  totals = null,
 }) {
   const notification_id = randomUUID();
 
-  // Always persist so the merchant UI can fetch via REST if offline
   await db.query(
     `
     INSERT INTO order_notification
@@ -199,14 +182,17 @@ async function insertAndEmitNotification({
     [notification_id, order_id, merchant_id, user_id, type, title, body_preview]
   );
 
-  // Emit only if merchant is currently online
   if (io && isMerchantOnline(merchant_id)) {
     const payload = {
       id: notification_id,
       type,
       orderId: order_id,
       createdAt: Date.now(),
-      data: { title, body: body_preview },
+      data: {
+        title,
+        body: body_preview,
+        ...(totals ? { totals } : {}),
+      },
     };
     io.to(roomMerchant(merchant_id)).emit("notify", payload);
   }
@@ -214,7 +200,7 @@ async function insertAndEmitNotification({
   return { notification_id };
 }
 
-/* ---------------- broadcast status (no replay) ---------------- */
+/** Broadcast order status to user + merchant rooms (only if online). */
 function broadcastOrderStatusToMany({
   order_id,
   user_id,
@@ -229,7 +215,7 @@ function broadcastOrderStatusToMany({
     data: { status },
   };
 
-  // Order room (if you use it)
+  // Order room (optional)
   io?.to(roomOrder(order_id)).emit("order:status", ev);
 
   // User
@@ -248,7 +234,6 @@ function broadcastOrderStatusToMany({
   }
 }
 
-/* ---------------- exports ---------------- */
 module.exports = {
   attachRealtime,
   insertAndEmitNotification,

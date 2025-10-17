@@ -7,7 +7,7 @@ function generateOrderId() {
   return `ORD-${n}`;
 }
 
-/** Cache whether orders.status_reason exists */
+/** Cache whether orders.status_reason exists (schema supports it, but keep dynamic) */
 let _hasStatusReason = null;
 async function ensureStatusReasonSupport() {
   if (_hasStatusReason !== null) return _hasStatusReason;
@@ -21,80 +21,101 @@ async function ensureStatusReasonSupport() {
   return _hasStatusReason;
 }
 
+/**
+ * Compute totals in a consistent way.
+ * - Items subtotal: prefer item.subtotal; else quantity * price.
+ * - Fees:
+ *    • If order-level platform_fee / delivery_fee present, use those.
+ *    • Else, sum per-line item.platform_fee / item.delivery_fee (already line totals).
+ * - Discount from order.discount_amount (number).
+ */
+function computeTotals(orderData) {
+  const items = Array.isArray(orderData.items) ? orderData.items : [];
+
+  let items_subtotal = 0;
+  for (const it of items) {
+    const lineSub =
+      it.subtotal != null
+        ? Number(it.subtotal)
+        : Number(it.price || 0) * Number(it.quantity || 0);
+    items_subtotal += Number(lineSub || 0);
+  }
+
+  let platform_fee_total =
+    orderData.platform_fee != null
+      ? Number(orderData.platform_fee)
+      : items.reduce((a, it) => a + Number(it.platform_fee || 0), 0);
+
+  let delivery_fee_total =
+    orderData.delivery_fee != null
+      ? Number(orderData.delivery_fee)
+      : items.reduce((a, it) => a + Number(it.delivery_fee || 0), 0);
+
+  const discount_amount = Number(orderData.discount_amount || 0);
+
+  const computed_total =
+    items_subtotal + platform_fee_total + delivery_fee_total - discount_amount;
+
+  // If caller passed total_amount, prefer it, else computed
+  const total_amount =
+    orderData.total_amount != null
+      ? Number(orderData.total_amount)
+      : Number(computed_total);
+
+  return {
+    items_subtotal,
+    platform_fee_total,
+    delivery_fee_total,
+    discount_amount,
+    total_amount,
+  };
+}
+
 const Order = {
   peekNewOrderId: () => generateOrderId(),
 
-  /** Inserts into orders then order_items atomically */
+  /** Inserts into orders (NOT NULL: total_amount, payment_method) then order_items */
   create: async (orderData) => {
-    const conn = await db.getConnection();
-    try {
-      await conn.beginTransaction();
+    const order_id = generateOrderId();
 
-      const order_id = generateOrderId();
+    const totals = computeTotals(orderData);
 
-      // Compute totals if missing, to satisfy NOT NULL(total_amount)
-      let items_subtotal = 0,
-        platform_fee_total = 0,
-        delivery_fee_total = 0;
+    await db.query(`INSERT INTO orders SET ?`, {
+      order_id,
+      user_id: orderData.user_id,
+      total_amount: totals.total_amount, // NOT NULL
+      discount_amount: totals.discount_amount,
+      payment_method: orderData.payment_method || "COD", // NOT NULL ENUM
+      delivery_address: orderData.delivery_address,
+      note_for_restaurant: orderData.note_for_restaurant || null,
+      status: (orderData.status || "PENDING").toUpperCase(),
+      fulfillment_type: orderData.fulfillment_type || "Delivery",
+      priority: !!orderData.priority,
+    });
 
-      for (const it of orderData.items || []) {
-        // prefer subtotal, else price*qty
-        const lineSub =
-          it.subtotal != null
-            ? Number(it.subtotal)
-            : Number(it.price || 0) * Number(it.quantity || 0);
-        items_subtotal += lineSub;
-      }
-
-      platform_fee_total = Number(orderData.platform_fee || 0);
-      delivery_fee_total = Number(orderData.delivery_fee || 0);
-
-      const discount = Number(orderData.discount_amount || 0);
-      const computed_total =
-        items_subtotal + platform_fee_total + delivery_fee_total - discount;
-
-      const total_amount =
-        orderData.total_amount != null
-          ? Number(orderData.total_amount)
-          : Number(computed_total);
-
-      await conn.query(`INSERT INTO orders SET ?`, {
+    for (const item of orderData.items || []) {
+      await db.query(`INSERT INTO order_items SET ?`, {
         order_id,
-        user_id: orderData.user_id,
-        total_amount,
-        discount_amount: discount,
-        payment_method: orderData.payment_method || "COD",
-        delivery_address: orderData.delivery_address,
-        note_for_restaurant: orderData.note_for_restaurant || null,
-        status: (orderData.status || "PENDING").toUpperCase(),
-        fulfillment_type: orderData.fulfillment_type || "Delivery",
-        priority: !!orderData.priority,
+        business_id: item.business_id,
+        business_name: item.business_name,
+        menu_id: item.menu_id,
+        item_name: item.item_name,
+        item_image: item.item_image || null,
+        quantity: item.quantity,
+        price: item.price,
+        subtotal:
+          item.subtotal != null
+            ? Number(item.subtotal)
+            : Number(item.price || 0) * Number(item.quantity || 0),
+        platform_fee:
+          orderData.platform_fee != null
+            ? 0 // when using order-level, keep per-line fee = 0 (or omit)
+            : Number(item.platform_fee || 0),
+        delivery_fee:
+          orderData.delivery_fee != null ? 0 : Number(item.delivery_fee || 0),
       });
-
-      for (const item of orderData.items || []) {
-        await conn.query(`INSERT INTO order_items SET ?`, {
-          order_id,
-          business_id: item.business_id,
-          business_name: item.business_name,
-          menu_id: item.menu_id,
-          item_name: item.item_name,
-          item_image: item.item_image || null,
-          quantity: item.quantity,
-          price: item.price,
-          subtotal: item.subtotal,
-          platform_fee: item.platform_fee || 0,
-          delivery_fee: item.delivery_fee || 0,
-        });
-      }
-
-      await conn.commit();
-      return order_id; // only after full persistence
-    } catch (e) {
-      await conn.rollback();
-      throw e;
-    } finally {
-      conn.release();
     }
+    return order_id;
   },
 
   findAll: async () => {
@@ -357,6 +378,7 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
+      // Rebuild a clean breakdown for the app card (does not change DB)
       let items_subtotal = 0,
         platform_fee_total = 0,
         delivery_fee_total = 0;
@@ -448,6 +470,9 @@ const Order = {
     ]);
     return r.affectedRows;
   },
+
+  // Expose totals calculator for controller use if needed
+  computeTotals,
 };
 
 module.exports = Order;
