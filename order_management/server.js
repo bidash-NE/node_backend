@@ -7,7 +7,7 @@ const dotenv = require("dotenv");
 
 const { initOrderManagementTable } = require("./models/initModel");
 const orderRoutes = require("./routes/orderRoutes");
-const { attachRealtime } = require("./realtime");
+const { attachRealtime } = require("./realtime"); // <- socket attach
 
 dotenv.config();
 
@@ -16,7 +16,7 @@ const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
-// serve test pages if you want: http://localhost:1001/user.html, /merchant.html
+// serve simple test pages (optional)
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -29,13 +29,11 @@ const server = http.createServer(app);
 
 (async () => {
   try {
-    await initOrderManagementTable(); // orders, order_items, order_notification (no FK to orders)
-    await attachRealtime(server); // socket (dev no-auth enabled inside)
+    await initOrderManagementTable(); // create tables if missing
+    await attachRealtime(server); // bind socket.io to this server
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () =>
-      console.log(
-        `🚀 Order service + Realtime Socket.io listening on port:${PORT}`
-      )
+      console.log(`🚀 Order service + Realtime listening on port:${PORT}`)
     );
   } catch (err) {
     console.error("Boot failed:", err);

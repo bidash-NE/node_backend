@@ -7,7 +7,7 @@ function generateOrderId() {
   return `ORD-${n}`;
 }
 
-/** Cache whether orders.status_reason exists (schema supports it, but keep dynamic) */
+/** Cache whether orders.status_reason exists */
 let _hasStatusReason = null;
 async function ensureStatusReasonSupport() {
   if (_hasStatusReason !== null) return _hasStatusReason;
@@ -24,59 +24,71 @@ async function ensureStatusReasonSupport() {
 const Order = {
   peekNewOrderId: () => generateOrderId(),
 
-  /** Inserts into orders (NOT NULL: total_amount, payment_method) then order_items */
+  /** Inserts into orders then order_items atomically */
   create: async (orderData) => {
-    const order_id = generateOrderId();
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    // Compute totals if missing, to satisfy NOT NULL(total_amount)
-    let items_subtotal = 0,
-      platform_fee_total = 0,
-      delivery_fee_total = 0;
+      const order_id = generateOrderId();
 
-    for (const it of orderData.items || []) {
-      items_subtotal += Number(it.subtotal || 0);
-      platform_fee_total += Number(it.platform_fee || 0);
-      delivery_fee_total += Number(it.delivery_fee || 0);
-    }
+      // Compute totals if missing, to satisfy NOT NULL(total_amount)
+      let items_subtotal = 0,
+        platform_fee_total = 0,
+        delivery_fee_total = 0;
 
-    const discount = Number(orderData.discount_amount || 0);
-    const computed_total =
-      items_subtotal + platform_fee_total + delivery_fee_total - discount;
+      for (const it of orderData.items || []) {
+        items_subtotal += Number(it.subtotal || 0);
+        platform_fee_total += Number(it.platform_fee || 0);
+        delivery_fee_total += Number(it.delivery_fee || 0);
+      }
 
-    const total_amount =
-      orderData.total_amount != null
-        ? Number(orderData.total_amount)
-        : Number(computed_total);
+      const discount = Number(orderData.discount_amount || 0);
+      const computed_total =
+        items_subtotal + platform_fee_total + delivery_fee_total - discount;
 
-    await db.query(`INSERT INTO orders SET ?`, {
-      order_id,
-      user_id: orderData.user_id,
-      total_amount: total_amount, // NOT NULL
-      discount_amount: discount,
-      payment_method: orderData.payment_method || "COD", // NOT NULL ENUM
-      delivery_address: orderData.delivery_address,
-      note_for_restaurant: orderData.note_for_restaurant || null,
-      status: (orderData.status || "PENDING").toUpperCase(),
-      fulfillment_type: orderData.fulfillment_type || "Delivery",
-      priority: !!orderData.priority,
-    });
+      const total_amount =
+        orderData.total_amount != null
+          ? Number(orderData.total_amount)
+          : Number(computed_total);
 
-    for (const item of orderData.items || []) {
-      await db.query(`INSERT INTO order_items SET ?`, {
+      await conn.query(`INSERT INTO orders SET ?`, {
         order_id,
-        business_id: item.business_id,
-        business_name: item.business_name,
-        menu_id: item.menu_id,
-        item_name: item.item_name,
-        item_image: item.item_image || null,
-        quantity: item.quantity,
-        price: item.price,
-        subtotal: item.subtotal,
-        platform_fee: item.platform_fee || 0,
-        delivery_fee: item.delivery_fee || 0,
+        user_id: orderData.user_id,
+        total_amount,
+        discount_amount: discount,
+        payment_method: orderData.payment_method || "COD",
+        delivery_address: orderData.delivery_address,
+        note_for_restaurant: orderData.note_for_restaurant || null,
+        status: (orderData.status || "PENDING").toUpperCase(),
+        fulfillment_type: orderData.fulfillment_type || "Delivery",
+        priority: !!orderData.priority,
       });
+
+      for (const item of orderData.items || []) {
+        await conn.query(`INSERT INTO order_items SET ?`, {
+          order_id,
+          business_id: item.business_id,
+          business_name: item.business_name,
+          menu_id: item.menu_id,
+          item_name: item.item_name,
+          item_image: item.item_image || null,
+          quantity: item.quantity,
+          price: item.price,
+          subtotal: item.subtotal,
+          platform_fee: item.platform_fee || 0,
+          delivery_fee: item.delivery_fee || 0,
+        });
+      }
+
+      await conn.commit();
+      return order_id; // only after full persistence
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
     }
-    return order_id;
   },
 
   findAll: async () => {

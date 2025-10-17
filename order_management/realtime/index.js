@@ -9,9 +9,26 @@ let io = null;
 const events = new EventEmitter();
 events.setMaxListeners(0);
 
+function roomUser(userId) {
+  return `user:${userId}`;
+}
+function roomMerchant(businessId) {
+  return `merchant:${businessId}`;
+}
+function roomOrder(orderId) {
+  return `order:${orderId}`;
+}
+
+// check if any socket is currently in the merchant room
+function isMerchantOnline(merchant_id) {
+  if (!io) return false;
+  const set = io.sockets.adapter.rooms.get(roomMerchant(merchant_id));
+  return !!(set && set.size > 0);
+}
+
 async function attachRealtime(server) {
   io = new Server(server, {
-    transports: ["websocket"],
+    transports: ["websocket"], // keep if your proxy supports WS; remove to allow polling fallback
     cors: { origin: true, credentials: true },
     path: "/socket.io",
   });
@@ -26,9 +43,9 @@ async function attachRealtime(server) {
         const devRole = String(socket.handshake.auth?.devRole || "");
         if (devUserId && (devRole === "user" || devRole === "merchant")) {
           socket.user = { user_id: devUserId, role: devRole };
-          console.log("[SOCKET] DEV user", socket.user);
           return next();
         }
+        // allow connect but mark unauth (optional: next(new Error(...)) if you want strict)
         return next(new Error("dev no-auth: provide devUserId & devRole"));
       }
 
@@ -45,21 +62,26 @@ async function attachRealtime(server) {
   });
 
   io.on("connection", async (socket) => {
-    const { user_id, role } = socket.user;
-    console.log("[SOCKET] connected", { sid: socket.id, user_id, role });
-    socket.join(`user:${user_id}`);
+    const { user_id, role } = socket.user || {};
+    if (!user_id) {
+      socket.disconnect(true);
+      return;
+    }
+
+    socket.join(roomUser(user_id));
 
     if (role === "merchant") {
+      // determine merchant business rooms
       let mids = [];
       if (typeof socket.handshake.auth?.merchantId !== "undefined") {
         mids = [Number(socket.handshake.auth.merchantId)];
       } else {
         mids = await getMerchantIdsForUser(user_id);
       }
-      mids.forEach((mid) => socket.join(`merchant:${mid}`));
-      console.log("[SOCKET] merchant joined rooms", mids);
+      mids = mids.filter((m) => Number.isFinite(m) && m > 0);
+      mids.forEach((mid) => socket.join(roomMerchant(mid)));
 
-      // Replay undelivered notifications
+      // Replay undelivered notifications (at-most-once; mark delivered_at on emit)
       for (const mid of mids) {
         const [rows] = await db.query(
           `SELECT notification_id, order_id, type, title, body_preview, created_at
@@ -92,20 +114,18 @@ async function attachRealtime(server) {
             `UPDATE order_notification SET delivered_at = NOW() WHERE notification_id = ?`,
             [String(id)]
           );
-          console.log("[SOCKET] delivered_at set for", id);
         } catch (e) {
           console.warn("failed to set delivered_at:", e.message);
         }
       });
 
       socket.on("merchant:preorder:ack", (ack) => {
-        console.log("[SOCKET] ACK from merchant", ack);
         events.emit("preorder:ack", { ...ack, _by: socket.id });
       });
     }
 
     socket.on("order:join", ({ orderId }) => {
-      if (orderId) socket.join(`order:${orderId}`);
+      if (orderId) socket.join(roomOrder(orderId));
     });
 
     socket.on("inbox:seen", async ({ ids = [] }) => {
@@ -128,7 +148,7 @@ async function getMerchantIdsForUser(user_id) {
   return rows.map((r) => r.business_id);
 }
 
-/** Durable notification + emit (replay covers offline merchants) */
+/** Durable notification + conditional emit (only if merchant online) */
 async function insertAndEmitNotification({
   merchant_id,
   user_id,
@@ -139,31 +159,32 @@ async function insertAndEmitNotification({
 }) {
   const notification_id = randomUUID();
 
+  // Insert durable notification first
   await db.query(
-    `INSERT INTO order_notification
-      (notification_id, order_id, merchant_id, user_id, type, title, body_preview, delivered_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+    `
+    INSERT INTO order_notification
+      (notification_id, order_id, merchant_id, user_id, type, title, body_preview, delivered_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NOW())
+    `,
     [notification_id, order_id, merchant_id, user_id, type, title, body_preview]
   );
 
-  const payload = {
-    id: notification_id,
-    type,
-    orderId: order_id,
-    createdAt: Date.now(),
-    data: { title, body: body_preview },
-  };
-
-  io.to(`merchant:${merchant_id}`).emit("notify", payload);
-  console.log("[SOCKET] notify emitted (no online check)", {
-    room: `merchant:${merchant_id}`,
-    notification_id,
-  });
+  // Emit only if merchant is connected right now
+  if (io && isMerchantOnline(merchant_id)) {
+    const payload = {
+      id: notification_id,
+      type,
+      orderId: order_id,
+      createdAt: Date.now(),
+      data: { title, body: body_preview },
+    };
+    io.to(roomMerchant(merchant_id)).emit("notify", payload);
+  }
 
   return { notification_id };
 }
 
-/** Broadcast order status to user, merchants, and order room */
+/** Broadcast order status to user/merchants/order room, only to online rooms */
 function broadcastOrderStatusToMany({
   order_id,
   user_id,
@@ -177,10 +198,22 @@ function broadcastOrderStatusToMany({
     createdAt: Date.now(),
     data: { status },
   };
-  io.to(`order:${order_id}`).emit("order:status", ev);
-  if (user_id) io.to(`user:${user_id}`).emit("order:status", ev);
-  for (const mid of merchant_ids) {
-    io.to(`merchant:${mid}`).emit("order:status", ev);
+
+  // Order room (fire-and-forget if used in your UI)
+  io?.to(roomOrder(order_id)).emit("order:status", ev);
+
+  // User (only if room has sockets)
+  if (io && user_id) {
+    const set = io.sockets.adapter.rooms.get(roomUser(user_id));
+    if (set?.size) io.to(roomUser(user_id)).emit("order:status", ev);
+  }
+
+  // Merchants (only to online ones)
+  if (io) {
+    for (const mid of merchant_ids) {
+      const set = io.sockets.adapter.rooms.get(roomMerchant(mid));
+      if (set?.size) io.to(roomMerchant(mid)).emit("order:status", ev);
+    }
   }
 }
 
@@ -188,4 +221,5 @@ module.exports = {
   attachRealtime,
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
+  events, // optional external use
 };

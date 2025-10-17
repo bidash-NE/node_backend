@@ -44,13 +44,13 @@ exports.createOrder = async (req, res) => {
         .json({ message: "Missing user_id, items or delivery_address" });
     }
 
-    // 1) Persist order immediately (always saved)
+    // 1) Persist order (transaction inside model). Only returns if COMMIT succeeded.
     const order_id = await Order.create({
       ...payload,
       status: "PENDING",
     });
 
-    // 2) Group items by business_id (one notification per merchant)
+    // 2) Group items by business_id (1 notification per merchant)
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -60,9 +60,9 @@ exports.createOrder = async (req, res) => {
     }
     const merchantIds = Array.from(byBiz.keys());
 
-    // 3) Insert notification row(s) first, then emit (no online check)
+    // 3) Insert durable notifications; emit only if merchant is online (handled in realtime)
     for (const merchant_id of merchantIds) {
-      // ensure merchant exists (adjust this query if your schema differs)
+      // ensure merchant exists (adjust if schema differs)
       const [[biz]] = await db.query(
         `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
         [merchant_id]
@@ -83,14 +83,7 @@ exports.createOrder = async (req, res) => {
       }).catch((e) => console.warn("notify error:", e.message));
     }
 
-    // 4) Broadcast initial status PENDING to user + all merchant rooms
-    broadcastOrderStatusToMany({
-      order_id,
-      user_id,
-      merchant_ids: merchantIds,
-      status: "PENDING",
-    });
-
+    // 4) Return success (no reliance on socket success)
     return res
       .status(201)
       .json({ order_id, message: "Order created successfully" });
@@ -185,13 +178,14 @@ exports.updateOrderStatus = async (req, res) => {
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // merchants linked to this order
+    // find linked merchants for this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const merchant_ids = bizRows.map((r) => r.business_id);
 
+    // Realtime broadcast (function itself checks who is online)
     broadcastOrderStatusToMany({
       order_id,
       user_id,
