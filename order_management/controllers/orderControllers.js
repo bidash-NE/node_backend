@@ -6,7 +6,6 @@ const {
   broadcastOrderStatusToMany,
 } = require("../realtime");
 
-// Keep statuses centralized
 const ALLOWED_STATUSES = new Set([
   "PENDING",
   "REJECTED",
@@ -18,7 +17,7 @@ const ALLOWED_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-// purely for merchant preview banner text; uses provided values only
+// Only builds a small preview string for merchant toast (no math)
 function buildPreview(items = [], totals) {
   const parts = items
     .slice(0, 2)
@@ -44,11 +43,8 @@ exports.createOrder = async (req, res) => {
         .json({ message: "Missing user_id, items or delivery_address" });
     }
 
-    // HARD REQUIREMENTS: Frontend must send the exact monetary breakdown.
-    // We do NOT compute anything here.
-    // Required top-level fields:
-    const mustHaveTop = ["total_amount", "discount_amount"];
-    for (const f of mustHaveTop) {
+    // Required order-level numbers (we do NO math on backend)
+    for (const f of ["total_amount", "discount_amount"]) {
       if (payload[f] == null || payload[f] === "") {
         return res
           .status(400)
@@ -56,7 +52,7 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    // Required per-line fields:
+    // Validate each item fields we rely on storing
     for (const [idx, it] of items.entries()) {
       for (const f of [
         "business_id",
@@ -70,16 +66,21 @@ exports.createOrder = async (req, res) => {
           return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
         }
       }
+      // delivery_fee is optional per-line but if present must be numeric
+      if (it.delivery_fee != null && Number.isNaN(Number(it.delivery_fee))) {
+        return res
+          .status(400)
+          .json({ message: `Item[${idx}] invalid delivery_fee` });
+      }
     }
 
-    // 1) Persist order EXACTLY as provided (uppercasing status only).
+    // 1) Persist order EXACTLY as provided (uppercasing status only)
     const order_id = await Order.create({
       ...payload,
       status: (payload.status || "PENDING").toUpperCase(),
-      // NOTE: no computeTotals, no math—trust frontend.
     });
 
-    // 2) Group items by business_id to know which merchant rooms to notify
+    // 2) Who to notify? group items by business_id
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -89,7 +90,7 @@ exports.createOrder = async (req, res) => {
     }
     const merchantIds = Array.from(byBiz.keys());
 
-    // 3) Insert notification row(s) first, then emit (conditional)
+    // 3) Insert notification row(s) then emit (if online)
     for (const merchant_id of merchantIds) {
       const [[biz]] = await db.query(
         `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
@@ -99,9 +100,7 @@ exports.createOrder = async (req, res) => {
 
       const its = byBiz.get(merchant_id) || [];
       const title = `New order #${order_id}`;
-      const preview = buildPreview(its, {
-        total_amount: payload.total_amount,
-      });
+      const preview = buildPreview(its, { total_amount: payload.total_amount });
 
       await insertAndEmitNotification({
         merchant_id,
@@ -111,17 +110,16 @@ exports.createOrder = async (req, res) => {
         body_preview: preview,
         type: "order:create",
         totals: {
-          // pass through exactly what FE sent (or subset used by merchant UI)
-          items_subtotal: payload.items_subtotal ?? null,
-          platform_fee_total: payload.platform_fee ?? null,
-          delivery_fee_total: payload.delivery_fee ?? null,
+          items_subtotal: null, // we don't compute on BE
+          platform_fee_total: payload.platform_fee ?? null, // 👈 order-level platform fee
+          delivery_fee_total: null, // per-line, not aggregated here
           discount_amount: payload.discount_amount,
           total_amount: payload.total_amount,
         },
       });
     }
 
-    // 4) Broadcast initial status to user + all merchant rooms
+    // 4) Broadcast initial status PENDING (or provided) to user + merchants
     broadcastOrderStatusToMany({
       order_id,
       user_id,

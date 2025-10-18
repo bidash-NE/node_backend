@@ -27,7 +27,8 @@ const Order = {
   /**
    * Insert order then order_items.
    * 🔒 NO MATH HERE — trust frontend values as-is.
-   * If a required monetary field is missing, the controller should have rejected it already.
+   * platform_fee is stored ONCE at order-level.
+   * delivery_fee is stored per-line (as sent by FE).
    */
   create: async (orderData) => {
     const order_id = generateOrderId();
@@ -35,17 +36,15 @@ const Order = {
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-      total_amount: orderData.total_amount,
-      discount_amount: orderData.discount_amount,
+      total_amount: orderData.total_amount, // exact FE number
+      discount_amount: orderData.discount_amount, // exact FE number
+      platform_fee: orderData.platform_fee ?? 0, // 👈 once per order
       payment_method: orderData.payment_method || "COD",
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
       priority: !!orderData.priority,
-      // If you also persist platform_fee / delivery_fee at the order level:
-      platform_fee: orderData.platform_fee ?? null,
-      delivery_fee: orderData.delivery_fee ?? null,
     });
 
     for (const item of orderData.items || []) {
@@ -58,9 +57,9 @@ const Order = {
         item_image: item.item_image || null,
         quantity: item.quantity,
         price: item.price,
-        subtotal: item.subtotal, // <- AS SENT BY FRONTEND
-        platform_fee: item.platform_fee ?? 0, // if FE sends per-line fees
-        delivery_fee: item.delivery_fee ?? 0,
+        subtotal: item.subtotal, // exact FE number
+        platform_fee: 0, // 👈 ALWAYS 0 per line
+        delivery_fee: item.delivery_fee ?? 0, // 👈 per-line delivery (from FE)
       });
     }
     return order_id;
@@ -99,14 +98,13 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.platform_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
         o.status,
         o.fulfillment_type,
         o.priority,
-        o.platform_fee,
-        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -146,14 +144,13 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.platform_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
         o.status,
         o.fulfillment_type,
         o.priority,
-        o.platform_fee,
-        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -198,13 +195,12 @@ const Order = {
         status_reason: o.status_reason || null,
         total_amount: o.total_amount,
         discount_amount: o.discount_amount,
+        platform_fee: o.platform_fee, // 👈 order-level platform fee
         payment_method: o.payment_method,
         delivery_address: o.delivery_address,
         note_for_restaurant: o.note_for_restaurant,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
-        platform_fee: o.platform_fee,
-        delivery_fee: o.delivery_fee,
         created_at: o.created_at,
         updated_at: o.updated_at,
         items: its,
@@ -228,14 +224,13 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.platform_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
         o.status,
         o.fulfillment_type,
         o.priority,
-        o.platform_fee,
-        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -270,13 +265,12 @@ const Order = {
             status_reason: o.status_reason || null,
             total_amount: o.total_amount,
             discount_amount: o.discount_amount,
+            platform_fee: o.platform_fee, // 👈 order-level platform fee
             payment_method: o.payment_method,
             delivery_address: o.delivery_address,
             note_for_restaurant: o.note_for_restaurant,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
-            platform_fee: o.platform_fee,
-            delivery_fee: o.delivery_fee,
             created_at: o.created_at,
             updated_at: o.updated_at,
             items: o.items,
@@ -297,14 +291,13 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.platform_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
         o.status,
         o.fulfillment_type,
         o.priority,
-        o.platform_fee,
-        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -337,7 +330,6 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
-      // Do NOT recompute anything; just restructure for app convenience.
       result.push({
         order_id: o.order_id,
         status: o.status,
@@ -355,10 +347,10 @@ const Order = {
         deliver_to: o.delivery_address,
 
         totals: {
-          // Forward the stored values directly
-          items_subtotal: null, // not stored at order level; FE can compute if needed
-          platform_fee: o.platform_fee ?? 0,
-          delivery_fee: o.delivery_fee ?? 0,
+          // forward stored values directly; no recompute
+          items_subtotal: null,
+          platform_fee: Number(o.platform_fee || 0), // 👈 order-level
+          delivery_fee: 0, // per-line; not aggregating here
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
         },
@@ -370,6 +362,7 @@ const Order = {
           quantity: it.quantity,
           unit_price: it.price,
           line_subtotal: it.subtotal,
+          line_delivery_fee: it.delivery_fee,
         })),
       });
     }
