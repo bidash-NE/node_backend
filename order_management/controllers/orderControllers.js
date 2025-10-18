@@ -17,42 +17,50 @@ const ALLOWED_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-// Only builds a small preview string for merchant toast (no math)
-function buildPreview(items = [], totals) {
+/** Build a short toast line for merchants (no math here). */
+function buildPreview(items = [], total_amount) {
   const parts = items
     .slice(0, 2)
     .map((it) => `${it.quantity}× ${it.item_name}`);
   const more = items.length > 2 ? `, +${items.length - 2} more` : "";
-  const total = Number(totals?.total_amount ?? 0).toFixed(2);
-  return `${parts.join(", ")}${more} · Total Nu ${total}`;
+  const totalStr = Number(total_amount ?? 0).toFixed(2);
+  return `${parts.join(", ")}${more} · Total Nu ${totalStr}`;
 }
 
 exports.createOrder = async (req, res) => {
   try {
     const payload = req.body || {};
-    const { user_id, items = [], delivery_address } = payload;
+    const items = Array.isArray(payload.items) ? payload.items : [];
 
-    if (
-      !user_id ||
-      !Array.isArray(items) ||
-      !items.length ||
-      !delivery_address
-    ) {
-      return res
-        .status(400)
-        .json({ message: "Missing user_id, items or delivery_address" });
+    // ---- Base validations (no backend math) ----
+    if (!payload.user_id) {
+      return res.status(400).json({ message: "Missing user_id" });
+    }
+    if (!items.length) {
+      return res.status(400).json({ message: "Missing items" });
+    }
+    if (payload.total_amount == null) {
+      return res.status(400).json({ message: "Missing total_amount" });
+    }
+    if (payload.discount_amount == null) {
+      return res.status(400).json({ message: "Missing discount_amount" });
     }
 
-    // Required order-level numbers (we do NO math on backend)
-    for (const f of ["total_amount", "discount_amount"]) {
-      if (payload[f] == null || payload[f] === "") {
+    // ---- Fulfillment-specific validation for delivery_address ----
+    const fulfillment = String(payload.fulfillment_type || "Delivery");
+    if (fulfillment === "Delivery") {
+      const addr = String(payload.delivery_address || "").trim();
+      if (!addr) {
         return res
           .status(400)
-          .json({ message: `Missing required field: ${f}` });
+          .json({ message: "delivery_address is required for Delivery" });
       }
+    } else if (fulfillment === "Pickup") {
+      // ensure non-null (column is NOT NULL); store empty string for pickup
+      payload.delivery_address = String(payload.delivery_address || "");
     }
 
-    // Validate each item fields we rely on storing
+    // ---- Validate item fields we persist (no math) ----
     for (const [idx, it] of items.entries()) {
       for (const f of [
         "business_id",
@@ -66,7 +74,6 @@ exports.createOrder = async (req, res) => {
           return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
         }
       }
-      // delivery_fee is optional per-line but if present must be numeric
       if (it.delivery_fee != null && Number.isNaN(Number(it.delivery_fee))) {
         return res
           .status(400)
@@ -74,13 +81,14 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    // 1) Persist order EXACTLY as provided (uppercasing status only)
+    // 1) Persist EXACTLY what FE sent (uppercase status only)
     const order_id = await Order.create({
       ...payload,
       status: (payload.status || "PENDING").toUpperCase(),
+      fulfillment_type: fulfillment, // normalize usage
     });
 
-    // 2) Who to notify? group items by business_id
+    // 2) Group items by merchant for notifications
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -90,7 +98,7 @@ exports.createOrder = async (req, res) => {
     }
     const merchantIds = Array.from(byBiz.keys());
 
-    // 3) Insert notification row(s) then emit (if online)
+    // 3) Insert+emit notifications that include EXACT total_amount from FE
     for (const merchant_id of merchantIds) {
       const [[biz]] = await db.query(
         `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
@@ -100,29 +108,30 @@ exports.createOrder = async (req, res) => {
 
       const its = byBiz.get(merchant_id) || [];
       const title = `New order #${order_id}`;
-      const preview = buildPreview(its, { total_amount: payload.total_amount });
+      const preview = buildPreview(its, payload.total_amount);
 
       await insertAndEmitNotification({
         merchant_id,
-        user_id,
+        user_id: payload.user_id,
         order_id,
         title,
         body_preview: preview,
         type: "order:create",
         totals: {
-          items_subtotal: null, // we don't compute on BE
-          platform_fee_total: payload.platform_fee ?? null, // 👈 order-level platform fee
-          delivery_fee_total: null, // per-line, not aggregated here
+          // forward FE values; do NOT compute/round on backend
+          items_subtotal: null,
+          platform_fee_total: payload.platform_fee ?? null, // order-level platform fee
+          delivery_fee_total: null, // per-line; not aggregated here
           discount_amount: payload.discount_amount,
-          total_amount: payload.total_amount,
+          total_amount: payload.total_amount, // exact FE total
         },
       });
     }
 
-    // 4) Broadcast initial status PENDING (or provided) to user + merchants
+    // 4) Broadcast status to user & merchants
     broadcastOrderStatusToMany({
       order_id,
-      user_id,
+      user_id: payload.user_id,
       merchant_ids: merchantIds,
       status: (payload.status || "PENDING").toUpperCase(),
     });
@@ -198,7 +207,7 @@ exports.updateOrder = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order_id = req.params.order_id;
-    const { status, reason, user_id } = req.body || {};
+    const { status, reason } = req.body || {};
 
     if (!status) return res.status(400).json({ message: "Status is required" });
 
@@ -211,12 +220,17 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    const reasonStr = (reason ?? "").toString().trim();
-    if (!reasonStr) {
-      return res
-        .status(400)
-        .json({ message: "Reason is required for status change" });
-    }
+    // Always fetch user_id from DB so we can emit to the user's room
+    const [[orderRow]] = await db.query(
+      `SELECT user_id FROM orders WHERE order_id = ? LIMIT 1`,
+      [order_id]
+    );
+    if (!orderRow) return res.status(404).json({ message: "Order not found" });
+
+    const user_id = orderRow.user_id;
+
+    // Reason optional; store trimmed or NULL
+    const reasonStr = (reason ?? "").toString().trim() || null;
 
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
