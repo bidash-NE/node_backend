@@ -3,7 +3,6 @@ const DriverMongo = require("../models/driverModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-
 const registerUser = async (req, res) => {
   let user_id = null;
   let driver_id = null;
@@ -93,8 +92,8 @@ const registerUser = async (req, res) => {
         await connection.query(
           `INSERT INTO driver_vehicles (
             driver_id, make, model, year, color, license_plate, vehicle_type,
-            actual_capacity, available_capacity, features, insurance_expiry
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            actual_capacity, available_capacity, features, insurance_expiry,code
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             driver_id,
             vehicle.make,
@@ -107,6 +106,7 @@ const registerUser = async (req, res) => {
             vehicle.capacity,
             vehicle.features ? vehicle.features.join(",") : null,
             vehicle.insurance_expiry,
+            vehicle.code,
           ]
         );
       }
@@ -174,7 +174,6 @@ const registerUser = async (req, res) => {
   }
 };
 
-
 const loginUser = async (req, res) => {
   const { phone, password, role } = req.body || {};
 
@@ -207,7 +206,13 @@ const loginUser = async (req, res) => {
     }
 
     // 4) Role allowlist (admin, super admin, user, merchant, driver)
-    const allowed = new Set(["admin", "super admin", "user", "merchant", "driver"]);
+    const allowed = new Set([
+      "admin",
+      "super admin",
+      "user",
+      "merchant",
+      "driver",
+    ]);
     if (!allowed.has(user.role)) {
       return res
         .status(403)
@@ -240,9 +245,6 @@ const loginUser = async (req, res) => {
         business_name = mbd[0]?.business_name ?? null;
         business_logo = mbd[0]?.business_logo ?? null;
         address = mbd[0]?.address ?? null;
-
-
-
       }
     }
 
@@ -277,7 +279,7 @@ const loginUser = async (req, res) => {
         role: user.role,
         email: user.email,
         ...(user.role === "merchant" || role === "merchant"
-          ? { owner_type,business_id,business_name,business_logo ,address}
+          ? { owner_type, business_id, business_name, business_logo, address }
           : {}),
       },
     });
