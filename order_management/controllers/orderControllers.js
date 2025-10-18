@@ -6,6 +6,7 @@ const {
   broadcastOrderStatusToMany,
 } = require("../realtime");
 
+// Keep statuses centralized
 const ALLOWED_STATUSES = new Set([
   "PENDING",
   "REJECTED",
@@ -17,12 +18,13 @@ const ALLOWED_STATUSES = new Set([
   "CANCELLED",
 ]);
 
+// purely for merchant preview banner text; uses provided values only
 function buildPreview(items = [], totals) {
   const parts = items
     .slice(0, 2)
     .map((it) => `${it.quantity}× ${it.item_name}`);
   const more = items.length > 2 ? `, +${items.length - 2} more` : "";
-  const total = (totals?.total_amount ?? 0).toFixed(2);
+  const total = Number(totals?.total_amount ?? 0).toFixed(2);
   return `${parts.join(", ")}${more} · Total Nu ${total}`;
 }
 
@@ -42,18 +44,42 @@ exports.createOrder = async (req, res) => {
         .json({ message: "Missing user_id, items or delivery_address" });
     }
 
-    // compute totals exactly like the UI
-    const totals = Order.computeTotals(payload);
+    // HARD REQUIREMENTS: Frontend must send the exact monetary breakdown.
+    // We do NOT compute anything here.
+    // Required top-level fields:
+    const mustHaveTop = ["total_amount", "discount_amount"];
+    for (const f of mustHaveTop) {
+      if (payload[f] == null || payload[f] === "") {
+        return res
+          .status(400)
+          .json({ message: `Missing required field: ${f}` });
+      }
+    }
 
-    // 1) Persist order (always saved)
+    // Required per-line fields:
+    for (const [idx, it] of items.entries()) {
+      for (const f of [
+        "business_id",
+        "menu_id",
+        "item_name",
+        "quantity",
+        "price",
+        "subtotal",
+      ]) {
+        if (it[f] == null || it[f] === "") {
+          return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
+        }
+      }
+    }
+
+    // 1) Persist order EXACTLY as provided (uppercasing status only).
     const order_id = await Order.create({
       ...payload,
-      status: "PENDING",
-      total_amount: totals.total_amount, // ensure stored
-      discount_amount: totals.discount_amount, // ensure stored
+      status: (payload.status || "PENDING").toUpperCase(),
+      // NOTE: no computeTotals, no math—trust frontend.
     });
 
-    // 2) Group items by business_id
+    // 2) Group items by business_id to know which merchant rooms to notify
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -73,7 +99,9 @@ exports.createOrder = async (req, res) => {
 
       const its = byBiz.get(merchant_id) || [];
       const title = `New order #${order_id}`;
-      const preview = buildPreview(its, totals);
+      const preview = buildPreview(its, {
+        total_amount: payload.total_amount,
+      });
 
       await insertAndEmitNotification({
         merchant_id,
@@ -82,16 +110,23 @@ exports.createOrder = async (req, res) => {
         title,
         body_preview: preview,
         type: "order:create",
-        totals, // ⬅️ pass to socket payload for exact display (Nu 115.70)
+        totals: {
+          // pass through exactly what FE sent (or subset used by merchant UI)
+          items_subtotal: payload.items_subtotal ?? null,
+          platform_fee_total: payload.platform_fee ?? null,
+          delivery_fee_total: payload.delivery_fee ?? null,
+          discount_amount: payload.discount_amount,
+          total_amount: payload.total_amount,
+        },
       });
     }
 
-    // 4) Broadcast initial status PENDING to user + all merchant rooms
+    // 4) Broadcast initial status to user + all merchant rooms
     broadcastOrderStatusToMany({
       order_id,
       user_id,
       merchant_ids: merchantIds,
-      status: "PENDING",
+      status: (payload.status || "PENDING").toUpperCase(),
     });
 
     return res

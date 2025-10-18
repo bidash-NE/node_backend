@@ -21,64 +21,31 @@ async function ensureStatusReasonSupport() {
   return _hasStatusReason;
 }
 
-/**
- * ✅ Mirror user UI:
- * - Use ONLY order-level platform_fee / delivery_fee / discount_amount
- * - Ignore any per-item platform_fee / delivery_fee
- * - If order.total_amount provided, respect it; else compute.
- */
-function computeTotals(orderData) {
-  const items = Array.isArray(orderData.items) ? orderData.items : [];
-
-  let items_subtotal = 0;
-  for (const it of items) {
-    const sub =
-      it.subtotal != null
-        ? Number(it.subtotal)
-        : Number(it.price || 0) * Number(it.quantity || 0);
-    items_subtotal += Number(sub || 0);
-  }
-
-  const platform_fee_total = Number(orderData.platform_fee || 0);
-  const delivery_fee_total = Number(orderData.delivery_fee || 0);
-  const discount_amount = Number(orderData.discount_amount || 0);
-
-  const computed_total =
-    items_subtotal + platform_fee_total + delivery_fee_total - discount_amount;
-
-  const total_amount =
-    orderData.total_amount != null
-      ? Number(orderData.total_amount)
-      : Number(computed_total);
-
-  return {
-    items_subtotal,
-    platform_fee_total,
-    delivery_fee_total,
-    discount_amount,
-    total_amount,
-  };
-}
-
 const Order = {
   peekNewOrderId: () => generateOrderId(),
 
-  /** Insert order then order_items (store per-item fees as 0 to avoid drift) */
+  /**
+   * Insert order then order_items.
+   * 🔒 NO MATH HERE — trust frontend values as-is.
+   * If a required monetary field is missing, the controller should have rejected it already.
+   */
   create: async (orderData) => {
     const order_id = generateOrderId();
-    const totals = computeTotals(orderData);
 
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-      total_amount: totals.total_amount,
-      discount_amount: totals.discount_amount,
+      total_amount: orderData.total_amount,
+      discount_amount: orderData.discount_amount,
       payment_method: orderData.payment_method || "COD",
       delivery_address: orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
       priority: !!orderData.priority,
+      // If you also persist platform_fee / delivery_fee at the order level:
+      platform_fee: orderData.platform_fee ?? null,
+      delivery_fee: orderData.delivery_fee ?? null,
     });
 
     for (const item of orderData.items || []) {
@@ -91,12 +58,9 @@ const Order = {
         item_image: item.item_image || null,
         quantity: item.quantity,
         price: item.price,
-        subtotal:
-          item.subtotal != null
-            ? Number(item.subtotal)
-            : Number(item.price || 0) * Number(item.quantity || 0),
-        platform_fee: 0,
-        delivery_fee: 0,
+        subtotal: item.subtotal, // <- AS SENT BY FRONTEND
+        platform_fee: item.platform_fee ?? 0, // if FE sends per-line fees
+        delivery_fee: item.delivery_fee ?? 0,
       });
     }
     return order_id;
@@ -141,6 +105,8 @@ const Order = {
         o.status,
         o.fulfillment_type,
         o.priority,
+        o.platform_fee,
+        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -186,6 +152,8 @@ const Order = {
         o.status,
         o.fulfillment_type,
         o.priority,
+        o.platform_fee,
+        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -235,6 +203,8 @@ const Order = {
         note_for_restaurant: o.note_for_restaurant,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
+        platform_fee: o.platform_fee,
+        delivery_fee: o.delivery_fee,
         created_at: o.created_at,
         updated_at: o.updated_at,
         items: its,
@@ -264,6 +234,8 @@ const Order = {
         o.status,
         o.fulfillment_type,
         o.priority,
+        o.platform_fee,
+        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -303,6 +275,8 @@ const Order = {
             note_for_restaurant: o.note_for_restaurant,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
+            platform_fee: o.platform_fee,
+            delivery_fee: o.delivery_fee,
             created_at: o.created_at,
             updated_at: o.updated_at,
             items: o.items,
@@ -329,6 +303,8 @@ const Order = {
         o.status,
         o.fulfillment_type,
         o.priority,
+        o.platform_fee,
+        o.delivery_fee,
         o.created_at,
         o.updated_at
       FROM orders o
@@ -361,9 +337,7 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
-      let items_subtotal = 0;
-      for (const it of its) items_subtotal += Number(it.subtotal || 0);
-
+      // Do NOT recompute anything; just restructure for app convenience.
       result.push({
         order_id: o.order_id,
         status: o.status,
@@ -381,9 +355,10 @@ const Order = {
         deliver_to: o.delivery_address,
 
         totals: {
-          items_subtotal,
-          platform_fee: 0,
-          delivery_fee: 0,
+          // Forward the stored values directly
+          items_subtotal: null, // not stored at order level; FE can compute if needed
+          platform_fee: o.platform_fee ?? 0,
+          delivery_fee: o.delivery_fee ?? 0,
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
         },
@@ -441,8 +416,6 @@ const Order = {
     ]);
     return r.affectedRows;
   },
-
-  computeTotals,
 };
 
 module.exports = Order;

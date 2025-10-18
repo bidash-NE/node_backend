@@ -54,8 +54,10 @@ async function attachRealtime(server) {
     const { user_id, role } = socket.user || {};
     if (!user_id) return socket.disconnect(true);
 
+    // Each socket has at least their user room
     socket.join(roomUser(user_id));
 
+    // Merchants can join one or many business rooms
     if (role === "merchant") {
       const auth = socket.handshake.auth || {};
       let mids = [];
@@ -66,9 +68,10 @@ async function attachRealtime(server) {
       mids = mids.filter((m) => Number.isFinite(m) && m > 0);
       mids.forEach((mid) => socket.join(roomMerchant(mid)));
 
-      socket.on("merchant:notify:delivered", () => {}); // no-op
+      socket.on("merchant:notify:delivered", () => {}); // placeholder
     }
 
+    // Optional: per-order room for granular updates
     socket.on("order:join", ({ orderId }) => {
       if (orderId) socket.join(roomOrder(orderId));
     });
@@ -98,11 +101,11 @@ async function insertAndEmitNotification({
         body: body_preview,
         totals: totals
           ? {
-              items_subtotal: Number(totals.items_subtotal || 0),
-              platform_fee_total: Number(totals.platform_fee_total || 0),
-              delivery_fee_total: Number(totals.delivery_fee_total || 0),
-              discount_amount: Number(totals.discount_amount || 0),
-              total_amount: Number(totals.total_amount || 0),
+              items_subtotal: totals.items_subtotal ?? null,
+              platform_fee_total: totals.platform_fee_total ?? null,
+              delivery_fee_total: totals.delivery_fee_total ?? null,
+              discount_amount: totals.discount_amount ?? null,
+              total_amount: totals.total_amount ?? null,
             }
           : null,
       },
