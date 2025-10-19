@@ -8,16 +8,18 @@ let io = null;
 const events = new EventEmitter();
 events.setMaxListeners(0);
 
+/* ───────── rooms ───────── */
 const roomUser = (id) => `user:${id}`;
-const roomMerchant = (bid) => `merchant:${bid}`;
-const roomOrder = (oid) => `order:${oid}`;
+const roomBusiness = (bid) => `business:${bid}`;
 
-function isMerchantOnline(merchant_id) {
+/* ───────── online checks ───────── */
+function isBusinessOnline(business_id) {
   if (!io) return false;
-  const set = io.sockets.adapter.rooms.get(roomMerchant(merchant_id));
+  const set = io.sockets.adapter.rooms.get(roomBusiness(business_id));
   return !!(set && set.size > 0);
 }
 
+/* ───────── attach ───────── */
 async function attachRealtime(server) {
   io = new Server(server, {
     transports: ["websocket"],
@@ -54,33 +56,45 @@ async function attachRealtime(server) {
     const { user_id, role } = socket.user || {};
     if (!user_id) return socket.disconnect(true);
 
-    // Each socket has at least their user room
+    // Always join the user's personal room
     socket.join(roomUser(user_id));
 
-    // Merchants can join one or many business rooms
+    // Merchants (store/staff sessions) join one or many business rooms
     if (role === "merchant") {
       const auth = socket.handshake.auth || {};
-      let mids = [];
-      if (Array.isArray(auth.business_ids))
-        mids = auth.business_ids.map(Number);
-      else if (auth.business_id != null) mids = [Number(auth.business_id)];
-      else if (auth.merchantId != null) mids = [Number(auth.merchantId)];
-      mids = mids.filter((m) => Number.isFinite(m) && m > 0);
-      mids.forEach((mid) => socket.join(roomMerchant(mid)));
+      let bids = [];
 
-      socket.on("merchant:notify:delivered", () => {}); // placeholder
+      // Prefer new fields
+      if (Array.isArray(auth.business_ids))
+        bids = auth.business_ids.map(Number);
+      else if (auth.business_id != null) bids = [Number(auth.business_id)];
+      // Backward compat: if old clients still send merchantId, treat it as business_id
+      else if (auth.merchantId != null) bids = [Number(auth.merchantId)];
+
+      bids = bids.filter((b) => Number.isFinite(b) && b > 0);
+      bids.forEach((bid) => socket.join(roomBusiness(bid)));
+
+      socket.on("business:notify:delivered", () => {
+        // placeholder for future delivered/seen events
+      });
     }
 
     // Optional: per-order room for granular updates
     socket.on("order:join", ({ orderId }) => {
-      if (orderId) socket.join(roomOrder(orderId));
+      if (orderId) socket.join(`order:${orderId}`);
     });
   });
 }
 
-/** Sends notify with exact totals coming from controller */
+/* ───────── notifications (business-scoped) ───────── */
+/**
+ * Insert+emit has moved to business_id semantics.
+ * Backward compat: if caller passes merchant_id, we treat it as business_id.
+ * DB insert itself is handled elsewhere; this function is the emitter.
+ */
 async function insertAndEmitNotification({
-  merchant_id,
+  business_id,
+  merchant_id, // backward compat alias (treated as business_id)
   user_id,
   order_id,
   title,
@@ -88,13 +102,19 @@ async function insertAndEmitNotification({
   type = "order:create",
   totals = null,
 }) {
+  const bid = Number(business_id ?? merchant_id ?? 0);
+  if (!bid || !user_id || !order_id || !type || !title || !body_preview) {
+    throw new Error("insertAndEmitNotification: missing required fields");
+  }
+
   const notification_id = randomUUID();
 
-  if (io && isMerchantOnline(merchant_id)) {
-    io.to(roomMerchant(merchant_id)).emit("notify", {
+  if (io && isBusinessOnline(bid)) {
+    io.to(roomBusiness(bid)).emit("notify", {
       id: notification_id,
       type,
       orderId: order_id,
+      business_id: bid,
       createdAt: Date.now(),
       data: {
         title,
@@ -114,10 +134,17 @@ async function insertAndEmitNotification({
   return { notification_id };
 }
 
+/* ───────── status broadcasting ───────── */
+/**
+ * Emit order status to:
+ *  - per-order room
+ *  - the user room
+ *  - all affected business rooms
+ */
 function broadcastOrderStatusToMany({
   order_id,
   user_id,
-  merchant_ids = [],
+  business_ids = [], // ✅ new param (array)
   status,
 }) {
   const ev = {
@@ -127,24 +154,36 @@ function broadcastOrderStatusToMany({
     createdAt: Date.now(),
     data: { status },
   };
-  io?.to(roomOrder(order_id)).emit("order:status", ev);
 
+  // Per-order room
+  io?.to?.(`order:${order_id}`)?.emit?.("order:status", ev);
+
+  // User room
   if (io && user_id) {
     const set = io.sockets.adapter.rooms.get(roomUser(user_id));
     if (set?.size) io.to(roomUser(user_id)).emit("order:status", ev);
   }
+
+  // Business rooms
   if (io) {
-    const mids = Array.isArray(merchant_ids) ? merchant_ids : [merchant_ids];
-    for (const mid of mids) {
-      const set = io.sockets.adapter.rooms.get(roomMerchant(mid));
-      if (set?.size) io.to(roomMerchant(mid)).emit("order:status", ev);
+    const bids = Array.isArray(business_ids) ? business_ids : [business_ids];
+    for (const bidRaw of bids) {
+      const bid = Number(bidRaw);
+      if (!Number.isFinite(bid) || bid <= 0) continue;
+      const set = io.sockets.adapter.rooms.get(roomBusiness(bid));
+      if (set?.size) io.to(roomBusiness(bid)).emit("order:status", ev);
     }
   }
 }
 
 module.exports = {
   attachRealtime,
-  insertAndEmitNotification,
-  broadcastOrderStatusToMany,
+  insertAndEmitNotification, // now business-scoped, merchant_id is alias only
+  broadcastOrderStatusToMany, // expects { business_ids: [...] }
   events,
+
+  // Exported for tests/other modules if needed
+  roomUser,
+  roomBusiness,
+  isBusinessOnline,
 };

@@ -129,7 +129,7 @@ async function initOrderManagementTable() {
     CREATE TABLE IF NOT EXISTS order_notification (
       notification_id CHAR(36) PRIMARY KEY,    -- UUID
       order_id VARCHAR(12) NOT NULL,
-      merchant_id INT NOT NULL,
+      business_id INT NOT NULL,
       user_id INT NOT NULL,
       type VARCHAR(64) NOT NULL,               -- 'order:create','order:status', etc.
       title VARCHAR(160) NOT NULL,             -- e.g. 'New order #10235'
@@ -138,8 +138,8 @@ async function initOrderManagementTable() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       delivered_at TIMESTAMP NULL,
       seen_at TIMESTAMP NULL,
-      INDEX idx_notif_merchant_time (merchant_id, created_at DESC),
-      INDEX idx_notif_merchant_unread (merchant_id, is_read, created_at DESC),
+      INDEX idx_notif_merchant_time (business_id, created_at DESC),
+      INDEX idx_notif_merchant_unread (business_id, is_read, created_at DESC),
       INDEX idx_notif_order (order_id)
     );
   `);

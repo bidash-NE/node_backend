@@ -88,7 +88,7 @@ exports.createOrder = async (req, res) => {
       fulfillment_type: fulfillment, // normalize usage
     });
 
-    // 2) Group items by merchant for notifications
+    // 2) Group items by business_id for notifications
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -96,43 +96,37 @@ exports.createOrder = async (req, res) => {
       if (!byBiz.has(bid)) byBiz.set(bid, []);
       byBiz.get(bid).push(it);
     }
-    const merchantIds = Array.from(byBiz.keys());
+    const businessIds = Array.from(byBiz.keys());
 
     // 3) Insert+emit notifications that include EXACT total_amount from FE
-    for (const merchant_id of merchantIds) {
-      const [[biz]] = await db.query(
-        `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-        [merchant_id]
-      );
-      if (!biz) continue;
-
-      const its = byBiz.get(merchant_id) || [];
+    for (const business_id of businessIds) {
+      const its = byBiz.get(business_id) || [];
       const title = `New order #${order_id}`;
       const preview = buildPreview(its, payload.total_amount);
 
-      await insertAndEmitNotification({
-        merchant_id,
-        user_id: payload.user_id,
-        order_id,
-        title,
-        body_preview: preview,
-        type: "order:create",
-        totals: {
-          // forward FE values; do NOT compute/round on backend
-          items_subtotal: null,
-          platform_fee_total: payload.platform_fee ?? null, // order-level platform fee
-          delivery_fee_total: null, // per-line; not aggregated here
-          discount_amount: payload.discount_amount,
-          total_amount: payload.total_amount, // exact FE total
-        },
-      });
+      try {
+        await insertAndEmitNotification({
+          business_id, // ✅ store key
+          user_id: payload.user_id, // buyer
+          order_id,
+          type: "order:create",
+          title,
+          body_preview: preview,
+        });
+      } catch (e) {
+        console.error("[NOTIFY INSERT FAILED]", {
+          order_id,
+          business_id,
+          err: e?.message,
+        });
+      }
     }
 
-    // 4) Broadcast status to user & merchants
+    // 4) Broadcast status to user & businesses
     broadcastOrderStatusToMany({
       order_id,
       user_id: payload.user_id,
-      merchant_ids: merchantIds,
+      business_ids: businessIds, // ✅ emit to business rooms
       status: (payload.status || "PENDING").toUpperCase(),
     });
 
@@ -220,7 +214,7 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Always fetch user_id from DB so we can emit to the user's room
+    // Fetch user_id (for emitting to user room)
     const [[orderRow]] = await db.query(
       `SELECT user_id FROM orders WHERE order_id = ? LIMIT 1`,
       [order_id]
@@ -235,16 +229,17 @@ exports.updateOrderStatus = async (req, res) => {
     const affected = await Order.updateStatus(order_id, normalized, reasonStr);
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
+    // Get affected businesses for this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
-    const merchant_ids = bizRows.map((r) => r.business_id);
+    const business_ids = bizRows.map((r) => r.business_id);
 
     broadcastOrderStatusToMany({
       order_id,
       user_id,
-      merchant_ids,
+      business_ids, // ✅ business scoped
       status: normalized,
     });
 
