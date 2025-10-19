@@ -12,6 +12,7 @@ on:
       - "driver/**"
       - "admin/**"
       - "Map_and_location_services/**"
+      - "wallet_payment/**"
       - "k8s/**"
       - ".github/workflows/deploy.yml"
 
@@ -29,6 +30,7 @@ jobs:
       driver: ${{ steps.filter.outputs.driver }}
       admin: ${{ steps.filter.outputs.admin }}
       map_location: ${{ steps.filter.outputs.map_location }}
+      wallet_payment: ${{ steps.filter.outputs.wallet_payment }}
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +47,7 @@ jobs:
             driver:               'driver/**'
             admin:                'admin/**'
             map_location:         'Map_and_location_services/**'
+            wallet_payment:       'wallet_payment/**'
             k8s:                  'k8s/**'
             any:
               - 'food/**'
@@ -55,6 +58,7 @@ jobs:
               - 'driver/**'
               - 'admin/**'
               - 'Map_and_location_services/**'
+              - 'wallet_payment/**'
               - 'k8s/**'
 
   build:
@@ -150,6 +154,16 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:${{ github.sha }}
 
+      - name: Build & push Wallet Payment
+        if: needs.changes.outputs.wallet_payment == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./wallet_payment
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:latest
+            ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:${{ github.sha }}
+
   deploy:
     name: Deploy changed services to k3s (prod)
     runs-on: self-hosted
@@ -168,6 +182,7 @@ jobs:
       DRIVER_CHANGED: ${{ needs.changes.outputs.driver }}
       ADMIN_CHANGED: ${{ needs.changes.outputs.admin }}
       MAP_CHANGED: ${{ needs.changes.outputs.map_location }}
+      WALLET_CHANGED: ${{ needs.changes.outputs.wallet_payment }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -189,9 +204,9 @@ jobs:
           kubectl -n "${NAMESPACE}" get deploy -o name || true
 
           deploy_if_exists () {
-            local name="$1"      # deployment name
-            local container="$2" # container name in pod spec
-            local image="$3"     # image:tag
+            local name="$1"
+            local container="$2"
+            local image="$3"
             if kubectl -n "${NAMESPACE}" get deploy/"${name}" >/dev/null 2>&1; then
               echo "Updating ${name} (${container}) -> ${image}"
               kubectl -n "${NAMESPACE}" set image deploy/"${name}" "${container}"="${image}"
@@ -225,6 +240,8 @@ jobs:
           if [ "${MAP_CHANGED:-}" = "true" ]; then
             deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
           fi
+          if [ "${WALLET_CHANGED:-}" = "true" ]; then
+            deploy_if_exists wallet-payment wallet-payment "${DOCKER_USER}/superapp-wallet-payment:${SHA}"
+          fi
 
-          # Ensure step success even if none were changed
           exit 0
