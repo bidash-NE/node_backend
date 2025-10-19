@@ -311,21 +311,26 @@ async function updateMerchantDetailsModel(business_id, data) {
 
 /* ------------------------ FINDERS ------------------------ */
 
-async function findCandidatesByUsername(user_name) {
-  const uname = String(user_name || "");
+/**
+ * Find by email (case-insensitive). We return most-recent accounts first
+ * to mirror previous username-based behavior.
+ */
+async function findCandidatesByEmail(email) {
+  const em = String(email || "").trim();
+  if (!em) return [];
   const [rows] = await db.query(
     `
     SELECT user_id, user_name, email, phone, role, password_hash, is_active
       FROM users
-     WHERE BINARY TRIM(user_name) = BINARY TRIM(?)
+     WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
      ORDER BY user_id DESC
     `,
-    [uname]
+    [em]
   );
   return rows || [];
 }
 
-/* ------------------------ owners by kind (unchanged) ------------------------ */
+/* (kept) owners by kind helpers below */
 
 async function getOwnersByKind(kind) {
   const k = String(kind || "").toLowerCase();
@@ -439,7 +444,7 @@ async function getMartOwners() {
 module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByUsername, // case-sensitive now
+  findCandidatesByEmail, // ← CHANGED export
   getOwnersByKind,
   getFoodOwners,
   getMartOwners,

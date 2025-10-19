@@ -8,7 +8,7 @@ const db = require("../config/db");
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByUsername, // ← from ../models/merchantRegistrationModel
+  findCandidatesByEmail, // ← CHANGED: email-based finder
 } = require("../models/merchantRegistrationModel");
 
 /* ---------------- file path helpers ---------------- */
@@ -228,19 +228,17 @@ async function updateMerchant(req, res) {
   }
 }
 
-/* ---------------- login (username+password ONLY) ---------------- */
+/* ---------------- login (email + password ONLY) ---------------- */
 
-async function loginByUsername(req, res) {
+async function loginByEmail(req, res) {
   try {
-    const { user_name, password } = req.body || {};
-    if (!user_name || !password) {
-      return res
-        .status(400)
-        .json({ error: "user_name and password are required" });
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: "email and password are required" });
     }
 
-    // 1) Fetch exact-case username candidates (case-sensitive)
-    const candidates = await findCandidatesByUsername(user_name); // newest first
+    // 1) Fetch by email (case-insensitive)
+    const candidates = await findCandidatesByEmail(email); // newest first
     if (!candidates.length)
       return res.status(404).json({ error: "User not found" });
 
@@ -263,6 +261,7 @@ async function loginByUsername(req, res) {
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
+    // Pull latest (or primary) business attached to this user
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
@@ -307,7 +306,7 @@ async function loginByUsername(req, res) {
       },
     });
   } catch (err) {
-    console.error("loginByUsername error:", err);
+    console.error("loginByEmail error:", err);
     return res.status(500).json({ error: "Login failed due to server error" });
   }
 }
@@ -459,7 +458,7 @@ async function listMartOwners(req, res) {
 module.exports = {
   registerMerchant,
   updateMerchant,
-  loginByUsername,
+  loginByEmail, // ← CHANGED export
   listFoodOwners,
   listMartOwners,
 };

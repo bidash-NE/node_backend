@@ -6,7 +6,7 @@ const upload = require("../middlewares/upload");
 
 const {
   registerMerchant,
-  loginByUsername,
+  loginByEmail,
   updateMerchant,
   listFoodOwners,
   listMartOwners,
@@ -32,7 +32,7 @@ router.post("/register", maybeMulter, registerMerchant);
 router.put("/update/:businessId", maybeMulter, updateMerchant);
 
 // Login by username
-router.post("/login-username", loginByUsername);
+router.post("/login-email", loginByEmail);
 
 // List business owners
 router.get("/owners/food", listFoodOwners);
