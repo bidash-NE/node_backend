@@ -2,14 +2,19 @@
 const router = require("express").Router();
 const ctrl = require("../controllers/walletController");
 
-// MAIN REST ENDPOINTS
-router.post("/create", ctrl.create); // POST /wallet (JSON)
+// CREATE (JSON)
+router.post("/create", ctrl.create);
 
-router.get("/getall", ctrl.getAll); // GET /wallet
-router.get("/getone/:wallet_id", ctrl.getByIdParam); // GET /wallet/NET000004
+// READ
+router.get("/getall", ctrl.getAll); // Get all wallets
+router.get("/getone/:wallet_id", ctrl.getByIdParam); // Get one by wallet_id
+router.get("/:wallet_id", ctrl.getByIdParam); // Alt shorthand
+router.get("/getbyuser/:user_id", ctrl.getByUserId); // ✅ Get by user_id
 
-router.put("/:wallet_id/:status", ctrl.updateStatusByParam); // PUT /wallet/NET000004/ACTIVE
+// UPDATE
+router.put("/:wallet_id/:status", ctrl.updateStatusByParam);
 
-router.delete("/delete/:wallet_id", ctrl.removeByParam); // DELETE /wallet/NET000004
+// DELETE
+router.delete("/delete/:wallet_id", ctrl.removeByParam);
 
 module.exports = router;

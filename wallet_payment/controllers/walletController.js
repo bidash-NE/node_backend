@@ -2,6 +2,7 @@
 const {
   createWallet,
   getWallet,
+  getWalletByUserId,
   listWallets,
   updateWalletStatus,
   deleteWallet,
@@ -17,21 +18,15 @@ function mapLocalTimes(row) {
   };
 }
 
-/* -------------------- POST /wallet (JSON only) -------------------- */
+// ---------------- POST /wallet/create ----------------
 exports.create = async (req, res) => {
   try {
     const { user_id, status = "ACTIVE" } = req.body || {};
 
-    if (
-      user_id === undefined ||
-      user_id === null ||
-      !Number.isInteger(user_id) ||
-      user_id <= 0
-    ) {
+    if (!user_id || !Number.isInteger(user_id) || user_id <= 0) {
       return res.status(400).json({
         success: false,
-        field: "user_id",
-        message: "user_id must be a positive integer.",
+        message: "user_id must be a valid positive integer.",
       });
     }
 
@@ -39,28 +34,21 @@ exports.create = async (req, res) => {
     if (!["ACTIVE", "INACTIVE"].includes(st)) {
       return res.status(400).json({
         success: false,
-        field: "status",
         message: "status must be either ACTIVE or INACTIVE.",
       });
     }
 
     const result = await createWallet({ user_id, status: st });
-
-    if (result?.error === "USER_NOT_FOUND") {
-      return res.status(404).json({
-        success: false,
-        field: "user_id",
-        message: `User with ID ${user_id} does not exist.`,
-      });
-    }
-    if (result?.error === "WALLET_EXISTS") {
+    if (result?.error === "USER_NOT_FOUND")
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found." });
+    if (result?.error === "WALLET_EXISTS")
       return res.status(409).json({
         success: false,
-        field: "user_id",
         message: "Wallet already exists for this user.",
         existing: mapLocalTimes(result.wallet),
       });
-    }
 
     return res.json({
       success: true,
@@ -68,74 +56,72 @@ exports.create = async (req, res) => {
       data: mapLocalTimes(result),
     });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: "Server error while creating wallet.",
-      error: e.message,
-    });
+    res.status(500).json({ success: false, message: e.message });
   }
 };
 
-/* -------------------- GET /wallet (get all) -------------------- */
+// ---------------- GET /wallet/getall ----------------
 exports.getAll = async (req, res) => {
   try {
     const { limit = 50, offset = 0, status = null } = req.query || {};
     const rows = await listWallets({ limit, offset, status });
-    return res.json({
+    res.json({
       success: true,
       count: rows.length,
       data: rows.map(mapLocalTimes),
     });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: "Unexpected server error.",
-      error: e.message,
-    });
+    res.status(500).json({ success: false, message: e.message });
   }
 };
 
-/* -------------------- GET /wallet/:wallet_id -------------------- */
+// ---------------- GET /wallet/getone/:wallet_id ----------------
 exports.getByIdParam = async (req, res) => {
   try {
-    const wallet_id = req.params.wallet_id;
-    if (!wallet_id)
-      return res
-        .status(400)
-        .json({ success: false, message: "wallet_id required in URL." });
-
-    const wallet = await getWallet({ key: wallet_id, user_id: null });
+    const { wallet_id } = req.params;
+    const wallet = await getWallet({ key: wallet_id });
     if (!wallet)
       return res
         .status(404)
         .json({ success: false, message: "Wallet not found." });
-
-    return res.json({ success: true, data: mapLocalTimes(wallet) });
+    res.json({ success: true, data: mapLocalTimes(wallet) });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: "Unexpected server error.",
-      error: e.message,
-    });
+    res.status(500).json({ success: false, message: e.message });
   }
 };
 
-/* -------------------- PUT /wallet/:wallet_id/:status -------------------- */
-exports.updateStatusByParam = async (req, res) => {
+// ---------------- ✅ GET /wallet/getbyuser/:user_id ----------------
+exports.getByUserId = async (req, res) => {
   try {
-    const { wallet_id, status } = req.params || {};
-    if (!wallet_id)
+    const { user_id } = req.params;
+    if (!user_id || isNaN(user_id)) {
       return res
         .status(400)
-        .json({ success: false, message: "wallet_id required in URL." });
+        .json({ success: false, message: "Invalid user_id." });
+    }
+    const wallet = await getWalletByUserId(user_id);
+    if (!wallet)
+      return res
+        .status(404)
+        .json({ success: false, message: "Wallet not found for this user." });
+    res.json({ success: true, data: mapLocalTimes(wallet) });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+};
 
-    const st = String(status || "").toUpperCase();
-    if (!["ACTIVE", "INACTIVE"].includes(st))
+// ---------------- PUT /wallet/:wallet_id/:status ----------------
+exports.updateStatusByParam = async (req, res) => {
+  try {
+    const { wallet_id, status } = req.params;
+    const st = String(status).toUpperCase();
+
+    if (!["ACTIVE", "INACTIVE"].includes(st)) {
       return res.status(400).json({
         success: false,
-        field: "status",
         message: "status must be either ACTIVE or INACTIVE.",
       });
+    }
 
     const updated = await updateWalletStatus({ key: wallet_id, status: st });
     if (!updated)
@@ -143,47 +129,34 @@ exports.updateStatusByParam = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Wallet not found." });
 
-    return res.json({
+    res.json({
       success: true,
       message: "Wallet status updated successfully.",
       data: mapLocalTimes(updated),
     });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: "Unexpected server error.",
-      error: e.message,
-    });
+    res.status(500).json({ success: false, message: e.message });
   }
 };
 
-/* -------------------- DELETE /wallet/:wallet_id -------------------- */
+// ---------------- DELETE /wallet/delete/:wallet_id ----------------
 exports.removeByParam = async (req, res) => {
   try {
-    const wallet_id = req.params.wallet_id;
-    if (!wallet_id)
-      return res
-        .status(400)
-        .json({ success: false, message: "wallet_id required in URL." });
-
+    const { wallet_id } = req.params;
     const out = await deleteWallet({ key: wallet_id });
+
     if (!out.ok && out.code === "NOT_FOUND")
       return res
         .status(404)
         .json({ success: false, message: "Wallet not found." });
-
     if (!out.ok && out.code === "HAS_TRANSACTIONS")
       return res.status(409).json({
         success: false,
         message: "Cannot delete wallet with transactions.",
       });
 
-    return res.json({ success: true, message: "Wallet deleted successfully." });
+    res.json({ success: true, message: "Wallet deleted successfully." });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: "Unexpected server error.",
-      error: e.message,
-    });
+    res.status(500).json({ success: false, message: e.message });
   }
 };
