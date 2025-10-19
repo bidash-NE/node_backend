@@ -25,6 +25,13 @@ app.use(morgan("dev"));
 
     // 3) Routes
     app.use("/wallet", walletRoutes);
+    app.get("/wallet-payment/health", (_req, res) => {
+      res.json({ ok: true, now: new Date().toISOString() });
+    });
+    // optional: leave /health too if you want
+    app.get("/health", (_req, res) => {
+      res.json({ ok: true, now: new Date().toISOString() });
+    });
 
     app.get("/health", async (_, res) => {
       const [r] = await db.query("SELECT NOW() AS now");
