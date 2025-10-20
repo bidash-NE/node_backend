@@ -177,7 +177,7 @@ const registerUser = async (req, res) => {
   }
 };
 
-/* ===================== LOGIN (sets is_active=1) ===================== */
+/* ===================== LOGIN (sets is_verified=1) ===================== */
 
 const loginUser = async (req, res) => {
   const { phone, password, role } = req.body || {};
@@ -185,7 +185,7 @@ const loginUser = async (req, res) => {
   try {
     // 1) Find by phone
     const [rows] = await pool.query(
-      `SELECT user_id, user_name, phone, email, role, password_hash, is_active
+      `SELECT user_id, user_name, phone, email, role, password_hash, is_active, is_verified
        FROM users
        WHERE phone = ?`,
       [phone]
@@ -199,13 +199,18 @@ const loginUser = async (req, res) => {
 
     const user = rows[0];
 
-    // 2) Check password
+    // 2) Optionally enforce active accounts (kept from your code)
+    if (Number(user.is_active) !== 1) {
+      return res.status(403).json({ error: "Account is deactivated." });
+    }
+
+    // 3) Check password
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 3) Role allowlist
+    // 4) Role allowlist (admin, super admin, user, merchant, driver)
     const allowed = new Set([
       "admin",
       "super admin",
@@ -226,7 +231,7 @@ const loginUser = async (req, res) => {
         .json({ error: `Role mismatch. Expected: ${user.role}` });
     }
 
-    // 4) If merchant, fetch owner_type from merchant_business_details
+    // 5) If merchant, fetch owner_type from merchant_business_details
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -235,7 +240,7 @@ const loginUser = async (req, res) => {
 
     if (user.role === "merchant" || role === "merchant") {
       const [mbd] = await pool.query(
-        `SELECT owner_type, business_id, business_name, business_logo, address
+        `SELECT owner_type,business_id, business_name,business_logo,address
            FROM merchant_business_details
           WHERE user_id = ?
           ORDER BY created_at DESC, business_id DESC
@@ -251,13 +256,13 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 5) Mark as active on successful login
+    // 6) Mark as verified on successful login
     await pool.query(
-      `UPDATE users SET is_active = 1, last_login = NOW() WHERE user_id = ?`,
+      `UPDATE users SET is_verified = 1, last_login = NOW() WHERE user_id = ?`,
       [user.user_id]
     );
 
-    // 6) Issue tokens
+    // 7) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -272,7 +277,7 @@ const loginUser = async (req, res) => {
       expiresIn: "10m",
     });
 
-    // 7) Response
+    // 8) Response (include owner_type if merchant)
     return res.status(200).json({
       message: "Login successful",
       token: {
@@ -287,6 +292,7 @@ const loginUser = async (req, res) => {
         phone: user.phone,
         role: user.role,
         email: user.email,
+        is_verified: 1, // reflects post-login state
         ...(user.role === "merchant" || role === "merchant"
           ? { owner_type, business_id, business_name, business_logo, address }
           : {}),
@@ -298,7 +304,7 @@ const loginUser = async (req, res) => {
   }
 };
 
-/* ===================== LOGOUT (sets is_active=0) ===================== */
+/* ===================== LOGOUT (sets is_verified=0) ===================== */
 /**
  * POST /api/auth/logout
  * Accepts either:
@@ -332,17 +338,15 @@ const logoutUser = async (req, res) => {
         .json({ error: "Missing user_id or invalid/expired token" });
     }
 
-    // Set inactive
+    // Set unverified
     const [r] = await pool.query(
-      `UPDATE users SET is_active = 0 WHERE user_id = ?`,
+      `UPDATE users SET is_verified = 0 WHERE user_id = ?`,
       [userId]
     );
 
     if (r.affectedRows === 0) {
       return res.status(404).json({ error: "User not found" });
     }
-
-    // (Optional) You can also blacklist the refresh token on your side if you store them
 
     return res.status(200).json({ message: "Logout successful" });
   } catch (err) {
@@ -353,6 +357,6 @@ const logoutUser = async (req, res) => {
 
 module.exports = {
   registerUser,
-  loginUser, // now sets is_active=1 and updates last_login
-  logoutUser, // new: sets is_active=0
+  loginUser, // now sets is_verified=1 + updates last_login
+  logoutUser, // sets is_verified=0
 };

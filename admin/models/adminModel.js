@@ -35,7 +35,7 @@ async function logAdmin(conn, actorUserId, adminName, activity) {
 // ✅ Fetch users with role 'user' (now includes profile_image)
 async function fetchUsersByRole() {
   const sql = `
-    SELECT user_id, user_name, email, phone, is_active, role, profile_image
+    SELECT user_id, user_name, email, phone,is_verified, is_active, role, profile_image
     FROM users
     WHERE role = 'user'
     ORDER BY user_name ASC
@@ -47,7 +47,7 @@ async function fetchUsersByRole() {
 // ✅ Fetch drivers with license and vehicle info (now includes profile_image)
 async function fetchDrivers() {
   const userQuery = `
-    SELECT user_id, user_name, email, phone, is_active, role, profile_image
+    SELECT user_id, user_name, email, phone, is_verified, is_active, role, profile_image
     FROM users
     WHERE role = 'driver'
     ORDER BY user_name ASC
@@ -79,6 +79,7 @@ async function fetchDrivers() {
         user_name: user.user_name,
         email: user.email,
         phone: user.phone,
+        is_verified: user.is_verified,
         is_active: user.is_active,
         role: user.role,
         profile_image: user.profile_image || null,
@@ -112,6 +113,7 @@ async function fetchMerchantsWithBusiness() {
       u.user_name,
       u.email,
       u.phone,
+      u.is_verified,
       u.is_active,
       u.role,
       COALESCE(u.profile_image, mbd.business_logo) AS profile_image,
