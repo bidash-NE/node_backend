@@ -1,7 +1,10 @@
+// controllers/authController.js
 const pool = require("../config/db");
 const DriverMongo = require("../models/driverModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+
+/* ===================== REGISTER ===================== */
 
 const registerUser = async (req, res) => {
   let user_id = null;
@@ -92,7 +95,7 @@ const registerUser = async (req, res) => {
         await connection.query(
           `INSERT INTO driver_vehicles (
             driver_id, make, model, year, color, license_plate, vehicle_type,
-            actual_capacity, available_capacity, features, insurance_expiry,code
+            actual_capacity, available_capacity, features, insurance_expiry, code
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             driver_id,
@@ -174,6 +177,8 @@ const registerUser = async (req, res) => {
   }
 };
 
+/* ===================== LOGIN (sets is_active=1) ===================== */
+
 const loginUser = async (req, res) => {
   const { phone, password, role } = req.body || {};
 
@@ -194,18 +199,13 @@ const loginUser = async (req, res) => {
 
     const user = rows[0];
 
-    // 2) Require active account
-    if (Number(user.is_active) !== 1) {
-      return res.status(403).json({ error: "Account is deactivated." });
-    }
-
-    // 3) Check password
+    // 2) Check password
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 4) Role allowlist (admin, super admin, user, merchant, driver)
+    // 3) Role allowlist
     const allowed = new Set([
       "admin",
       "super admin",
@@ -226,16 +226,19 @@ const loginUser = async (req, res) => {
         .json({ error: `Role mismatch. Expected: ${user.role}` });
     }
 
-    // 5) If merchant, fetch owner_type from merchant_business_details
+    // 4) If merchant, fetch owner_type from merchant_business_details
     let owner_type = null;
     let business_id = null;
     let business_name = null;
+    let business_logo = null;
+    let address = null;
 
     if (user.role === "merchant" || role === "merchant") {
       const [mbd] = await pool.query(
-        `SELECT owner_type,business_id, business_name,business_logo,address
+        `SELECT owner_type, business_id, business_name, business_logo, address
            FROM merchant_business_details
           WHERE user_id = ?
+          ORDER BY created_at DESC, business_id DESC
           LIMIT 1`,
         [user.user_id]
       );
@@ -247,6 +250,12 @@ const loginUser = async (req, res) => {
         address = mbd[0]?.address ?? null;
       }
     }
+
+    // 5) Mark as active on successful login
+    await pool.query(
+      `UPDATE users SET is_active = 1, last_login = NOW() WHERE user_id = ?`,
+      [user.user_id]
+    );
 
     // 6) Issue tokens
     const payload = {
@@ -263,7 +272,7 @@ const loginUser = async (req, res) => {
       expiresIn: "10m",
     });
 
-    // 7) Response (include owner_type if merchant)
+    // 7) Response
     return res.status(200).json({
       message: "Login successful",
       token: {
@@ -289,7 +298,61 @@ const loginUser = async (req, res) => {
   }
 };
 
+/* ===================== LOGOUT (sets is_active=0) ===================== */
+/**
+ * POST /api/auth/logout
+ * Accepts either:
+ *  - Authorization via x-access-token (preferred), or
+ *  - { user_id } in body (fallback when no auth middleware present)
+ */
+const logoutUser = async (req, res) => {
+  try {
+    let userId = null;
+
+    // Try token first (x-access-token)
+    const token = req.headers["x-access-token"];
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+        userId = decoded?.user_id ?? null;
+      } catch {
+        // ignore; will try body
+      }
+    }
+
+    // Fallback to body.user_id
+    if (!userId) {
+      const n = Number(req.body?.user_id);
+      if (Number.isInteger(n) && n > 0) userId = n;
+    }
+
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ error: "Missing user_id or invalid/expired token" });
+    }
+
+    // Set inactive
+    const [r] = await pool.query(
+      `UPDATE users SET is_active = 0 WHERE user_id = ?`,
+      [userId]
+    );
+
+    if (r.affectedRows === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // (Optional) You can also blacklist the refresh token on your side if you store them
+
+    return res.status(200).json({ message: "Logout successful" });
+  } catch (err) {
+    console.error("Logout error:", err);
+    return res.status(500).json({ error: "Logout failed due to server error" });
+  }
+};
+
 module.exports = {
   registerUser,
-  loginUser,
+  loginUser, // now sets is_active=1 and updates last_login
+  logoutUser, // new: sets is_active=0
 };

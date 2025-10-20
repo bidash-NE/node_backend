@@ -2,6 +2,7 @@ const express = require("express");
 const {
   registerUser,
   loginUser,
+  logoutUser,
 } = require("../controllers/registrationController");
 
 const router = express.Router();
@@ -11,5 +12,5 @@ router.post("/register", registerUser);
 
 // Login endpoint
 router.post("/login", loginUser);
-
+router.post("/logout", logoutUser);
 module.exports = router;
