@@ -236,12 +236,36 @@ exports.updateOrderStatus = async (req, res) => {
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
+    // Broadcast status
     broadcastOrderStatusToMany({
       order_id,
       user_id,
       business_ids, // ✅ business scoped
       status: normalized,
     });
+
+    // ✅ Also persist a notification row per business when COMPLETED
+    // (Remove the if-guard if you want to save on every status change)
+    try {
+      if (normalized === "COMPLETED") {
+        for (const business_id of business_ids) {
+          await insertAndEmitNotification({
+            business_id,
+            user_id, // customer
+            order_id,
+            type: "order:status",
+            title: `Order #${order_id} COMPLETED`,
+            body_preview: `Status changed to COMPLETED`,
+          });
+        }
+      }
+    } catch (e) {
+      console.error("[STATUS NOTIFY INSERT FAILED]", {
+        order_id,
+        status: normalized,
+        err: e?.message,
+      });
+    }
 
     res.json({ message: "Order status updated successfully" });
   } catch (err) {

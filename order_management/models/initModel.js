@@ -131,9 +131,9 @@ async function initOrderManagementTable() {
       order_id VARCHAR(12) NOT NULL,
       business_id INT NOT NULL,
       user_id INT NOT NULL,
-      type VARCHAR(64) NOT NULL,               -- 'order:create','order:status', etc.
-      title VARCHAR(160) NOT NULL,             -- e.g. 'New order #10235'
-      body_preview VARCHAR(220) NOT NULL,      -- e.g. '2× Chicken Rice · Nu 27.50'
+      type VARCHAR(64) NOT NULL,             
+      title VARCHAR(160) NOT NULL,           
+      body_preview VARCHAR(220) NOT NULL,     
       is_read TINYINT(1) NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       delivered_at TIMESTAMP NULL,
