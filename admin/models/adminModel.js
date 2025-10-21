@@ -16,7 +16,6 @@ function toDbStrOrNull(v) {
  * IMPORTANT:
  * For TIMESTAMP columns, always insert UTC at the DB layer.
  * MySQL will convert to the client's/session time zone on SELECT.
- * This avoids the +6h double-shift you saw.
  */
 async function logAdmin(conn, actorUserId, adminName, activity) {
   const sql = `
@@ -32,25 +31,45 @@ async function logAdmin(conn, actorUserId, adminName, activity) {
 
 // ===== existing + updated queries =====
 
-// ✅ Fetch users with role 'user' (now includes profile_image)
+// ✅ Users (role='user') + wallet_id
 async function fetchUsersByRole() {
   const sql = `
-    SELECT user_id, user_name, email, phone,is_verified, is_active, role, profile_image
-    FROM users
-    WHERE role = 'user'
-    ORDER BY user_name ASC
+    SELECT 
+      u.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
+      u.is_verified,
+      u.is_active,
+      u.role,
+      u.profile_image,
+      w.wallet_id
+    FROM users u
+    LEFT JOIN wallets w ON w.user_id = u.user_id
+    WHERE u.role = 'user'
+    ORDER BY u.user_name ASC
   `;
   const [rows] = await pool.query(sql);
   return rows;
 }
 
-// ✅ Fetch drivers with license and vehicle info (now includes profile_image)
+// ✅ Drivers (role='driver') + license/vehicles + wallet_id
 async function fetchDrivers() {
   const userQuery = `
-    SELECT user_id, user_name, email, phone, is_verified, is_active, role, profile_image
-    FROM users
-    WHERE role = 'driver'
-    ORDER BY user_name ASC
+    SELECT 
+      u.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
+      u.is_verified,
+      u.is_active,
+      u.role,
+      u.profile_image,
+      w.wallet_id
+    FROM users u
+    LEFT JOIN wallets w ON w.user_id = u.user_id
+    WHERE u.role = 'driver'
+    ORDER BY u.user_name ASC
   `;
   const [users] = await pool.query(userQuery);
 
@@ -83,6 +102,7 @@ async function fetchDrivers() {
         is_active: user.is_active,
         role: user.role,
         profile_image: user.profile_image || null,
+        wallet_id: user.wallet_id || null,
         driver_id,
         license_number,
         vehicles,
@@ -93,19 +113,29 @@ async function fetchDrivers() {
   return detailedDrivers;
 }
 
-// ✅ Fetch admins (admin + superadmin) (now includes profile_image)
+// ✅ Admins (role in 'admin','superadmin') + wallet_id
 async function fetchAdmins() {
   const sql = `
-    SELECT user_id, user_name, email, phone, is_active, role, profile_image
-    FROM users
-    WHERE role IN ('admin', 'superadmin')
-    ORDER BY user_name ASC
+    SELECT 
+      u.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
+      u.is_active,
+      u.role,
+      u.profile_image,
+      w.wallet_id
+    FROM users u
+    LEFT JOIN wallets w ON w.user_id = u.user_id
+    WHERE u.role IN ('admin', 'superadmin')
+    ORDER BY u.user_name ASC
   `;
   const [rows] = await pool.query(sql);
   return rows;
 }
 
-// ===== Merchants list with business details (uses business_logo as profile_image fallback) =====
+// ✅ Merchants with business details + wallet_id
+// (uses business_logo as profile_image fallback)
 async function fetchMerchantsWithBusiness() {
   const sql = `
     SELECT
@@ -117,6 +147,7 @@ async function fetchMerchantsWithBusiness() {
       u.is_active,
       u.role,
       COALESCE(u.profile_image, mbd.business_logo) AS profile_image,
+      w.wallet_id,
       mbd.business_id,
       mbd.business_name,
       mbd.owner_type,
@@ -129,6 +160,8 @@ async function fetchMerchantsWithBusiness() {
     FROM users u
     JOIN merchant_business_details mbd
       ON mbd.user_id = u.user_id
+    LEFT JOIN wallets w 
+      ON w.user_id = u.user_id
     WHERE u.role = 'merchant'
     ORDER BY mbd.created_at DESC, u.user_name ASC
   `;

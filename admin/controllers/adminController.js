@@ -77,7 +77,9 @@ exports.getAllMerchantsWithDetails = async (_req, res) => {
     });
   } catch (error) {
     console.error("Error fetching merchants:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error" });
+    return res
+      .status(500)
+      .json({ success: false, error: "Internal Server Error" });
   }
 };
 
@@ -93,14 +95,20 @@ exports.deactivateUser = async (req, res) => {
     );
 
     if (result.notFound)
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     if (result.already === "deactivated")
-      return res.status(200).json({ success: true, message: "Already deactivated" });
+      return res
+        .status(200)
+        .json({ success: true, message: "Already deactivated" });
 
     return res.status(200).json({ success: true, message: "User deactivated" });
   } catch (error) {
     console.error("Deactivate error:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error" });
+    return res
+      .status(500)
+      .json({ success: false, error: "Internal Server Error" });
   }
 };
 
@@ -115,14 +123,18 @@ exports.activateUser = async (req, res) => {
     );
 
     if (result.notFound)
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     if (result.already === "active")
       return res.status(200).json({ success: true, message: "Already active" });
 
     return res.status(200).json({ success: true, message: "User activated" });
   } catch (error) {
     console.error("Activate error:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error" });
+    return res
+      .status(500)
+      .json({ success: false, error: "Internal Server Error" });
   }
 };
 
@@ -137,15 +149,20 @@ exports.deleteUser = async (req, res) => {
     );
 
     if (result.notFound)
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     return res.status(200).json({ success: true, message: "User deleted" });
   } catch (error) {
     if (error && error.code === "ER_ROW_IS_REFERENCED_2") {
-      return res
-        .status(409)
-        .json({ success: false, error: "Cannot delete user due to linked records." });
+      return res.status(409).json({
+        success: false,
+        error: "Cannot delete user due to linked records.",
+      });
     }
     console.error("Delete error:", error);
-    return res.status(500).json({ success: false, error: "Internal Server Error" });
+    return res
+      .status(500)
+      .json({ success: false, error: "Internal Server Error" });
   }
 };
