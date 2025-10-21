@@ -12,5 +12,5 @@ router.post("/register", registerUser);
 
 // Login endpoint
 router.post("/login", loginUser);
-router.post("/logout", logoutUser);
+router.post("/logout/:user_id", logoutUser);
 module.exports = router;

@@ -311,44 +311,28 @@ const loginUser = async (req, res) => {
  *  - Authorization via x-access-token (preferred), or
  *  - { user_id } in body (fallback when no auth middleware present)
  */
+
 const logoutUser = async (req, res) => {
   try {
-    let userId = null;
+    const { user_id } = req.params; // ✅ read from param
+    const n = Number(user_id);
 
-    // Try token first (x-access-token)
-    const token = req.headers["x-access-token"];
-    if (token) {
-      try {
-        const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
-        userId = decoded?.user_id ?? null;
-      } catch {
-        // ignore; will try body
-      }
-    }
-
-    // Fallback to body.user_id
-    if (!userId) {
-      const n = Number(req.body?.user_id);
-      if (Number.isInteger(n) && n > 0) userId = n;
-    }
-
-    if (!userId) {
+    if (!Number.isInteger(n) || n <= 0) {
       return res
         .status(400)
-        .json({ error: "Missing user_id or invalid/expired token" });
+        .json({ error: "Invalid or missing user_id param" });
     }
 
-    // Set unverified
     const [r] = await pool.query(
       `UPDATE users SET is_verified = 0 WHERE user_id = ?`,
-      [userId]
+      [n]
     );
 
     if (r.affectedRows === 0) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    return res.status(200).json({ message: "Logout successful" });
+    return res.status(200).json({ message: "Logout successful", user_id: n });
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json({ error: "Logout failed due to server error" });
