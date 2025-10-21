@@ -8,7 +8,7 @@ const {
 
 const ALLOWED_STATUSES = new Set([
   "PENDING",
-  "REJECTED",
+  "DECLINED",
   "CONFIRMED",
   "PREPARING",
   "READY",
