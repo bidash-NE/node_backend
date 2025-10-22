@@ -86,24 +86,26 @@ async function initWalletTables() {
   // ---------- TRANSACTION TABLE ----------
   if (!txExists) {
     await db.query(`
-      CREATE TABLE wallet_transactions (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        transaction_id VARCHAR(32) NOT NULL UNIQUE,     -- TNX...
-        journal_code  VARCHAR(36) NULL,                 -- JRN... link DR/CR
-        tnx_from      VARCHAR(20) NULL,                 -- NET...
-        tnx_to        VARCHAR(20) NULL,                 -- NET...
-        amount        DECIMAL(12,2) NOT NULL,           -- Nu with 2 decimals
-        remark        ENUM('CR','DR') NOT NULL,
-        created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        KEY idx_journal_code (journal_code),
-        KEY idx_from (tnx_from),
-        KEY idx_to (tnx_to),
-        KEY idx_tx_created (created_at)
-      ) ENGINE=InnoDB
-        DEFAULT CHARSET=utf8mb4
-        COLLATE=utf8mb4_unicode_ci;
+     CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  transaction_id VARCHAR(32) NOT NULL UNIQUE,     -- TNX...
+  journal_code  VARCHAR(36) NULL,                 -- JRN... link DR/CR
+  tnx_from      VARCHAR(20) NULL,                 -- NET...
+  tnx_to        VARCHAR(20) NULL,                 -- NET...
+  amount        DECIMAL(12,2) NOT NULL,           -- Nu with 2 decimals
+  remark        ENUM('CR','DR') NOT NULL,         -- Credit/Debit indicator
+  note          VARCHAR(255) NULL,                -- ✅ Added for transfer notes
+  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_journal_code (journal_code),
+  KEY idx_from (tnx_from),
+  KEY idx_to (tnx_to),
+  KEY idx_tx_created (created_at)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
     `);
     console.log("✅ Created table: wallet_transactions");
   } else {

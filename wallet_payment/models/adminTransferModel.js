@@ -24,14 +24,14 @@ async function findAdminByUserName(conn, admin_name) {
 }
 
 /**
- * Admin Tip Transfer (Nu DECIMAL(12,2), journal_code links DR/CR):
- * - verifies admin by users.user_name + role
+ * Admin Tip Transfer:
+ * - verifies admin (user_name + role)
  * - locks both wallets (FOR UPDATE)
- * - validates ACTIVE & balance
- * - updates balances precisely (DECIMAL)
- * - inserts 2 wallet_transactions rows (DR admin, CR user) with same journal_code
- * - logs into admin_logs (user_id = recipient)
- * NOTE: tnx_from/tnx_to store WALLET IDs (e.g. NET000004), not numeric ids.
+ * - validates ACTIVE status and sufficient balance
+ * - updates balances (DECIMAL)
+ * - inserts 2 wallet_transactions (DR & CR) with wallet_id in tnx_from/tnx_to
+ * - inserts `note` into both records
+ * - logs admin action in admin_logs
  */
 async function adminTipTransfer({
   admin_name,
@@ -44,7 +44,7 @@ async function adminTipTransfer({
   try {
     await conn.beginTransaction();
 
-    // 1) Verify admin user
+    // 1️⃣ Verify admin user
     const adminUser = await findAdminByUserName(conn, admin_name);
     if (!adminUser) {
       await conn.rollback();
@@ -55,8 +55,7 @@ async function adminTipTransfer({
       };
     }
 
-    // 2) Lock wallets (we still read numeric ids for balance math,
-    //    but we will WRITE wallet_id strings into wallet_transactions)
+    // 2️⃣ Lock wallets
     const [[adminW]] = await conn.query(
       "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
       [admin_wallet_id]
@@ -66,7 +65,7 @@ async function adminTipTransfer({
       [user_wallet_id]
     );
 
-    // 3) Validate wallets
+    // 3️⃣ Validate wallets
     if (!adminW) {
       await conn.rollback();
       return { ok: false, status: 404, message: "Admin wallet not found." };
@@ -84,7 +83,7 @@ async function adminTipTransfer({
       return { ok: false, status: 409, message: "User wallet is not ACTIVE." };
     }
 
-    // 4) Validate amount
+    // 4️⃣ Validate amount
     const amt = Number(amount_nu);
     if (!isFinite(amt) || amt <= 0) {
       await conn.rollback();
@@ -102,9 +101,9 @@ async function adminTipTransfer({
         message: "Insufficient admin wallet balance.",
       };
     }
-    const amtStr = amt.toFixed(2); // exact DECIMAL
+    const amtStr = amt.toFixed(2);
 
-    // 5) Update balances (using numeric ids)
+    // 5️⃣ Update balances using numeric IDs
     await conn.query("UPDATE wallets SET amount = amount - ? WHERE id = ?", [
       amtStr,
       adminW.id,
@@ -114,28 +113,28 @@ async function adminTipTransfer({
       userW.id,
     ]);
 
-    // 6) Journal + transaction IDs
+    // 6️⃣ Create journal + transaction IDs
     const journal_code =
       "JRN" + crypto.randomBytes(6).toString("hex").toUpperCase();
     const txnAdmin = makeTxnId();
     const txnUser = makeTxnId();
 
-    // 7) Insert transactions — ✅ USE WALLET IDs in tnx_from/tnx_to
+    // 7️⃣ Insert wallet transactions (using wallet IDs + note)
     await conn.query(
       `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from,        tnx_to,          amount, remark)
-       VALUES (?,             ?,            ?,              ?,              ?,     'DR')`,
-      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr]
+        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
+       VALUES (?, ?, ?, ?, ?, 'DR', ?)`,
+      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note]
     );
 
     await conn.query(
       `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from,        tnx_to,          amount, remark)
-       VALUES (?,             ?,            ?,              ?,              ?,     'CR')`,
-      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr]
+        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
+       VALUES (?, ?, ?, ?, ?, 'CR', ?)`,
+      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note]
     );
 
-    // 8) Admin log
+    // 8️⃣ Log admin action
     const activity =
       `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
       `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
@@ -145,7 +144,7 @@ async function adminTipTransfer({
       [userW.user_id, adminUser.user_name, activity]
     );
 
-    // 9) Fresh balances
+    // 9️⃣ Get updated balances
     const [[adminNew]] = await conn.query(
       "SELECT * FROM wallets WHERE id = ?",
       [adminW.id]
@@ -156,10 +155,12 @@ async function adminTipTransfer({
 
     await conn.commit();
 
+    // ✅ Return response
     return {
       ok: true,
       journal_code,
       amount: amtStr,
+      note,
       admin_verified: {
         user_id: adminUser.user_id,
         user_name: adminUser.user_name,
@@ -182,7 +183,6 @@ async function adminTipTransfer({
             : Number(userNew.amount).toFixed(2),
       },
       transactions: { admin_dr: txnAdmin, user_cr: txnUser },
-      note,
     };
   } catch (err) {
     await conn.rollback();

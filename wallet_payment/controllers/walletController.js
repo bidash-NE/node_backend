@@ -189,7 +189,7 @@ async function adminTipTransferHandler(req, res) {
         .json({ success: false, message: "amount must be positive (Nu)." });
 
     const result = await adminTipTransfer({
-      admin_name: admin_name.trim(), // maps to users.user_name in the model
+      admin_name: admin_name.trim(),
       admin_wallet_id,
       user_wallet_id,
       amount_nu: Number(amount),
@@ -201,7 +201,7 @@ async function adminTipTransferHandler(req, res) {
         .status(result.status || 400)
         .json({ success: false, message: result.message });
 
-    return res.json({
+    res.json({
       success: true,
       message: "Tip transferred successfully.",
       data: result,
