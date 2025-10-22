@@ -28,9 +28,10 @@ async function findAdminByUserName(conn, admin_name) {
  * - verifies admin by users.user_name + role
  * - locks both wallets (FOR UPDATE)
  * - validates ACTIVE & balance
- * - updates balances precisely with string "xx.yy"
+ * - updates balances precisely (DECIMAL)
  * - inserts 2 wallet_transactions rows (DR admin, CR user) with same journal_code
  * - logs into admin_logs (user_id = recipient)
+ * NOTE: tnx_from/tnx_to store WALLET IDs (e.g. NET000004), not numeric ids.
  */
 async function adminTipTransfer({
   admin_name,
@@ -54,7 +55,8 @@ async function adminTipTransfer({
       };
     }
 
-    // 2) Lock wallets
+    // 2) Lock wallets (we still read numeric ids for balance math,
+    //    but we will WRITE wallet_id strings into wallet_transactions)
     const [[adminW]] = await conn.query(
       "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
       [admin_wallet_id]
@@ -102,7 +104,7 @@ async function adminTipTransfer({
     }
     const amtStr = amt.toFixed(2); // exact DECIMAL
 
-    // 5) Update balances
+    // 5) Update balances (using numeric ids)
     await conn.query("UPDATE wallets SET amount = amount - ? WHERE id = ?", [
       amtStr,
       adminW.id,
@@ -112,27 +114,28 @@ async function adminTipTransfer({
       userW.id,
     ]);
 
-    // 6) Journal code + transaction IDs
+    // 6) Journal + transaction IDs
     const journal_code =
       "JRN" + crypto.randomBytes(6).toString("hex").toUpperCase();
     const txnAdmin = makeTxnId();
     const txnUser = makeTxnId();
 
-    // 7) Insert transactions
+    // 7) Insert transactions — ✅ USE WALLET IDs in tnx_from/tnx_to
     await conn.query(
       `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark)
-       VALUES (?, ?, ?, ?, ?, 'DR')`,
-      [txnAdmin, journal_code, adminW.id, userW.id, amtStr]
-    );
-    await conn.query(
-      `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark)
-       VALUES (?, ?, ?, ?, ?, 'CR')`,
-      [txnUser, journal_code, adminW.id, userW.id, amtStr]
+        (transaction_id, journal_code, tnx_from,        tnx_to,          amount, remark)
+       VALUES (?,             ?,            ?,              ?,              ?,     'DR')`,
+      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr]
     );
 
-    // 8) Admin log (your schema)
+    await conn.query(
+      `INSERT INTO wallet_transactions 
+        (transaction_id, journal_code, tnx_from,        tnx_to,          amount, remark)
+       VALUES (?,             ?,            ?,              ?,              ?,     'CR')`,
+      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr]
+    );
+
+    // 8) Admin log
     const activity =
       `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
       `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
