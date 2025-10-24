@@ -8,7 +8,7 @@ require("dotenv").config();
 const db = require("./config/db"); // Promise pool connection
 const { initWalletTables } = require("./models/init");
 const walletRoutes = require("./routes/walletRoutes");
-
+const txRoutes = require("./routes/transactionHistoryRoutes");
 const app = express();
 
 /* ─────────────────── Middleware ─────────────────── */
@@ -28,6 +28,7 @@ app.use(morgan("dev"));
 
     // 3) Main routes
     app.use("/wallet", walletRoutes);
+    app.use("/transactions", txRoutes);
 
     // 4) Health endpoints
     app.get("/wallet/health", (_req, res) => {
