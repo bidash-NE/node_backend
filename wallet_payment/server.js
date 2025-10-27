@@ -57,7 +57,7 @@ app.use(morgan("dev"));
     // 5) Start server
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () =>
-      console.log(`💰 wallet_payment listening on :${PORT}`)
+      console.log(`💰 wallet_payment listening on port:${PORT}`)
     );
   } catch (err) {
     console.error("❌ Startup failed:", err.message);
