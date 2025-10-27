@@ -21,7 +21,7 @@ async function mapTypeNamesToIds(names) {
   if (!trimmed.length) return [];
   const [rows] = await db.query(
     `SELECT id, name FROM business_types
-      WHERE LOWER(name) IN (${trimmed.map(() => "LOWER(?)").join(",")})`,
+       WHERE LOWER(name) IN (${trimmed.map(() => "LOWER(?)").join(",")})`,
     trimmed
   );
   return rows.map((r) => r.id);
@@ -418,7 +418,7 @@ async function getOwnersByKind(kind) {
     closing_time: b.closing_time,
     holidays: b.holidays,
     complement: b.complement,
-    complement_details: b.complementary_details,
+    complement_details: b.complement_details,
     created_at: b.created_at,
     updated_at: b.updated_at,
     user: {
