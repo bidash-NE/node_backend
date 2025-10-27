@@ -4,7 +4,8 @@ const moment = require("moment-timezone");
 const axios = require("axios");
 
 const ADMIN_WALLET_ID = "NET000001";
-const ID_SERVICE_URL = process.env.ID_SERVICE_URL || "http://localhost:3000"; // e.g., same service or dedicated ids service
+const ID_SERVICE_URL =
+  process.env.ID_SERVICE_URL || "https://grab.newedge.bt/wallet"; // e.g., same service or dedicated ids service
 
 const nowBT = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
