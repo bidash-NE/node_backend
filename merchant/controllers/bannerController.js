@@ -1,13 +1,14 @@
+// controllers/bannerController.js
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
 const {
   sweepExpiredBanners,
-  createBanner,
+  createBannerWithWalletCharge, // atomic: wallet transfer + banner insert
   getBannerById,
   listBanners,
-  listAllBannersForBusiness, // <-- import NEW
+  listAllBannersForBusiness,
   listActiveByKind,
   updateBanner,
   deleteBanner,
@@ -84,10 +85,26 @@ function extractStorableImagePath(req) {
 /* --------------- CONTROLLERS --------------- */
 
 // POST /api/banners
+// Body must include: user_id (payer) and total_amount
 async function createBannerCtrl(req, res) {
   try {
     const b = req.body || {};
     const img = extractStorableImagePath(req);
+
+    const user_id = Number(b.user_id);
+    const total_amount = Number(b.total_amount);
+    if (!Number.isInteger(user_id) || user_id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "user_id must be a positive integer",
+      });
+    }
+    if (!Number.isFinite(total_amount) || total_amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "total_amount must be a positive number",
+      });
+    }
 
     const payload = {
       business_id: b.business_id,
@@ -100,12 +117,19 @@ async function createBannerCtrl(req, res) {
       owner_type: b.owner_type,
     };
 
-    const out = await createBanner(payload);
+    const out = await createBannerWithWalletCharge({
+      banner: payload,
+      payer_user_id: user_id,
+      amount: total_amount,
+    });
+
     if (!out.success) return res.status(400).json(out);
+
     return res.status(201).json({
       success: true,
-      message: "Banner created successfully.",
-      data: out.data,
+      message: "Banner created and payment processed successfully.",
+      data: out.data, // banner row
+      payment: out.payment, // { debit_txn_id, credit_txn_id, from, to, amount }
     });
   } catch (e) {
     return res.status(400).json({
@@ -115,7 +139,7 @@ async function createBannerCtrl(req, res) {
   }
 }
 
-// (Kept for admin/debug)
+// GET /api/banners
 async function listBannersCtrl(req, res) {
   try {
     const { business_id, active_only, owner_type } = req.query || {};
@@ -133,7 +157,7 @@ async function listBannersCtrl(req, res) {
   }
 }
 
-/* NEW: GET /api/banners/business/:business_id  -> fetch ALL (active + inactive) */
+/* GET /api/banners/business/:business_id  -> ALL (active + inactive) */
 async function listAllBannersByBusinessCtrl(req, res) {
   try {
     const { owner_type } = req.query || {};
@@ -154,7 +178,7 @@ async function listAllBannersByBusinessCtrl(req, res) {
   }
 }
 
-// Kinded active endpoints
+// GET /api/banners/active/food
 async function listActiveFoodCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
@@ -171,6 +195,8 @@ async function listActiveFoodCtrl(req, res) {
     });
   }
 }
+
+// GET /api/banners/active/mart
 async function listActiveMartCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
@@ -188,7 +214,7 @@ async function listActiveMartCtrl(req, res) {
   }
 }
 
-// Single (no active filter)
+// GET /api/banners/:id
 async function getBannerCtrl(req, res) {
   try {
     const out = await getBannerById(req.params.id);
@@ -201,7 +227,7 @@ async function getBannerCtrl(req, res) {
   }
 }
 
-// Update
+// PUT /api/banners/:id
 async function updateBannerCtrl(req, res) {
   try {
     const id = Number(req.params.id);
@@ -227,17 +253,6 @@ async function updateBannerCtrl(req, res) {
     const out = await updateBanner(id, fields);
     if (!out.success) return res.status(400).json(out);
 
-    if (
-      out.old_image &&
-      out.data?.banner_image &&
-      out.old_image !== out.data.banner_image
-    ) {
-      safeDeleteFile(out.old_image);
-    }
-    if (fields.banner_image === null && out.old_image) {
-      safeDeleteFile(out.old_image);
-    }
-
     return res.status(200).json({
       success: true,
       message: "Banner updated successfully.",
@@ -251,12 +266,11 @@ async function updateBannerCtrl(req, res) {
   }
 }
 
-// Delete
+// DELETE /api/banners/:id
 async function deleteBannerCtrl(req, res) {
   try {
     const out = await deleteBanner(req.params.id);
     if (!out.success) return res.status(404).json(out);
-    if (out.old_image) safeDeleteFile(out.old_image);
     return res
       .status(200)
       .json({ success: true, message: "Banner deleted successfully." });
@@ -273,14 +287,9 @@ module.exports = {
 
   createBannerCtrl,
   listBannersCtrl,
-
-  // business-scoped: ALL banners (active + inactive)
   listAllBannersByBusinessCtrl,
-
-  // kinded active-only
   listActiveFoodCtrl,
   listActiveMartCtrl,
-
   getBannerCtrl,
   updateBannerCtrl,
   deleteBannerCtrl,
