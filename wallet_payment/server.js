@@ -9,6 +9,7 @@ const db = require("./config/db"); // Promise pool connection
 const { initWalletTables } = require("./models/init");
 const walletRoutes = require("./routes/walletRoutes");
 const txRoutes = require("./routes/transactionHistoryRoutes");
+const idRoutes = require("./routes/idRoutes");
 const app = express();
 
 /* ─────────────────── Middleware ─────────────────── */
@@ -29,6 +30,7 @@ app.use(morgan("dev"));
     // 3) Main routes
     app.use("/wallet", walletRoutes);
     app.use("/transactions", txRoutes);
+    app.use("/ids", idRoutes);
 
     // 4) Health endpoints
     app.get("/wallet/health", (_req, res) => {

@@ -2,10 +2,8 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-
 const {
-  sweepExpiredBanners,
-  createBannerWithWalletCharge, // atomic: wallet transfer + banner insert
+  createBannerWithWalletCharge,
   getBannerById,
   listBanners,
   listAllBannersForBusiness,
@@ -13,19 +11,16 @@ const {
   updateBanner,
   deleteBanner,
 } = require("../models/bannerModel");
-
 const {
   uploadBannerImage,
   toWebPath,
   DEST,
 } = require("../middlewares/uploadBannerImage");
 
-/* file helpers */
 const isUploadsPath = (p) =>
   typeof p === "string" && /^\/?uploads\//i.test(String(p).replace(/^\/+/, ""));
 const toAbsPath = (webPath) =>
   path.join(process.cwd(), String(webPath).replace(/^\//, ""));
-
 function safeDeleteFile(oldWebPath) {
   if (!oldWebPath) return;
   const normalized = String(oldWebPath).trim();
@@ -40,19 +35,15 @@ function safeDeleteFile(oldWebPath) {
     fs.unlink(absNorm, () => {});
   });
 }
-
-// base64 support
 function saveBase64ImageIfPresent(body) {
   const raw = (body?.banner_image || body?.image || "").toString().trim();
   const m = raw.match(
     /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,(.+)$/i
   );
   if (!m) return null;
-
   const ext = m[1].toLowerCase().replace("jpeg", "jpg").replace("+xml", "");
   const data = m[2];
   const buf = Buffer.from(data, "base64");
-
   const base =
     (body?.title || "banner")
       .toString()
@@ -61,31 +52,23 @@ function saveBase64ImageIfPresent(body) {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "")
       .slice(0, 60) || "banner";
-
   const fileName = `${Date.now()}-${crypto.randomUUID()}-${base}.${ext}`;
   const abs = path.join(DEST, fileName);
   fs.writeFileSync(abs, buf);
   return `/uploads/banners/${fileName}`;
 }
-
 function extractStorableImagePath(req) {
   if (req.file) return toWebPath(req.file);
-
   const raw = (req.body?.banner_image || req.body?.image || "")
     .toString()
     .trim();
   if (raw.startsWith("/uploads/banners/")) return raw;
-
   const saved = saveBase64ImageIfPresent(req.body);
   if (saved) return saved;
-
   return null;
 }
 
-/* --------------- CONTROLLERS --------------- */
-
 // POST /api/banners
-// Body must include: user_id (payer) and total_amount
 async function createBannerCtrl(req, res) {
   try {
     const b = req.body || {};
@@ -93,18 +76,16 @@ async function createBannerCtrl(req, res) {
 
     const user_id = Number(b.user_id);
     const total_amount = Number(b.total_amount);
-    if (!Number.isInteger(user_id) || user_id <= 0) {
+    if (!Number.isInteger(user_id) || user_id <= 0)
       return res.status(400).json({
         success: false,
         message: "user_id must be a positive integer",
       });
-    }
-    if (!Number.isFinite(total_amount) || total_amount <= 0) {
+    if (!Number.isFinite(total_amount) || total_amount <= 0)
       return res.status(400).json({
         success: false,
         message: "total_amount must be a positive number",
       });
-    }
 
     const payload = {
       business_id: b.business_id,
@@ -128,8 +109,8 @@ async function createBannerCtrl(req, res) {
     return res.status(201).json({
       success: true,
       message: "Banner created and payment processed successfully.",
-      data: out.data, // banner row
-      payment: out.payment, // { debit_txn_id, credit_txn_id, from, to, amount }
+      data: out.data,
+      payment: out.payment,
     });
   } catch (e) {
     return res.status(400).json({
@@ -139,7 +120,7 @@ async function createBannerCtrl(req, res) {
   }
 }
 
-// GET /api/banners
+// Other controllers unchanged
 async function listBannersCtrl(req, res) {
   try {
     const { business_id, active_only, owner_type } = req.query || {};
@@ -156,8 +137,6 @@ async function listBannersCtrl(req, res) {
     });
   }
 }
-
-/* GET /api/banners/business/:business_id  -> ALL (active + inactive) */
 async function listAllBannersByBusinessCtrl(req, res) {
   try {
     const { owner_type } = req.query || {};
@@ -177,8 +156,6 @@ async function listAllBannersByBusinessCtrl(req, res) {
     });
   }
 }
-
-// GET /api/banners/active/food
 async function listActiveFoodCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
@@ -195,8 +172,6 @@ async function listActiveFoodCtrl(req, res) {
     });
   }
 }
-
-// GET /api/banners/active/mart
 async function listActiveMartCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
@@ -213,8 +188,6 @@ async function listActiveMartCtrl(req, res) {
     });
   }
 }
-
-// GET /api/banners/:id
 async function getBannerCtrl(req, res) {
   try {
     const out = await getBannerById(req.params.id);
@@ -226,8 +199,6 @@ async function getBannerCtrl(req, res) {
     });
   }
 }
-
-// PUT /api/banners/:id
 async function updateBannerCtrl(req, res) {
   try {
     const id = Number(req.params.id);
@@ -237,7 +208,6 @@ async function updateBannerCtrl(req, res) {
       b.banner_image === null ||
       b.banner_image === "null" ||
       b.banner_image === "";
-
     const fields = {
       ...(b.business_id !== undefined && { business_id: b.business_id }),
       ...(b.title !== undefined && { title: b.title }),
@@ -252,7 +222,6 @@ async function updateBannerCtrl(req, res) {
 
     const out = await updateBanner(id, fields);
     if (!out.success) return res.status(400).json(out);
-
     return res.status(200).json({
       success: true,
       message: "Banner updated successfully.",
@@ -265,8 +234,6 @@ async function updateBannerCtrl(req, res) {
     });
   }
 }
-
-// DELETE /api/banners/:id
 async function deleteBannerCtrl(req, res) {
   try {
     const out = await deleteBanner(req.params.id);
@@ -284,7 +251,6 @@ async function deleteBannerCtrl(req, res) {
 
 module.exports = {
   uploadBannerImage,
-
   createBannerCtrl,
   listBannersCtrl,
   listAllBannersByBusinessCtrl,

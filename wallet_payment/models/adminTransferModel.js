@@ -1,13 +1,27 @@
 // models/adminTransferModel.js
 const db = require("../config/db");
-const crypto = require("crypto");
+const axios = require("axios");
 
 const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
+const ID_SERVICE_URL = process.env.ID_SERVICE_URL || "http://localhost:3000";
 
-function makeTxnId() {
-  return (
-    "TNX" + Date.now() + crypto.randomBytes(2).toString("hex").toUpperCase()
-  );
+/* ---------- Helpers to call ID generator API ---------- */
+async function getJournalCodeViaApi() {
+  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});
+  if (!data?.ok || !data.code) {
+    throw new Error("ID service: failed to generate journal_code");
+  }
+  return data.code;
+}
+
+async function getTxnIdsViaApi(count = 2) {
+  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/transaction`, {
+    count,
+  });
+  if (!data?.ok || !Array.isArray(data.data) || data.data.length < count) {
+    throw new Error("ID service: failed to generate transaction_id(s)");
+  }
+  return data.data; // array of ids
 }
 
 /** Find admin by users.user_name (case-insensitive) with allowed role */
@@ -29,6 +43,7 @@ async function findAdminByUserName(conn, admin_name) {
  * - locks both wallets (FOR UPDATE)
  * - validates ACTIVE status and sufficient balance
  * - updates balances (DECIMAL)
+ * - generates journal_code + txn ids via *API*
  * - inserts 2 wallet_transactions (DR & CR) with wallet_id in tnx_from/tnx_to
  * - inserts `note` into both records
  * - logs admin action in admin_logs
@@ -113,13 +128,12 @@ async function adminTipTransfer({
       userW.id,
     ]);
 
-    // 6️⃣ Create journal + transaction IDs
-    const journal_code =
-      "JRN" + crypto.randomBytes(6).toString("hex").toUpperCase();
-    const txnAdmin = makeTxnId();
-    const txnUser = makeTxnId();
+    // 6️⃣ Generate journal + transaction IDs via API (consistency across services)
+    const journal_code = await getJournalCodeViaApi();
+    const [txnAdmin, txnUser] = await getTxnIdsViaApi(2); // DR then CR
 
     // 7️⃣ Insert wallet transactions (using wallet IDs + note)
+    // DR: admin -> user
     await conn.query(
       `INSERT INTO wallet_transactions 
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
@@ -127,6 +141,7 @@ async function adminTipTransfer({
       [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note]
     );
 
+    // CR: admin -> user
     await conn.query(
       `INSERT INTO wallet_transactions 
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
@@ -185,7 +200,9 @@ async function adminTipTransfer({
       transactions: { admin_dr: txnAdmin, user_cr: txnUser },
     };
   } catch (err) {
-    await conn.rollback();
+    try {
+      await conn.rollback();
+    } catch {}
     throw err;
   } finally {
     conn.release();
