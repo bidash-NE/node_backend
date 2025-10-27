@@ -179,6 +179,13 @@ const Order = {
     for (const o of orders) {
       const its = itemsByOrder.get(o.order_id) || [];
       if (!grouped.has(o.user_id)) {
+        console.log(
+          "Grouping for user_id:",
+          o.user_id,
+          o.user_name,
+          o.user_email,
+          o.user_phone
+        );
         grouped.set(o.user_id, {
           user: {
             user_id: o.user_id,
