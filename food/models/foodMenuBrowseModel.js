@@ -17,96 +17,121 @@ async function assertBusinessExists(business_id) {
 }
 
 /**
- * Flow:
- * 1) From business → merchant_business_types → business_types (types='food') → names
- * 2) From food_category: categories whose business_type IN (those names)
- * 3) From food_menu: all items for this business across those categories
- * 4) Group items under their category
- * 5) Exclude categories with zero items
+ * New flow (robust to name/case/space mismatches):
+ * 1) Pull ALL items for this business (source of truth).
+ * 2) Build distinct normalized category keys from items.
+ * 3) Enrich with food_category (best-effort) via case/space-insensitive match.
+ * 4) Group items under their categories; exclude only if NO items (never happens here).
  */
 async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
   const bid = toBizIdOrThrow(business_id);
   await assertBusinessExists(bid);
 
-  // 1) business_type names (FOOD only) for this business
-  const [btRows] = await db.query(
-    `SELECT DISTINCT bt.id, bt.name
-       FROM merchant_business_types mbt
-       JOIN business_types bt
-         ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id = ?
-        AND LOWER(bt.types) = 'food'`,
-    [bid]
-  );
-  if (!btRows.length) {
-    return {
-      success: true,
-      data: [],
-      meta: { business_id: bid, categories_count: 0, items_count: 0 },
-    };
-  }
-  const btNames = btRows.map((r) => r.name);
-
-  // 2) categories from food_category for those business_type names
-  const placeholders = btNames.map(() => "?").join(",");
-  const [catRows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image
-       FROM food_category
-      WHERE LOWER(business_type) IN (${placeholders})
-      ORDER BY category_name ASC`,
-    btNames.map((n) => n.toLowerCase())
-  );
-  if (!catRows.length) {
-    return {
-      success: true,
-      data: [],
-      meta: { business_id: bid, categories_count: 0, items_count: 0 },
-    };
-  }
-  const catNames = catRows.map((c) => c.category_name);
-
-  // 3) fetch all menu items for this business across those category names
-  const catPh = catNames.map(() => "?").join(",");
+  // 1) Fetch all items for this business
   const [itemRows] = await db.query(
     `SELECT id, business_id, category_name, item_name, description, item_image,
             actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
             stock_limit, sort_order, created_at, updated_at
        FROM food_menu
       WHERE business_id = ?
-        AND LOWER(category_name) IN (${catPh})
       ORDER BY sort_order ASC, item_name ASC`,
-    [bid, ...catNames.map((n) => n.toLowerCase())]
+    [bid]
   );
 
-  // 4) group items under categories
-  const itemsByCat = new Map();
-  for (const it of itemRows) {
-    const key = String(it.category_name || "").toLowerCase();
-    if (!itemsByCat.has(key)) itemsByCat.set(key, []);
-    itemsByCat.get(key).push(it);
+  if (!itemRows.length) {
+    return {
+      success: true,
+      data: [],
+      meta: { business_id: bid, categories_count: 0, items_count: 0 },
+    };
   }
 
-  const grouped = catRows.map((cat) => {
-    const key = String(cat.category_name || "").toLowerCase();
-    return {
-      category_id: cat.id,
-      category_name: cat.category_name,
-      business_type: cat.business_type,
-      category_image: cat.category_image,
-      description: cat.description,
-      items: itemsByCat.get(key) || [],
-    };
-  });
+  // 2) Distinct normalized category keys from items
+  const norm = (s) =>
+    String(s ?? "")
+      .trim()
+      .toLowerCase();
+  const catKeyToOriginal = new Map(); // key -> first-seen original casing
+  const catKeys = new Set();
 
-  // 5) exclude categories with zero items
-  const groupedNonEmpty = grouped.filter((g) => g.items && g.items.length > 0);
+  for (const it of itemRows) {
+    const key = norm(it.category_name);
+    if (!key) continue;
+    if (!catKeyToOriginal.has(key))
+      catKeyToOriginal.set(key, it.category_name || "");
+    catKeys.add(key);
+  }
+
+  if (!catKeys.size) {
+    // Items have no category_name at all — put them under "Uncategorized"
+    return {
+      success: true,
+      data: [
+        {
+          category_id: null,
+          category_name: "Uncategorized",
+          business_type: null,
+          category_image: null,
+          description: null,
+          items: itemRows,
+        },
+      ],
+      meta: {
+        business_id: bid,
+        categories_count: 1,
+        items_count: itemRows.length,
+      },
+    };
+  }
+
+  // 3) Enrich with food_category by case/space-insensitive name match
+  //    Build dynamic IN list using the original names (but we’ll match with LOWER(TRIM()))
+  const originals = Array.from(catKeyToOriginal.values());
+  const ph = originals.map(() => "?").join(",");
+
+  const [catRows] = await db.query(
+    `SELECT id, category_name, business_type, description, category_image
+       FROM food_category
+      WHERE LOWER(TRIM(category_name)) IN (${ph})`,
+    originals.map((n) => n.trim().toLowerCase())
+  );
+
+  // Map: normalized category_name -> category metadata
+  const catMetaByKey = new Map();
+  for (const c of catRows) {
+    catMetaByKey.set(norm(c.category_name), c);
+  }
+
+  // 4) Group items
+  const groups = new Map(); // key -> { meta, items[] }
+  for (const it of itemRows) {
+    const key = norm(it.category_name) || "__uncategorized__";
+    if (!groups.has(key)) {
+      const meta = catMetaByKey.get(key);
+      groups.set(key, {
+        category_id: meta?.id ?? null,
+        category_name:
+          meta?.category_name ?? (catKeyToOriginal.get(key) || "Uncategorized"),
+        business_type: meta?.business_type ?? null,
+        category_image: meta?.category_image ?? null,
+        description: meta?.description ?? null,
+        items: [],
+      });
+    }
+    groups.get(key).items.push(it);
+  }
+
+  // Stable order by category_name
+  const grouped = Array.from(groups.values()).sort((a, b) =>
+    String(a.category_name).localeCompare(String(b.category_name))
+  );
 
   return {
     success: true,
-    data: groupedNonEmpty,
+    data: grouped,
     meta: {
       business_id: bid,
-      categories_count: groupedNonEmpty.length,
+      categories_count: grouped.length,
       items_count: itemRows.length,
     },
   };
