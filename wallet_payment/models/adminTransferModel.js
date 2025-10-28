@@ -3,8 +3,7 @@ const db = require("../config/db");
 const axios = require("axios");
 
 const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
-const ID_SERVICE_URL =
-  process.env.ID_SERVICE_URL || "https://grab.newedge.bt/wallet";
+const ID_SERVICE_URL = "https://grab.newedge.bt/wallet";
 
 /* ---------- Helpers to call ID generator API ---------- */
 async function getJournalCodeViaApi() {
