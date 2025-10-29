@@ -32,19 +32,15 @@ exports.createOrder = async (req, res) => {
     const payload = req.body || {};
     const items = Array.isArray(payload.items) ? payload.items : [];
 
-    // ---- Base validations (no backend math) ----
-    if (!payload.user_id) {
+    // ---- Base validations ----
+    if (!payload.user_id)
       return res.status(400).json({ message: "Missing user_id" });
-    }
-    if (!items.length) {
+    if (!items.length)
       return res.status(400).json({ message: "Missing items" });
-    }
-    if (payload.total_amount == null) {
+    if (payload.total_amount == null)
       return res.status(400).json({ message: "Missing total_amount" });
-    }
-    if (payload.discount_amount == null) {
+    if (payload.discount_amount == null)
       return res.status(400).json({ message: "Missing discount_amount" });
-    }
 
     // ---- Fulfillment-specific validation for delivery_address ----
     const fulfillment = String(payload.fulfillment_type || "Delivery");
@@ -56,7 +52,7 @@ exports.createOrder = async (req, res) => {
           .json({ message: "delivery_address is required for Delivery" });
       }
     } else if (fulfillment === "Pickup") {
-      // ensure non-null (column is NOT NULL); store empty string for pickup
+      // ensure non-null; store empty string for pickup
       payload.delivery_address = String(payload.delivery_address || "");
     }
 
@@ -81,14 +77,14 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    // 1) Persist EXACTLY what FE sent (uppercase status only)
+    // Persist exactly what FE sent
     const order_id = await Order.create({
       ...payload,
       status: (payload.status || "PENDING").toUpperCase(),
-      fulfillment_type: fulfillment, // normalize usage
+      fulfillment_type: fulfillment,
     });
 
-    // 2) Group items by business_id for notifications
+    // Group by business for notifications
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -98,7 +94,7 @@ exports.createOrder = async (req, res) => {
     }
     const businessIds = Array.from(byBiz.keys());
 
-    // 3) Insert+emit notifications that include EXACT total_amount from FE
+    // Merchant notifications (order:create)
     for (const business_id of businessIds) {
       const its = byBiz.get(business_id) || [];
       const title = `New order #${order_id}`;
@@ -106,8 +102,8 @@ exports.createOrder = async (req, res) => {
 
       try {
         await insertAndEmitNotification({
-          business_id, // ✅ store key
-          user_id: payload.user_id, // buyer
+          business_id,
+          user_id: payload.user_id,
           order_id,
           type: "order:create",
           title,
@@ -122,11 +118,11 @@ exports.createOrder = async (req, res) => {
       }
     }
 
-    // 4) Broadcast status to user & businesses
+    // Broadcast status to user & businesses
     broadcastOrderStatusToMany({
       order_id,
       user_id: payload.user_id,
-      business_ids: businessIds, // ✅ emit to business rooms
+      business_ids: businessIds,
       status: (payload.status || "PENDING").toUpperCase(),
     });
 
@@ -198,6 +194,15 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
+/**
+ * Status update rules:
+ * - Allowed statuses validated.
+ * - If target is CANCELLED and current is >= CONFIRMED -> reject (user cannot cancel after acceptance).
+ * - On CONFIRMED:
+ *     - If WALLET -> captureOrderFunds (user→merchant net, user→admin fee).
+ *     - If COD    -> captureOrderCODFee (user→admin fee only).
+ * - On DECLINED/CANCELLED -> no wallet movements.
+ */
 exports.updateOrderStatus = async (req, res) => {
   try {
     const order_id = req.params.order_id;
@@ -214,38 +219,76 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
-    // Fetch user_id (for emitting to user room)
-    const [[orderRow]] = await db.query(
-      `SELECT user_id FROM orders WHERE order_id = ? LIMIT 1`,
+    // Fetch current order context
+    const [[row]] = await db.query(
+      `SELECT user_id, status AS current_status, payment_method
+         FROM orders WHERE order_id = ? LIMIT 1`,
       [order_id]
     );
-    if (!orderRow) return res.status(404).json({ message: "Order not found" });
+    if (!row) return res.status(404).json({ message: "Order not found" });
 
-    const user_id = orderRow.user_id;
+    const user_id = row.user_id;
+    const current = String(row.current_status || "PENDING").toUpperCase();
+    const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // Reason optional; store trimmed or NULL
-    const reasonStr = (reason ?? "").toString().trim() || null;
+    // Prevent cancelling after acceptance
+    if (normalized === "CANCELLED") {
+      const locked = new Set([
+        "CONFIRMED",
+        "PREPARING",
+        "READY",
+        "OUT_FOR_DELIVERY",
+        "COMPLETED",
+      ]);
+      if (locked.has(current)) {
+        return res.status(400).json({
+          message:
+            "Order cannot be cancelled after it has been accepted by the merchant.",
+        });
+      }
+    }
 
-    const affected = await Order.updateStatus(order_id, normalized, reasonStr);
+    // Persist status (with optional reason)
+    const affected = await Order.updateStatus(
+      order_id,
+      normalized,
+      (reason ?? "").toString().trim()
+    );
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // Get affected businesses for this order
+    // Affected businesses
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
+    // Wallet captures ONLY on CONFIRMED
+    if (normalized === "CONFIRMED") {
+      try {
+        if (payMethod === "WALLET") {
+          await Order.captureOrderFunds(order_id);
+        } else if (payMethod === "COD") {
+          await Order.captureOrderCODFee(order_id);
+        }
+      } catch (e) {
+        console.error("[CAPTURE FAILED]", order_id, e?.message);
+        return res.status(500).json({
+          message: "Order accepted, but wallet capture failed.",
+          error: e?.message || "Capture error",
+        });
+      }
+    }
+
     // Broadcast status
     broadcastOrderStatusToMany({
       order_id,
       user_id,
-      business_ids, // ✅ business scoped
+      business_ids,
       status: normalized,
     });
 
-    // ✅ Also persist a notification row per business when COMPLETED
-    // (Remove the if-guard if you want to save on every status change)
+    // Optional: notification row per business when COMPLETED
     try {
       if (normalized === "COMPLETED") {
         for (const business_id of business_ids) {

@@ -1,6 +1,7 @@
 // models/initModel.js
 const db = require("../config/db");
 
+/* ----------------------- helpers ----------------------- */
 async function indexExists(table, indexName) {
   const [rows] = await db.query(
     `
@@ -18,27 +19,71 @@ async function indexExists(table, indexName) {
 
 async function ensureIndex(table, indexName, ddlSql) {
   const exists = await indexExists(table, indexName);
-  if (!exists) {
-    await db.query(ddlSql);
-  }
+  if (!exists) await db.query(ddlSql);
 }
 
+async function columnExists(table, column) {
+  const [rows] = await db.query(
+    `
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = ?
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [table, column]
+  );
+  return rows.length > 0;
+}
+
+async function getEnumDefinition(table, column) {
+  const [[row]] = await db.query(
+    `
+    SELECT COLUMN_TYPE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = ?
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [table, column]
+  );
+  return row ? String(row.COLUMN_TYPE || "") : "";
+}
+
+/* Replace enum with a normalized one if needed */
+async function ensurePaymentMethodEnum() {
+  // Normalize to ENUM('COD','WALLET','CARD')
+  const desired = `enum('COD','WALLET','CARD')`;
+  const current = await getEnumDefinition("orders", "payment_method");
+  if (!current) return; // column created below (fresh DB)
+  if (current.toLowerCase() === desired.toLowerCase()) return;
+
+  await db.query(`
+    ALTER TABLE orders
+    MODIFY COLUMN payment_method ENUM('COD','WALLET','CARD') NOT NULL
+  `);
+}
+
+/* ------------------- main initializer ------------------- */
 /**
  * Initialize (and patch) order management tables in a version-safe way.
- * - orders: adds platform_fee (order-level) if missing
- * - order_items: keeps delivery_fee (per-line) and ensures columns exist
- * - order_notification unchanged
- * - indexes created only when missing (no IF NOT EXISTS)
+ * - orders: ensures platform_fee and normalized payment_method ENUM
+ * - order_items: ensures fee columns
+ * - order_notification: as required (with indexes)
+ * - order_wallet_captures: idempotency marker for wallet/COD captures
+ * NOTE: We DO NOT touch wallet_transactions here (it already exists in your wallet service init).
  */
 async function initOrderManagementTable() {
-  // ---------------- Orders table ----------------
+  /* -------- Orders -------- */
   await db.query(`
     CREATE TABLE IF NOT EXISTS orders (
       order_id VARCHAR(12) PRIMARY KEY,
       user_id INT NOT NULL,
       total_amount DECIMAL(10,2) NOT NULL,
       discount_amount DECIMAL(10,2) DEFAULT 0,
-      payment_method ENUM('COD','Wallet','Card') NOT NULL,
+      payment_method ENUM('COD','WALLET','CARD') NOT NULL,
       delivery_address VARCHAR(500) NOT NULL,
       note_for_restaurant VARCHAR(500),
       status VARCHAR(100) DEFAULT 'PENDING',
@@ -50,20 +95,13 @@ async function initOrderManagementTable() {
     );
   `);
 
-  // Patch orders table: add platform_fee if missing
-  const [orderCols] = await db.query(`
-    SELECT COLUMN_NAME
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders'
-  `);
-  const orderColSet = new Set(orderCols.map((c) => c.COLUMN_NAME));
-  if (!orderColSet.has("platform_fee")) {
+  if (!(await columnExists("orders", "platform_fee"))) {
     await db.query(
       `ALTER TABLE orders ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
     );
   }
+  await ensurePaymentMethodEnum();
 
-  // Helpful indexes (create only if missing)
   await ensureIndex(
     "orders",
     "idx_orders_user",
@@ -75,7 +113,7 @@ async function initOrderManagementTable() {
     "CREATE INDEX idx_orders_created ON orders(created_at)"
   );
 
-  // ---------------- Order items table ----------------
+  /* -------- Order items -------- */
   await db.query(`
     CREATE TABLE IF NOT EXISTS order_items (
       item_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -94,25 +132,17 @@ async function initOrderManagementTable() {
     );
   `);
 
-  // Patch order_items: ensure fee columns exist
-  const [itemCols] = await db.query(`
-    SELECT COLUMN_NAME
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'order_items'
-  `);
-  const itemColSet = new Set(itemCols.map((c) => c.COLUMN_NAME));
-  if (!itemColSet.has("platform_fee")) {
+  if (!(await columnExists("order_items", "platform_fee"))) {
     await db.query(
       `ALTER TABLE order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
     );
   }
-  if (!itemColSet.has("delivery_fee")) {
+  if (!(await columnExists("order_items", "delivery_fee"))) {
     await db.query(
       `ALTER TABLE order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
     );
   }
 
-  // Indexes for order_items
   await ensureIndex(
     "order_items",
     "idx_items_order",
@@ -124,7 +154,7 @@ async function initOrderManagementTable() {
     "CREATE INDEX idx_items_biz_order ON order_items(business_id, order_id)"
   );
 
-  // ---------------- Order notification table ----------------
+  /* -------- Order notification -------- */
   await db.query(`
     CREATE TABLE IF NOT EXISTS order_notification (
       notification_id CHAR(36) PRIMARY KEY,    -- UUID
@@ -144,8 +174,21 @@ async function initOrderManagementTable() {
     );
   `);
 
+  /* -------- Order wallet captures (idempotency) -------- */
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS order_wallet_captures (
+      order_id      VARCHAR(32) NOT NULL,
+      capture_type  VARCHAR(32) NOT NULL,   -- WALLET_FULL | COD_FEE
+      captured_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      buyer_txn_id  VARCHAR(64) DEFAULT NULL,
+      merch_txn_id  VARCHAR(64) DEFAULT NULL,
+      admin_txn_id  VARCHAR(64) DEFAULT NULL,
+      PRIMARY KEY (order_id, capture_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   console.log(
-    "✅ orders, order_items, and order_notification tables are ready (version-safe indexes)."
+    "✅ orders, order_items, order_notification, order_wallet_captures are ready (version-safe)."
   );
 }
 
