@@ -116,9 +116,8 @@ exports.createOrder = async (req, res) => {
       const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
       if (!buyer) {
         return res.status(400).json({
-          code: "WALLET_NOT_FOUND",
           message:
-            "Buyer wallet does not exist (required to pay platform fee).",
+            "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
         });
       }
       const fee = Number(payload.platform_fee ?? 0);
