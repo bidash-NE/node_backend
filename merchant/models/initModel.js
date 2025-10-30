@@ -252,7 +252,7 @@ async function ensureBusinessBannersTable() {
   }
 }
 
-/* ---------- FOOD MENU (full schema your model uses) ---------- */
+/* ---------- FOOD MENU ---------- */
 async function ensureFoodMenuTable() {
   const table = "food_menu";
   if (!(await tableExists(table))) {
@@ -284,71 +284,10 @@ async function ensureFoodMenuTable() {
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    return;
-  }
-
-  // Migration: add any missing columns
-  const addCol = async (name, defSql) => {
-    if (!(await columnExists(table, name))) {
-      await db.query(`ALTER TABLE \`${table}\` ADD COLUMN ${defSql}`);
-    }
-  };
-  await addCol("category_name", "VARCHAR(100) NOT NULL AFTER business_id");
-  await addCol("item_name", "VARCHAR(255) NOT NULL AFTER category_name");
-  await addCol("description", "TEXT NULL AFTER item_name");
-  await addCol("item_image", "VARCHAR(255) NULL AFTER description");
-  await addCol(
-    "actual_price",
-    "DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER item_image"
-  );
-  await addCol(
-    "discount_percentage",
-    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER actual_price"
-  );
-  await addCol(
-    "tax_rate",
-    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER discount_percentage"
-  );
-  await addCol("is_veg", "TINYINT(1) NOT NULL DEFAULT 0 AFTER tax_rate");
-  await addCol(
-    "spice_level",
-    "ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None' AFTER is_veg"
-  );
-  await addCol(
-    "is_available",
-    "TINYINT(1) NOT NULL DEFAULT 1 AFTER spice_level"
-  );
-  await addCol("stock_limit", "INT NOT NULL DEFAULT 0 AFTER is_available");
-  await addCol("sort_order", "INT NOT NULL DEFAULT 0 AFTER stock_limit");
-  await addCol("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
-  await addCol(
-    "updated_at",
-    "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-  );
-
-  if (!(await indexExists(table, "idx_food_menu_business"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_business (business_id)`
-    );
-  }
-  if (!(await indexExists(table, "idx_food_menu_cat"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_cat (category_name)`
-    );
-  }
-  if (!(await indexExists(table, "idx_food_menu_available"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_food_menu_available (is_available)`
-    );
-  }
-  if (!(await indexExists(table, "uk_foodmenu_biz_cat_name"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD UNIQUE KEY uk_foodmenu_biz_cat_name (business_id, category_name, item_name)`
-    );
   }
 }
 
-/* ---------- MART MENU (IDENTICAL to food_menu) ---------- */
+/* ---------- MART MENU ---------- */
 async function ensureMartMenuTable() {
   const table = "mart_menu";
   if (!(await tableExists(table))) {
@@ -380,164 +319,232 @@ async function ensureMartMenuTable() {
           ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
-    return;
   }
+}
 
-  // Migration: add any missing columns to mirror food_menu
-  const addCol = async (name, defSql) => {
-    if (!(await columnExists(table, name))) {
-      await db.query(`ALTER TABLE \`${table}\` ADD COLUMN ${defSql}`);
+/* ---------- FOOD RATINGS (uses business_id, allows many per user) ---------- */
+async function ensureFoodRatingsTable() {
+  const newName = "food_ratings";
+  const oldName = "food_menu_ratings";
+
+  // If legacy table exists and new doesn't, rename it
+  if (await tableExists(oldName)) {
+    if (!(await tableExists(newName))) {
+      await db.query(`RENAME TABLE \`${oldName}\` TO \`${newName}\``);
     }
-  };
-  await addCol("category_name", "VARCHAR(100) NOT NULL AFTER business_id");
-  await addCol("item_name", "VARCHAR(255) NOT NULL AFTER category_name");
-  await addCol("description", "TEXT NULL AFTER item_name");
-  await addCol("item_image", "VARCHAR(255) NULL AFTER description");
-  await addCol(
-    "actual_price",
-    "DECIMAL(10,2) NOT NULL DEFAULT 0.00 AFTER item_image"
-  );
-  await addCol(
-    "discount_percentage",
-    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER actual_price"
-  );
-  await addCol(
-    "tax_rate",
-    "DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER discount_percentage"
-  );
-  await addCol("is_veg", "TINYINT(1) NOT NULL DEFAULT 0 AFTER tax_rate");
-  await addCol(
-    "spice_level",
-    "ENUM('None','Mild','Medium','Hot') NOT NULL DEFAULT 'None' AFTER is_veg"
-  );
-  await addCol(
-    "is_available",
-    "TINYINT(1) NOT NULL DEFAULT 1 AFTER spice_level"
-  );
-  await addCol("stock_limit", "INT NOT NULL DEFAULT 0 AFTER is_available");
-  await addCol("sort_order", "INT NOT NULL DEFAULT 0 AFTER stock_limit");
-  await addCol("created_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP");
-  await addCol(
-    "updated_at",
-    "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-  );
+  }
 
-  if (!(await indexExists(table, "idx_mart_menu_business"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_business (business_id)`
-    );
-  }
-  if (!(await indexExists(table, "idx_mart_menu_cat"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_cat (category_name)`
-    );
-  }
-  if (!(await indexExists(table, "idx_mart_menu_available"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD KEY idx_mart_menu_available (is_available)`
-    );
-  }
-  if (!(await indexExists(table, "uk_martmenu_biz_cat_name"))) {
-    await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` ADD UNIQUE KEY uk_martmenu_biz_cat_name (business_id, category_name, item_name)`
-    );
-  }
-}
-
-/* ---------- ratings per menu item (food & mart) ---------- */
-async function ensureFoodMenuRatingsTable() {
-  const table = "food_menu_ratings";
-  if (!(await tableExists(table))) {
+  // Create fresh if still missing
+  if (!(await tableExists(newName))) {
     await db.query(`
-      CREATE TABLE ${table} (
+      CREATE TABLE \`${newName}\` (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        menu_id BIGINT UNSIGNED NOT NULL,
+        business_id BIGINT UNSIGNED NOT NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         rating TINYINT UNSIGNED NOT NULL,
         comment TEXT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        KEY idx_fmr_menu (menu_id),
-        KEY idx_fmr_user (user_id),
-        KEY idx_fmr_rating (rating),
-        UNIQUE KEY uk_fmr_menu_user (menu_id, user_id)
+        KEY idx_fr_business (business_id),
+        KEY idx_fr_user (user_id),
+        KEY idx_fr_rating (rating)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
   }
 
-  if (!(await tableExists("food_menu"))) await ensureFoodMenuTable();
-
-  await ensureColumnTypeMatches({
-    table,
-    column: "menu_id",
-    refTable: "food_menu",
-    refColumn: "id",
-    desiredType: null,
-    fkName: "fk_fmr_menu",
-  });
-
-  const userFks = await fkConstraintNamesForColumn(table, "user_id");
-  if (!userFks.length) {
+  // Migrate: if column menu_id exists, add business_id, backfill via food_menu, drop menu_id
+  const hasMenuId = await columnExists(newName, "menu_id");
+  if (hasMenuId && !(await columnExists(newName, "business_id"))) {
     await db.query(
-      `ALTER TABLE \`${table}\`
-         ADD CONSTRAINT fk_fmr_user
-         FOREIGN KEY (user_id) REFERENCES users(user_id)
-         ON DELETE CASCADE ON UPDATE CASCADE`
+      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`
     );
   }
+  if (hasMenuId) {
+    await executeIgnoreErr(`
+      UPDATE ${newName} fr
+      JOIN food_menu fm ON fm.id = fr.menu_id
+         SET fr.business_id = fm.business_id
+       WHERE fr.business_id IS NULL
+    `);
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`
+    );
+    await executeIgnoreErr(`ALTER TABLE \`${newName}\` DROP COLUMN menu_id`);
+  }
+
+  // Drop any legacy UNIQUE that blocks multiple feedbacks per (business_id,user_id)
+  const legacyUniques = [
+    "uk_fmr_menu_user",
+    "uk_fr_business_user",
+    "menu_id_user_id",
+    "business_id_user_id",
+  ];
+  for (const idx of legacyUniques) {
+    if (await indexExists(newName, idx)) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``
+      );
+    }
+  }
+
+  // Ensure indexes
+  if (!(await indexExists(newName, "idx_fr_business"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_business (business_id)`
+    );
+  }
+  if (!(await indexExists(newName, "idx_fr_user"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_user (user_id)`
+    );
+  }
+  if (!(await indexExists(newName, "idx_fr_rating"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_rating (rating)`
+    );
+  }
+
+  // Recreate clean FKs
+  for (const col of ["business_id", "user_id"]) {
+    const fks = await fkConstraintNamesForColumn(newName, col);
+    for (const name of fks) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``
+      );
+    }
+  }
+  await executeIgnoreErr(`
+    ALTER TABLE \`${newName}\`
+      ADD CONSTRAINT fk_fr_business
+      FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  `);
+  await executeIgnoreErr(`
+    ALTER TABLE \`${newName}\`
+      ADD CONSTRAINT fk_fr_user
+      FOREIGN KEY (user_id) REFERENCES users(user_id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  `);
+
+  // Rating guard (safe no-op if already exists on some MySQL versions)
   await executeIgnoreErr(
-    `ALTER TABLE \`${table}\` ADD CONSTRAINT chk_fmr_rating CHECK (rating BETWEEN 1 AND 5)`
+    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_fr_rating CHECK (rating BETWEEN 1 AND 5)`
   );
 }
 
-async function ensureMartMenuRatingsTable() {
-  const table = "mart_menu_ratings";
-  if (!(await tableExists(table))) {
+/* ---------- MART RATINGS (uses business_id, allows many per user) ---------- */
+async function ensureMartRatingsTable() {
+  const newName = "mart_ratings";
+  const oldName = "mart_menu_ratings";
+
+  // If legacy table exists and new doesn't, rename it
+  if (await tableExists(oldName)) {
+    if (!(await tableExists(newName))) {
+      await db.query(`RENAME TABLE \`${oldName}\` TO \`${newName}\``);
+    }
+  }
+
+  // Create fresh if still missing
+  if (!(await tableExists(newName))) {
     await db.query(`
-      CREATE TABLE ${table} (
+      CREATE TABLE \`${newName}\` (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        menu_id BIGINT UNSIGNED NOT NULL,
+        business_id BIGINT UNSIGNED NOT NULL,
         user_id BIGINT UNSIGNED NOT NULL,
         rating TINYINT UNSIGNED NOT NULL,
         comment TEXT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
-        KEY idx_mmr_menu (menu_id),
-        KEY idx_mmr_user (user_id),
-        KEY idx_mmr_rating (rating),
-        UNIQUE KEY uk_mmr_menu_user (menu_id, user_id)
+        KEY idx_mr_business (business_id),
+        KEY idx_mr_user (user_id),
+        KEY idx_mr_rating (rating)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
   }
 
-  if (!(await tableExists("mart_menu"))) await ensureMartMenuTable();
-
-  await ensureColumnTypeMatches({
-    table,
-    column: "menu_id",
-    refTable: "mart_menu",
-    refColumn: "id",
-    desiredType: null,
-    fkName: "fk_mmr_menu",
-  });
-
-  const userFks = await fkConstraintNamesForColumn(table, "user_id");
-  if (!userFks.length) {
+  // Migrate: if column menu_id exists, add business_id, backfill via mart_menu, drop menu_id
+  const hasMenuId = await columnExists(newName, "menu_id");
+  if (hasMenuId && !(await columnExists(newName, "business_id"))) {
     await db.query(
-      `ALTER TABLE \`${table}\`
-         ADD CONSTRAINT fk_mmr_user
-         FOREIGN KEY (user_id) REFERENCES users(user_id)
-         ON DELETE CASCADE ON UPDATE CASCADE`
+      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`
     );
   }
+  if (hasMenuId) {
+    await executeIgnoreErr(`
+      UPDATE ${newName} mr
+      JOIN mart_menu mm ON mm.id = mr.menu_id
+         SET mr.business_id = mm.business_id
+       WHERE mr.business_id IS NULL
+    `);
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`
+    );
+    await executeIgnoreErr(`ALTER TABLE \`${newName}\` DROP COLUMN menu_id`);
+  }
+
+  // Drop any legacy UNIQUE that blocks multiple feedbacks per (business_id,user_id)
+  const legacyUniques = [
+    "uk_mmr_menu_user",
+    "uk_mr_business_user",
+    "menu_id_user_id",
+    "business_id_user_id",
+  ];
+  for (const idx of legacyUniques) {
+    if (await indexExists(newName, idx)) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``
+      );
+    }
+  }
+
+  // Ensure indexes
+  if (!(await indexExists(newName, "idx_mr_business"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_business (business_id)`
+    );
+  }
+  if (!(await indexExists(newName, "idx_mr_user"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_user (user_id)`
+    );
+  }
+  if (!(await indexExists(newName, "idx_mr_rating"))) {
+    await executeIgnoreErr(
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_rating (rating)`
+    );
+  }
+
+  // Recreate clean FKs
+  for (const col of ["business_id", "user_id"]) {
+    const fks = await fkConstraintNamesForColumn(newName, col);
+    for (const name of fks) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``
+      );
+    }
+  }
+  await executeIgnoreErr(`
+    ALTER TABLE \`${newName}\`
+      ADD CONSTRAINT fk_mr_business
+      FOREIGN KEY (business_id) REFERENCES merchant_business_details(business_id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  `);
+  await executeIgnoreErr(`
+    ALTER TABLE \`${newName}\`
+      ADD CONSTRAINT fk_mr_user
+      FOREIGN KEY (user_id) REFERENCES users(user_id)
+      ON DELETE CASCADE ON UPDATE CASCADE
+  `);
+
+  // Rating guard (safe no-op)
   await executeIgnoreErr(
-    `ALTER TABLE \`${table}\` ADD CONSTRAINT chk_mmr_rating CHECK (rating BETWEEN 1 AND 5)`
+    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_mr_rating CHECK (rating BETWEEN 1 AND 5)`
   );
 }
 
-/* -------- merchant_bank_details (user_id required, business_id optional) -------- */
+/* -------- merchant_bank_details -------- */
 async function ensureMerchantBankDetailsTable() {
   const table = "merchant_bank_details";
 
@@ -598,40 +605,19 @@ async function ensureMerchantBankDetailsTable() {
   }
 }
 
-/* --------------- migrations (safe no-ops / guards) --------------- */
-async function migrateLegacyBusinessTypeId() {
-  try {
-    const table = "merchant_business_details";
-    const hasOld = await columnExists(table, "business_type_id");
-    if (hasOld) {
-      // no-op placeholder
-    }
-  } catch {}
-}
-
 /* --------------- entrypoint --------------- */
 async function initMerchantTables() {
-  // Core business taxonomy
   await ensureBusinessTypesTable();
   await ensureMerchantBusinessDetailsTable();
   await ensureMerchantBusinessTypesTable();
-  await migrateLegacyBusinessTypeId();
-
-  // Bank details
   await ensureMerchantBankDetailsTable();
-
-  // Categories & banners
   await ensureFoodCategoryTable();
   await ensureMartCategoryTable();
   await ensureBusinessBannersTable();
-
-  // Base menu tables (MUST exist before ratings & before controllers query them)
   await ensureFoodMenuTable();
-  await ensureMartMenuTable(); // <- now identical to food_menu
-
-  // Ratings (FKs to menu tables)
-  await ensureFoodMenuRatingsTable();
-  await ensureMartMenuRatingsTable();
+  await ensureMartMenuTable();
+  await ensureFoodRatingsTable(); // uses business_id; allows multiple feedbacks per user
+  await ensureMartRatingsTable(); // uses business_id; allows multiple feedbacks per user
 }
 
 module.exports = { initMerchantTables };

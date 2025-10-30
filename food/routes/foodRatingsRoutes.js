@@ -1,12 +1,11 @@
-// routes/foodRatingsRoutes.js
 const express = require("express");
 const router = express.Router();
-const ctrl = require("../controllers/foodRatingsController");
+const {
+  createFoodRating,
+  getFoodRatings,
+} = require("../controllers/foodRatingsController");
 
-// Create/Update rating
-router.post("/", ctrl.createOrUpdateFoodRating);
-
-// Get ratings for a menu item (with aggregates)
-router.get("/:menu_id", ctrl.getFoodRatings);
+router.post("/", createFoodRating);
+router.get("/:business_id", getFoodRatings);
 
 module.exports = router;

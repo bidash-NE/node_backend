@@ -9,6 +9,7 @@ const { initOrderManagementTable } = require("./models/initModel");
 const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
+
 dotenv.config();
 
 const app = express();

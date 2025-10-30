@@ -65,7 +65,7 @@ async function registerMerchantModel(data) {
       bank_name,
       account_holder_name,
       account_number,
-      bank_qr_code_image, // kept
+      bank_qr_code_image,
     } = data;
 
     const role = (data.role || "merchant").toLowerCase();
@@ -171,7 +171,7 @@ async function registerMerchantModel(data) {
       [values]
     );
 
-    // Bank details (front/back removed; only QR optional)
+    // Bank details
     await conn.query(
       `INSERT INTO merchant_bank_details
          (user_id, bank_name, account_holder_name, account_number, bank_qr_code_image)
@@ -312,8 +312,7 @@ async function updateMerchantDetailsModel(business_id, data) {
 /* ------------------------ FINDERS ------------------------ */
 
 /**
- * Find by email (case-insensitive). We return most-recent accounts first
- * to mirror previous username-based behavior.
+ * Find by email (case-insensitive). We return most-recent accounts first.
  */
 async function findCandidatesByEmail(email) {
   const em = String(email || "").trim();
@@ -330,13 +329,16 @@ async function findCandidatesByEmail(email) {
   return rows || [];
 }
 
-/* (kept) owners by kind helpers below */
-
+/**
+ * Owners by kind: returns basic business + user + business types +
+ * ratings summary (uses new ratings tables with business_id).
+ */
 async function getOwnersByKind(kind) {
   const k = String(kind || "").toLowerCase();
   if (!["food", "mart"].includes(k))
     throw new Error("kind must be 'food' or 'mart'");
 
+  // Base business + user info (restricted to businesses that have a type of this 'k')
   const [bizRows] = await db.query(
     `SELECT
         mbd.business_id, mbd.user_id, mbd.owner_type, mbd.business_name,
@@ -365,6 +367,7 @@ async function getOwnersByKind(kind) {
   const ids = bizRows.map((b) => b.business_id);
   const ph = ids.map(() => "?").join(",");
 
+  // Map business types (tags) filtered by 'k'
   const [typeRows] = await db.query(
     `SELECT mbt.business_id, bt.id AS business_type_id, bt.name
        FROM merchant_business_types mbt
@@ -383,26 +386,30 @@ async function getOwnersByKind(kind) {
       .push({ business_type_id: r.business_type_id, name: r.name });
   }
 
+  // Ratings from new tables (food_ratings / mart_ratings) by business_id
+  const ratingsTable = k === "food" ? "food_ratings" : "mart_ratings";
   const [ratingRows] = await db.query(
     `SELECT
-        fm.business_id,
-        AVG(fmr.rating) AS avg_rating,
-        COUNT(fmr.comment) AS total_comments
-     FROM food_menu fm
-     LEFT JOIN food_menu_ratings fmr ON fmr.menu_id = fm.id
-     WHERE fm.business_id IN (${ph})
-     GROUP BY fm.business_id`,
+        business_id,
+        COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
+        SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments
+     FROM ${ratingsTable}
+     WHERE business_id IN (${ph})
+     GROUP BY business_id`,
     ids
   );
 
   const ratingsByBiz = new Map();
   for (const row of ratingRows) {
+    console.log(ratingRows);
+
     ratingsByBiz.set(row.business_id, {
-      avg_rating: row.avg_rating || 0,
-      total_comments: row.total_comments || 0,
+      avg_rating: Number(row.avg_rating || 0),
+      total_comments: Number(row.total_comments || 0),
     });
   }
 
+  // Combine
   return bizRows.map((b) => ({
     business_id: b.business_id,
     owner_type: b.owner_type,
@@ -444,7 +451,7 @@ async function getMartOwners() {
 module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByEmail, // ← CHANGED export
+  findCandidatesByEmail,
   getOwnersByKind,
   getFoodOwners,
   getMartOwners,

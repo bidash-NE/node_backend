@@ -1,36 +1,38 @@
-// controllers/foodRatingsController.js
 const {
-  upsertFoodMenuRating,
-  fetchFoodMenuRatings,
+  insertFoodRating,
+  fetchFoodRatings,
 } = require("../models/foodRatingsModel");
 
-exports.createOrUpdateFoodRating = async (req, res) => {
+async function createFoodRating(req, res) {
   try {
-    const { menu_id, user_id, rating, comment } = req.body || {};
-    const out = await upsertFoodMenuRating({
-      menu_id,
+    const { business_id, user_id, rating, comment } = req.body || {};
+    const out = await insertFoodRating({
+      business_id,
       user_id,
       rating,
       comment,
     });
-    return res.status(201).json(out);
+    res.status(201).json(out);
   } catch (e) {
-    return res
-      .status(400)
-      .json({ success: false, message: e.message || "Failed to save rating." });
-  }
-};
-
-exports.getFoodRatings = async (req, res) => {
-  try {
-    const { menu_id } = req.params;
-    const { page, limit } = req.query;
-    const out = await fetchFoodMenuRatings(menu_id, { page, limit });
-    return res.status(200).json(out);
-  } catch (e) {
-    return res.status(400).json({
+    res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch ratings.",
+      message: e.message || "Failed to save feedback.",
     });
   }
-};
+}
+
+async function getFoodRatings(req, res) {
+  try {
+    const { business_id } = req.params;
+    const { page, limit } = req.query;
+    const out = await fetchFoodRatings(business_id, { page, limit });
+    res.status(200).json(out);
+  } catch (e) {
+    res.status(400).json({
+      success: false,
+      message: e.message || "Failed to fetch feedback.",
+    });
+  }
+}
+
+module.exports = { createFoodRating, getFoodRatings };

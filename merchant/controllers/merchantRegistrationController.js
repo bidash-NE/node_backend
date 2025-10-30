@@ -8,7 +8,7 @@ const db = require("../config/db");
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByEmail, // ← CHANGED: email-based finder
+  findCandidatesByEmail, // email-based finder
 } = require("../models/merchantRegistrationModel");
 
 /* ---------------- file path helpers ---------------- */
@@ -92,7 +92,7 @@ async function registerMerchant(req, res) {
       delivery_option: b.delivery_option,
       owner_type: (b.owner_type || "individual").toLowerCase(),
 
-      // bank (front/back removed)
+      // bank
       bank_name: b.bank_name,
       account_holder_name: b.account_holder_name,
       account_number: b.account_number,
@@ -335,6 +335,7 @@ async function listFoodOwners(req, res) {
     }
     params.push(limit, offset);
 
+    // Ratings now come from food_ratings with business_id
     const [rows] = await db.query(
       `
    SELECT
@@ -354,9 +355,9 @@ async function listFoodOwners(req, res) {
      MAX(u.profile_image)              AS profile_image,
      MAX(mbd.complementary)            AS complement,
      MAX(mbd.complementary_details)    AS complement_details,
-     COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
-     COUNT(fmr.comment)                       AS total_comments,
-     GROUP_CONCAT(DISTINCT bt.name)           AS tags
+     COALESCE(ROUND(AVG(fr.rating), 2), 0) AS avg_rating,
+     SUM(CASE WHEN fr.comment IS NOT NULL AND fr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
+     GROUP_CONCAT(DISTINCT bt.name)    AS tags
    FROM merchant_business_details mbd
    JOIN users u
      ON u.user_id = mbd.user_id
@@ -364,10 +365,8 @@ async function listFoodOwners(req, res) {
      ON mbt.business_id = mbd.business_id
    LEFT JOIN business_types bt
      ON bt.id = mbt.business_type_id
-   LEFT JOIN food_menu fmn
-     ON fmn.business_id = mbd.business_id
-   LEFT JOIN food_menu_ratings fmr
-     ON fmr.menu_id = fmn.id
+   LEFT JOIN food_ratings fr
+     ON fr.business_id = mbd.business_id
    WHERE TRIM(LOWER(mbd.owner_type)) = 'food'
    ${whereSearch}
    GROUP BY mbd.business_id
@@ -403,6 +402,7 @@ async function listMartOwners(req, res) {
     }
     params.push(limit, offset);
 
+    // Ratings now come from mart_ratings with business_id
     const [rows] = await db.query(
       `
    SELECT
@@ -422,9 +422,9 @@ async function listMartOwners(req, res) {
      MAX(u.profile_image)              AS profile_image,
      MAX(mbd.complementary)            AS complement,
      MAX(mbd.complementary_details)    AS complement_details,
-     COALESCE(ROUND(AVG(mmr.rating), 2), 0) AS avg_rating,
-     COUNT(mmr.comment)                       AS total_comments,
-     GROUP_CONCAT(DISTINCT bt.name)           AS tags
+     COALESCE(ROUND(AVG(mr.rating), 2), 0) AS avg_rating,
+     SUM(CASE WHEN mr.comment IS NOT NULL AND mr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
+     GROUP_CONCAT(DISTINCT bt.name)    AS tags
    FROM merchant_business_details mbd
    JOIN users u
      ON u.user_id = mbd.user_id
@@ -432,10 +432,8 @@ async function listMartOwners(req, res) {
      ON mbt.business_id = mbd.business_id
    LEFT JOIN business_types bt
      ON bt.id = mbt.business_type_id
-   LEFT JOIN mart_menu mmn
-     ON mmn.business_id = mbd.business_id
-   LEFT JOIN mart_menu_ratings mmr
-     ON mmr.menu_id = mmn.id
+   LEFT JOIN mart_ratings mr
+     ON mr.business_id = mbd.business_id
    WHERE TRIM(LOWER(mbd.owner_type)) = 'mart'
    ${whereSearch}
    GROUP BY mbd.business_id
@@ -462,7 +460,7 @@ async function listMartOwners(req, res) {
 module.exports = {
   registerMerchant,
   updateMerchant,
-  loginByEmail, // ← CHANGED export
+  loginByEmail,
   listFoodOwners,
   listMartOwners,
 };
