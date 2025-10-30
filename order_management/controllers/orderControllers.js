@@ -116,6 +116,7 @@ exports.createOrder = async (req, res) => {
       const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
       if (!buyer) {
         return res.status(400).json({
+          code: "WALLET_NOT_FOUND",
           message:
             "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
         });
@@ -201,22 +202,63 @@ exports.createOrder = async (req, res) => {
 
 // ----- Everything below remains the same -----
 exports.getOrders = async (_req, res) => {
-  /* unchanged */
+  try {
+    const orders = await Order.findAll();
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
+
 exports.getOrderById = async (req, res) => {
-  /* unchanged */
+  try {
+    const grouped = await Order.findByOrderIdGrouped(req.params.order_id);
+    if (!grouped.length)
+      return res.status(404).json({ message: "Order not found" });
+    res.json({ success: true, data: grouped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
+
 exports.getOrdersByBusinessId = async (req, res) => {
-  /* unchanged */
+  try {
+    const items = await Order.findByBusinessId(req.params.business_id);
+    res.json(items);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
+
 exports.getBusinessOrdersGroupedByUser = async (req, res) => {
-  /* unchanged */
+  try {
+    const data = await Order.findByBusinessGroupedByUser(
+      req.params.business_id
+    );
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 };
+
 exports.getOrdersForUser = async (req, res) => {
-  /* unchanged */
+  try {
+    const data = await Order.findByUserIdForApp(req.params.user_id);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 };
+
 exports.updateOrder = async (req, res) => {
-  /* unchanged */
+  try {
+    const affectedRows = await Order.update(req.params.order_id, req.body);
+    if (!affectedRows)
+      return res.status(404).json({ message: "Order not found" });
+    res.json({ message: "Order updated successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
 
 /**
