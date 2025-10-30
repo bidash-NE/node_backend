@@ -34,7 +34,7 @@ const server = http.createServer(app);
     await attachRealtime(server); // bind socket.io to this server
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () =>
-      console.log(`🚀 Order service + Realtime listening on port:${PORT}`)
+      console.log(`🚀 Order service + Realtime listening on :${PORT}`)
     );
   } catch (err) {
     console.error("Boot failed:", err);
