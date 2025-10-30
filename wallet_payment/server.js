@@ -10,6 +10,7 @@ const { initWalletTables } = require("./models/init");
 const walletRoutes = require("./routes/walletRoutes");
 const txRoutes = require("./routes/transactionHistoryRoutes");
 const idRoutes = require("./routes/idRoutes");
+const platformFeeRuleRoutes = require("./routes/platformFeeRuleRoutes");
 const app = express();
 
 /* ─────────────────── Middleware ─────────────────── */
@@ -31,6 +32,7 @@ app.use(morgan("dev"));
     app.use("/wallet", walletRoutes);
     app.use("/transactions", txRoutes);
     app.use("/ids", idRoutes);
+    app.use("/api/platform-fee-rules", platformFeeRuleRoutes);
 
     // 4) Health endpoints
     app.get("/wallet/health", (_req, res) => {
@@ -57,7 +59,7 @@ app.use(morgan("dev"));
     // 5) Start server
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () =>
-      console.log(`💰 wallet_payment listening on port:${PORT}`)
+      console.log(`💰 wallet_payment listening on :${PORT}`)
     );
   } catch (err) {
     console.error("❌ Startup failed:", err.message);
