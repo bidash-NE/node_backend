@@ -29,10 +29,11 @@ function mapRowForWallet(row, wallet_id) {
 async function getByWallet(req, res) {
   try {
     const { wallet_id } = req.params;
-    if (!isValidWalletId(wallet_id))
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
+    }
 
     const { limit, cursor, start, end, direction, journal, q } = req.query;
     const { rows, next_cursor } = await listByWallet(wallet_id, {
@@ -40,7 +41,7 @@ async function getByWallet(req, res) {
       cursor,
       start,
       end,
-      direction: direction ? String(direction).toUpperCase() : null,
+      direction: direction ? String(direction).toUpperCase() : null, // 'CR' | 'DR' | null
       journal,
       q,
     });
@@ -49,7 +50,7 @@ async function getByWallet(req, res) {
       success: true,
       count: rows.length,
       next_cursor,
-      data: rows.map((r) => mapRowForWallet(r, wallet_id)),
+      data: rows.map((r) => mapRowForWallet(r, wallet_id)), // r.remark is the direction
     });
   } catch (e) {
     console.error("getByWallet error:", e);

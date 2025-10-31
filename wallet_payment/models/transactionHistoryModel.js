@@ -56,26 +56,29 @@ async function listByWallet(
     cursor = null,
     start = null,
     end = null,
-    direction = null,
+    direction = null, // 'CR' or 'DR' or null
     journal = null,
     q = null,
   } = {}
 ) {
   if (!isValidWalletId(wallet_id)) return { rows: [], next_cursor: null };
+
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+
+  // Reuse your common filters (dates, journal, query text, etc.)
   const { where, params } = buildCommonFilters({ start, end, journal, q });
 
-  if (direction === "CR") {
-    where.push("wt.tnx_to = ?");
-    params.push(wallet_id);
-  } else if (direction === "DR") {
-    where.push("wt.tnx_from = ?");
-    params.push(wallet_id);
-  } else {
-    where.push("(wt.tnx_from = ? OR wt.tnx_to = ?)");
-    params.push(wallet_id, wallet_id);
+  // ✅ Core change: single-side filter using generated column
+  where.push("wt.actual_wallet_id = ?");
+  params.push(wallet_id);
+
+  // Optional one-sided direction filter using remark (CR/DR)
+  if (direction === "CR" || direction === "DR") {
+    where.push("wt.remark = ?");
+    params.push(direction);
   }
 
+  // Cursor pagination (stable, same as before)
   let cursorClause = "";
   if (cursor) {
     const c = decodeCursor(cursor);
@@ -87,21 +90,33 @@ async function listByWallet(
   }
 
   const sql = `
-    SELECT wt.id, wt.transaction_id, wt.journal_code,
-           wt.tnx_from, wt.tnx_to, wt.amount, wt.remark, wt.note, wt.created_at
+    SELECT
+      wt.id,
+      wt.transaction_id,
+      wt.journal_code,
+      wt.tnx_from,
+      wt.tnx_to,
+      wt.actual_wallet_id,   -- for debugging/inspection if needed
+      wt.amount,
+      wt.remark,             -- 'CR' or 'DR' (your direction)
+      wt.note,
+      wt.created_at
     FROM wallet_transactions wt
     ${where.length ? "WHERE " + where.join(" AND ") : ""}
     ${cursorClause}
     ORDER BY wt.created_at DESC, wt.id DESC
     LIMIT ?
   `;
+
   const [rows] = await db.query(sql, [...params, lim + 1]);
+
   let next_cursor = null;
   if (rows.length > lim) {
     const last = rows[lim - 1];
     next_cursor = encodeCursor(last.created_at, last.id);
     rows.length = lim;
   }
+
   return { rows, next_cursor };
 }
 
