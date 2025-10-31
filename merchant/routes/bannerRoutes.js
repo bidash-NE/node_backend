@@ -30,7 +30,6 @@ const validateBusinessIdParam = (req, res, next) => {
 };
 
 /* ---------------- routes ---------------- */
-router.get("/base-price", getBannerBasePriceCtrl);
 
 // Create (multipart or JSON base64; field: banner_image OR image)
 router.post("/", uploadBannerImage(), createBannerCtrl);
@@ -42,6 +41,7 @@ router.post("/", uploadBannerImage(), createBannerCtrl);
  */
 router.get("/food", listActiveFoodCtrl);
 router.get("/mart", listActiveMartCtrl);
+router.get("/base-price", getBannerBasePriceCtrl);
 
 /**
  * By business: fetch ALL banners (active + inactive), optional ?owner_type=food|mart
