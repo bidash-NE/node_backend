@@ -252,6 +252,22 @@ async function ensureBusinessBannersTable() {
   }
 }
 
+/* ---------- NEW: BANNERS BASE PRICES ---------- */
+async function ensureBannersBasePricesTable() {
+  const table = "banners_base_prices";
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE ${table} (
+        banner_price_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        amount_per_day DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (banner_price_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  }
+}
+
 /* ---------- FOOD MENU ---------- */
 async function ensureFoodMenuTable() {
   const table = "food_menu";
@@ -614,6 +630,7 @@ async function initMerchantTables() {
   await ensureFoodCategoryTable();
   await ensureMartCategoryTable();
   await ensureBusinessBannersTable();
+  await ensureBannersBasePricesTable(); // <<< NEW call added, everything else unchanged
   await ensureFoodMenuTable();
   await ensureMartMenuTable();
   await ensureFoodRatingsTable(); // uses business_id; allows multiple feedbacks per user

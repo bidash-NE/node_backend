@@ -248,6 +248,30 @@ async function deleteBannerCtrl(req, res) {
     });
   }
 }
+// GET /api/banners/base-price
+async function getBannerBasePriceCtrl(req, res) {
+  try {
+    const [rows] = await require("../config/db").query(
+      "SELECT amount_per_day FROM banners_base_prices LIMIT 1"
+    );
+
+    if (!rows.length)
+      return res.status(404).json({
+        success: false,
+        message: "No base price found in table.",
+      });
+
+    return res.status(200).json({
+      success: true,
+      amount_per_day: parseInt(rows[0].amount_per_day, 10),
+    });
+  } catch (e) {
+    return res.status(500).json({
+      success: false,
+      message: e.message || "Failed to fetch banner base price.",
+    });
+  }
+}
 
 module.exports = {
   uploadBannerImage,
@@ -259,4 +283,5 @@ module.exports = {
   getBannerCtrl,
   updateBannerCtrl,
   deleteBannerCtrl,
+  getBannerBasePriceCtrl,
 };
