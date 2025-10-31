@@ -908,7 +908,7 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
     [business_id]
   );
 
-  // default all possible statuses = 0
+  // Default all possible statuses = 0
   const allStatuses = [
     "PENDING",
     "CONFIRMED",
@@ -928,6 +928,21 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
     const key = String(row.status || "").toUpperCase();
     if (key) result[key] = Number(row.count) || 0;
   }
+
+  // 🔹 Count orders declined today only
+  const [todayRows] = await db.query(
+    `
+    SELECT COUNT(DISTINCT o.order_id) AS declined_today
+      FROM orders o
+      INNER JOIN order_items oi ON oi.order_id = o.order_id
+     WHERE oi.business_id = ?
+       AND o.status = 'DECLINED'
+       AND DATE(o.created_at) = CURDATE()
+    `,
+    [business_id]
+  );
+
+  result.order_declined_today = Number(todayRows[0]?.declined_today || 0);
 
   return result;
 };
