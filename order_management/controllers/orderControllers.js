@@ -51,8 +51,13 @@ exports.createOrder = async (req, res) => {
     // ---- Fulfillment-specific validation ----
     const fulfillment = String(payload.fulfillment_type || "Delivery");
     if (fulfillment === "Delivery") {
-      const addr = String(payload.delivery_address || "").trim();
-      if (!addr) {
+      const addrObj = payload.delivery_address;
+      const isObj =
+        addrObj && typeof addrObj === "object" && !Array.isArray(addrObj);
+      const addrStr = isObj
+        ? String(addrObj.address || "").trim()
+        : String(addrObj || "").trim();
+      if (!addrStr) {
         return res
           .status(400)
           .json({ message: "delivery_address is required for Delivery" });
@@ -144,6 +149,14 @@ exports.createOrder = async (req, res) => {
     // ================== END preflight checks ==================
 
     // Persist exactly what FE sent
+    // Persist exactly what FE sent (ensure delivery_address object is stringified)
+    if (
+      payload.delivery_address &&
+      typeof payload.delivery_address === "object"
+    ) {
+      payload.delivery_address = JSON.stringify(payload.delivery_address);
+    }
+
     const order_id = await Order.create({
       ...payload,
       status: (payload.status || "PENDING").toUpperCase(),

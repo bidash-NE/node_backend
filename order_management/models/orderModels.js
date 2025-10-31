@@ -153,6 +153,25 @@ async function insertUserNotification(
   );
 }
 
+function parseDeliveryAddress(val) {
+  if (val == null) return null;
+  if (typeof val === "object") return val;
+  const str = String(val || "").trim();
+  if (!str) return null;
+  try {
+    const obj = JSON.parse(str);
+    // normalize keys
+    return {
+      address: obj.address ?? obj.addr ?? "",
+      lat: typeof obj.lat === "number" ? obj.lat : Number(obj.lat ?? NaN),
+      lng: typeof obj.lng === "number" ? obj.lng : Number(obj.lng ?? NaN),
+    };
+  } catch {
+    // legacy plain string
+    return { address: str, lat: null, lng: null };
+  }
+}
+
 /* ================= CAPTURE HELPERS ================= */
 async function captureExists(order_id, capture_type, conn = null) {
   const dbh = conn || db;
@@ -511,7 +530,11 @@ const Order = {
       discount_amount: orderData.discount_amount,
       platform_fee: orderData.platform_fee ?? 0,
       payment_method: orderData.payment_method,
-      delivery_address: orderData.delivery_address,
+      delivery_address:
+        orderData.delivery_address &&
+        typeof orderData.delivery_address === "object"
+          ? JSON.stringify(orderData.delivery_address)
+          : orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
@@ -553,8 +576,11 @@ const Order = {
     const byOrder = new Map();
     for (const o of orders) {
       o.items = [];
+      // parse delivery_address for client
+      o.delivery_address = parseDeliveryAddress(o.delivery_address);
       byOrder.set(o.order_id, o);
     }
+
     for (const it of items) byOrder.get(it.order_id)?.items.push(it);
     return orders;
   },
@@ -591,6 +617,9 @@ const Order = {
       [order_id]
     );
     orders[0].items = items;
+    orders[0].delivery_address = parseDeliveryAddress(
+      orders[0].delivery_address
+    );
     return orders[0];
   },
 
@@ -681,7 +710,7 @@ const Order = {
         discount_amount: o.discount_amount,
         platform_fee: o.platform_fee,
         payment_method: o.payment_method,
-        delivery_address: o.delivery_address,
+        delivery_address: parseDeliveryAddress(o.delivery_address),
         note_for_restaurant: o.note_for_restaurant,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
@@ -756,7 +785,7 @@ const Order = {
             discount_amount: o.discount_amount,
             platform_fee: o.platform_fee,
             payment_method: o.payment_method,
-            delivery_address: o.delivery_address,
+            delivery_address: parseDeliveryAddress(o.delivery_address),
             note_for_restaurant: o.note_for_restaurant,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
@@ -832,7 +861,7 @@ const Order = {
               name: primaryBiz.business_name,
             }
           : null,
-        deliver_to: o.delivery_address,
+        deliver_to: parseDeliveryAddress(o.delivery_address),
         totals: {
           items_subtotal: null,
           platform_fee: Number(o.platform_fee || 0),
@@ -859,6 +888,19 @@ const Order = {
     if (!orderData || !Object.keys(orderData).length) return 0;
     if (orderData.status)
       orderData.status = String(orderData.status).toUpperCase();
+
+    if (Object.prototype.hasOwnProperty.call(orderData, "delivery_address")) {
+      if (
+        orderData.delivery_address &&
+        typeof orderData.delivery_address === "object"
+      ) {
+        orderData.delivery_address = JSON.stringify(orderData.delivery_address);
+      } else if (orderData.delivery_address == null) {
+        orderData.delivery_address = null;
+      } else {
+        orderData.delivery_address = String(orderData.delivery_address);
+      }
+    }
 
     const fields = Object.keys(orderData);
     const values = Object.values(orderData);
