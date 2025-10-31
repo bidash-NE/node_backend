@@ -261,6 +261,33 @@ async function loginByEmail(req, res) {
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
+    /* -----------------------------------------------------------
+       ✅ Mark as verified on first successful login (idempotent)
+    ----------------------------------------------------------- */
+    try {
+      // If you store is_verified in the users table:
+      await db.query(
+        `UPDATE users
+            SET is_verified = 1,
+                last_login = NOW()
+          WHERE user_id = ?
+            AND (is_verified IS NULL OR is_verified = 0)`,
+        [user.user_id]
+      );
+
+      // 🔸 If instead is_verified is stored in merchant_business_details:
+      // await db.query(
+      //   `UPDATE merchant_business_details
+      //       SET is_verified = 1,
+      //           verified_at = IFNULL(verified_at, NOW())
+      //     WHERE user_id = ?
+      //       AND (is_verified IS NULL OR is_verified = 0)`,
+      //   [user.user_id]
+      // );
+    } catch (e) {
+      console.error("is_verified update failed:", e?.message || e);
+    }
+
     // Pull latest (or primary) business attached to this user
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address

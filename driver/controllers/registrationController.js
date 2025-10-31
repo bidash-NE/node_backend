@@ -314,7 +314,15 @@ const loginUser = async (req, res) => {
 
 const logoutUser = async (req, res) => {
   try {
-    const { user_id } = req.params; // ✅ read from param
+    console.log(
+      "➡️ logout hit",
+      req.method,
+      req.originalUrl,
+      req.params,
+      new Date().toISOString()
+    );
+
+    const { user_id } = req.params; // expects /logout/:user_id
     const n = Number(user_id);
 
     if (!Number.isInteger(n) || n <= 0) {
@@ -323,16 +331,24 @@ const logoutUser = async (req, res) => {
         .json({ error: "Invalid or missing user_id param" });
     }
 
-    const [r] = await pool.query(
-      `UPDATE users SET is_verified = 0 WHERE user_id = ?`,
+    // ✅ Use the same promise-based pool as in login/register
+    const [result] = await pool.query(
+      `UPDATE users 
+          SET is_verified = 0,
+              last_login = NOW()
+        WHERE user_id = ?`,
       [n]
     );
 
-    if (r.affectedRows === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    return res.status(200).json({ message: "Logout successful", user_id: n });
+    return res.status(200).json({
+      message: "Logout successful",
+      user_id: n,
+      is_verified: 0,
+    });
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json({ error: "Logout failed due to server error" });
