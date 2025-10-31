@@ -49,4 +49,9 @@ router.get(
 /* User-facing */
 router.get("/users/:user_id/orders", validUserId, orderCtrl.getOrdersForUser);
 
+router.get(
+  "/orders/business/:business_id/status-counts",
+  validBizId,
+  orderCtrl.getOrderStatusCountsByBusiness
+);
 module.exports = router;

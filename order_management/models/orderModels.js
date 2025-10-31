@@ -895,5 +895,41 @@ const Order = {
     return r.affectedRows;
   },
 };
+/* ====================== KPI COUNTS BY BUSINESS ====================== */
+Order.getOrderStatusCountsByBusiness = async (business_id) => {
+  const [rows] = await db.query(
+    `
+    SELECT o.status, COUNT(DISTINCT o.order_id) AS count
+      FROM orders o
+      INNER JOIN order_items oi ON oi.order_id = o.order_id
+     WHERE oi.business_id = ?
+     GROUP BY o.status
+    `,
+    [business_id]
+  );
+
+  // default all possible statuses = 0
+  const allStatuses = [
+    "PENDING",
+    "CONFIRMED",
+    "PREPARING",
+    "READY",
+    "OUT_FOR_DELIVERY",
+    "COMPLETED",
+    "CANCELLED",
+    "REJECTED",
+    "DECLINED",
+  ];
+
+  const result = {};
+  for (const s of allStatuses) result[s] = 0;
+
+  for (const row of rows) {
+    const key = String(row.status || "").toUpperCase();
+    if (key) result[key] = Number(row.count) || 0;
+  }
+
+  return result;
+};
 
 module.exports = Order;

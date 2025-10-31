@@ -381,3 +381,17 @@ exports.deleteOrder = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+exports.getOrderStatusCountsByBusiness = async (req, res) => {
+  try {
+    const business_id = Number(req.params.business_id);
+    if (!Number.isFinite(business_id) || business_id <= 0) {
+      return res.status(400).json({ message: "Invalid business_id" });
+    }
+
+    const counts = await Order.getOrderStatusCountsByBusiness(business_id);
+    return res.json(counts);
+  } catch (err) {
+    console.error("[getOrderStatusCountsByBusiness]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+};
