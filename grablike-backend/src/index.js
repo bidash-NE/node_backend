@@ -4,7 +4,6 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
-import mongoose from "mongoose";
 
 import { mysqlPool } from "./db/mysql.js";
 import { initDriverSocket } from "./sockets/driver.js";
@@ -13,7 +12,6 @@ import { earningsRouter } from "./routes/earnings.js";
 import { ratingsRouter } from "./routes/ratings.js";
 import { ridesTypesRouter } from "./routes/rideTypes.js";
 
-// ⬇️ NEW: sequential matching route (uses Redis presence/matcher modules we added)
 import { makeMatchingRouter } from "./routes/matching.js";
 import { makeOfferAdapter } from "./services/offerAdapter.js";
 import { configureMatcher } from "./matching/matcher.js";
@@ -31,14 +29,38 @@ app.use(cors());
 app.use(express.json());
 
 /* ============================== Health ================================ */
-app.get("/", (_req, res) => res.json({ ok: true }));
+// Root health check
+app.get("/", (_req, res) =>
+  res.json({ ok: true, service: "grablike-backend" })
+);
+
+// Extended health check
+app.get("/health", async (_req, res) => {
+  try {
+    const conn = await mysqlPool.getConnection();
+    await conn.ping();
+    conn.release();
+
+    res.status(200).json({
+      ok: true,
+      service: "grablike-backend",
+      mysql: "connected",
+      uptime_sec: Math.round(process.uptime()),
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      service: "grablike-backend",
+      error: err.message || String(err),
+    });
+  }
+});
 
 /* =============================== Routes =============================== */
-// Existing routes (unchanged)
 app.use("/api/driver/jobs", driverJobsRouter(mysqlPool));
 app.use("/api/driver", earningsRouter(mysqlPool));
 app.use("/api", ratingsRouter(mysqlPool));
-app.use("/api", nearbyDriversApi(mysqlPool)); // <-- NEW: nearby drivers API
+app.use("/api", nearbyDriversApi(mysqlPool));
 app.use("/api", ridesTypesRouter);
 app.use("/api/rides/locations", locationsRouter);
 app.use("/api/places", places);
@@ -58,18 +80,9 @@ configureMatcher(adapter);
 // Attach sockets
 initDriverSocket(io, mysqlPool);
 
-// ⬇️ NEW: mount matching router AFTER io is created so it can use it
+// Mount after IO is ready
 app.use("/rides/match", makeMatchingRouter(io, mysqlPool));
 app.use("/rides", currentRidesRouter);
-
-/* ============================ Mongo events ============================ */
-mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
-mongoose.connection.on("error", (err) =>
-  console.error("❌ MongoDB connection error:", err)
-);
-mongoose.connection.on("disconnected", () =>
-  console.warn("⚠ MongoDB disconnected")
-);
 
 /* ============================ MySQL check ============================= */
 async function testMySQLConnection() {
@@ -87,25 +100,17 @@ async function testMySQLConnection() {
 /* ============================== Startup =============================== */
 async function startServer() {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      // For Mongoose v7+, these options are not required; harmless if left.
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-
     await testMySQLConnection();
 
-    const PORT = process.env.PORT || 4000;
-    server.listen(PORT, () => {
-      console.log(`HTTP+WS listening on port http://localhost:${PORT}`);
+    const PORT = Number(process.env.PORT || 3000);
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`✅ Grablike Backend running on http://0.0.0.0:${PORT}`);
+      console.log("Health check:", "/health");
     });
 
-    // Optional: graceful shutdown
+    // Graceful shutdown
     const shutdown = async (sig) => {
       console.log(`\n${sig} received — shutting down...`);
-      try {
-        await mongoose.disconnect();
-      } catch {}
       try {
         server.close();
       } catch {}
