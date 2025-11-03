@@ -203,11 +203,15 @@ async function updateBannerCtrl(req, res) {
   try {
     const id = Number(req.params.id);
     const b = req.body || {};
+
+    // same image handling as before
     const newImg = extractStorableImagePath(req);
     const wantsClear =
       b.banner_image === null ||
       b.banner_image === "null" ||
       b.banner_image === "";
+
+    // fields you want to update (same as before)
     const fields = {
       ...(b.business_id !== undefined && { business_id: b.business_id }),
       ...(b.title !== undefined && { title: b.title }),
@@ -220,12 +224,36 @@ async function updateBannerCtrl(req, res) {
     if (newImg) fields.banner_image = newImg;
     else if (wantsClear) fields.banner_image = null;
 
-    const out = await updateBanner(id, fields);
+    // NEW: optional wallet-charge inputs (only used if dates are being updated)
+    const payer_user_id =
+      b.user_id !== undefined ? Number(b.user_id) : undefined;
+    const total_amount =
+      b.total_amount !== undefined ? Number(b.total_amount) : undefined;
+    const auto_price =
+      String(b.auto_price || "").toLowerCase() === "true" ||
+      b.auto_price === true;
+
+    // Delegate to model. The model decides whether to do a simple update
+    // or the date+wallet atomic flow (based on fields + options).
+    const out = await require("../models/bannerModel").updateBanner(
+      id,
+      fields,
+      {
+        payer_user_id,
+        total_amount,
+        auto_price,
+      }
+    );
+
     if (!out.success) return res.status(400).json(out);
+
+    // If the model performed a wallet flow, it will include payment/pricing.
     return res.status(200).json({
       success: true,
-      message: "Banner updated successfully.",
+      message: out.message || "Banner updated successfully.",
       data: out.data,
+      ...(out.payment ? { payment: out.payment } : {}),
+      ...(out.pricing ? { pricing: out.pricing } : {}),
     });
   } catch (e) {
     return res.status(400).json({
@@ -234,6 +262,7 @@ async function updateBannerCtrl(req, res) {
     });
   }
 }
+
 async function deleteBannerCtrl(req, res) {
   try {
     const out = await deleteBanner(req.params.id);
