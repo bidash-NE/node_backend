@@ -1,5 +1,5 @@
 // src/index.js
-import "dotenv/config.js";               // if this fails, change to: import "dotenv/config";
+import "dotenv/config.js"; // if this fails, change to: import "dotenv/config";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -18,7 +18,7 @@ import { makeMatchingRouter } from "./routes/matching.js";
 import { makeOfferAdapter } from "./services/offerAdapter.js";
 import { configureMatcher } from "./matching/matcher.js";
 import nearbyDriversApi from "./routes/nearbyDriversApi.js";
-import locationsRouter from "./routes/locations.js"
+import locationsRouter from "./routes/locations.js";
 import places from "./routes/places.js";
 import makeDriverLookupRouter from "./routes/driverLookup.js";
 import currentRidesRouter from "./routes/currentRides.js";
@@ -38,13 +38,12 @@ app.get("/", (_req, res) => res.json({ ok: true }));
 app.use("/api/driver/jobs", driverJobsRouter(mysqlPool));
 app.use("/api/driver", earningsRouter(mysqlPool));
 app.use("/api", ratingsRouter(mysqlPool));
-app.use("/api", nearbyDriversApi(mysqlPool));  // <-- NEW: nearby drivers API
+app.use("/api", nearbyDriversApi(mysqlPool)); // <-- NEW: nearby drivers API
 app.use("/api", ridesTypesRouter);
-app.use('/api/rides/locations', locationsRouter);
+app.use("/api/rides/locations", locationsRouter);
 app.use("/api/places", places);
 app.use("/api", makeDriverLookupRouter(mysqlPool));
-app.use("/api/tips",tipsRouter(mysqlPool));
-
+app.use("/api/tips", tipsRouter(mysqlPool));
 
 /* ========================= HTTP + Socket.IO =========================== */
 const server = http.createServer(app);
@@ -60,13 +59,17 @@ configureMatcher(adapter);
 initDriverSocket(io, mysqlPool);
 
 // ⬇️ NEW: mount matching router AFTER io is created so it can use it
-app.use("/rides/match", makeMatchingRouter(io,mysqlPool));
+app.use("/rides/match", makeMatchingRouter(io, mysqlPool));
 app.use("/rides", currentRidesRouter);
 
 /* ============================ Mongo events ============================ */
 mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
-mongoose.connection.on("error", (err) => console.error("❌ MongoDB connection error:", err));
-mongoose.connection.on("disconnected", () => console.warn("⚠ MongoDB disconnected"));
+mongoose.connection.on("error", (err) =>
+  console.error("❌ MongoDB connection error:", err)
+);
+mongoose.connection.on("disconnected", () =>
+  console.warn("⚠ MongoDB disconnected")
+);
 
 /* ============================ MySQL check ============================= */
 async function testMySQLConnection() {
@@ -94,14 +97,18 @@ async function startServer() {
 
     const PORT = process.env.PORT || 4000;
     server.listen(PORT, () => {
-      console.log(`HTTP+WS listening on http://localhost:${PORT}`);
+      console.log(`HTTP+WS listening on port http://localhost:${PORT}`);
     });
 
     // Optional: graceful shutdown
     const shutdown = async (sig) => {
       console.log(`\n${sig} received — shutting down...`);
-      try { await mongoose.disconnect(); } catch {}
-      try { server.close(); } catch {}
+      try {
+        await mongoose.disconnect();
+      } catch {}
+      try {
+        server.close();
+      } catch {}
       process.exit(0);
     };
     process.on("SIGINT", () => shutdown("SIGINT"));
