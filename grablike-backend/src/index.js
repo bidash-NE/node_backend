@@ -1,5 +1,5 @@
 // src/index.js
-import "dotenv/config.js"; // if this fails, change to: import "dotenv/config";
+import "dotenv/config.js";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -29,13 +29,17 @@ app.use(cors());
 app.use(express.json());
 
 /* ============================== Health ================================ */
-// Root health check
-app.get("/", (_req, res) =>
-  res.json({ ok: true, service: "grablike-backend" })
-);
+// Basic health checks (for both internal and ingress access)
+app.get(["/", "/grablike", "/grablike/"], (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "grablike-backend",
+    timestamp: new Date().toISOString(),
+  });
+});
 
-// Extended health check
-app.get("/health", async (_req, res) => {
+// Extended MySQL + uptime health check
+app.get(["/health", "/grablike/health"], async (_req, res) => {
   try {
     const conn = await mysqlPool.getConnection();
     await conn.ping();
@@ -46,11 +50,13 @@ app.get("/health", async (_req, res) => {
       service: "grablike-backend",
       mysql: "connected",
       uptime_sec: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
     res.status(500).json({
       ok: false,
       service: "grablike-backend",
+      mysql: "disconnected",
       error: err.message || String(err),
     });
   }
@@ -80,11 +86,11 @@ configureMatcher(adapter);
 // Attach sockets
 initDriverSocket(io, mysqlPool);
 
-// Mount after IO is ready
+// Mount routes that depend on IO
 app.use("/rides/match", makeMatchingRouter(io, mysqlPool));
 app.use("/rides", currentRidesRouter);
 
-/* ============================ MySQL check ============================= */
+/* ============================ MySQL Check ============================= */
 async function testMySQLConnection() {
   try {
     const conn = await mysqlPool.getConnection();
@@ -105,7 +111,7 @@ async function startServer() {
     const PORT = Number(process.env.PORT || 3000);
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`✅ Grablike Backend running on http://0.0.0.0:${PORT}`);
-      console.log("Health check:", "/health");
+      console.log(`🩺 Health check available at: /health and /grablike/health`);
     });
 
     // Graceful shutdown
