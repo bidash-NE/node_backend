@@ -22,7 +22,6 @@ async function assertBusinessExists(business_id) {
 /**
  * Reads the owner type from merchant_business_details.
  * Expecting values like 'food' | 'mart' | 'both' (case-insensitive).
- * If the column name differs in your schema, change it below.
  */
 async function getOwnerTypeForBusiness(business_id) {
   const [r] = await db.query(
@@ -49,7 +48,7 @@ function hoursAgoBT(createdAt) {
   return diff >= 0 ? diff : 0;
 }
 
-/* ---------- main: chooses table by owner_type ---------- */
+/* ---------- main: chooses table by owner_type, returns likes_count too ---------- */
 async function fetchBusinessRatingsAuto(
   business_id,
   { page = 1, limit = 20 } = {}
@@ -92,7 +91,7 @@ async function fetchBusinessRatingsAuto(
 
     listSql = `
       SELECT
-        r.id, r.business_id, r.user_id, r.rating, r.comment, r.created_at,
+        r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
         u.user_name, u.profile_image
       FROM ${MART_TBL} r
       JOIN users u ON u.user_id = r.user_id
@@ -120,7 +119,7 @@ async function fetchBusinessRatingsAuto(
 
     listSql = `
       SELECT
-        r.id, r.business_id, r.user_id, r.rating, r.comment, r.created_at,
+        r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
         u.user_name, u.profile_image
       FROM ${FOOD_TBL} r
       JOIN users u ON u.user_id = r.user_id
@@ -154,7 +153,7 @@ async function fetchBusinessRatingsAuto(
       FROM (
         SELECT
           'food' AS owner_type,
-          r.id, r.business_id, r.user_id, r.rating, r.comment, r.created_at,
+          r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
           u.user_name, u.profile_image
         FROM ${FOOD_TBL} r
         JOIN users u ON u.user_id = r.user_id
@@ -162,7 +161,7 @@ async function fetchBusinessRatingsAuto(
         UNION ALL
         SELECT
           'mart' AS owner_type,
-          r.id, r.business_id, r.user_id, r.rating, r.comment, r.created_at,
+          r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
           u.user_name, u.profile_image
         FROM ${MART_TBL} r
         JOIN users u ON u.user_id = r.user_id
@@ -188,6 +187,7 @@ async function fetchBusinessRatingsAuto(
     },
     rating: r.rating,
     comment: r.comment,
+    likes_count: Number(r.likes_count ?? 0),
     created_at: r.created_at,
     hours_ago: hoursAgoBT(r.created_at),
   }));
@@ -216,4 +216,152 @@ async function fetchBusinessRatingsAuto(
   };
 }
 
-module.exports = { fetchBusinessRatingsAuto };
+/* ---------- simple like / unlike, NO user tracking ---------- */
+
+/**
+ * FOOD rating like: increments likes_count by 1 for that rating id.
+ */
+async function likeFoodRating(rating_id) {
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+
+  const [res] = await db.query(
+    `UPDATE food_ratings
+       SET likes_count = likes_count + 1
+     WHERE id = ?`,
+    [rid]
+  );
+
+  if (res.affectedRows === 0) {
+    throw new Error("food rating not found");
+  }
+
+  const [[row]] = await db.query(
+    `SELECT id, business_id, likes_count
+       FROM food_ratings
+      WHERE id = ?
+      LIMIT 1`,
+    [rid]
+  );
+
+  return {
+    success: true,
+    data: {
+      id: row.id,
+      business_id: row.business_id,
+      likes_count: Number(row.likes_count ?? 0),
+    },
+  };
+}
+
+/**
+ * FOOD rating unlike: decrements likes_count but never below 0.
+ */
+async function unlikeFoodRating(rating_id) {
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+
+  const [res] = await db.query(
+    `UPDATE food_ratings
+       SET likes_count = GREATEST(likes_count - 1, 0)
+     WHERE id = ?`,
+    [rid]
+  );
+
+  if (res.affectedRows === 0) {
+    throw new Error("food rating not found");
+  }
+
+  const [[row]] = await db.query(
+    `SELECT id, business_id, likes_count
+       FROM food_ratings
+      WHERE id = ?
+      LIMIT 1`,
+    [rid]
+  );
+
+  return {
+    success: true,
+    data: {
+      id: row.id,
+      business_id: row.business_id,
+      likes_count: Number(row.likes_count ?? 0),
+    },
+  };
+}
+
+/**
+ * MART rating like: increments likes_count by 1 for that rating id.
+ */
+async function likeMartRating(rating_id) {
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+
+  const [res] = await db.query(
+    `UPDATE mart_ratings
+       SET likes_count = likes_count + 1
+     WHERE id = ?`,
+    [rid]
+  );
+
+  if (res.affectedRows === 0) {
+    throw new Error("mart rating not found");
+  }
+
+  const [[row]] = await db.query(
+    `SELECT id, business_id, likes_count
+       FROM mart_ratings
+      WHERE id = ?
+      LIMIT 1`,
+    [rid]
+  );
+
+  return {
+    success: true,
+    data: {
+      id: row.id,
+      business_id: row.business_id,
+      likes_count: Number(row.likes_count ?? 0),
+    },
+  };
+}
+
+/**
+ * MART rating unlike: decrements likes_count but never below 0.
+ */
+async function unlikeMartRating(rating_id) {
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+
+  const [res] = await db.query(
+    `UPDATE mart_ratings
+       SET likes_count = GREATEST(likes_count - 1, 0)
+     WHERE id = ?`,
+    [rid]
+  );
+
+  if (res.affectedRows === 0) {
+    throw new Error("mart rating not found");
+  }
+
+  const [[row]] = await db.query(
+    `SELECT id, business_id, likes_count
+       FROM mart_ratings
+      WHERE id = ?
+      LIMIT 1`,
+    [rid]
+  );
+
+  return {
+    success: true,
+    data: {
+      id: row.id,
+      business_id: row.business_id,
+      likes_count: Number(row.likes_count ?? 0),
+    },
+  };
+}
+
+module.exports = {
+  fetchBusinessRatingsAuto,
+  likeFoodRating,
+  unlikeFoodRating,
+  likeMartRating,
+  unlikeMartRating,
+};
