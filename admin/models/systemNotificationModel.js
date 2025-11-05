@@ -1,21 +1,9 @@
 // models/systemNotificationModel.js
 const db = require("../config/db");
 
-/* Verify admin / super admin using user_id + user_name */
-async function findAdminByIdAndName(userId, userName) {
-  const sql = `
-    SELECT user_id, user_name, role
-    FROM users
-    WHERE user_id = ?
-      AND user_name = ?
-      AND role IN ('admin', 'super admin')
-    LIMIT 1
-  `;
-  const [rows] = await db.query(sql, [userId, userName]);
-  return rows.length ? rows[0] : null;
-}
-
-/* Insert a new system notification (immediate send) */
+/* -----------------------------------------------
+   INSERT new notification
+------------------------------------------------ */
 async function insertSystemNotification(data) {
   const {
     title,
@@ -38,8 +26,8 @@ async function insertSystemNotification(data) {
   const [result] = await db.query(sql, [
     title,
     message,
-    JSON.stringify(deliveryChannels || []),
-    JSON.stringify(targetAudience || []),
+    JSON.stringify(deliveryChannels),
+    JSON.stringify(targetAudience),
     createdBy,
     sentAt,
     status,
@@ -48,16 +36,38 @@ async function insertSystemNotification(data) {
   return result.insertId;
 }
 
-/* Get role of a user */
-async function getUserRole(userId) {
-  const sql = `SELECT role FROM users WHERE user_id = ? LIMIT 1`;
-  const [rows] = await db.query(sql, [userId]);
-  return rows.length ? rows[0].role : null;
+/* -----------------------------------------------
+   FETCH all system notifications (Admin)
+------------------------------------------------ */
+async function getAllSystemNotifications() {
+  const sql = `
+    SELECT
+      id,
+      title,
+      message,
+      delivery_channels,
+      target_audience,
+      status,
+      sent_at,
+      created_at
+    FROM system_notifications
+    ORDER BY created_at DESC, id DESC
+  `;
+  const [rows] = await db.query(sql);
+  return rows;
 }
 
-/* Fetch notifications for a given role (simplified columns) */
-async function getNotificationsForRole(role) {
-  if (!role) return [];
+/* -----------------------------------------------
+   FETCH notifications by user role (User)
+------------------------------------------------ */
+async function getNotificationsForUserRole(userId) {
+  if (!userId) return [];
+
+  const sqlRole = `SELECT role FROM users WHERE user_id = ? LIMIT 1`;
+  const [roleRows] = await db.query(sqlRole, [userId]);
+  if (!roleRows.length) return [];
+
+  const role = roleRows[0].role;
 
   const sql = `
     SELECT
@@ -67,8 +77,7 @@ async function getNotificationsForRole(role) {
       status,
       created_at
     FROM system_notifications
-    WHERE
-      JSON_CONTAINS(target_audience, JSON_QUOTE(?))
+    WHERE JSON_CONTAINS(target_audience, JSON_QUOTE(?))
       AND status = 'sent'
     ORDER BY created_at DESC
   `;
@@ -78,8 +87,7 @@ async function getNotificationsForRole(role) {
 }
 
 module.exports = {
-  findAdminByIdAndName,
   insertSystemNotification,
-  getUserRole,
-  getNotificationsForRole,
+  getAllSystemNotifications,
+  getNotificationsForUserRole,
 };

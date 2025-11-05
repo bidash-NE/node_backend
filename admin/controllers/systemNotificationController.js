@@ -1,58 +1,43 @@
 // controllers/systemNotificationController.js
 const {
-  findAdminByIdAndName,
   insertSystemNotification,
-  getUserRole,
-  getNotificationsForRole,
+  getAllSystemNotifications,
+  getNotificationsForUserRole,
 } = require("../models/systemNotificationModel");
 
 const adminLogModel = require("../models/adminlogModel");
 
-/* POST: create system notification */
+/* ---------------------------------------------------
+   POST /api/system-notifications
+   Create a new system notification
+--------------------------------------------------- */
 async function createSystemNotification(req, res) {
   try {
     const {
-      user_id,
-      user_name,
       title,
       message,
       delivery_channels,
       target_audience,
+      created_by = null,
     } = req.body || {};
 
-    if (!user_id || !user_name) {
-      return res.status(401).json({
-        success: false,
-        message: "user_id and user_name are required for admin verification.",
-      });
-    }
-
-    const admin = await findAdminByIdAndName(user_id, user_name);
-    if (!admin) {
-      return res.status(403).json({
-        success: false,
-        message: "Only admin / super admin can create notifications.",
-      });
-    }
-
     if (!title || !message) {
-      return res.status(400).json({
-        success: false,
-        message: "Title and message are required.",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Title and message are required." });
     }
 
     if (!Array.isArray(delivery_channels) || delivery_channels.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Select at least one delivery channel.",
+        message: "At least one delivery channel is required.",
       });
     }
 
     if (!Array.isArray(target_audience) || target_audience.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Select at least one target audience role.",
+        message: "At least one target audience is required.",
       });
     }
 
@@ -61,70 +46,74 @@ async function createSystemNotification(req, res) {
       message,
       deliveryChannels: delivery_channels,
       targetAudience: target_audience,
-      createdBy: admin.user_id,
+      createdBy: created_by,
     });
 
-    const adminName = admin.user_name || `user_${admin.user_id}`;
-    const activity = `Created system notification #${newId} - "${title}"`;
-
     await adminLogModel.addLog({
-      user_id: admin.user_id,
-      admin_name: adminName,
-      activity,
+      user_id: created_by,
+      admin_name: "System",
+      activity: `Created system notification #${newId}`,
     });
 
     return res.status(201).json({
       success: true,
       message: "Notification created successfully.",
-      notification_id: newId,
+      id: newId,
     });
   } catch (err) {
     console.error("❌ Error creating notification:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    res.status(500).json({ success: false, message: "Internal server error." });
   }
 }
 
-/* GET: fetch notifications by userId */
-async function getSystemNotificationsForUser(req, res) {
+/* ---------------------------------------------------
+   GET /api/system-notifications/all
+   Fetch ALL system notifications (for admin)
+--------------------------------------------------- */
+async function getAllSystemNotificationsController(req, res) {
+  try {
+    const notifications = await getAllSystemNotifications();
+    res.json({
+      success: true,
+      count: notifications.length,
+      notifications,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching all notifications:", err);
+    res.status(500).json({ success: false, message: "Internal server error." });
+  }
+}
+
+/* ---------------------------------------------------
+   GET /api/system-notifications/user/:userId
+   Fetch notifications based on user's role
+--------------------------------------------------- */
+async function getSystemNotificationsByUser(req, res) {
   try {
     const { userId } = req.params;
 
     if (!userId) {
       return res.status(400).json({
         success: false,
-        message: "userId is required in params.",
+        message: "User ID is required.",
       });
     }
 
-    const role = await getUserRole(userId);
-    if (!role) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found or has no role.",
-      });
-    }
-
-    const notifications = await getNotificationsForRole(role);
-
-    return res.json({
+    const notifications = await getNotificationsForUserRole(userId);
+    res.json({
       success: true,
-      role,
+      user_id: userId,
       count: notifications.length,
       notifications,
     });
   } catch (err) {
-    console.error("❌ Error fetching notifications:", err);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    console.error("❌ Error fetching user notifications:", err);
+    res.status(500).json({ success: false, message: "Internal server error." });
   }
 }
 
 module.exports = {
   createSystemNotification,
-  getSystemNotificationsForUser,
+  getAllSystemNotificationsController,
+  getSystemNotificationsByUser,
 };

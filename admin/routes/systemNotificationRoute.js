@@ -4,13 +4,17 @@ const router = express.Router();
 
 const {
   createSystemNotification,
-  getSystemNotificationsForUser,
+  getAllSystemNotificationsController,
+  getSystemNotificationsByUser,
 } = require("../controllers/systemNotificationController");
 
-// Create new system notification (admin / super admin only)
+// Create new notification
 router.post("/", createSystemNotification);
 
-// Fetch notifications for a user (based on their role)
-router.get("/:userId", getSystemNotificationsForUser);
+// Fetch all system notifications (admin)
+router.get("/all", getAllSystemNotificationsController);
+
+// Fetch notifications for a specific user (by role)
+router.get("/:userId", getSystemNotificationsByUser);
 
 module.exports = router;
