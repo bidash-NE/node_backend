@@ -22,9 +22,10 @@ async function getAll() {
   }
 }
 
-/** Add new admin log */
 /**
  * Save a descriptive activity log.
+ * Used by many modules (including system notifications).
+ *
  * @param {Object} log
  * @param {number} log.user_id
  * @param {string} log.admin_name
