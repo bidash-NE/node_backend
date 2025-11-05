@@ -6,7 +6,7 @@ const {
   getNotificationsForRole,
 } = require("../models/systemNotificationModel");
 
-const adminLogModel = require("../models/adminLogModel");
+const adminLogModel = require("../models/adminlogModel");
 
 /* POST: create system notification */
 async function createSystemNotification(req, res) {
