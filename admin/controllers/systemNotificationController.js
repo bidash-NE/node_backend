@@ -5,7 +5,7 @@ const {
   getNotificationsForUserRole,
 } = require("../models/systemNotificationModel");
 
-const adminLogModel = require("../models/adminLogModel");
+const adminLogModel = require("../models/adminlogModel");
 const {
   sendNotificationEmails,
 } = require("../services/emailNotificationService");
