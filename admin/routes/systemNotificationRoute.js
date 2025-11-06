@@ -8,13 +8,13 @@ const {
   getSystemNotificationsByUser,
 } = require("../controllers/systemNotificationController");
 
-// POST — create and broadcast notification
+// Create new notification (in_app, email, sms – behaviour handled in controller)
 router.post("/", createSystemNotification);
 
-// GET — list all notifications (for admin view)
+// Admin: fetch all IN_APP notifications from DB
 router.get("/all", getAllSystemNotificationsController);
 
-// GET — list visible notifications for a specific user (based on role)
+// User: fetch in_app notifications by role
 router.get("/:userId", getSystemNotificationsByUser);
 
 module.exports = router;

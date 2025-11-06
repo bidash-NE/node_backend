@@ -1,7 +1,7 @@
 // models/systemNotificationModel.js
 const db = require("../config/db");
 
-/* ========== INSERT new notification ========== */
+/* INSERT new notification (used only for in_app) */
 async function insertSystemNotification(data) {
   const {
     title,
@@ -34,12 +34,18 @@ async function insertSystemNotification(data) {
   return result.insertId;
 }
 
-/* ========== FETCH all notifications ========== */
+/* FETCH all notifications (for admin view) */
 async function getAllSystemNotifications() {
   const sql = `
     SELECT
-      id, title, message, delivery_channels,
-      target_audience, status, sent_at, created_at
+      id,
+      title,
+      message,
+      delivery_channels,
+      target_audience,
+      status,
+      sent_at,
+      created_at
     FROM system_notifications
     ORDER BY created_at DESC, id DESC
   `;
@@ -47,7 +53,7 @@ async function getAllSystemNotifications() {
   return rows;
 }
 
-/* ========== FETCH notifications visible to user (based on role) ========== */
+/* FETCH notifications visible to a user (by role) */
 async function getNotificationsForUserRole(userId) {
   if (!userId) return [];
 
@@ -58,7 +64,12 @@ async function getNotificationsForUserRole(userId) {
   const role = roleRows[0].role;
 
   const sql = `
-    SELECT id, title, message, status, created_at
+    SELECT
+      id,
+      title,
+      message,
+      status,
+      created_at
     FROM system_notifications
     WHERE JSON_CONTAINS(target_audience, JSON_QUOTE(?))
       AND status = 'sent'
