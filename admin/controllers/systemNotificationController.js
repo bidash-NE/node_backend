@@ -12,12 +12,14 @@ const {
 
 /* ---------------------------------------------------
    POST /api/system-notifications
-   Create & send notification
-
-   Rules:
-   - If "in_app" is selected  -> save in system_notifications
-   - If "email"/"sms" selected -> DO NOT save in system_notifications,
-                                 only send + log in admin_logs
+   Behaviour:
+   - If "in_app" is in delivery_channels:
+       -> Save in system_notifications
+   - If "email" is in delivery_channels:
+       -> Do NOT save in system_notifications,
+          just send emails + log in admin_logs
+   - If "sms" is in delivery_channels:
+       -> Only log (no SMS sending implemented)
 --------------------------------------------------- */
 async function createSystemNotification(req, res) {
   try {
@@ -56,17 +58,17 @@ async function createSystemNotification(req, res) {
     const lowerChannels = delivery_channels.map((c) => String(c).toLowerCase());
     const wantsInApp = lowerChannels.includes("in_app");
     const wantsEmail = lowerChannels.includes("email");
-    const wantsSms = lowerChannels.includes("sms"); // just log for now
+    const wantsSms = lowerChannels.includes("sms");
 
     let notificationId = null;
     let emailSummary = null;
 
-    // 1️⃣ In-app: save to system_notifications
+    // 1️⃣ IN_APP: save into system_notifications
     if (wantsInApp) {
       notificationId = await insertSystemNotification({
         title,
         message,
-        deliveryChannels: ["in_app"], // store only in_app here
+        deliveryChannels: ["in_app"], // store only in_app
         targetAudience: target_audience,
         createdBy,
       });
@@ -80,43 +82,52 @@ async function createSystemNotification(req, res) {
       });
     }
 
-    // 2️⃣ Email: DO NOT save in system_notifications, only send + log
+    // 2️⃣ EMAIL: send but do NOT save in system_notifications
     if (wantsEmail) {
       emailSummary = await sendNotificationEmails({
-        notificationId: notificationId, // may be null if no in_app
+        notificationId, // may be null if no in_app
         title,
         message,
         roles: target_audience,
       });
 
+      // Build a clean log message without "N/A"
+      let logMessage = `Sent EMAIL notification to roles [${target_audience.join(
+        ", "
+      )}]`;
+      if (notificationId) {
+        logMessage += ` (Notification #${notificationId})`;
+      }
+      logMessage += ` — sent: ${emailSummary.sent}, failed: ${emailSummary.failed}`;
+
       await adminLogModel.addLog({
         user_id: createdBy,
         admin_name: adminName,
-        activity: `Sent EMAIL notification (notification_id=${
-          notificationId || "N/A"
-        }) to roles [${target_audience.join(", ")}] -> sent=${
-          emailSummary.sent
-        }, failed=${emailSummary.failed}`,
+        activity: logMessage,
       });
     }
 
-    // 3️⃣ SMS: only log (no actual SMS sending implemented yet)
+    // 3️⃣ SMS: only log (no actual sending implemented)
     if (wantsSms) {
+      let logMessage = `Requested SMS notification to roles [${target_audience.join(
+        ", "
+      )}]`;
+      if (notificationId) {
+        logMessage += ` (Notification #${notificationId})`;
+      }
+      logMessage += " — SMS sending not yet implemented";
+
       await adminLogModel.addLog({
         user_id: createdBy,
         admin_name: adminName,
-        activity: `Requested SMS notification (notification_id=${
-          notificationId || "N/A"
-        }) to roles [${target_audience.join(
-          ", "
-        )}] (SMS sending not yet implemented)`,
+        activity: logMessage,
       });
     }
 
     return res.status(201).json({
       success: true,
       message: "Notification processed successfully.",
-      notification_id: notificationId, // may be null if no in_app
+      notification_id: notificationId, // null if only email/sms
       email_summary: emailSummary,
     });
   } catch (err) {
@@ -129,7 +140,7 @@ async function createSystemNotification(req, res) {
 
 /* ---------------------------------------------------
    GET /api/system-notifications/all  (Admin)
-   Only returns IN_APP notifications saved in DB
+   Only IN_APP notifications from system_notifications table
 --------------------------------------------------- */
 async function getAllSystemNotificationsController(req, res) {
   try {
@@ -147,7 +158,7 @@ async function getAllSystemNotificationsController(req, res) {
 
 /* ---------------------------------------------------
    GET /api/system-notifications/user/:userId  (App)
-   Only IN_APP notifications (based on role)
+   Only IN_APP notifications (filtered by user's role)
 --------------------------------------------------- */
 async function getSystemNotificationsByUser(req, res) {
   try {

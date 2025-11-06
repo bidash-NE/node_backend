@@ -1,7 +1,10 @@
 // models/systemNotificationModel.js
 const db = require("../config/db");
 
-/* INSERT new notification (used only for in_app) */
+/**
+ * Insert a new IN_APP system notification.
+ * (We only store in DB when "in_app" channel is used.)
+ */
 async function insertSystemNotification(data) {
   const {
     title,
@@ -34,7 +37,9 @@ async function insertSystemNotification(data) {
   return result.insertId;
 }
 
-/* FETCH all notifications (for admin view) */
+/**
+ * Fetch all IN_APP notifications (for admin view).
+ */
 async function getAllSystemNotifications() {
   const sql = `
     SELECT
@@ -53,7 +58,10 @@ async function getAllSystemNotifications() {
   return rows;
 }
 
-/* FETCH notifications visible to a user (by role) */
+/**
+ * Fetch notifications visible to a user based on their role.
+ * Only IN_APP notifications are stored here.
+ */
 async function getNotificationsForUserRole(userId) {
   if (!userId) return [];
 

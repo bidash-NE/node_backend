@@ -30,12 +30,13 @@ app.use(express.json());
 
 /* ============================== Health ================================ */
 // Basic health checks (for both internal and ingress access)
-app.get(["/", "/grablike", "/grablike/"], (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    service: "grablike-backend",
-    timestamp: new Date().toISOString(),
-  });
+app.use((req, _res, next) => {
+  if (req.url.startsWith("/grablike/")) {
+    req.url = req.url.slice("/grablike".length); // "/grablike/api/..." -> "/api/..."
+  } else if (req.url === "/grablike") {
+    req.url = "/";
+  }
+  next();
 });
 
 // Extended MySQL + uptime health check
