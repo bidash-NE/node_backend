@@ -90,16 +90,11 @@ async function createOrder(req, res) {
       }
     }
 
-    // ---- if_unavailable preference ----
-    const allowedIfUnavail = new Set([
-      "suggest_replacement",
-      "cancel_entire_order",
-      "skip_unavailable_only",
-    ]);
-    const if_unavailable_raw = String(payload.if_unavailable || "").trim();
-    const if_unavailable = allowedIfUnavail.has(if_unavailable_raw)
-      ? if_unavailable_raw
-      : "suggest_replacement";
+    // ---- if_unavailable: just take whatever client sends, no defaults ----
+    let if_unavailable = null;
+    if (payload.if_unavailable !== undefined && payload.if_unavailable !== null) {
+      if_unavailable = String(payload.if_unavailable);
+    }
 
     // ================== Preflight wallet checks ==================
     if (payMethod === "WALLET") {
@@ -168,7 +163,7 @@ async function createOrder(req, res) {
 
     const order_id = await Order.create({
       ...payload,
-      if_unavailable, // store preference
+      if_unavailable, // ⬅️ use raw value from client (or null)
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
     });
@@ -209,7 +204,6 @@ async function createOrder(req, res) {
 
     const initialStatus = (payload.status || "PENDING").toUpperCase();
 
-    // Broadcast initial status
     broadcastOrderStatusToMany({
       order_id,
       user_id: payload.user_id,
@@ -217,7 +211,6 @@ async function createOrder(req, res) {
       status: initialStatus,
     });
 
-    // User-side "order placed" notification
     try {
       await Order.addUserOrderStatusNotification({
         user_id: payload.user_id,
@@ -320,17 +313,27 @@ async function updateOrder(req, res) {
 
 /**
  * PATCH /orders/:order_id/status
+ * Includes:
+ * - unavailable item changes
+ * - totals update
+ * - capture
+ * - notifications
+ */
+/**
+ * PATCH/PUT /orders/:order_id/status
  * Status rules:
  * - Block user cancel after acceptance.
- * - On CONFIRMED: apply unavailable item changes, update totals, capture funds/fee.
- * - Insert notifications for user in this order:
- *   1) order status
- *   2) unavailable items
- *   3) wallet debit (last)
+ * - On CONFIRMED:
+ *    - apply unavailable item changes to order_items
+ *    - update final totals in orders
+ *    - capture wallet / platform fee
+ *    - send notifications (order, unavailable items, wallet deduction)
  */
-async function updateOrderStatus(req, res) {
+async function updateOrderStatus(req, res){
   try {
     const order_id = req.params.order_id;
+
+    // Accept both snake_case and camelCase from frontend
     const {
       status,
       reason,
@@ -338,9 +341,14 @@ async function updateOrderStatus(req, res) {
       final_platform_fee,
       final_discount_amount,
       unavailable_changes,
+      unavailableChanges,
     } = req.body || {};
 
-    if (!status) return res.status(400).json({ message: "Status is required" });
+    const changes = unavailable_changes || unavailableChanges || null;
+
+    if (!status) {
+      return res.status(400).json({ message: "Status is required" });
+    }
 
     const normalized = String(status).trim().toUpperCase();
     if (!ALLOWED_STATUSES.has(normalized)) {
@@ -351,6 +359,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
+    // Get current order info
     const [[row]] = await db.query(
       `SELECT user_id, status AS current_status, payment_method
          FROM orders WHERE order_id = ? LIMIT 1`,
@@ -362,7 +371,7 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // Cancellation guard
+    // Block late cancels
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -379,15 +388,20 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 🔹 If merchant is ACCEPTING (CONFIRMED)
+    // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
-      // 1) Apply unavailable item changes to order_items (remove/replace rows)
-      if (unavailable_changes) {
+      // 1) Apply unavailable item changes (remove/replace items)
+      if (
+        changes &&
+        (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
+      ) {
+        console.log(
+          "[APPLY UNAVAILABLE ITEM CHANGES]",
+          order_id,
+          JSON.stringify(changes)
+        );
         try {
-          await Order.applyUnavailableItemChanges(
-            order_id,
-            unavailable_changes
-          );
+          await Order.applyUnavailableItemChanges(order_id, changes);
         } catch (e) {
           console.error("[APPLY UNAVAILABLE ITEM CHANGES FAILED]", {
             order_id,
@@ -400,7 +414,7 @@ async function updateOrderStatus(req, res) {
         }
       }
 
-      // 2) Update final totals in orders
+      // 2) Update final totals on orders (these are already recomputed by FE)
       const updatePayload = {};
       if (final_total_amount != null)
         updatePayload.total_amount = Number(final_total_amount);
@@ -420,23 +434,25 @@ async function updateOrderStatus(req, res) {
       normalized,
       (reason ?? "").toString().trim()
     );
-    if (!affected) return res.status(404).json({ message: "Order not found" });
+    if (!affected) {
+      return res.status(404).json({ message: "Order not found" });
+    }
 
-    // 4) Fetch businesses involved in this order
+    // 4) Businesses involved in this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // 5) On CONFIRMED: capture funds / platform fee using the UPDATED totals
-    let captureResult = null;
+    // 5) On CONFIRMED → capture funds / platform fee and prepare wallet info
+    let captureInfo = null;
     if (normalized === "CONFIRMED") {
       try {
         if (payMethod === "WALLET") {
-          captureResult = await Order.captureOrderFunds(order_id);
+          captureInfo = await Order.captureOrderFunds(order_id);
         } else if (payMethod === "COD") {
-          captureResult = await Order.captureOrderCODFee(order_id);
+          captureInfo = await Order.captureOrderCODFee(order_id);
         }
       } catch (e) {
         console.error("[CAPTURE FAILED]", order_id, e?.message);
@@ -447,7 +463,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 6) Broadcast status to user & businesses
+    // 6) Broadcast status to user & businesses (websocket)
     broadcastOrderStatusToMany({
       order_id,
       user_id,
@@ -477,55 +493,77 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // 8) User notifications: order status → unavailable items → wallet debit LAST
+    // 8) User-side order status notification (generic)
     try {
-      // 8.1 Order status notification
       await Order.addUserOrderStatusNotification({
         user_id,
         order_id,
         status: normalized,
         reason,
       });
-
-      // 8.2 If confirmed & there were unavailable item changes, notify user
-      if (normalized === "CONFIRMED" && unavailable_changes) {
-        await Order.addUserUnavailableItemNotification({
-          user_id,
-          order_id,
-          changes: unavailable_changes,
-          final_total_amount:
-            final_total_amount != null ? Number(final_total_amount) : null,
-        });
-      }
-
-      // 8.3 Wallet debit notification LAST (only if capture actually happened)
-      if (
-        normalized === "CONFIRMED" &&
-        captureResult &&
-        captureResult.captured &&
-        (captureResult.order_amount > 0 || captureResult.platform_fee > 0)
-      ) {
-        await Order.addUserWalletDebitNotification({
-          user_id,
-          order_id,
-          order_amount: captureResult.order_amount,
-          platform_fee: captureResult.platform_fee,
-          method: payMethod,
-        });
-      }
     } catch (e) {
-      console.error("[USER NOTIFY FAILED on status change]", {
+      console.error("[USER ORDER STATUS NOTIFY FAILED on status change]", {
         order_id,
         status: normalized,
         err: e?.message,
       });
     }
 
-    res.json({ message: "Order status updated successfully" });
+    // 9) If unavailable items changed, notify user about remove/replace + final amount
+    if (
+      normalized === "CONFIRMED" &&
+      changes &&
+      (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
+    ) {
+      try {
+        await Order.addUserUnavailableItemNotification({
+          user_id,
+          order_id,
+          changes,
+          final_total_amount:
+            final_total_amount != null ? Number(final_total_amount) : null,
+        });
+      } catch (e) {
+        console.error(
+          "[USER ORDER UNAVAILABLE ITEMS NOTIFY FAILED on CONFIRMED]",
+          {
+            order_id,
+            err: e?.message,
+          }
+        );
+      }
+    }
+
+    // 🔟 Wallet deduction notification LAST (after all order-related notifications)
+    try {
+      if (
+        captureInfo &&
+        captureInfo.captured &&
+        !captureInfo.skipped &&
+        !captureInfo.alreadyCaptured
+      ) {
+        await Order.addUserWalletDebitNotification({
+          user_id: captureInfo.user_id,
+          order_id,
+          order_amount: captureInfo.order_amount,
+          platform_fee: captureInfo.platform_fee,
+          method: payMethod,
+        });
+      }
+    } catch (e) {
+      console.error("[USER WALLET DEBIT NOTIFY FAILED]", {
+        order_id,
+        err: e?.message,
+      });
+    }
+
+    return res.json({ message: "Order status updated successfully" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[updateOrderStatus ERROR]", err);
+    return res.status(500).json({ error: err.message });
   }
-}
+};
+
 
 /**
  * DELETE /orders/:order_id

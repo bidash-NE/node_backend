@@ -78,7 +78,6 @@ async function fetchTxnAndJournalIds() {
     }
   } catch (_) {}
 
-  // Fallback: single endpoints
   let dr_id = null,
     cr_id = null,
     journal_id = null;
@@ -153,7 +152,6 @@ async function insertUserNotification(
   );
 }
 
-// status → nice text
 function humanOrderStatus(status) {
   const s = String(status || "").toUpperCase();
   switch (s) {
@@ -178,7 +176,6 @@ function humanOrderStatus(status) {
   }
 }
 
-// user-side order status notification
 async function addUserOrderStatusNotificationInternal(
   user_id,
   order_id,
@@ -216,7 +213,6 @@ async function addUserOrderStatusNotificationInternal(
   });
 }
 
-// user-side unavailable item notification
 async function addUserUnavailableItemNotificationInternal(
   user_id,
   order_id,
@@ -281,7 +277,6 @@ async function addUserUnavailableItemNotificationInternal(
   });
 }
 
-// user-side wallet debit notification (no wallet IDs)
 async function addUserWalletDebitNotificationInternal(
   user_id,
   order_id,
@@ -305,7 +300,6 @@ async function addUserWalletDebitNotificationInternal(
       feeAmt
     )} as platform fee.`;
   } else {
-    // COD → only platform fee
     message = `Order ${order_id}: Nu. ${fmtNu(
       feeAmt
     )} was deducted from your wallet as platform fee.`;
@@ -405,7 +399,6 @@ async function computeBusinessSplit(order_id, conn = null) {
  * Record a wallet transfer as TWO rows in wallet_transactions:
  *  - DR: debit from fromId
  *  - CR: credit to toId
- * Also updates wallet balances atomically.
  */
 async function recordWalletTransfer(
   conn,
@@ -446,7 +439,6 @@ async function recordWalletTransfer(
 }
 
 /* ================= PUBLIC CAPTURE APIS ================= */
-/** WALLET path: charge user → merchant (net) and user → admin (platform fee). */
 async function captureOrderFunds(order_id) {
   const conn = await db.getConnection();
   try {
@@ -493,7 +485,6 @@ async function captureOrderFunds(order_id) {
       throw new Error("Insufficient wallet balance during capture");
     }
 
-    // USER → MERCHANT (net)
     const t1 = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
@@ -502,7 +493,6 @@ async function captureOrderFunds(order_id) {
       note: `Wallet capture (USER→MERCHANT) for ${order_id}`,
     });
 
-    // Merchant notification
     const bodyCR = `CR ${t1?.cr_txn_id || "-"} · JRN ${t1?.journal_id || "-"}`;
     await conn.query(
       `INSERT INTO order_notification
@@ -511,7 +501,6 @@ async function captureOrderFunds(order_id) {
       [order_id, split.business_id, order.user_id, bodyCR]
     );
 
-    // USER → ADMIN (platform fee)
     if (fee > 0) {
       const t2 = await recordWalletTransfer(conn, {
         fromId: buyer.wallet_id,
@@ -544,8 +533,7 @@ async function captureOrderFunds(order_id) {
     }
 
     await conn.commit();
-
-    // Controller will send wallet-debit notification LAST
+  
     return {
       captured: true,
       user_id: order.user_id,
@@ -562,7 +550,6 @@ async function captureOrderFunds(order_id) {
   }
 }
 
-/** COD path: charge user → admin (platform fee only). */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
   try {
@@ -645,22 +632,6 @@ async function captureOrderCODFee(order_id) {
 }
 
 /* ================= APPLY UNAVAILABLE ITEM CHANGES ================= */
-/**
- * changes = {
- *   removed: [
- *     { business_id, menu_id, item_name? }
- *   ],
- *   replaced: [
- *     {
- *       old: { business_id, menu_id, item_name? },
- *       new: {
- *         business_id?, business_name?, menu_id?,
- *         item_name?, item_image?, quantity?, price?, subtotal?, delivery_fee?
- *       }
- *     }
- *   ]
- * }
- */
 async function applyUnavailableItemChanges(order_id, changes) {
   const removed = Array.isArray(changes?.removed) ? changes.removed : [];
   const replaced = Array.isArray(changes?.replaced) ? changes.replaced : [];
@@ -671,7 +642,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
   try {
     await conn.beginTransaction();
 
-    // 1) Removed items
+    // removed
     for (const r of removed) {
       const bid = Number(r.business_id);
       const mid = Number(r.menu_id);
@@ -685,7 +656,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
       );
     }
 
-    // 2) Replaced items
+    // replaced
     for (const ch of replaced) {
       const old = ch.old || {};
       const neu = ch.new || {};
@@ -757,18 +728,14 @@ async function applyUnavailableItemChanges(order_id, changes) {
 
 /* ================= PUBLIC MODEL API ================= */
 const Order = {
-  // exposed wallet lookups
   getBuyerWalletByUserId,
   getAdminWallet,
 
-  // capture apis
   captureOrderFunds,
   captureOrderCODFee,
 
-  // item-change apis
   applyUnavailableItemChanges,
 
-  // write paths
   peekNewOrderId: () => generateOrderId(),
 
   create: async (orderData) => {
@@ -787,7 +754,12 @@ const Order = {
           ? JSON.stringify(orderData.delivery_address)
           : orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
-      if_unavailable: orderData.if_unavailable || "suggest_replacement",
+      // ⬇️ store exactly what comes from controller; no default
+      if_unavailable:
+        orderData.if_unavailable !== undefined &&
+        orderData.if_unavailable !== null
+          ? String(orderData.if_unavailable)
+          : null,
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
       priority: !!orderData.priority,
@@ -811,7 +783,6 @@ const Order = {
     return order_id;
   },
 
-  /* reads */
   findAll: async () => {
     await ensureStatusReasonSupport();
     const [orders] = await db.query(
@@ -1189,7 +1160,6 @@ const Order = {
     return r.affectedRows;
   },
 
-  // user notifications exposed to controller
   addUserOrderStatusNotification: async ({
     user_id,
     order_id,
