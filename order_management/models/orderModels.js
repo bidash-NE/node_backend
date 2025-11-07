@@ -38,11 +38,31 @@ const fmtNu = (n) => Number(n || 0).toFixed(2);
 
 /* ================= HTTP & ID SERVICE HELPERS ================= */
 async function postJson(url, body = {}, timeout = 8000) {
-  const { data } = await axios.post(url, body, {
-    timeout,
-    headers: { "Content-Type": "application/json" },
-  });
-  return data;
+  try {
+    const { data } = await axios.post(url, body, {
+      timeout,
+      headers: { "Content-Type": "application/json" },
+    });
+    return data;
+  } catch (err) {
+    console.error("[WALLET POST ERROR]", {
+      url,
+      code: err.code,
+      message: err.message,
+    });
+
+    if (
+      err.code === "ECONNRESET" ||
+      err.code === "ECONNREFUSED" ||
+      err.code === "ETIMEDOUT"
+    ) {
+      throw new Error(
+        "Wallet service is temporarily unavailable. Please try again."
+      );
+    }
+
+    throw err;
+  }
 }
 
 function extractIdsShape(payload) {
@@ -151,6 +171,135 @@ async function insertUserNotification(
       status === "read" ? "read" : "unread",
     ]
   );
+}
+
+// Helper to convert status to human readable text
+function humanOrderStatus(status) {
+  const s = String(status || "").toUpperCase();
+  switch (s) {
+    case "PENDING":
+      return "pending";
+    case "CONFIRMED":
+      return "accepted by the store";
+    case "PREPARING":
+      return "being prepared";
+    case "READY":
+      return "ready for pickup";
+    case "OUT_FOR_DELIVERY":
+      return "out for delivery";
+    case "COMPLETED":
+      return "completed";
+    case "CANCELLED":
+      return "cancelled";
+    case "DECLINED":
+      return "declined by the store";
+    default:
+      return s.toLowerCase();
+  }
+}
+
+// internal helper: user-side order status notification into `notifications` table
+async function addUserOrderStatusNotificationInternal(
+  user_id,
+  order_id,
+  status,
+  reason = "",
+  conn = null
+) {
+  const dbh = conn || db;
+  const normalized = String(status || "").toUpperCase();
+  const trimmedReason = String(reason || "").trim();
+
+  let message;
+
+  if (normalized === "CONFIRMED") {
+    // For accepted orders, just a clean acceptance message
+    message = `Your order ${order_id} is accepted successfully.`;
+  } else {
+    const nice = humanOrderStatus(normalized);
+    message = `Your order ${order_id} is now ${nice}.`;
+  }
+
+  if (trimmedReason) {
+    message += ` Reason: ${trimmedReason}`;
+  }
+
+  await insertUserNotification(dbh, {
+    user_id,
+    type: "order_status",
+    title: "Order update",
+    message,
+    data: {
+      order_id,
+      status: normalized,
+      reason: trimmedReason || null,
+    },
+    status: "unread",
+  });
+}
+
+// internal helper: user notification for unavailable / removed / replaced items
+async function addUserUnavailableItemNotificationInternal(
+  user_id,
+  order_id,
+  changes,
+  final_total_amount = null,
+  conn = null
+) {
+  const dbh = conn || db;
+  const removed = Array.isArray(changes?.removed_items)
+    ? changes.removed_items
+    : [];
+  const replaced = Array.isArray(changes?.replaced_items)
+    ? changes.replaced_items
+    : [];
+
+  if (!removed.length && !replaced.length) return;
+
+  const parts = [];
+
+  if (removed.length) {
+    const list = removed
+      .map(
+        (it) =>
+          `${it.quantity ?? 1}× ${String(it.item_name || "").trim() || "-"}`
+      )
+      .join(", ");
+    parts.push(`Removed: ${list}`);
+  }
+
+  if (replaced.length) {
+    const list = replaced
+      .map((it) => {
+        const oldName = String(it.old_item_name || "").trim() || "-";
+        const newName = String(it.new_item_name || "").trim() || "-";
+        const qty = it.quantity ?? 1;
+        return `${qty}× ${oldName} → ${newName}`;
+      })
+      .join(", ");
+    parts.push(`Replaced: ${list}`);
+  }
+
+  let message = `Some items in your order ${order_id} were updated due to unavailability. ${parts.join(
+    " | "
+  )}`;
+  if (final_total_amount != null) {
+    message += ` Final total: Nu. ${fmtNu(final_total_amount)}.`;
+  }
+
+  await insertUserNotification(dbh, {
+    user_id,
+    type: "order_items_unavailable",
+    title: "Order items updated",
+    message,
+    data: {
+      order_id,
+      removed_items: removed,
+      replaced_items: replaced,
+      final_total_amount,
+    },
+    status: "unread",
+  });
 }
 
 function parseDeliveryAddress(val) {
@@ -311,8 +460,8 @@ async function captureOrderFunds(order_id) {
     if (!admin) throw new Error("Admin wallet missing");
 
     const total = Number(order.total_amount || 0);
-    const fee = Number(split.platform_fee || 0);
-    const toMerch = Number(split.net_to_merchant || 0);
+    const fee = Number(split.platform_fee || 0); // fee deducted in this capture
+    const toMerch = Number(split.net_to_merchant || 0); // net to merchant
 
     // Ensure buyer has enough for TOTAL (net+fee)
     const [[freshBuyer]] = await conn.query(
@@ -323,7 +472,7 @@ async function captureOrderFunds(order_id) {
       throw new Error("Insufficient wallet balance during capture");
     }
 
-    // USER → MERCHANT (net)
+    // USER → MERCHANT (net order amount)
     const t1 = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
@@ -341,23 +490,6 @@ async function captureOrderFunds(order_id) {
       [order_id, split.business_id, order.user_id, bodyCR]
     );
 
-    // User debit notification (USER→MERCHANT)
-    await insertUserNotification(conn, {
-      user_id: order.user_id,
-      title: "Transaction successful",
-      message: `Your account has been debited with Nu. ${fmtNu(
-        toMerch
-      )} from acc ${buyer.wallet_id} to ${merch.wallet_id}.`,
-      type: "wallet_debit",
-      data: {
-        order_id,
-        from: buyer.wallet_id,
-        to: merch.wallet_id,
-        amount: toMerch,
-      },
-      status: "unread",
-    });
-
     // USER → ADMIN (platform fee)
     if (fee > 0) {
       const t2 = await recordWalletTransfer(conn, {
@@ -366,22 +498,6 @@ async function captureOrderFunds(order_id) {
         amount: fee,
         order_id,
         note: `Platform fee for ${order_id}`,
-      });
-
-      await insertUserNotification(conn, {
-        user_id: order.user_id,
-        title: "Transaction successful",
-        message: `Your account has been debited with Nu. ${fmtNu(
-          fee
-        )} from acc ${buyer.wallet_id} to ${admin.wallet_id}.`,
-        type: "wallet_debit",
-        data: {
-          order_id,
-          from: buyer.wallet_id,
-          to: admin.wallet_id,
-          amount: fee,
-        },
-        status: "unread",
       });
 
       await conn.query(
@@ -406,6 +522,25 @@ async function captureOrderFunds(order_id) {
       );
     }
 
+    // 🔔 Combined user notification (no wallet IDs, both amounts)
+    await insertUserNotification(conn, {
+      user_id: order.user_id,
+      title: "Order accepted",
+      message: `Your order ${order_id} is accepted successfully. Nu. ${fmtNu(
+        toMerch
+      )} has been deducted from your wallet for the order and Nu. ${fmtNu(
+        fee
+      )} as platform fee.`,
+      type: "wallet_debit",
+      data: {
+        kind: "ORDER_ACCEPTED_WALLET",
+        order_id,
+        order_amount: toMerch,
+        platform_fee: fee,
+      },
+      status: "unread",
+    });
+
     await conn.commit();
     return { captured: true };
   } catch (e) {
@@ -418,7 +553,7 @@ async function captureOrderFunds(order_id) {
   }
 }
 
-/** COD path: charge user → admin (platform fee only). User gets debit notification only. */
+/** COD path: charge user → admin (platform fee only). User gets specific platform-fee notification. */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
   try {
@@ -465,19 +600,18 @@ async function captureOrderCODFee(order_id) {
         note: `Platform fee for ${order_id}`,
       });
 
-      // User debit notification
+      // 🔔 User debit notification (COD, no wallet IDs)
       await insertUserNotification(conn, {
         user_id: order.user_id,
-        title: "Transaction successful",
-        message: `Your account has been debited with Nu. ${fmtNu(
+        title: "Order accepted",
+        message: `Your order ${order_id} is accepted successfully. Nu. ${fmtNu(
           fee
-        )} from acc ${buyer.wallet_id} to ${admin.wallet_id}.`,
+        )} has been deducted from your wallet as platform fee. The order amount will be collected in cash on delivery.`,
         type: "wallet_debit",
         data: {
+          kind: "ORDER_ACCEPTED_COD",
           order_id,
-          from: buyer.wallet_id,
-          to: admin.wallet_id,
-          amount: fee,
+          platform_fee: fee,
         },
         status: "unread",
       });
@@ -536,6 +670,7 @@ const Order = {
           ? JSON.stringify(orderData.delivery_address)
           : orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
+      if_unavailable: orderData.if_unavailable || "suggest_replacement",
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
       priority: !!orderData.priority,
@@ -813,6 +948,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.if_unavailable,      
         o.status,
         o.fulfillment_type,
         o.priority,
@@ -855,6 +991,7 @@ const Order = {
         payment_method: o.payment_method,
         fulfillment_type: o.fulfillment_type,
         created_at: o.created_at,
+        if_unavailable: o.if_unavailable || null,
         restaurant: primaryBiz
           ? {
               business_id: primaryBiz.business_id,
@@ -936,7 +1073,42 @@ const Order = {
     ]);
     return r.affectedRows;
   },
+
+  // user-side order status notification exposed to controllers
+  addUserOrderStatusNotification: async ({
+    user_id,
+    order_id,
+    status,
+    reason = "",
+    conn = null,
+  }) => {
+    await addUserOrderStatusNotificationInternal(
+      user_id,
+      order_id,
+      status,
+      reason,
+      conn
+    );
+  },
+
+  // user-side notification for unavailable / removed / replaced items
+  addUserUnavailableItemNotification: async ({
+    user_id,
+    order_id,
+    changes,
+    final_total_amount = null,
+    conn = null,
+  }) => {
+    await addUserUnavailableItemNotificationInternal(
+      user_id,
+      order_id,
+      changes,
+      final_total_amount,
+      conn
+    );
+  },
 };
+
 /* ====================== KPI COUNTS BY BUSINESS ====================== */
 Order.getOrderStatusCountsByBusiness = async (business_id) => {
   const [rows] = await db.query(

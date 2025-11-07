@@ -78,22 +78,23 @@ async function ensurePaymentMethodEnum() {
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
   await db.query(`
-    CREATE TABLE IF NOT EXISTS orders (
-      order_id VARCHAR(12) PRIMARY KEY,
-      user_id INT NOT NULL,
-      total_amount DECIMAL(10,2) NOT NULL,
-      discount_amount DECIMAL(10,2) DEFAULT 0,
-      payment_method ENUM('COD','WALLET','CARD') NOT NULL,
-      delivery_address VARCHAR(500) NOT NULL,
-      note_for_restaurant VARCHAR(500),
-      status VARCHAR(100) DEFAULT 'PENDING',
-      status_reason VARCHAR(255) NULL,
-      fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
-      priority BOOLEAN DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    );
-  `);
+  CREATE TABLE IF NOT EXISTS orders (
+    order_id VARCHAR(12) PRIMARY KEY,
+    user_id INT NOT NULL,
+    total_amount DECIMAL(10,2) NOT NULL,
+    discount_amount DECIMAL(10,2) DEFAULT 0,
+    payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+    delivery_address VARCHAR(500) NOT NULL,
+    note_for_restaurant VARCHAR(500),
+    if_unavailable VARCHAR(256) ,  
+    status VARCHAR(100) DEFAULT 'PENDING',
+    status_reason VARCHAR(255) NULL,
+    fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
+    priority BOOLEAN DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  );
+`);
 
   if (!(await columnExists("orders", "platform_fee"))) {
     await db.query(
