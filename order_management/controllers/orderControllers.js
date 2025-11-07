@@ -29,208 +29,6 @@ function buildPreview(items = [], total_amount) {
 /**
  * POST /orders
  */
-// async function createOrder(req, res) {
-//   try {
-//     const payload = req.body || {};
-//     const items = Array.isArray(payload.items) ? payload.items : [];
-
-//     // ---- Base validations ----
-//     if (!payload.user_id)
-//       return res.status(400).json({ message: "Missing user_id" });
-//     if (!items.length)
-//       return res.status(400).json({ message: "Missing items" });
-//     if (payload.total_amount == null)
-//       return res.status(400).json({ message: "Missing total_amount" });
-//     if (payload.discount_amount == null)
-//       return res.status(400).json({ message: "Missing discount_amount" });
-
-//     const payMethod = String(payload.payment_method || "").toUpperCase();
-//     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
-//       return res
-//         .status(400)
-//         .json({ message: "Invalid or missing payment_method" });
-//     }
-
-//     // ---- Fulfillment-specific validation ----
-//     const fulfillment = String(payload.fulfillment_type || "Delivery");
-//     if (fulfillment === "Delivery") {
-//       const addrObj = payload.delivery_address;
-//       const isObj =
-//         addrObj && typeof addrObj === "object" && !Array.isArray(addrObj);
-//       const addrStr = isObj
-//         ? String(addrObj.address || "").trim()
-//         : String(addrObj || "").trim();
-//       if (!addrStr) {
-//         return res
-//           .status(400)
-//           .json({ message: "delivery_address is required for Delivery" });
-//       }
-//     } else if (fulfillment === "Pickup") {
-//       payload.delivery_address = String(payload.delivery_address || "");
-//     }
-
-//     // ---- Validate item fields we persist (no math) ----
-//     for (const [idx, it] of items.entries()) {
-//       for (const f of [
-//         "business_id",
-//         "menu_id",
-//         "item_name",
-//         "quantity",
-//         "price",
-//         "subtotal",
-//       ]) {
-//         if (it[f] == null || it[f] === "") {
-//           return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
-//         }
-//       }
-//       if (it.delivery_fee != null && Number.isNaN(Number(it.delivery_fee))) {
-//         return res
-//           .status(400)
-//           .json({ message: `Item[${idx}] invalid delivery_fee` });
-//       }
-//     }
-
-//     // ================== Preflight wallet checks ==================
-//     // We check BEFORE creating the order, so user cannot place an order that will fail later.
-//     if (payMethod === "WALLET") {
-//       const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
-//       if (!buyer) {
-//         return res.status(400).json({
-//           code: "WALLET_NOT_FOUND",
-//           message:
-//             "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
-//         });
-//       }
-//       const need = Number(payload.total_amount || 0);
-//       const have = Number(buyer.amount || 0);
-//       if (have < need) {
-//         return res.status(400).json({
-//           code: "INSUFFICIENT_BALANCE",
-//           message: `Insufficient wallet balance. Required Nu. ${need.toFixed(
-//             2
-//           )}, available Nu. ${have.toFixed(2)}.`,
-//         });
-//       }
-//       // Optional: verify admin wallet exists early
-//       const admin = await Order.getAdminWallet();
-//       if (!admin) {
-//         return res.status(500).json({
-//           code: "ADMIN_WALLET_MISSING",
-//           message: "Admin wallet is not configured.",
-//         });
-//       }
-//     } else if (payMethod === "COD") {
-//       // For COD, we still require buyer wallet to exist and have at least platform_fee.
-//       const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
-//       if (!buyer) {
-//         return res.status(400).json({
-//           code: "WALLET_NOT_FOUND",
-//           message:
-//             "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
-//         });
-//       }
-//       const fee = Number(payload.platform_fee ?? 0);
-//       if (fee > 0) {
-//         const have = Number(buyer.amount || 0);
-//         if (have < fee) {
-//           return res.status(400).json({
-//             code: "INSUFFICIENT_BALANCE",
-//             message: `Insufficient wallet balance for platform fee. Required Nu. ${fee.toFixed(
-//               2
-//             )}, available Nu. ${have.toFixed(2)}.`,
-//           });
-//         }
-//       }
-//       const admin = await Order.getAdminWallet();
-//       if (!admin) {
-//         return res.status(500).json({
-//           code: "ADMIN_WALLET_MISSING",
-//           message: "Admin wallet is not configured.",
-//         });
-//       }
-//     }
-//     // ================== END preflight checks ==================
-
-//     // Persist exactly what FE sent (ensure delivery_address object is stringified)
-//     if (
-//       payload.delivery_address &&
-//       typeof payload.delivery_address === "object"
-//     ) {
-//       payload.delivery_address = JSON.stringify(payload.delivery_address);
-//     }
-
-//     const order_id = await Order.create({
-//       ...payload,
-//       status: (payload.status || "PENDING").toUpperCase(),
-//       fulfillment_type: fulfillment,
-//     });
-
-//     // Group by business for notifications
-//     const byBiz = new Map();
-//     for (const it of items) {
-//       const bid = Number(it.business_id);
-//       if (!bid || Number.isNaN(bid)) continue;
-//       if (!byBiz.has(bid)) byBiz.set(bid, []);
-//       byBiz.get(bid).push(it);
-//     }
-//     const businessIds = Array.from(byBiz.keys());
-
-//     // Merchant notifications (order:create)
-//     for (const business_id of businessIds) {
-//       const its = byBiz.get(business_id) || [];
-//       const title = `New order #${order_id}`;
-//       const preview = buildPreview(its, payload.total_amount);
-
-//       try {
-//         await insertAndEmitNotification({
-//           business_id,
-//           user_id: payload.user_id,
-//           order_id,
-//           type: "order:create",
-//           title,
-//           body_preview: preview,
-//         });
-//       } catch (e) {
-//         console.error("[NOTIFY INSERT FAILED]", {
-//           order_id,
-//           business_id,
-//           err: e?.message,
-//         });
-//       }
-//     }
-
-//     const initialStatus = (payload.status || "PENDING").toUpperCase();
-
-//     // Broadcast status to user & businesses
-//     broadcastOrderStatusToMany({
-//       order_id,
-//       user_id: payload.user_id,
-//       business_ids: businessIds,
-//       status: initialStatus,
-//     });
-
-//     // User-side "order placed / pending" notification
-//     try {
-//       await Order.addUserOrderStatusNotification({
-//         user_id: payload.user_id,
-//         order_id,
-//         status: initialStatus,
-//         reason: "",
-//       });
-//     } catch (e) {
-//       console.error("[USER ORDER STATUS NOTIFY FAILED on create]", {
-//         order_id,
-//         err: e?.message,
-//       });
-//     }
-
-//     return res
-//       .status(201)
-//       .json({ order_id, message: "Order created successfully" });
-//   } catch (err) {
-//     return res.status(500).json({ error: err.message });
-//   }
-// }
 async function createOrder(req, res) {
   try {
     const payload = req.body || {};
@@ -370,7 +168,7 @@ async function createOrder(req, res) {
 
     const order_id = await Order.create({
       ...payload,
-      if_unavailable, // 🔹 store preference
+      if_unavailable, // store preference
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
     });
@@ -411,6 +209,7 @@ async function createOrder(req, res) {
 
     const initialStatus = (payload.status || "PENDING").toUpperCase();
 
+    // Broadcast initial status
     broadcastOrderStatusToMany({
       order_id,
       user_id: payload.user_id,
@@ -418,6 +217,7 @@ async function createOrder(req, res) {
       status: initialStatus,
     });
 
+    // User-side "order placed" notification
     try {
       await Order.addUserOrderStatusNotification({
         user_id: payload.user_id,
@@ -522,7 +322,11 @@ async function updateOrder(req, res) {
  * PATCH /orders/:order_id/status
  * Status rules:
  * - Block user cancel after acceptance.
- * - On CONFIRMED: capture funds (WALLET) or fee (COD).
+ * - On CONFIRMED: apply unavailable item changes, update totals, capture funds/fee.
+ * - Insert notifications for user in this order:
+ *   1) order status
+ *   2) unavailable items
+ *   3) wallet debit (last)
  */
 async function updateOrderStatus(req, res) {
   try {
@@ -535,6 +339,7 @@ async function updateOrderStatus(req, res) {
       final_discount_amount,
       unavailable_changes,
     } = req.body || {};
+
     if (!status) return res.status(400).json({ message: "Status is required" });
 
     const normalized = String(status).trim().toUpperCase();
@@ -557,6 +362,7 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
+    // Cancellation guard
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -573,8 +379,28 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 🔹 If merchant is ACCEPTING (CONFIRMED), first persist the final amounts
+    // 🔹 If merchant is ACCEPTING (CONFIRMED)
     if (normalized === "CONFIRMED") {
+      // 1) Apply unavailable item changes to order_items (remove/replace rows)
+      if (unavailable_changes) {
+        try {
+          await Order.applyUnavailableItemChanges(
+            order_id,
+            unavailable_changes
+          );
+        } catch (e) {
+          console.error("[APPLY UNAVAILABLE ITEM CHANGES FAILED]", {
+            order_id,
+            err: e?.message,
+          });
+          return res.status(500).json({
+            message: "Failed to apply item changes for unavailable products.",
+            error: e?.message || "Item change error",
+          });
+        }
+      }
+
+      // 2) Update final totals in orders
       const updatePayload = {};
       if (final_total_amount != null)
         updatePayload.total_amount = Number(final_total_amount);
@@ -588,6 +414,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
+    // 3) Update status (and optional reason)
     const affected = await Order.updateStatus(
       order_id,
       normalized,
@@ -595,19 +422,21 @@ async function updateOrderStatus(req, res) {
     );
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
+    // 4) Fetch businesses involved in this order
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // On CONFIRMED: capture funds / platform fee using the UPDATED totals
+    // 5) On CONFIRMED: capture funds / platform fee using the UPDATED totals
+    let captureResult = null;
     if (normalized === "CONFIRMED") {
       try {
         if (payMethod === "WALLET") {
-          await Order.captureOrderFunds(order_id);
+          captureResult = await Order.captureOrderFunds(order_id);
         } else if (payMethod === "COD") {
-          await Order.captureOrderCODFee(order_id);
+          captureResult = await Order.captureOrderCODFee(order_id);
         }
       } catch (e) {
         console.error("[CAPTURE FAILED]", order_id, e?.message);
@@ -618,7 +447,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // Broadcast status to user & businesses (sockets)
+    // 6) Broadcast status to user & businesses
     broadcastOrderStatusToMany({
       order_id,
       user_id,
@@ -626,7 +455,7 @@ async function updateOrderStatus(req, res) {
       status: normalized,
     });
 
-    // Merchant notification on COMPLETED
+    // 7) Merchant notification on COMPLETED
     try {
       if (normalized === "COMPLETED") {
         for (const business_id of business_ids) {
@@ -648,25 +477,18 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // User-side order status notification
+    // 8) User notifications: order status → unavailable items → wallet debit LAST
     try {
+      // 8.1 Order status notification
       await Order.addUserOrderStatusNotification({
         user_id,
         order_id,
         status: normalized,
         reason,
       });
-    } catch (e) {
-      console.error("[USER ORDER STATUS NOTIFY FAILED on status change]", {
-        order_id,
-        status: normalized,
-        err: e?.message,
-      });
-    }
 
-    // 🔹 If there were unavailable-item changes, notify user about removed / replaced items
-    if (normalized === "CONFIRMED" && unavailable_changes) {
-      try {
+      // 8.2 If confirmed & there were unavailable item changes, notify user
+      if (normalized === "CONFIRMED" && unavailable_changes) {
         await Order.addUserUnavailableItemNotification({
           user_id,
           order_id,
@@ -674,15 +496,29 @@ async function updateOrderStatus(req, res) {
           final_total_amount:
             final_total_amount != null ? Number(final_total_amount) : null,
         });
-      } catch (e) {
-        console.error(
-          "[USER ORDER UNAVAILABLE ITEMS NOTIFY FAILED on CONFIRMED]",
-          {
-            order_id,
-            err: e?.message,
-          }
-        );
       }
+
+      // 8.3 Wallet debit notification LAST (only if capture actually happened)
+      if (
+        normalized === "CONFIRMED" &&
+        captureResult &&
+        captureResult.captured &&
+        (captureResult.order_amount > 0 || captureResult.platform_fee > 0)
+      ) {
+        await Order.addUserWalletDebitNotification({
+          user_id,
+          order_id,
+          order_amount: captureResult.order_amount,
+          platform_fee: captureResult.platform_fee,
+          method: payMethod,
+        });
+      }
+    } catch (e) {
+      console.error("[USER NOTIFY FAILED on status change]", {
+        order_id,
+        status: normalized,
+        err: e?.message,
+      });
     }
 
     res.json({ message: "Order status updated successfully" });
