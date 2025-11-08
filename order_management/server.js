@@ -9,6 +9,7 @@ const { initOrderManagementTable } = require("./models/initModel");
 const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
+const usernotificationRoutes = require("./routes/userNotificationRoutes");
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // REST routes
 app.use("/", orderRoutes);
 app.use("/api/order_notification", notificationRoutes);
+app.use("/api/user_notification", usernotificationRoutes);
 
 // single HTTP server for REST + Socket.IO
 const server = http.createServer(app);
