@@ -69,6 +69,7 @@ function extractStorableImagePath(req) {
 }
 
 // POST /api/banners
+// POST /api/banners
 async function createBannerCtrl(req, res) {
   try {
     const b = req.body || {};
@@ -76,16 +77,19 @@ async function createBannerCtrl(req, res) {
 
     const user_id = Number(b.user_id);
     const total_amount = Number(b.total_amount);
-    if (!Number.isInteger(user_id) || user_id <= 0)
+
+    if (!Number.isInteger(user_id) || user_id <= 0) {
       return res.status(400).json({
         success: false,
         message: "user_id must be a positive integer",
       });
-    if (!Number.isFinite(total_amount) || total_amount <= 0)
+    }
+    if (!Number.isFinite(total_amount) || total_amount <= 0) {
       return res.status(400).json({
         success: false,
         message: "total_amount must be a positive number",
       });
+    }
 
     const payload = {
       business_id: b.business_id,
@@ -106,11 +110,54 @@ async function createBannerCtrl(req, res) {
 
     if (!out.success) return res.status(400).json(out);
 
+    // Format date and time for payment card
+    const now = new Date();
+    const months = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    const day = String(now.getDate()).padStart(2, "0");
+    const month = months[now.getMonth()];
+    const year = now.getFullYear();
+    const dateStr = `${day} ${month} ${year}`;
+
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, "0");
+    const seconds = String(now.getSeconds()).padStart(2, "0");
+    const ampm = hours >= 12 ? "PM" : "AM";
+    hours = hours % 12 || 12;
+    const timeStr = `${String(hours).padStart(
+      2,
+      "0"
+    )}:${minutes}:${seconds} ${ampm}`;
+
+    // Prepare clean payment object for UI
+    const pay = out.payment;
+    const payment = {
+      Amount: `Nu. ${Number(pay.amount).toFixed(2)}`,
+      "Jrnl No": pay.journal_code,
+      "From Account": pay.debited_from_wallet,
+      "To Account": pay.credited_to_wallet,
+      Purpose: `Banner Fee | banner_id=${out.data.id}`,
+      Date: dateStr,
+      Time: timeStr,
+    };
+
     return res.status(201).json({
       success: true,
       message: "Banner created and payment processed successfully.",
       data: out.data,
-      payment: out.payment,
+      payment,
     });
   } catch (e) {
     return res.status(400).json({
