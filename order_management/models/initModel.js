@@ -91,6 +91,8 @@ async function initOrderManagementTable() {
     status_reason VARCHAR(255) NULL,
     fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
     priority BOOLEAN DEFAULT 0,
+        estimated_arrivial_time TIME NULL,
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   );

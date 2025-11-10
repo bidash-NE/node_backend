@@ -92,7 +92,10 @@ async function createOrder(req, res) {
 
     // ---- if_unavailable: just take whatever client sends, no defaults ----
     let if_unavailable = null;
-    if (payload.if_unavailable !== undefined && payload.if_unavailable !== null) {
+    if (
+      payload.if_unavailable !== undefined &&
+      payload.if_unavailable !== null
+    ) {
       if_unavailable = String(payload.if_unavailable);
     }
 
@@ -329,11 +332,36 @@ async function updateOrder(req, res) {
  *    - capture wallet / platform fee
  *    - send notifications (order, unavailable items, wallet deduction)
  */
-async function updateOrderStatus(req, res){
+
+async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
+  try {
+    const mins = Number(estimated_minutes);
+    if (!Number.isFinite(mins) || mins <= 0)
+      throw new Error("Invalid estimated minutes");
+
+    const now = new Date();
+    const arrival = new Date(now.getTime() + mins * 60000);
+
+    const hh = String(arrival.getHours()).padStart(2, "0");
+    const mm = String(arrival.getMinutes()).padStart(2, "0");
+    const ss = String(arrival.getSeconds()).padStart(2, "0");
+    const formattedTime = `${hh}:${mm}:${ss}`;
+
+    await db.query(
+      `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
+      [formattedTime, order_id]
+    );
+
+    console.log(
+      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedTime} (+${mins} mins)`
+    );
+  } catch (err) {
+    console.error("[updateEstimatedArrivalTime ERROR]", err.message);
+  }
+}
+async function updateOrderStatus(req, res) {
   try {
     const order_id = req.params.order_id;
-
-    // Accept both snake_case and camelCase from frontend
     const {
       status,
       reason,
@@ -342,6 +370,7 @@ async function updateOrderStatus(req, res){
       final_discount_amount,
       unavailable_changes,
       unavailableChanges,
+      estimated_minutes, // ⬅️ NEW: from merchant
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -362,7 +391,7 @@ async function updateOrderStatus(req, res){
     // Get current order info
     const [[row]] = await db.query(
       `SELECT user_id, status AS current_status, payment_method
-         FROM orders WHERE order_id = ? LIMIT 1`,
+       FROM orders WHERE order_id = ? LIMIT 1`,
       [order_id]
     );
     if (!row) return res.status(404).json({ message: "Order not found" });
@@ -371,7 +400,7 @@ async function updateOrderStatus(req, res){
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // Block late cancels
+    // Prevent late cancellations
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -390,23 +419,14 @@ async function updateOrderStatus(req, res){
 
     // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
-      // 1) Apply unavailable item changes (remove/replace items)
+      // 1️⃣ Apply unavailable item changes
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
       ) {
-        console.log(
-          "[APPLY UNAVAILABLE ITEM CHANGES]",
-          order_id,
-          JSON.stringify(changes)
-        );
         try {
           await Order.applyUnavailableItemChanges(order_id, changes);
         } catch (e) {
-          console.error("[APPLY UNAVAILABLE ITEM CHANGES FAILED]", {
-            order_id,
-            err: e?.message,
-          });
           return res.status(500).json({
             message: "Failed to apply item changes for unavailable products.",
             error: e?.message || "Item change error",
@@ -414,7 +434,7 @@ async function updateOrderStatus(req, res){
         }
       }
 
-      // 2) Update final totals on orders (these are already recomputed by FE)
+      // 2️⃣ Update final totals
       const updatePayload = {};
       if (final_total_amount != null)
         updatePayload.total_amount = Number(final_total_amount);
@@ -426,9 +446,14 @@ async function updateOrderStatus(req, res){
       if (Object.keys(updatePayload).length) {
         await Order.update(order_id, updatePayload);
       }
+
+      // 3️⃣ Handle estimated arrival minutes (NEW)
+      if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
+        await updateEstimatedArrivalTime(order_id, estimated_minutes);
+      }
     }
 
-    // 3) Update status (and optional reason)
+    // 4️⃣ Update order status + reason
     const affected = await Order.updateStatus(
       order_id,
       normalized,
@@ -438,14 +463,14 @@ async function updateOrderStatus(req, res){
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // 4) Businesses involved in this order
+    // 5️⃣ Business IDs
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // 5) On CONFIRMED → capture funds / platform fee and prepare wallet info
+    // 6️⃣ Capture payment (if CONFIRMED)
     let captureInfo = null;
     if (normalized === "CONFIRMED") {
       try {
@@ -455,7 +480,6 @@ async function updateOrderStatus(req, res){
           captureInfo = await Order.captureOrderCODFee(order_id);
         }
       } catch (e) {
-        console.error("[CAPTURE FAILED]", order_id, e?.message);
         return res.status(500).json({
           message: "Order accepted, but wallet capture failed.",
           error: e?.message || "Capture error",
@@ -463,7 +487,7 @@ async function updateOrderStatus(req, res){
       }
     }
 
-    // 6) Broadcast status to user & businesses (websocket)
+    // 7️⃣ Broadcast status
     broadcastOrderStatusToMany({
       order_id,
       user_id,
@@ -471,99 +495,71 @@ async function updateOrderStatus(req, res){
       status: normalized,
     });
 
-    // 7) Merchant notification on COMPLETED
-    try {
-      if (normalized === "COMPLETED") {
-        for (const business_id of business_ids) {
-          await insertAndEmitNotification({
-            business_id,
-            user_id,
-            order_id,
-            type: "order:status",
-            title: `Order #${order_id} COMPLETED`,
-            body_preview: `Status changed to COMPLETED`,
-          });
-        }
+    // 8️⃣ Completed order notifications
+    if (normalized === "COMPLETED") {
+      for (const business_id of business_ids) {
+        await insertAndEmitNotification({
+          business_id,
+          user_id,
+          order_id,
+          type: "order:status",
+          title: `Order #${order_id} COMPLETED`,
+          body_preview: `Status changed to COMPLETED`,
+        });
       }
-    } catch (e) {
-      console.error("[STATUS NOTIFY INSERT FAILED]", {
-        order_id,
-        status: normalized,
-        err: e?.message,
-      });
     }
 
-    // 8) User-side order status notification (generic)
-    try {
-      await Order.addUserOrderStatusNotification({
-        user_id,
-        order_id,
-        status: normalized,
-        reason,
-      });
-    } catch (e) {
-      console.error("[USER ORDER STATUS NOTIFY FAILED on status change]", {
-        order_id,
-        status: normalized,
-        err: e?.message,
-      });
-    }
+    // 9️⃣ Notify user of status
+    await Order.addUserOrderStatusNotification({
+      user_id,
+      order_id,
+      status: normalized,
+      reason,
+    });
 
-    // 9) If unavailable items changed, notify user about remove/replace + final amount
+    // 🔟 Notify unavailable item changes
     if (
       normalized === "CONFIRMED" &&
       changes &&
       (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
     ) {
-      try {
-        await Order.addUserUnavailableItemNotification({
-          user_id,
-          order_id,
-          changes,
-          final_total_amount:
-            final_total_amount != null ? Number(final_total_amount) : null,
-        });
-      } catch (e) {
-        console.error(
-          "[USER ORDER UNAVAILABLE ITEMS NOTIFY FAILED on CONFIRMED]",
-          {
-            order_id,
-            err: e?.message,
-          }
-        );
-      }
-    }
-
-    // 🔟 Wallet deduction notification LAST (after all order-related notifications)
-    try {
-      if (
-        captureInfo &&
-        captureInfo.captured &&
-        !captureInfo.skipped &&
-        !captureInfo.alreadyCaptured
-      ) {
-        await Order.addUserWalletDebitNotification({
-          user_id: captureInfo.user_id,
-          order_id,
-          order_amount: captureInfo.order_amount,
-          platform_fee: captureInfo.platform_fee,
-          method: payMethod,
-        });
-      }
-    } catch (e) {
-      console.error("[USER WALLET DEBIT NOTIFY FAILED]", {
+      await Order.addUserUnavailableItemNotification({
+        user_id,
         order_id,
-        err: e?.message,
+        changes,
+        final_total_amount:
+          final_total_amount != null ? Number(final_total_amount) : null,
       });
     }
 
-    return res.json({ message: "Order status updated successfully" });
+    // 💬 Wallet deduction notification
+    if (
+      captureInfo &&
+      captureInfo.captured &&
+      !captureInfo.skipped &&
+      !captureInfo.alreadyCaptured
+    ) {
+      await Order.addUserWalletDebitNotification({
+        user_id: captureInfo.user_id,
+        order_id,
+        order_amount: captureInfo.order_amount,
+        platform_fee: captureInfo.platform_fee,
+        method: payMethod,
+      });
+    }
+
+    return res.json({
+      message: "Order status updated successfully",
+      estimated_arrivial_time_applied:
+        normalized === "CONFIRMED" && estimated_minutes
+          ? `${estimated_minutes} min`
+          : null,
+    });
   } catch (err) {
     console.error("[updateOrderStatus ERROR]", err);
     return res.status(500).json({ error: err.message });
   }
-};
-
+}
 
 /**
  * DELETE /orders/:order_id
