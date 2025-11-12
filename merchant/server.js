@@ -9,6 +9,7 @@ const categoryRoutes = require("./routes/categoryRoute");
 const bannerRoutes = require("./routes/bannerRoutes");
 const updateMerchantRoute = require("./routes/updateMerchantRoute");
 const merchantRatings = require("./routes/merchantRatings");
+const salesRoutes = require("./routes/salesRoutes");
 
 dotenv.config();
 const app = express();
@@ -33,6 +34,7 @@ app.use("/api/category", categoryRoutes);
 app.use("/api/banners", bannerRoutes);
 app.use("/api", updateMerchantRoute);
 app.use("/api/merchant", merchantRatings);
+app.use("/api/sales", salesRoutes);
 
 // near the other routes:
 app.get("/health", (_req, res) => res.json({ ok: true }));
