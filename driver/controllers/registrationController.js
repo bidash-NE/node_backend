@@ -270,7 +270,7 @@ const loginUser = async (req, res) => {
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "1m",
+      expiresIn: "60m",
     });
 
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
