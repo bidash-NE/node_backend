@@ -282,7 +282,7 @@ const loginUser = async (req, res) => {
       message: "Login successful",
       token: {
         access_token,
-        access_token_time: 1,
+        access_token_time: 60,
         refresh_token,
         refresh_token_time: 10,
       },
