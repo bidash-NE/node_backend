@@ -10,6 +10,11 @@ const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
 const usernotificationRoutes = require("./routes/userNotificationRoutes");
+// app.js or server.js
+const scheduledOrdersRoutes = require("./routes/scheduledOrdersRoutes");
+const {
+  startScheduledOrderProcessor,
+} = require("./services/scheduledOrderProcessor");
 
 dotenv.config();
 
@@ -27,6 +32,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 app.use("/", orderRoutes);
 app.use("/api/order_notification", notificationRoutes);
 app.use("/api/user_notification", usernotificationRoutes);
+app.use("/api", scheduledOrdersRoutes);
 
 // single HTTP server for REST + Socket.IO
 const server = http.createServer(app);
@@ -35,6 +41,7 @@ const server = http.createServer(app);
   try {
     await initOrderManagementTable(); // create tables if missing
     await attachRealtime(server); // bind socket.io to this server
+    await startScheduledOrderProcessor(); // start the background job processor
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () =>
       console.log(`🚀 Order service + Realtime listening on :${PORT}`)
