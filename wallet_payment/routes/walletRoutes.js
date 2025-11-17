@@ -20,4 +20,16 @@ router.delete("/delete/:wallet_id", ctrl.removeByParam);
 // ✅ ADMIN TIP TRANSFER (Send Nu from admin wallet to another wallet)
 router.post("/admin/tip", ctrl.adminTipTransfer);
 
+// ✅ SET / CREATE T-PIN for a wallet
+router.post("/:wallet_id/t-pin", ctrl.setTPin);
+
+// CHANGE T-PIN (verify old T-PIN first)
+router.patch("/:wallet_id/t-pin", ctrl.changeTPin);
+
+// ✅ FORGOT T-PIN: request OTP (send mail)
+router.post("/:wallet_id/forgot-tpin", ctrl.forgotTPinRequest);
+
+// ✅ FORGOT T-PIN: verify OTP and set new T-PIN
+router.post("/:wallet_id/forgot-tpin/verify", ctrl.forgotTPinVerify);
+
 module.exports = router;

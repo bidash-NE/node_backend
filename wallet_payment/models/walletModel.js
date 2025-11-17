@@ -64,7 +64,7 @@ async function getWallet({ key }) {
   return rows[0] || null;
 }
 
-// ✅ new
+// ✅ get by user_id
 async function getWalletByUserId(user_id) {
   const [rows] = await db.query("SELECT * FROM wallets WHERE user_id = ?", [
     user_id,
@@ -146,6 +146,37 @@ async function deleteWallet({ key }) {
   }
 }
 
+/**
+ * ✅ Set / update encrypted T-PIN for a wallet
+ * @param {Object} params
+ * @param {string|number} params.key - wallet_id (NET...) or numeric id
+ * @param {string} params.t_pin_hash - encrypted / hashed PIN
+ */
+async function setWalletTPin({ key, t_pin_hash }) {
+  // Resolve wallet id first (supports NETxxx or numeric)
+  const [existing] = await db.query(
+    /^NET/i.test(String(key))
+      ? "SELECT id FROM wallets WHERE wallet_id = ?"
+      : "SELECT id FROM wallets WHERE id = ?",
+    [key]
+  );
+  if (!existing.length) return null;
+
+  const walletId = existing[0].id;
+
+  // Update t_pin
+  await db.query("UPDATE wallets SET t_pin = ? WHERE id = ?", [
+    t_pin_hash,
+    walletId,
+  ]);
+
+  // Return fresh row
+  const [rows] = await db.query("SELECT * FROM wallets WHERE id = ?", [
+    walletId,
+  ]);
+  return rows[0] || null;
+}
+
 module.exports = {
   createWallet,
   getWallet,
@@ -153,4 +184,5 @@ module.exports = {
   listWallets,
   updateWalletStatus,
   deleteWallet,
+  setWalletTPin, // ✅ export
 };
