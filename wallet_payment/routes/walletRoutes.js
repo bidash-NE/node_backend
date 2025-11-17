@@ -32,4 +32,6 @@ router.post("/:wallet_id/forgot-tpin", ctrl.forgotTPinRequest);
 // ✅ FORGOT T-PIN: verify OTP and set new T-PIN
 router.post("/:wallet_id/forgot-tpin/verify", ctrl.forgotTPinVerify);
 
+router.post("/transfer", ctrl.userTransfer);
+
 module.exports = router;

@@ -9,11 +9,14 @@ const {
   setWalletTPin,
 } = require("../models/walletModel");
 const { adminTipTransfer } = require("../models/adminTransferModel");
+const { userWalletTransfer } = require("../models/userTransferModel");
 const { toThimphuString } = require("../utils/time");
 const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const redis = require("../utils/redisClient");
 const { sendOtpEmail } = require("../utils/mailer");
+
+/* ---------- helpers ---------- */
 
 function mapLocalTimes(row) {
   if (!row) return row;
@@ -22,6 +25,35 @@ function mapLocalTimes(row) {
     created_at: toThimphuString(row.created_at),
     updated_at: toThimphuString(row.updated_at),
   };
+}
+
+// NET000069 -> NET*****69
+function maskWallet(walletId) {
+  if (!walletId || walletId.length < 5) return walletId;
+  const prefix = walletId.slice(0, 3); // NET
+  const last2 = walletId.slice(-2);
+  const maskedMid = "*".repeat(walletId.length - prefix.length - 2);
+  return prefix + maskedMid + last2;
+}
+
+// 2025-11-10 / 09:51:10 AM style
+function formatReceiptDateTime(date) {
+  const d = date ? new Date(date) : new Date();
+
+  const dateStr = d.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }); // e.g. 10 Nov 2025
+
+  const timeStr = d.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }); // e.g. 09:51:10 AM
+
+  return { dateStr, timeStr };
 }
 
 /* ---------- CREATE ---------- */
@@ -366,7 +398,6 @@ async function forgotTPinRequest(req, res) {
         .json({ success: false, message: "Invalid wallet_id." });
     }
 
-    // Get wallet (to get user_id)
     const wallet = await getWallet({ key: wallet_id });
     if (!wallet) {
       return res
@@ -374,11 +405,11 @@ async function forgotTPinRequest(req, res) {
         .json({ success: false, message: "Wallet not found." });
     }
 
-    // Fetch user email from users table
     const [rows] = await db.query(
       "SELECT user_id, email, user_name FROM users WHERE user_id = ?",
       [wallet.user_id]
     );
+
     if (!rows.length || !rows[0].email) {
       return res.status(404).json({
         success: false,
@@ -390,14 +421,11 @@ async function forgotTPinRequest(req, res) {
     const email = user.email;
     const userName = user.user_name || null;
 
-    // Generate 6-digit OTP
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-
-    // Store OTP in Redis with TTL (10 minutes)
+    const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
+
     await redis.set(redisKey, otp, { EX: 600 });
 
-    // Send email
     await sendOtpEmail({
       to: email,
       otp,
@@ -444,7 +472,6 @@ async function forgotTPinVerify(req, res) {
       });
     }
 
-    // Get wallet (for user_id)
     const wallet = await getWallet({ key: wallet_id });
     if (!wallet) {
       return res
@@ -469,14 +496,12 @@ async function forgotTPinVerify(req, res) {
       });
     }
 
-    // OTP is valid → update T-PIN
     const hashed = await bcrypt.hash(newPinStr, 10);
     const updated = await setWalletTPin({
       key: wallet_id,
       t_pin_hash: hashed,
     });
 
-    // Invalidate OTP
     await redis.del(redisKey);
 
     if (!updated) {
@@ -496,6 +521,151 @@ async function forgotTPinVerify(req, res) {
   }
 }
 
+/* ---------- USER / MERCHANT / DRIVER WALLET TRANSFER ---------- */
+/**
+ * Body:
+ * {
+ *   "sender_wallet_id": "NET000123",
+ *   "recipient_wallet_id": "NET000456",
+ *   "amount": 225,
+ *   "note": "Tt",
+ *   "t_pin": "1234"
+ * }
+ */
+async function userTransfer(req, res) {
+  try {
+    const {
+      sender_wallet_id,
+      recipient_wallet_id,
+      amount,
+      note = "",
+      t_pin,
+    } = req.body || {};
+
+    if (!sender_wallet_id || !/^NET/i.test(sender_wallet_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sender_wallet_id.",
+      });
+    }
+
+    if (!recipient_wallet_id || !/^NET/i.test(recipient_wallet_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid recipient_wallet_id.",
+      });
+    }
+
+    if (sender_wallet_id === recipient_wallet_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Sender and recipient wallet must be different.",
+      });
+    }
+
+    if (isNaN(amount) || Number(amount) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be a positive number (Nu).",
+      });
+    }
+
+    const pinStr = String(t_pin || "").trim();
+    if (!/^\d{4}$/.test(pinStr)) {
+      return res.status(400).json({
+        success: false,
+        message: "t_pin must be a 4-digit numeric code.",
+      });
+    }
+
+    const senderWallet = await getWallet({ key: sender_wallet_id });
+    if (!senderWallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Sender wallet not found.",
+      });
+    }
+
+    if (senderWallet.status !== "ACTIVE") {
+      return res.status(403).json({
+        success: false,
+        message: "Sender wallet is not ACTIVE.",
+      });
+    }
+
+    if (!senderWallet.t_pin) {
+      return res.status(409).json({
+        success: false,
+        message: "T-PIN not set for this wallet.",
+      });
+    }
+
+    const okPin = await bcrypt.compare(pinStr, senderWallet.t_pin);
+    if (!okPin) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid T-PIN.",
+      });
+    }
+
+    const recipientWallet = await getWallet({ key: recipient_wallet_id });
+    if (!recipientWallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Recipient wallet not found.",
+      });
+    }
+
+    if (recipientWallet.status !== "ACTIVE") {
+      return res.status(403).json({
+        success: false,
+        message: "Recipient wallet is not ACTIVE.",
+      });
+    }
+
+    const result = await userWalletTransfer({
+      sender_wallet_id,
+      recipient_wallet_id,
+      amount_nu: Number(amount),
+      note,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message || "Transfer failed.",
+      });
+    }
+
+    const { journal_code, transaction_ids } = result;
+    const primaryTxnId = Array.isArray(transaction_ids)
+      ? transaction_ids[0]
+      : null;
+
+    const { dateStr, timeStr } = formatReceiptDateTime(); // use current time
+
+    const receipt = {
+      amount: `Nu. ${Number(amount).toFixed(2)}`,
+      journal_no: journal_code,
+      transaction_id: primaryTxnId, // ✅ only first ID shown
+      from_account: maskWallet(sender_wallet_id),
+      to_account: maskWallet(recipient_wallet_id),
+      purpose: note || "N/A",
+      date: dateStr,
+      time: timeStr,
+    };
+
+    return res.json({
+      success: true,
+      message: "Wallet transfer successful.",
+      receipt,
+    });
+  } catch (e) {
+    console.error("Error in userTransfer:", e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 module.exports = {
   create,
   getAll,
@@ -508,4 +678,5 @@ module.exports = {
   changeTPin,
   forgotTPinRequest,
   forgotTPinVerify,
+  userTransfer,
 };
