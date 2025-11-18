@@ -26,11 +26,13 @@ const adminLogRoutes = require("./routes/adminLogsRoute");
 const orderReportRoutes = require("./routes/ordersReportRoutes");
 const adminCollaboratorRoutes = require("./routes/adminCollaboratorRoutes"); // 👈 NEW
 const systemNotificationRoute = require("./routes/systemNotificationRoute");
+const appRatingRoutes = require("./routes/appRatingRoutes");
 
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin-logs", adminLogRoutes);
 app.use("/api/orders", orderReportRoutes);
 app.use("/api/system-notifications", systemNotificationRoute);
+app.use("/api/app-ratings", appRatingRoutes);
 
 // Mount collaborators at /api/admin-collaborators
 // (routes file should expose relative paths: '/', '/:id', etc.)

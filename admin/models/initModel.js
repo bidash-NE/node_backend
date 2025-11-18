@@ -26,7 +26,7 @@ async function initAdminLogsTable() {
   `;
 
   /* =======================================================
-     2. ADMIN COLLABORATORS TABLE (keep if used elsewhere)
+     2. ADMIN COLLABORATORS TABLE
   ======================================================= */
   const sqlCollaborators = `
     CREATE TABLE IF NOT EXISTS admin_collaborators (
@@ -51,7 +51,7 @@ async function initAdminLogsTable() {
   `;
 
   /* =======================================================
-     3. SYSTEM NOTIFICATIONS TABLE (NO scheduled_at)
+     3. SYSTEM NOTIFICATIONS TABLE
   ======================================================= */
   const sqlNotifications = `
     CREATE TABLE IF NOT EXISTS system_notifications (
@@ -78,12 +78,49 @@ async function initAdminLogsTable() {
       COLLATE=utf8mb4_unicode_ci;
   `;
 
+  /* =======================================================
+     4. APP RATINGS TABLE  (with role auto-filled via backend)
+     For "Rate Our App" feature
+  ======================================================= */
+  const sqlAppRatings = `
+    CREATE TABLE IF NOT EXISTS app_ratings (
+      id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id         BIGINT UNSIGNED DEFAULT NULL,
+      role            VARCHAR(50) DEFAULT NULL,   -- role from users table
+
+      rating          INT NOT NULL, 
+      comment         TEXT DEFAULT NULL,
+
+      platform        VARCHAR(20) DEFAULT NULL, 
+      os_version      VARCHAR(20) DEFAULT NULL,
+      app_version     VARCHAR(50) DEFAULT NULL,
+      device_model    VARCHAR(255) DEFAULT NULL,
+      network_type    VARCHAR(50) DEFAULT NULL,
+
+      created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      PRIMARY KEY (id),
+      KEY idx_rating (rating),
+      KEY idx_user_id (user_id),
+      KEY idx_role (role),
+      KEY idx_created_at (created_at),
+
+      CONSTRAINT fk_app_rating_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE SET NULL ON UPDATE CASCADE
+    ) ENGINE=InnoDB
+      DEFAULT CHARSET=utf8mb4
+      COLLATE=utf8mb4_unicode_ci;
+  `;
+
   try {
     await db.query(sqlLogs);
     await db.query(sqlCollaborators);
     await db.query(sqlNotifications);
+    await db.query(sqlAppRatings);
+
     console.log(
-      "✔️ admin_logs, admin_collaborators, and system_notifications tables are ready"
+      "✔️ admin_logs, admin_collaborators, system_notifications, and app_ratings tables are ready"
     );
   } catch (err) {
     console.error("❌ Error initializing admin tables:", err);
