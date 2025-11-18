@@ -53,7 +53,7 @@ async function fetchUsersByRole() {
   return rows;
 }
 
-// ✅ Drivers (role='driver') + license/vehicles + wallet_id
+// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating
 async function fetchDrivers() {
   const userQuery = `
     SELECT 
@@ -75,6 +75,7 @@ async function fetchDrivers() {
 
   const detailedDrivers = await Promise.all(
     users.map(async (user) => {
+      // basic driver info
       const [driverRows] = await pool.query(
         `SELECT driver_id, license_number FROM drivers WHERE user_id = ?`,
         [user.user_id]
@@ -84,6 +85,7 @@ async function fetchDrivers() {
       const driver_id = driverInfo.driver_id || null;
       const license_number = driverInfo.license_number || null;
 
+      // vehicles
       let vehicles = [];
       if (driver_id) {
         const [vehicleRows] = await pool.query(
@@ -91,6 +93,24 @@ async function fetchDrivers() {
           [driver_id]
         );
         vehicles = vehicleRows;
+      }
+
+      // average rating from ride_ratings
+      let avg_rating = null;
+      if (driver_id) {
+        const [[ratingRow]] = await pool.query(
+          `
+            SELECT 
+              AVG(rating) AS avg_rating
+            FROM ride_ratings
+            WHERE driver_id = ?
+          `,
+          [driver_id]
+        );
+
+        if (ratingRow && ratingRow.avg_rating !== null) {
+          avg_rating = Number(ratingRow.avg_rating);
+        }
       }
 
       return {
@@ -106,6 +126,7 @@ async function fetchDrivers() {
         driver_id,
         license_number,
         vehicles,
+        avg_rating, // driver average rating
       };
     })
   );
@@ -134,7 +155,7 @@ async function fetchAdmins() {
   return rows;
 }
 
-// ✅ Merchants with business details + wallet_id
+// ✅ Merchants with business details + wallet_id + average_rating
 // (uses business_logo as profile_image fallback)
 async function fetchMerchantsWithBusiness() {
   const sql = `
@@ -156,12 +177,34 @@ async function fetchMerchantsWithBusiness() {
       mbd.closing_time,
       mbd.address,
       mbd.created_at AS business_created_at,
-      mbd.updated_at AS business_updated_at
+      mbd.updated_at AS business_updated_at,
+      r.avg_rating AS average_rating
     FROM users u
     JOIN merchant_business_details mbd
       ON mbd.user_id = u.user_id
     LEFT JOIN wallets w 
       ON w.user_id = u.user_id
+    LEFT JOIN (
+      -- mart ratings
+      SELECT
+        'mart' AS owner_type,
+        business_id,
+        AVG(rating) AS avg_rating
+      FROM mart_ratings
+      GROUP BY business_id
+
+      UNION ALL
+
+      -- food ratings
+      SELECT
+        'food' AS owner_type,
+        business_id,
+        AVG(rating) AS avg_rating
+      FROM food_ratings
+      GROUP BY business_id
+    ) r
+      ON r.owner_type = mbd.owner_type
+     AND r.business_id = mbd.business_id
     WHERE u.role = 'merchant'
     ORDER BY mbd.created_at DESC, u.user_name ASC
   `;
