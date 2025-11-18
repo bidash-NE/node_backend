@@ -162,13 +162,11 @@ async function checkTPinByUserId(req, res) {
         .json({ success: false, message: "Wallet not found for this user." });
     }
 
-    const has_t_pin = Boolean(wallet.t_pin && String(wallet.t_pin).trim() !== "");
 
     return res.json({
       success: true,
       user_id: Number(user_id),
       wallet_id: maskWallet(wallet.wallet_id),
-      has_t_pin,
     });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
