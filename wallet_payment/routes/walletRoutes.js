@@ -34,4 +34,7 @@ router.post("/:wallet_id/forgot-tpin/verify", ctrl.forgotTPinVerify);
 
 router.post("/transfer", ctrl.userTransfer);
 
+router.get("/:user_id/has-tpin", ctrl.checkTPinByUserId);
+
+
 module.exports = router;
