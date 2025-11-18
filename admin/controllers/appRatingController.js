@@ -10,6 +10,49 @@ const {
 } = require("../models/appRatingModel");
 
 /**
+ * Helper: load admin user and verify role is admin/super-admin
+ * Returns { admin_user_id, admin_name, role } or throws 403 error
+ */
+async function verifyAdminOrSuperAdmin(admin_user_id) {
+  const idNum = Number(admin_user_id);
+  if (!idNum || Number.isNaN(idNum)) {
+    const err = new Error("Invalid admin_user_id");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const [rows] = await db.query(
+    "SELECT user_id, user_name, role FROM users WHERE user_id = ? LIMIT 1",
+    [idNum]
+  );
+
+  if (!rows.length) {
+    const err = new Error("Admin user not found");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const admin = rows[0];
+  const role = String(admin.role || "").toLowerCase();
+
+  const allowedRoles = new Set(["admin", "super admin", "superadmin"]); // adjust if needed
+
+  if (!allowedRoles.has(role)) {
+    const err = new Error(
+      "Not authorized. Only admin/super admin can perform this action."
+    );
+    err.statusCode = 403;
+    throw err;
+  }
+
+  return {
+    admin_user_id: admin.user_id,
+    admin_name: admin.user_name || "UNKNOWN_ADMIN",
+    role,
+  };
+}
+
+/**
  * POST /api/app-ratings
  * Body: {
  *   user_id: number (required),
@@ -55,7 +98,7 @@ async function createAppRatingController(req, res) {
 
     const network_type = body.network_type || null;
 
-    // Auto-fetch role from users table based on user_id
+    // Auto-fetch role from users table based on user_id (app user)
     let role = null;
     const [[userRow]] = await db.query(
       "SELECT role FROM users WHERE user_id = ? LIMIT 1",
@@ -79,14 +122,14 @@ async function createAppRatingController(req, res) {
 
     return res.status(201).json({
       success: true,
-      message: "App rating submitted successfully. Thank You for the feedback!",
+      message: "App rating submitted successfully.",
       data: created,
     });
   } catch (err) {
     console.error("Error creating app rating:", err);
-    return res.status(500).json({
+    return res.status(err.statusCode || 500).json({
       success: false,
-      message: "Failed to submit app rating.",
+      message: err.message || "Failed to submit app rating.",
     });
   }
 }
@@ -217,17 +260,57 @@ async function updateAppRatingController(req, res) {
 
 /**
  * DELETE /api/app-ratings/:id
+ * Body: {
+ *   admin_user_id: number (required)  // admin's user_id
+ * }
+ * Verifies admin role (admin/super_admin) and logs into admin_logs directly.
  */
+// DELETE /api/app-ratings/:id
 async function deleteAppRatingController(req, res) {
   try {
     const { id } = req.params;
-    const result = await deleteAppRating(id);
+    const { admin_user_id } = req.body || {};
 
+    // 1. Verify admin (super_admin or admin)
+    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
+    const { admin_user_id: adminId, admin_name, role } = adminInfo;
+
+    // 2. Fetch rating before delete
+    const existing = await getAppRatingById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "App rating not found.",
+      });
+    }
+
+    // Extract comment safely
+    const userComment = existing.comment
+      ? existing.comment.trim()
+      : "No comment";
+
+    // 3. Delete rating
+    const result = await deleteAppRating(id);
     if (!result || result.affectedRows === 0) {
       return res.status(404).json({
         success: false,
         message: "App rating not found.",
       });
+    }
+
+    // 4. Insert admin log (direct SQL)
+    try {
+      const activity =
+        `Admin ${admin_name} (id=${adminId}, role=${role}) ` +
+        `deleted app rating #${id} ` +
+        `(rating=${existing.rating}, comment="${userComment}", given_by_user=${existing.user_id})`;
+
+      await db.query(
+        `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
+        [adminId, admin_name, activity]
+      );
+    } catch (logErr) {
+      console.error("Error writing admin log for app rating delete:", logErr);
     }
 
     return res.json({
@@ -236,9 +319,9 @@ async function deleteAppRatingController(req, res) {
     });
   } catch (err) {
     console.error("Error deleting app rating:", err);
-    return res.status(500).json({
+    return res.status(err.statusCode || 500).json({
       success: false,
-      message: "Failed to delete app rating.",
+      message: err.message || "Failed to delete app rating.",
     });
   }
 }
