@@ -1,4 +1,3 @@
-// controllers/bannerController.js
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -68,7 +67,6 @@ function extractStorableImagePath(req) {
   return null;
 }
 
-// POST /api/banners
 // POST /api/banners
 async function createBannerCtrl(req, res) {
   try {
@@ -143,12 +141,14 @@ async function createBannerCtrl(req, res) {
 
     // Prepare clean payment object for UI
     const pay = out.payment;
+    const purpose = `Banner Fee from Business #${out.data.business_id} (${out.data.owner_type})`;
+
     const payment = {
       Amount: `Nu. ${Number(pay.amount).toFixed(2)}`,
       "Jrnl No": pay.journal_code,
       "From Account": pay.debited_from_wallet,
       "To Account": pay.credited_to_wallet,
-      Purpose: `Banner Fee | banner_id=${out.data.id}`,
+      Purpose: purpose,
       Date: dateStr,
       Time: timeStr,
     };
@@ -324,6 +324,7 @@ async function deleteBannerCtrl(req, res) {
     });
   }
 }
+
 // GET /api/banners/base-price
 async function getBannerBasePriceCtrl(req, res) {
   try {

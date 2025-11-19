@@ -1,4 +1,3 @@
-// models/bannerModel.js
 const db = require("../config/db");
 const moment = require("moment-timezone");
 const axios = require("axios");
@@ -34,10 +33,14 @@ function toOwnerType(v) {
 
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+    `SELECT business_id, business_name
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
     [business_id]
   );
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
+  return r[0]; // return row so we can use business_name
 }
 
 async function getConn() {
@@ -129,7 +132,7 @@ async function _selectBanner(conn, id) {
 
 /* ---------- Atomic payment + banner creation (ENUM remark = 'CR'/'DR') ---------- */
 async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
-  await assertBusinessExists(toBizId(banner.business_id));
+  const biz = await assertBusinessExists(toBizId(banner.business_id));
   if (!Number.isFinite(amount) || amount <= 0) {
     return { success: false, message: "Invalid total_amount" };
   }
@@ -186,7 +189,7 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
       return { success: false, message: "Insufficient wallet balance" };
     }
 
-    // Create banner first (so note can include id)
+    // Create banner first (so note can use business info + owner type)
     const bannerId = await _insertBanner(conn, banner);
 
     // Get IDs from the ID service
@@ -194,7 +197,9 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
     const { dr, cr } = await getTwoTxnIdsViaApi();
 
     const now = nowBT();
-    const note = `Banner Fee | banner_id=${bannerId}`;
+    const business_name = biz.business_name || `business_id=${biz.business_id}`;
+    const otypeForNote = toOwnerType(banner.owner_type);
+    const note = `Banner Fee from ${business_name} (${otypeForNote})`;
 
     // Update balances
     await conn.query(`UPDATE wallets SET amount = amount - ? WHERE id = ?`, [
@@ -270,6 +275,7 @@ async function listBanners({ business_id, active_only, owner_type } = {}) {
     params = [];
   if (business_id !== undefined) {
     const bid = toBizId(business_id);
+    await assertBusinessExists(bid);
     where.push("business_id = ?");
     params.push(bid);
   }
@@ -380,7 +386,7 @@ async function updateBanner(id, fields, opts = {}) {
       }
       const cur = curRows[0];
 
-      // Validate/resolve any field constraints (business_id, owner_type) as the old code did
+      // Validate/resolve any field constraints (business_id, owner_type)
       const sets = [];
       const params = [];
 
@@ -637,9 +643,16 @@ async function updateBanner(id, fields, opts = {}) {
         admin.id,
       ]);
 
-      // 3) Insert DR/CR
+      // 3) Insert DR/CR with nicer note
       const now = nowBT();
-      const note = `Banner Extension | banner_id=${id} | charge=${chargeAmount}`;
+      const biz = await assertBusinessExists(cur.business_id);
+      const business_name =
+        biz.business_name || `business_id=${cur.business_id}`;
+      const otypeForNote = toOwnerType(
+        fields.owner_type !== undefined ? fields.owner_type : cur.owner_type
+      );
+      const note = `Banner Fee from ${business_name} (${otypeForNote})`;
+
       await conn.query(
         `INSERT INTO wallet_transactions
           (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)

@@ -146,30 +146,38 @@ async function getByUserId(req, res) {
 }
 
 // NEW: Check whether a wallet for given user_id has a T-PIN set
+// NEW: Check whether a wallet for given user_id has a T-PIN set
 async function checkTPinByUserId(req, res) {
   try {
     const { user_id } = req.params;
+
     if (!user_id || isNaN(user_id) || Number(user_id) <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid user_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user_id.",
+      });
     }
 
     const wallet = await getWalletByUserId(Number(user_id));
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found for this user." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found for this user.",
+      });
     }
 
+    const hasTPin = !!wallet.t_pin && wallet.t_pin !== "";
 
     return res.json({
       success: true,
       user_id: Number(user_id),
-      wallet_id: maskWallet(wallet.wallet_id),
+      has_tpin: hasTPin,
     });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 

@@ -1,23 +1,30 @@
 // utils/redisClient.js
-const { createClient } = require("redis");
+const Redis = require("ioredis");
 
-const redis = createClient({
-  url: process.env.REDIS_URL,
+const redis = new Redis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null, // recommended for queues / sockets
+  enableReadyCheck: true,
+});
+
+// Events
+redis.on("connect", () => {
+  console.log("[Redis] Connected");
+});
+
+redis.on("ready", () => {
+  console.log("[Redis] Ready to accept commands");
 });
 
 redis.on("error", (err) => {
-  console.error("Redis error:", err);
+  console.error("[Redis] Error:", err);
 });
 
-(async () => {
-  try {
-    if (!redis.isOpen) {
-      await redis.connect();
-      console.log("[Redis] Connected");
-    }
-  } catch (err) {
-    console.error("[Redis] Connection error:", err);
-  }
-})();
+redis.on("close", () => {
+  console.log("[Redis] Connection closed");
+});
+
+redis.on("reconnecting", () => {
+  console.log("[Redis] Reconnecting...");
+});
 
 module.exports = redis;
