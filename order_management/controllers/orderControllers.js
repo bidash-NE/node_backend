@@ -166,7 +166,7 @@ async function createOrder(req, res) {
 
     const order_id = await Order.create({
       ...payload,
-      if_unavailable, // ⬅️ use raw value from client (or null)
+      if_unavailable, // use raw value from client (or null)
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
     });
@@ -228,9 +228,15 @@ async function createOrder(req, res) {
       });
     }
 
-    return res
-      .status(201)
-      .json({ order_id, message: "Order created successfully" });
+    return res.status(201).json({
+      order_id,
+      message:
+        "Order created successfully. Note: 50% of the platform fee will be deducted from the merchant side.",
+      platform_fee_sharing: {
+        user_share: 0.5,
+        merchant_share: 0.5,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -314,25 +320,6 @@ async function updateOrder(req, res) {
   }
 }
 
-/**
- * PATCH /orders/:order_id/status
- * Includes:
- * - unavailable item changes
- * - totals update
- * - capture
- * - notifications
- */
-/**
- * PATCH/PUT /orders/:order_id/status
- * Status rules:
- * - Block user cancel after acceptance.
- * - On CONFIRMED:
- *    - apply unavailable item changes to order_items
- *    - update final totals in orders
- *    - capture wallet / platform fee
- *    - send notifications (order, unavailable items, wallet deduction)
- */
-
 async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
   try {
     const mins = Number(estimated_minutes);
@@ -359,6 +346,10 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
   }
 }
+
+/**
+ * PATCH/PUT /orders/:order_id/status
+ */
 async function updateOrderStatus(req, res) {
   try {
     const order_id = req.params.order_id;
@@ -370,7 +361,7 @@ async function updateOrderStatus(req, res) {
       final_discount_amount,
       unavailable_changes,
       unavailableChanges,
-      estimated_minutes, // ⬅️ NEW: from merchant
+      estimated_minutes, // from merchant
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -419,6 +410,35 @@ async function updateOrderStatus(req, res) {
 
     // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
+      // 💳 If payment is via WALLET, ensure merchant has a wallet
+      if (payMethod === "WALLET") {
+        const [merchantWalletCheck] = await db.query(
+          `
+          SELECT m.business_id, w.wallet_id
+            FROM order_items oi
+            JOIN merchant_business_details m ON m.business_id = oi.business_id
+            LEFT JOIN wallets w ON w.user_id = m.user_id
+           WHERE oi.order_id = ?
+           GROUP BY m.business_id, w.wallet_id
+           ORDER BY m.business_id ASC
+           LIMIT 1
+        `,
+          [order_id]
+        );
+
+        // If we can't even resolve a merchant, or there's no wallet_id, block confirm
+        if (
+          !merchantWalletCheck ||
+          !merchantWalletCheck.wallet_id ||
+          !merchantWalletCheck.business_id
+        ) {
+          return res.status(400).json({
+            message:
+              "The store’s wallet is not yet set up to receive this order. Please try again after the store completes their wallet setup. Thank you for your patience!",
+          });
+        }
+      }
+
       // 1️⃣ Apply unavailable item changes
       if (
         changes &&
@@ -447,7 +467,7 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      // 3️⃣ Handle estimated arrival minutes (NEW)
+      // 3️⃣ Handle estimated arrival minutes
       if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
       }
@@ -543,7 +563,7 @@ async function updateOrderStatus(req, res) {
         user_id: captureInfo.user_id,
         order_id,
         order_amount: captureInfo.order_amount,
-        platform_fee: captureInfo.platform_fee,
+        platform_fee: captureInfo.platform_fee_user ?? captureInfo.platform_fee, // supports old + new shape
         method: payMethod,
       });
     }
@@ -560,6 +580,7 @@ async function updateOrderStatus(req, res) {
     return res.status(500).json({ error: err.message });
   }
 }
+
 
 /**
  * DELETE /orders/:order_id

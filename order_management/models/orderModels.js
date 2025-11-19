@@ -5,6 +5,10 @@ const axios = require("axios");
 /* ======================= CONFIG ======================= */
 const ADMIN_WALLET_ID = "NET000001"; // admin wallet
 
+// 50/50 platform fee sharing
+const PLATFORM_USER_SHARE = 0.5;       // 50% from user side
+const PLATFORM_MERCHANT_SHARE = 0.5;   // 50% from merchant side
+
 // External ID services (all POST)
 const IDS_BOTH_URL =
   process.env.WALLET_IDS_BOTH_URL || "https://grab.newedge.bt/wallet/ids/both";
@@ -288,7 +292,7 @@ async function addUserWalletDebitNotificationInternal(
   const dbh = conn || db;
   const payMethod = String(method || "").toUpperCase();
   const orderAmt = Number(order_amount || 0);
-  const feeAmt = Number(platform_fee || 0);
+  const feeAmt = Number(platform_fee || 0); // here this is USER share only
 
   if (!(orderAmt > 0 || feeAmt > 0)) return;
 
@@ -298,11 +302,11 @@ async function addUserWalletDebitNotificationInternal(
       orderAmt
     )} has been deducted from your wallet for the order and Nu. ${fmtNu(
       feeAmt
-    )} as platform fee.`;
+    )} as platform fee (your share).`;
   } else {
     message = `Order ${order_id}: Nu. ${fmtNu(
       feeAmt
-    )} was deducted from your wallet as platform fee.`;
+    )} was deducted from your wallet as platform fee (your share).`;
   }
 
   await insertUserNotification(dbh, {
@@ -376,20 +380,22 @@ async function computeBusinessSplit(order_id, conn = null) {
   const primaryBizId = items[0].business_id;
 
   if (byBiz.size === 1) {
+    const base = total - fee; // items+delivery for this merchant
     return {
       business_id: primaryBizId,
-      total_amount: total,
+      total_amount: base, // base share for this merchant
       platform_fee: fee,
-      net_to_merchant: total - fee,
+      net_to_merchant: base - fee, // kept for backward compatibility (not used by new capture logic)
     };
   }
 
   const primaryShare = byBiz.get(primaryBizId) || 0;
-  const feeShare = total > 0 ? fee * (primaryShare / total) : 0;
+  const feeShare =
+    total > 0 ? fee * (primaryShare / total) : 0; // fee share for this merchant
 
   return {
     business_id: primaryBizId,
-    total_amount: primaryShare,
+    total_amount: primaryShare, // base share (items+delivery) for this merchant
     platform_fee: feeShare,
     net_to_merchant: primaryShare - feeShare,
   };
@@ -439,11 +445,18 @@ async function recordWalletTransfer(
 }
 
 /* ================= PUBLIC CAPTURE APIS ================= */
+/**
+ * WALLET orders:
+ * - User pays: base (items+delivery) + 50% of platform fee
+ * - Merchant receives: base - 50% of fee
+ * - Admin receives: 100% fee = 50% user + 50% merchant
+ */
 async function captureOrderFunds(order_id) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
+    // prevent double-capture
     if (await captureExists(order_id, "WALLET_FULL", conn)) {
       await conn.commit();
       return { captured: false, alreadyCaptured: true };
@@ -454,7 +467,9 @@ async function captureOrderFunds(order_id) {
          FROM orders WHERE order_id = ? LIMIT 1`,
       [order_id]
     );
+
     if (!order) throw new Error("Order not found for capture");
+
     if (String(order.payment_method || "WALLET").toUpperCase() !== "WALLET") {
       await conn.commit();
       return {
@@ -464,6 +479,7 @@ async function captureOrderFunds(order_id) {
       };
     }
 
+    // Split by business as before
     const split = await computeBusinessSplit(order_id, conn);
     const buyer = await getBuyerWalletByUserId(order.user_id, conn);
     const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
@@ -475,8 +491,12 @@ async function captureOrderFunds(order_id) {
 
     const total = Number(order.total_amount || 0);
     const fee = Number(split.platform_fee || 0);
-    const toMerch = Number(split.net_to_merchant || 0);
 
+    // 50/50 platform fee split
+    const userFee = fee > 0 ? Number((fee / 2).toFixed(2)) : 0;
+    const merchFee = fee - userFee; // keeps total exact even with rounding
+
+    // Make sure buyer has enough for the order amount
     const [[freshBuyer]] = await conn.query(
       `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
       [buyer.id]
@@ -485,60 +505,81 @@ async function captureOrderFunds(order_id) {
       throw new Error("Insufficient wallet balance during capture");
     }
 
-    const t1 = await recordWalletTransfer(conn, {
+    // (optional) ensure merchant has enough for their fee share
+    if (merchFee > 0) {
+      const [[freshMerch]] = await conn.query(
+        `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+        [merch.id]
+      );
+      if (!freshMerch || Number(freshMerch.amount) < merchFee) {
+        throw new Error(
+          "Insufficient merchant wallet balance for platform fee share."
+        );
+      }
+    }
+
+    /* 1️⃣ ORDER AMOUNT: USER → MERCHANT
+       This is the main order capture.
+       Note clearly says it's the order amount, not the fee.
+    */
+    const tOrder = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
-      amount: toMerch,
+      amount: total,
       order_id,
-      note: `Wallet capture (USER→MERCHANT) for ${order_id}`,
+      note: `Order amount for ${order_id}`, // <-- main order amount
     });
 
-    const bodyCR = `CR ${t1?.cr_txn_id || "-"} · JRN ${t1?.journal_id || "-"}`;
-    await conn.query(
-      `INSERT INTO order_notification
-         (notification_id, order_id, business_id, user_id, type, title, body_preview, is_read, created_at)
-       VALUES (UUID(), ?, ?, ?, 'order:wallet_txn', 'Amount credited', ?, 0, NOW())`,
-      [order_id, split.business_id, order.user_id, bodyCR]
-    );
-
-    if (fee > 0) {
-      const t2 = await recordWalletTransfer(conn, {
+    /* 2️⃣ USER PLATFORM FEE SHARE: USER → ADMIN */
+    let tUserFee = null;
+    if (userFee > 0) {
+      tUserFee = await recordWalletTransfer(conn, {
         fromId: buyer.wallet_id,
         toId: admin.wallet_id,
-        amount: fee,
+        amount: userFee,
         order_id,
-        note: `Platform fee for ${order_id}`,
+        note: `Platform fee (user share) for ${order_id}`, // <-- clearly user share
       });
-
-      await conn.query(
-        `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
-         VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
-        [
-          order_id,
-          `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
-          `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
-          `${t2?.dr_txn_id || ""}/${t2?.cr_txn_id || ""}`,
-        ]
-      );
-    } else {
-      await conn.query(
-        `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
-         VALUES (?, 'WALLET_FULL', ?, ?, NULL)`,
-        [
-          order_id,
-          `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
-          `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
-        ]
-      );
     }
+
+    /* 3️⃣ MERCHANT PLATFORM FEE SHARE: MERCHANT → ADMIN */
+    let tMerchFee = null;
+    if (merchFee > 0) {
+      tMerchFee = await recordWalletTransfer(conn, {
+        fromId: merch.wallet_id,
+        toId: admin.wallet_id,
+        amount: merchFee,
+        order_id,
+        note: `Platform fee (merchant share) for ${order_id}`, // <-- clearly merchant share
+      });
+    }
+
+    /* 4️⃣ SAVE A SINGLE PAIR PER COLUMN IN order_wallet_captures
+          - buyer_txn_id   -> user fee DR/CR pair (if any)
+          - merch_txn_id   -> merchant fee DR/CR pair (if any)
+          - admin_txn_id   -> main order DR/CR pair (user→merchant)
+       This keeps them "separate" and avoids Data too long issues.
+    */
+    await conn.query(
+      `INSERT INTO order_wallet_captures
+         (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
+       VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
+      [
+        order_id,
+        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,  // user fee
+        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null, // merchant fee
+        tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,        // main order
+      ]
+    );
 
     await conn.commit();
 
     return {
       captured: true,
       user_id: order.user_id,
-      order_amount: toMerch,
-      platform_fee: fee,
+      order_amount: total,
+      platform_fee_user: userFee,
+      platform_fee_merchant: merchFee,
     };
   } catch (e) {
     try {
@@ -550,6 +591,13 @@ async function captureOrderFunds(order_id) {
   }
 }
 
+
+/**
+ * COD orders:
+ * - Customer pays cash for items+delivery.
+ * - User wallet: 50% of platform fee → Admin.
+ * - Merchant wallet: 50% of platform fee → Admin.
+ */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
   try {
@@ -575,10 +623,17 @@ async function captureOrderCODFee(order_id) {
       };
     }
 
-    const fee = Number(order.platform_fee || 0);
+    // Use same split logic to find primary business & fee share
+    const split = await computeBusinessSplit(order_id, conn);
+    const fee = Number(split.platform_fee || 0);
+    const userFee = fee * PLATFORM_USER_SHARE;
+    const merchantFee = fee - userFee;
+
     const buyer = await getBuyerWalletByUserId(order.user_id, conn);
+    const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
     const admin = await getAdminWallet(conn);
     if (!buyer) throw new Error("Buyer wallet missing");
+    if (!merch) throw new Error("Merchant wallet missing");
     if (!admin) throw new Error("Admin wallet missing");
 
     if (fee > 0) {
@@ -586,24 +641,56 @@ async function captureOrderCODFee(order_id) {
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
         [buyer.id]
       );
-      if (!freshBuyer || Number(freshBuyer.amount) < fee) {
+      if (!freshBuyer || Number(freshBuyer.amount) < userFee) {
         throw new Error(
-          "Insufficient user wallet balance for COD platform fee."
+          "Insufficient user wallet balance for COD platform fee share."
         );
       }
 
-      const t = await recordWalletTransfer(conn, {
-        fromId: buyer.wallet_id,
-        toId: admin.wallet_id,
-        amount: fee,
-        order_id,
-        note: `Platform fee for ${order_id}`,
-      });
+      const [[freshMerchant]] = await conn.query(
+        `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+        [merch.id]
+      );
+      if (!freshMerchant || Number(freshMerchant.amount) < merchantFee) {
+        throw new Error(
+          "Insufficient merchant wallet balance for COD platform fee share."
+        );
+      }
+
+      let tUserFee = null;
+      let tMerchFee = null;
+
+      if (userFee > 0) {
+        tUserFee = await recordWalletTransfer(conn, {
+          fromId: buyer.wallet_id,
+          toId: admin.wallet_id,
+          amount: userFee,
+          order_id,
+          note: `COD platform fee (user 50%) for ${order_id}`,
+        });
+      }
+
+      if (merchantFee > 0) {
+        tMerchFee = await recordWalletTransfer(conn, {
+          fromId: merch.wallet_id,
+          toId: admin.wallet_id,
+          amount: merchantFee,
+          order_id,
+          note: `COD platform fee (merchant 50%) for ${order_id}`,
+        });
+      }
+
+      const adminTxnSummary = [
+        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : "",
+        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : "",
+      ]
+        .filter(Boolean)
+        .join(";");
 
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, admin_txn_id)
          VALUES (?, 'COD_FEE', ?)`,
-        [order_id, `${t.dr_txn_id}/${t.cr_txn_id}`]
+        [order_id, adminTxnSummary || null]
       );
     } else {
       await conn.query(
@@ -619,7 +706,7 @@ async function captureOrderCODFee(order_id) {
       captured: true,
       user_id: order.user_id,
       order_amount: 0,
-      platform_fee: fee,
+      platform_fee: userFee, // Only user share for notification
     };
   } catch (e) {
     try {
@@ -754,7 +841,6 @@ const Order = {
           ? JSON.stringify(orderData.delivery_address)
           : orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
-      // store exactly what comes from controller; no default
       if_unavailable:
         orderData.if_unavailable !== undefined &&
         orderData.if_unavailable !== null
@@ -800,7 +886,6 @@ const Order = {
     for (const o of orders) {
       o.items = [];
       o.delivery_address = parseDeliveryAddress(o.delivery_address);
-      // if_unavailable already in o.* if column exists
       byOrder.set(o.order_id, o);
     }
 
@@ -823,7 +908,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
-        o.if_unavailable,             -- NEW
+        o.if_unavailable,
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -845,7 +930,7 @@ const Order = {
     orders[0].delivery_address = parseDeliveryAddress(
       orders[0].delivery_address
     );
-    orders[0].if_unavailable = orders[0].if_unavailable || null; // NEW normalize
+    orders[0].if_unavailable = orders[0].if_unavailable || null;
     return orders[0];
   },
 
@@ -875,7 +960,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
-        o.if_unavailable,             -- NEW
+        o.if_unavailable,
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -914,7 +999,8 @@ const Order = {
       );
       const fee_share =
         Number(o.total_amount || 0) > 0
-          ? Number(o.platform_fee || 0) * (share / Number(o.total_amount || 0))
+          ? Number(o.platform_fee || 0) *
+            (share / Number(o.total_amount || 0))
           : 0;
       const net_for_business = share - fee_share;
 
@@ -939,7 +1025,7 @@ const Order = {
         payment_method: o.payment_method,
         delivery_address: parseDeliveryAddress(o.delivery_address),
         note_for_restaurant: o.note_for_restaurant,
-        if_unavailable: o.if_unavailable || null, // NEW: exposed for business
+        if_unavailable: o.if_unavailable || null,
         estimated_arrivial_time: o.estimated_arrivial_time || null,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
@@ -975,7 +1061,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
-        o.if_unavailable,               -- NEW
+        o.if_unavailable,
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -1018,7 +1104,7 @@ const Order = {
             payment_method: o.payment_method,
             delivery_address: parseDeliveryAddress(o.delivery_address),
             note_for_restaurant: o.note_for_restaurant,
-            if_unavailable: o.if_unavailable || null, // NEW
+            if_unavailable: o.if_unavailable || null,
             estimated_arrivial_time: o.estimated_arrivial_time || null,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
