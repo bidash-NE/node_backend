@@ -424,6 +424,7 @@ async function changeTPin(req, res) {
 }
 
 /* ---------- FORGOT T-PIN: REQUEST OTP ---------- */
+/* ---------- FORGOT T-PIN: REQUEST OTP ---------- */
 async function forgotTPinRequest(req, res) {
   try {
     const { wallet_id } = req.params;
@@ -460,7 +461,11 @@ async function forgotTPinRequest(req, res) {
     const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
 
-    await redis.set(redisKey, otp, { EX: 600 });
+    // ❌ OLD (causes ERR syntax error for your client)
+    // await redis.set(redisKey, otp, { EX: 600 });
+
+    // ✅ NEW: use positional EX argument (works with ioredis / node-redis v3)
+    await redis.set(redisKey, otp, "EX", 600);
 
     await sendOtpEmail({
       to: email,
