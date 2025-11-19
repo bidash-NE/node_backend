@@ -361,7 +361,7 @@ async function updateOrderStatus(req, res) {
       final_discount_amount,
       unavailable_changes,
       unavailableChanges,
-      estimated_minutes, // from merchant
+      estimated_minutes, // ⬅️ from merchant
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -410,28 +410,31 @@ async function updateOrderStatus(req, res) {
 
     // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
-      // 💳 If payment is via WALLET, ensure merchant has a wallet
+      // 💳 If payment is via WALLET, ensure ALL involved merchants have wallets
       if (payMethod === "WALLET") {
-        const [merchantWalletCheck] = await db.query(
+        const [merchantRows] = await db.query(
           `
           SELECT m.business_id, w.wallet_id
             FROM order_items oi
             JOIN merchant_business_details m ON m.business_id = oi.business_id
             LEFT JOIN wallets w ON w.user_id = m.user_id
            WHERE oi.order_id = ?
-           GROUP BY m.business_id, w.wallet_id
-           ORDER BY m.business_id ASC
-           LIMIT 1
         `,
           [order_id]
         );
 
-        // If we can't even resolve a merchant, or there's no wallet_id, block confirm
-        if (
-          !merchantWalletCheck ||
-          !merchantWalletCheck.wallet_id ||
-          !merchantWalletCheck.business_id
-        ) {
+        if (!merchantRows.length) {
+          return res.status(400).json({
+            message:
+              "The store’s wallet is not yet set up to receive this order. Please try again after the store completes their wallet setup. Thank you for your patience!",
+          });
+        }
+
+        const merchantsWithoutWallet = merchantRows.filter(
+          (r) => !r.wallet_id
+        );
+
+        if (merchantsWithoutWallet.length > 0) {
           return res.status(400).json({
             message:
               "The store’s wallet is not yet set up to receive this order. Please try again after the store completes their wallet setup. Thank you for your patience!",
@@ -563,7 +566,8 @@ async function updateOrderStatus(req, res) {
         user_id: captureInfo.user_id,
         order_id,
         order_amount: captureInfo.order_amount,
-        platform_fee: captureInfo.platform_fee_user ?? captureInfo.platform_fee, // supports old + new shape
+        // if you later return platform_fee_user etc, you can adjust this
+        platform_fee: captureInfo.platform_fee,
         method: payMethod,
       });
     }
