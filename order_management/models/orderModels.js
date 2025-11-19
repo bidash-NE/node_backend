@@ -513,7 +513,6 @@ async function captureOrderFunds(order_id) {
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
          VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
-
         [
           order_id,
           `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
@@ -525,7 +524,6 @@ async function captureOrderFunds(order_id) {
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
          VALUES (?, 'WALLET_FULL', ?, ?, NULL)`,
-
         [
           order_id,
           `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
@@ -756,7 +754,7 @@ const Order = {
           ? JSON.stringify(orderData.delivery_address)
           : orderData.delivery_address,
       note_for_restaurant: orderData.note_for_restaurant || null,
-      // ⬇️ store exactly what comes from controller; no default
+      // store exactly what comes from controller; no default
       if_unavailable:
         orderData.if_unavailable !== undefined &&
         orderData.if_unavailable !== null
@@ -802,6 +800,7 @@ const Order = {
     for (const o of orders) {
       o.items = [];
       o.delivery_address = parseDeliveryAddress(o.delivery_address);
+      // if_unavailable already in o.* if column exists
       byOrder.set(o.order_id, o);
     }
 
@@ -824,6 +823,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.if_unavailable,             -- NEW
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -845,6 +845,7 @@ const Order = {
     orders[0].delivery_address = parseDeliveryAddress(
       orders[0].delivery_address
     );
+    orders[0].if_unavailable = orders[0].if_unavailable || null; // NEW normalize
     return orders[0];
   },
 
@@ -874,6 +875,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.if_unavailable,             -- NEW
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -937,6 +939,7 @@ const Order = {
         payment_method: o.payment_method,
         delivery_address: parseDeliveryAddress(o.delivery_address),
         note_for_restaurant: o.note_for_restaurant,
+        if_unavailable: o.if_unavailable || null, // NEW: exposed for business
         estimated_arrivial_time: o.estimated_arrivial_time || null,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
@@ -972,6 +975,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.if_unavailable,               -- NEW
         o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
@@ -1014,6 +1018,7 @@ const Order = {
             payment_method: o.payment_method,
             delivery_address: parseDeliveryAddress(o.delivery_address),
             note_for_restaurant: o.note_for_restaurant,
+            if_unavailable: o.if_unavailable || null, // NEW
             estimated_arrivial_time: o.estimated_arrivial_time || null,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
