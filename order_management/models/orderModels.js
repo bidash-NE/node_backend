@@ -513,6 +513,7 @@ async function captureOrderFunds(order_id) {
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
          VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
+
         [
           order_id,
           `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
@@ -524,6 +525,7 @@ async function captureOrderFunds(order_id) {
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
          VALUES (?, 'WALLET_FULL', ?, ?, NULL)`,
+
         [
           order_id,
           `${t1?.dr_txn_id || ""}/${t1?.cr_txn_id || ""}`,
@@ -533,7 +535,7 @@ async function captureOrderFunds(order_id) {
     }
 
     await conn.commit();
-  
+
     return {
       captured: true,
       user_id: order.user_id,
@@ -822,6 +824,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
         o.priority,
@@ -871,6 +874,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
         o.priority,
@@ -933,6 +937,7 @@ const Order = {
         payment_method: o.payment_method,
         delivery_address: parseDeliveryAddress(o.delivery_address),
         note_for_restaurant: o.note_for_restaurant,
+        estimated_arrivial_time: o.estimated_arrivial_time || null,
         fulfillment_type: o.fulfillment_type,
         priority: o.priority,
         created_at: o.created_at,
@@ -967,6 +972,7 @@ const Order = {
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
+        o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
         o.priority,
@@ -1008,6 +1014,7 @@ const Order = {
             payment_method: o.payment_method,
             delivery_address: parseDeliveryAddress(o.delivery_address),
             note_for_restaurant: o.note_for_restaurant,
+            estimated_arrivial_time: o.estimated_arrivial_time || null,
             fulfillment_type: o.fulfillment_type,
             priority: o.priority,
             created_at: o.created_at,
@@ -1035,6 +1042,7 @@ const Order = {
         o.delivery_address,
         o.note_for_restaurant,
         o.if_unavailable,
+        o.estimated_arrivial_time,
         o.status,
         o.fulfillment_type,
         o.priority,
@@ -1078,6 +1086,7 @@ const Order = {
         fulfillment_type: o.fulfillment_type,
         created_at: o.created_at,
         if_unavailable: o.if_unavailable || null,
+        estimated_arrivial_time: o.estimated_arrivial_time || null,
         restaurant: primaryBiz
           ? {
               business_id: primaryBiz.business_id,
