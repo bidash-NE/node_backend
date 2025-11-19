@@ -73,6 +73,7 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
       });
     }
 
+    // sort oldest → newest (you can flip if needed)
     replies.sort((a, b) => (a.ts || 0) - (b.ts || 0));
     result[ratingId] = replies;
   }
@@ -551,7 +552,7 @@ async function createRatingReply({ rating_type, rating_id, user_id, text }) {
 }
 
 /**
- * List replies for a rating (paginated).
+ * List replies for a rating (paginated) + hydrate user info.
  */
 async function listRatingReplies({
   rating_type,
@@ -602,6 +603,8 @@ async function listRatingReplies({
   const rowsArr = await pipe.exec();
 
   const data = [];
+  const userIds = new Set();
+
   for (let i = 0; i < ids.length; i++) {
     const [err, row] = rowsArr[i];
     if (err) continue;
@@ -617,8 +620,38 @@ async function listRatingReplies({
       text: row.text,
       created_at: createdAt,
       updated_at: Number(row.updated_at || createdAt),
+      hours_ago: hoursAgoFromMillis(createdAt),
+      user: null, // will fill below
     };
+
+    if (item.user_id > 0) userIds.add(item.user_id);
     data.push(item);
+  }
+
+  // hydrate user info for this endpoint as well
+  if (userIds.size > 0) {
+    const ids = Array.from(userIds);
+    const [userRows] = await db.query(
+      `
+      SELECT user_id, user_name, profile_image
+      FROM users
+      WHERE user_id IN (?)
+    `,
+      [ids]
+    );
+
+    const userMap = {};
+    for (const u of userRows) {
+      userMap[u.user_id] = {
+        user_id: u.user_id,
+        user_name: u.user_name || null,
+        profile_image: u.profile_image || null,
+      };
+    }
+
+    for (const reply of data) {
+      reply.user = userMap[reply.user_id] || null;
+    }
   }
 
   return {
