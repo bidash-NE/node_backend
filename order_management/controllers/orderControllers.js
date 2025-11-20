@@ -640,7 +640,119 @@ async function getOrderStatusCountsByBusiness(req, res) {
     return res.status(500).json({ error: err.message });
   }
 }
+async function cancelOrderByUser(req, res) {
+  try {
+    const user_id_param = Number(req.params.user_id);
+    const order_id = req.params.order_id;
+    const body = req.body || {};
+    const userReason = String(body.reason || "").trim(); // optional from app
 
+    if (!Number.isFinite(user_id_param) || user_id_param <= 0) {
+      return res.status(400).json({ message: "Invalid user_id" });
+    }
+
+    // Fetch order owner + current status
+    const [[row]] = await db.query(
+      `SELECT user_id, status 
+         FROM orders 
+        WHERE order_id = ? 
+        LIMIT 1`,
+      [order_id]
+    );
+
+    if (!row) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (Number(row.user_id) !== user_id_param) {
+      return res.status(403).json({
+        message: "You are not allowed to cancel this order.",
+      });
+    }
+
+    const current = String(row.status || "PENDING").toUpperCase();
+
+    // If already cancelled or declined, don't let them re-cancel
+    if (current === "CANCELLED") {
+      return res.status(400).json({
+        code: "ALREADY_CANCELLED",
+        message: "This order is already cancelled.",
+      });
+    }
+    if (current === "DECLINED") {
+      return res.status(400).json({
+        code: "ALREADY_DECLINED",
+        message: "This order has already been declined by the store.",
+      });
+    }
+
+    // Only allow cancel when still PENDING
+    if (current !== "PENDING") {
+      return res.status(400).json({
+        code: "CANNOT_CANCEL_AFTER_ACCEPT",
+        message:
+          "This order can no longer be cancelled because the store has already accepted it.",
+      });
+    }
+
+    // Build reason string for DB + notifications
+    const reason =
+      userReason.length > 0
+        ? `Cancelled by customer: ${userReason}`
+        : "Cancelled by customer before the store accepted the order.";
+
+    // Update status in DB
+    const affected = await Order.updateStatus(order_id, "CANCELLED", reason);
+    if (!affected) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Get businesses to notify
+    const [bizRows] = await db.query(
+      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+      [order_id]
+    );
+    const business_ids = bizRows.map((r) => r.business_id);
+
+    // Broadcast via websocket (user & merchant streams)
+    broadcastOrderStatusToMany({
+      order_id,
+      user_id: user_id_param,
+      business_ids,
+      status: "CANCELLED",
+    });
+
+    // Merchant notifications
+    for (const business_id of business_ids) {
+      await insertAndEmitNotification({
+        business_id,
+        user_id: user_id_param,
+        order_id,
+        type: "order:status",
+        title: `Order #${order_id} CANCELLED`,
+        body_preview: "Customer cancelled the order before acceptance.",
+      });
+    }
+
+    // User notification
+    await Order.addUserOrderStatusNotification({
+      user_id: user_id_param,
+      order_id,
+      status: "CANCELLED",
+      reason,
+    });
+
+    return res.json({
+      success: true,
+      message: "Your order has been cancelled successfully.",
+      order_id,
+      status: "CANCELLED",
+    });
+  } catch (err) {
+    console.error("[cancelOrderByUser ERROR]", err);
+    return res.status(500).json({ error: err.message });
+  }
+}
 module.exports = {
   createOrder,
   getOrders,
@@ -652,4 +764,5 @@ module.exports = {
   updateOrderStatus,
   deleteOrder,
   getOrderStatusCountsByBusiness,
+  cancelOrderByUser,
 };

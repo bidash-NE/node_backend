@@ -54,4 +54,12 @@ router.get(
   validBizId,
   orderCtrl.getOrderStatusCountsByBusiness
 );
+
+/* NEW: user cancels their own order (only if still PENDING) */
+router.patch(
+  "/users/:user_id/orders/:order_id/cancel",
+  validUserId,
+  validOrderId,
+  orderCtrl.cancelOrderByUser
+);
 module.exports = router;
