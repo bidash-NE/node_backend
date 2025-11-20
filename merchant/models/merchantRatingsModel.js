@@ -706,6 +706,68 @@ async function deleteRatingReply({ reply_id, user_id }) {
     },
   };
 }
+// models/merchantRatingsModel.js
+// ...existing requires & code above...
+
+/**
+ * Delete a rating (comment) and ALL its replies.
+ */
+async function deleteRatingWithReplies({ rating_type, rating_id }) {
+  const type = String(rating_type || "").toLowerCase();
+  if (type !== "food" && type !== "mart") {
+    throw new Error("rating_type must be 'food' or 'mart'");
+  }
+
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+  const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
+
+  // 1️⃣ Ensure rating exists
+  const [rows] = await db.query(
+    `SELECT id, business_id FROM ${tbl} WHERE id = ? LIMIT 1`,
+    [rid]
+  );
+  if (!rows.length) {
+    const err = new Error(`${type} rating not found`);
+    err.code = "NOT_FOUND";
+    throw err;
+  }
+
+  // 2️⃣ Delete rating row from DB
+  const [delRes] = await db.query(`DELETE FROM ${tbl} WHERE id = ? LIMIT 1`, [
+    rid,
+  ]);
+  if (delRes.affectedRows === 0) {
+    const err = new Error(`${type} rating not found`);
+    err.code = "NOT_FOUND";
+    throw err;
+  }
+
+  // 3️⃣ Delete all replies from Redis
+  const idxKey = replyIndexKey(type, rid);
+  const replyIds = await redis.zrange(idxKey, 0, -1);
+
+  const multi = redis.multi();
+
+  if (replyIds && replyIds.length > 0) {
+    for (const replId of replyIds) {
+      multi.del(replyKey(replId));
+    }
+  }
+  // delete the index key itself
+  multi.del(idxKey);
+
+  await multi.exec();
+
+  return {
+    success: true,
+    message: "Rating and its replies deleted successfully.",
+    data: {
+      rating_type: type,
+      rating_id: rid,
+      deleted_replies: replyIds ? replyIds.length : 0,
+    },
+  };
+}
 
 module.exports = {
   fetchBusinessRatingsAuto,
@@ -716,4 +778,5 @@ module.exports = {
   createRatingReply,
   listRatingReplies,
   deleteRatingReply,
+  deleteRatingWithReplies,
 };

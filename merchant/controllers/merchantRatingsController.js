@@ -8,6 +8,7 @@ const {
   createRatingReply,
   listRatingReplies,
   deleteRatingReply,
+  deleteRatingWithReplies,
 } = require("../models/merchantRatingsModel");
 
 /* ---------- existing ratings / likes ---------- */
@@ -194,6 +195,37 @@ exports.deleteRatingReplyCtrl = async (req, res) => {
     return res.status(400).json({
       success: false,
       message: e.message || "Failed to delete reply.",
+    });
+  }
+};
+
+/**
+ * DELETE /api/merchant/ratings/:type/:rating_id
+ * Deletes the rating (comment) AND all its replies.
+ */
+exports.deleteRatingWithRepliesCtrl = async (req, res) => {
+  try {
+    const { type, rating_id } = req.params;
+    // If later you want to restrict who can delete, use req.user.user_id here
+
+    const out = await deleteRatingWithReplies({
+      rating_type: type,
+      rating_id: Number(rating_id),
+    });
+
+    return res.status(200).json(out);
+  } catch (e) {
+    console.error("[deleteRatingWithRepliesCtrl]", e?.message || e);
+
+    if (e && e.code === "NOT_FOUND") {
+      return res
+        .status(404)
+        .json({ success: false, message: e.message || "Rating not found" });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to delete rating.",
     });
   }
 };

@@ -13,6 +13,7 @@ const {
   createRatingReplyCtrl,
   listRatingRepliesCtrl,
   deleteRatingReplyCtrl,
+  deleteRatingWithRepliesCtrl,
 } = require("../controllers/merchantRatingsController");
 
 /* ---------- validators ---------- */
@@ -96,6 +97,13 @@ router.post(
   unlikeMartRatingCtrl
 );
 
+router.delete(
+  "/ratings/:type/:rating_id",
+  authUser,
+  validateRatingTypeParam,
+  validateRatingIdParam,
+  deleteRatingWithRepliesCtrl
+);
 /* ---------- NEW: replies (Redis-backed) ---------- */
 
 /**
