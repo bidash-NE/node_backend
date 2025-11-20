@@ -326,29 +326,47 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     if (!Number.isFinite(mins) || mins <= 0)
       throw new Error("Invalid estimated minutes");
 
-    // Work in UTC so server timezone doesn't matter
-    const now = new Date(); // point in time
-    const arrivalMs = now.getTime() + mins * 60 * 1000;
-    const arrival = new Date(arrivalMs);
+    // Use UTC so server timezone doesn't matter, then convert to Bhutan time (+06)
+    const now = new Date();
 
-    // Convert UTC -> Bhutan (UTC+06)
+    // Start of window: now + merchant estimate
+    const startDate = new Date(now.getTime() + mins * 60 * 1000);
+    // End of window: start + 30 minutes
+    const endDate = new Date(startDate.getTime() + 30 * 60 * 1000);
+
     const BHUTAN_OFFSET_HOURS = 6;
-    const bhutanHour = (arrival.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
-    const bhutanMin = arrival.getUTCMinutes();
-    const bhutanSec = arrival.getUTCSeconds();
 
-    const hh = String(bhutanHour).padStart(2, "0");
-    const mm = String(bhutanMin).padStart(2, "0");
-    const ss = String(bhutanSec).padStart(2, "0");
-    const formattedTime = `${hh}:${mm}:${ss}`;
+    const toBhutanParts = (d) => {
+      // convert UTC → Bhutan local
+      let hour24 = (d.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
+      const minute = d.getUTCMinutes();
+      const meridiem = hour24 >= 12 ? "PM" : "AM";
+      const hour12 = hour24 % 12 || 12; // 0 → 12
+      return { hour12, minute, meridiem };
+    };
+
+    const s = toBhutanParts(startDate);
+    const e = toBhutanParts(endDate);
+
+    const sStr = `${s.hour12}:${String(s.minute).padStart(2, "0")}`;
+    const eStr = `${e.hour12}:${String(e.minute).padStart(2, "0")}`;
+
+    // If both sides are same AM/PM, show it once at the end.
+    // If it crosses noon/midnight, show both.
+    let formattedRange;
+    if (s.meridiem === e.meridiem) {
+      formattedRange = `${sStr} - ${eStr} ${s.meridiem}`; // e.g. "1:15 - 1:45 PM"
+    } else {
+      formattedRange = `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`; // e.g. "11:50 AM - 12:20 PM"
+    }
 
     await db.query(
       `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
-      [formattedTime, order_id]
+      [formattedRange, order_id]
     );
 
     console.log(
-      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedTime} (+${mins} mins, Bhutan time)`
+      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedRange} (start in ${mins} mins, +30 min window)`
     );
   } catch (err) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
