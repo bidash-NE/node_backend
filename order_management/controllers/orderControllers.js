@@ -387,7 +387,7 @@ async function updateOrderStatus(req, res) {
       final_discount_amount,
       unavailable_changes,
       unavailableChanges,
-      estimated_minutes, // ⬅️ from merchant
+      estimated_minutes, // from merchant
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -417,7 +417,7 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // Prevent late cancellations
+    // 1️⃣ Prevent late cancellations (your existing rule)
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -434,38 +434,17 @@ async function updateOrderStatus(req, res) {
       }
     }
 
+    // 2️⃣ NEW: Prevent accepting an already cancelled order
+    if (current === "CANCELLED" && normalized === "CONFIRMED") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This order has already been cancelled and cannot be accepted.",
+      });
+    }
+
     // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
-      // 💳 If payment is via WALLET, ensure ALL involved merchants have wallets
-      if (payMethod === "WALLET") {
-        const [merchantRows] = await db.query(
-          `
-          SELECT m.business_id, w.wallet_id
-            FROM order_items oi
-            JOIN merchant_business_details m ON m.business_id = oi.business_id
-            LEFT JOIN wallets w ON w.user_id = m.user_id
-           WHERE oi.order_id = ?
-        `,
-          [order_id]
-        );
-
-        if (!merchantRows.length) {
-          return res.status(400).json({
-            message:
-              "The store’s wallet is not yet set up to receive this order. Please try again after the store completes their wallet setup. Thank you for your patience!",
-          });
-        }
-
-        const merchantsWithoutWallet = merchantRows.filter((r) => !r.wallet_id);
-
-        if (merchantsWithoutWallet.length > 0) {
-          return res.status(400).json({
-            message:
-              "The store’s wallet is not yet set up to receive this order. Please try again after the store completes their wallet setup. Thank you for your patience!",
-          });
-        }
-      }
-
       // 1️⃣ Apply unavailable item changes
       if (
         changes &&
@@ -494,13 +473,13 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      // 3️⃣ Handle estimated arrival minutes
+      // 3️⃣ Handle estimated arrival minutes (existing helper)
       if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
       }
     }
 
-    // 4️⃣ Update order status + reason
+    // 3️⃣ Update order status + reason
     const affected = await Order.updateStatus(
       order_id,
       normalized,
@@ -510,14 +489,14 @@ async function updateOrderStatus(req, res) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // 5️⃣ Business IDs
+    // 4️⃣ Business IDs
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // 6️⃣ Capture payment (if CONFIRMED)
+    // 5️⃣ Capture payment (if CONFIRMED)
     let captureInfo = null;
     if (normalized === "CONFIRMED") {
       try {
@@ -534,7 +513,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 7️⃣ Broadcast status
+    // 6️⃣ Broadcast status
     broadcastOrderStatusToMany({
       order_id,
       user_id,
@@ -542,7 +521,7 @@ async function updateOrderStatus(req, res) {
       status: normalized,
     });
 
-    // 8️⃣ Completed order notifications
+    // 7️⃣ Completed order notifications
     if (normalized === "COMPLETED") {
       for (const business_id of business_ids) {
         await insertAndEmitNotification({
@@ -556,7 +535,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 9️⃣ Notify user of status
+    // 8️⃣ Notify user of status
     await Order.addUserOrderStatusNotification({
       user_id,
       order_id,
@@ -564,7 +543,7 @@ async function updateOrderStatus(req, res) {
       reason,
     });
 
-    // 🔟 Notify unavailable item changes
+    // 9️⃣ Notify unavailable item changes
     if (
       normalized === "CONFIRMED" &&
       changes &&
@@ -579,7 +558,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // 💬 Wallet deduction notification
+    // 🔟 Wallet deduction notification
     if (
       captureInfo &&
       captureInfo.captured &&
@@ -590,13 +569,22 @@ async function updateOrderStatus(req, res) {
         user_id: captureInfo.user_id,
         order_id,
         order_amount: captureInfo.order_amount,
-        // if you later return platform_fee_user etc, you can adjust this
         platform_fee: captureInfo.platform_fee,
         method: payMethod,
       });
     }
 
+    // 🔁 Custom response for CANCELLED
+    if (normalized === "CANCELLED") {
+      return res.json({
+        success: true,
+        message: "Your order has been cancelled successfully. Happy Shopping!",
+      });
+    }
+
+    // Default response for other statuses
     return res.json({
+      success: true,
       message: "Order status updated successfully",
       estimated_arrivial_time_applied:
         normalized === "CONFIRMED" && estimated_minutes
