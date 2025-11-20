@@ -326,12 +326,20 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     if (!Number.isFinite(mins) || mins <= 0)
       throw new Error("Invalid estimated minutes");
 
-    const now = new Date();
-    const arrival = new Date(now.getTime() + mins * 60000);
+    // Work in UTC so server timezone doesn't matter
+    const now = new Date(); // point in time
+    const arrivalMs = now.getTime() + mins * 60 * 1000;
+    const arrival = new Date(arrivalMs);
 
-    const hh = String(arrival.getHours()).padStart(2, "0");
-    const mm = String(arrival.getMinutes()).padStart(2, "0");
-    const ss = String(arrival.getSeconds()).padStart(2, "0");
+    // Convert UTC -> Bhutan (UTC+06)
+    const BHUTAN_OFFSET_HOURS = 6;
+    const bhutanHour = (arrival.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
+    const bhutanMin = arrival.getUTCMinutes();
+    const bhutanSec = arrival.getUTCSeconds();
+
+    const hh = String(bhutanHour).padStart(2, "0");
+    const mm = String(bhutanMin).padStart(2, "0");
+    const ss = String(bhutanSec).padStart(2, "0");
     const formattedTime = `${hh}:${mm}:${ss}`;
 
     await db.query(
@@ -340,7 +348,7 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     );
 
     console.log(
-      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedTime} (+${mins} mins)`
+      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedTime} (+${mins} mins, Bhutan time)`
     );
   } catch (err) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
@@ -430,9 +438,7 @@ async function updateOrderStatus(req, res) {
           });
         }
 
-        const merchantsWithoutWallet = merchantRows.filter(
-          (r) => !r.wallet_id
-        );
+        const merchantsWithoutWallet = merchantRows.filter((r) => !r.wallet_id);
 
         if (merchantsWithoutWallet.length > 0) {
           return res.status(400).json({
@@ -584,7 +590,6 @@ async function updateOrderStatus(req, res) {
     return res.status(500).json({ error: err.message });
   }
 }
-
 
 /**
  * DELETE /orders/:order_id
