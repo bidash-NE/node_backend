@@ -217,9 +217,9 @@ function getUserIdFromAccessToken(req) {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET); // ✅ MATCH login
     const uid = Number(decoded?.user_id);
-
+    console.log("Decoded user_id from token:", uid);
     if (!Number.isFinite(uid) || uid <= 0) {
       const err = new Error("Invalid token payload: user_id missing");
       err.code = "UNAUTHORIZED";
@@ -228,6 +228,9 @@ function getUserIdFromAccessToken(req) {
 
     return uid;
   } catch (e) {
+    // optional: keep real reason for debugging
+    // console.log(e.name, e.message);
+
     const err = new Error("Invalid or expired access token");
     err.code = "UNAUTHORIZED";
     throw err;
