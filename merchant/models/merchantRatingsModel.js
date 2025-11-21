@@ -712,23 +712,33 @@ async function deleteRatingReply({ reply_id, user_id }) {
 /**
  * Delete a rating (comment) and ALL its replies.
  */
-async function deleteRatingWithReplies({ rating_type, rating_id }) {
+// models/merchantRatingsModel.js
+
+async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
   const type = String(rating_type || "").toLowerCase();
   if (type !== "food" && type !== "mart") {
     throw new Error("rating_type must be 'food' or 'mart'");
   }
 
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+  const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
   const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
 
-  // 1️⃣ Ensure rating exists
+  // 1️⃣ Ensure rating exists + fetch its owner
   const [rows] = await db.query(
-    `SELECT id, business_id FROM ${tbl} WHERE id = ? LIMIT 1`,
+    `SELECT id, business_id, user_id FROM ${tbl} WHERE id = ? LIMIT 1`,
     [rid]
   );
   if (!rows.length) {
     const err = new Error(`${type} rating not found`);
     err.code = "NOT_FOUND";
+    throw err;
+  }
+
+  const ownerId = Number(rows[0].user_id || 0);
+  if (ownerId !== uid) {
+    const err = new Error("You are not allowed to delete this rating");
+    err.code = "FORBIDDEN";
     throw err;
   }
 
@@ -753,7 +763,6 @@ async function deleteRatingWithReplies({ rating_type, rating_id }) {
       multi.del(replyKey(replId));
     }
   }
-  // delete the index key itself
   multi.del(idxKey);
 
   await multi.exec();
