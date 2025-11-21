@@ -7,7 +7,14 @@ function toDbIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
-
+function toDbTinyInt(v, fallback = 1) {
+  const n = Number(v);
+  return Number.isFinite(n) ? (n ? 1 : 0) : fallback;
+}
+function toDbDec(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 function toDbStrOrNull(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
@@ -21,8 +28,11 @@ function getBhutanTime() {
 
 // Insert into admin_logs (with Bhutan's time for created_at)
 async function logAdmin(conn, userId, adminName, activity) {
-  const createdAt = getBhutanTime(); // Get Bhutan time when creating the log
-  const sql = `INSERT INTO admin_logs (user_id, admin_name, activity, created_at) VALUES (?, ?, ?, ?)`;
+  const createdAt = getBhutanTime();
+  const sql = `
+    INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
+    VALUES (?, ?, ?, ?)
+  `;
   await conn.query(sql, [
     toDbIntOrNull(userId),
     toDbStrOrNull(adminName),
@@ -32,7 +42,19 @@ async function logAdmin(conn, userId, adminName, activity) {
 }
 
 const createRideType = async (
-  { name, base_fare, per_km, per_min, image = null },
+  {
+    name,
+    code,
+    description = null,
+    base_fare,
+    per_km_rate,
+    min_fare,
+    cancellation_fee,
+    capacity,
+    vehicle_type = null,
+    icon_url = null,
+    is_active = 1,
+  },
   actorUserId = null,
   adminName = null
 ) => {
@@ -41,8 +63,8 @@ const createRideType = async (
     await conn.beginTransaction();
 
     const [existing] = await conn.query(
-      `SELECT ride_type_id FROM ride_types WHERE name = ?`,
-      [name]
+      `SELECT id FROM ride_types WHERE name = ? OR code = ?`,
+      [name, code]
     );
     if (existing.length > 0) {
       await conn.rollback();
@@ -50,15 +72,32 @@ const createRideType = async (
     }
 
     const [result] = await conn.query(
-      `INSERT INTO ride_types (name, image, base_fare, per_km, per_min) VALUES (?, ?, ?, ?, ?)`,
-      [name, image || null, base_fare, per_km, per_min]
+      `
+      INSERT INTO ride_types
+        (name, code, description, base_fare, per_km_rate, min_fare, cancellation_fee, capacity, vehicle_type, icon_url, is_active)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        toDbStrOrNull(name),
+        toDbStrOrNull(code),
+        toDbStrOrNull(description),
+        toDbDec(base_fare),
+        toDbDec(per_km_rate),
+        toDbDec(min_fare),
+        toDbDec(cancellation_fee),
+        toDbIntOrNull(capacity) ?? 1,
+        toDbStrOrNull(vehicle_type),
+        toDbStrOrNull(icon_url),
+        toDbTinyInt(is_active, 1),
+      ]
     );
 
     await logAdmin(
       conn,
       actorUserId,
       adminName,
-      `Created ride type "${name}" (id: ${result.insertId})`
+      `Added ride type "${name}" (code: ${code}, id: ${result.insertId}) base_fare=${base_fare}, per_km_rate=${per_km_rate}, min_fare=${min_fare}, cancellation_fee=${cancellation_fee}, capacity=${capacity}`
     );
 
     await conn.commit();
@@ -77,16 +116,54 @@ const updateRideType = async (
   actorUserId = null,
   adminName = null
 ) => {
-  const { name, base_fare, per_km, per_min, image = null } = data;
+  const {
+    name,
+    code,
+    description = null,
+    base_fare,
+    per_km_rate,
+    min_fare,
+    cancellation_fee,
+    capacity,
+    vehicle_type = null,
+    icon_url = null,
+    is_active = 1,
+  } = data;
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
     const [result] = await conn.query(
-      `UPDATE ride_types
-         SET name = ?, image = ?, base_fare = ?, per_km = ?, per_min = ?
-       WHERE ride_type_id = ?`,
-      [name, image || null, base_fare, per_km, per_min, id]
+      `
+      UPDATE ride_types
+         SET name = ?,
+             code = ?,
+             description = ?,
+             base_fare = ?,
+             per_km_rate = ?,
+             min_fare = ?,
+             cancellation_fee = ?,
+             capacity = ?,
+             vehicle_type = ?,
+             icon_url = ?,
+             is_active = ?
+       WHERE ride_type_id = ?
+      `,
+      [
+        toDbStrOrNull(name),
+        toDbStrOrNull(code),
+        toDbStrOrNull(description),
+        toDbDec(base_fare),
+        toDbDec(per_km_rate),
+        toDbDec(min_fare),
+        toDbDec(cancellation_fee),
+        toDbIntOrNull(capacity) ?? 1,
+        toDbStrOrNull(vehicle_type),
+        toDbStrOrNull(icon_url),
+        toDbTinyInt(is_active, 1),
+        id,
+      ]
     );
 
     if (result.affectedRows > 0) {
@@ -94,7 +171,7 @@ const updateRideType = async (
         conn,
         actorUserId,
         adminName,
-        `Updated ride type (id: ${id}) -> name="${name}", base_fare=${base_fare}, per_km=${per_km}, per_min=${per_min}`
+        `Updated ride type (id: ${id}) -> name="${name}", code="${code}", base_fare=${base_fare}, per_km_rate=${per_km_rate}, min_fare=${min_fare}, cancellation_fee=${cancellation_fee}, capacity=${capacity}, vehicle_type="${vehicle_type}", is_active=${is_active}`
       );
     }
 
@@ -131,7 +208,7 @@ const deleteRideType = async (
     await conn.beginTransaction();
 
     const [[existing]] = await conn.query(
-      `SELECT name, image FROM ride_types WHERE ride_type_id = ?`,
+      `SELECT name, code, icon_url FROM ride_types WHERE ride_type_id = ?`,
       [ride_type_id]
     );
 
@@ -145,16 +222,16 @@ const deleteRideType = async (
         conn,
         actorUserId,
         adminName,
-        `Deleted ride type "${
-          existing?.name || "(unknown)"
-        }" (id: ${ride_type_id})`
+        `Deleted ride type "${existing?.name || "(unknown)"}" (code: ${
+          existing?.code || "(unknown)"
+        }, id: ${ride_type_id})`
       );
     }
 
     await conn.commit();
     return {
       affectedRows: result.affectedRows,
-      deletedImage: existing?.image || null,
+      deletedIcon: existing?.icon_url || null,
     };
   } catch (err) {
     await conn.rollback();

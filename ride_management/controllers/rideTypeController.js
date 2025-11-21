@@ -40,58 +40,91 @@ async function safeUnlink(absPath) {
   }
 }
 
-// Prefer uploaded file; fallback to body.image (absolute URL or /uploads path)
-function extractIncomingImage(req) {
+// Prefer uploaded file; fallback to body.icon_url or body.image
+function extractIncomingIcon(req) {
   if (req.file) return toWebPath(req.file);
-  const raw = (req.body?.image || "").toString().trim();
+
+  const raw = (req.body?.icon_url ?? req.body?.image ?? "").toString().trim();
   if (!raw) return null;
+
   if (raw.startsWith("/uploads/")) return raw;
   if (raw.startsWith("uploads/")) return `/${raw}`;
+
   try {
     const u = new URL(raw);
-    return u.pathname || raw; // strip host
+    return u.pathname || raw;
   } catch {
     return raw; // accept as-is (CDN)
   }
 }
 
+function cleanupNewUploadIfAny(req) {
+  const iconPath = extractIncomingIcon(req);
+  if (req.file && isLocalUploadsPath(iconPath)) {
+    return safeUnlink(toAbsoluteUploadsPath(iconPath));
+  }
+  return Promise.resolve(false);
+}
+
 const createRideType = async (req, res) => {
   try {
     const actor = getActor(req);
-    const imagePath = extractIncomingImage(req);
+    const iconPath = extractIncomingIcon(req);
+
+    const payload = {
+      name: req.body?.name,
+      code: req.body?.code,
+      description: req.body?.description,
+      base_fare: req.body?.base_fare,
+      per_km_rate: req.body?.per_km_rate,
+      min_fare: req.body?.min_fare,
+      cancellation_fee: req.body?.cancellation_fee,
+      capacity: req.body?.capacity,
+      vehicle_type: req.body?.vehicle_type,
+      icon_url: iconPath || req.body?.icon_url || null,
+      is_active: req.body?.is_active,
+    };
+
+    // basic validation to avoid silent 500s
+    if (
+      !payload.name ||
+      !payload.code ||
+      payload.base_fare == null ||
+      payload.per_km_rate == null ||
+      payload.min_fare == null ||
+      payload.cancellation_fee == null ||
+      payload.capacity == null
+    ) {
+      await cleanupNewUploadIfAny(req);
+      return res.status(400).json({
+        success: false,
+        message:
+          "name, code, base_fare, per_km_rate, min_fare, cancellation_fee, capacity are required",
+      });
+    }
 
     const result = await rideTypeModel.createRideType(
-      {
-        name: req.body?.name,
-        image: imagePath || null,
-        base_fare: req.body?.base_fare,
-        per_km: req.body?.per_km,
-        per_min: req.body?.per_min,
-      },
+      payload,
       actor.user_id,
       actor.admin_name
     );
 
     if (result.exists) {
-      // clean up newly uploaded file if duplicate
-      if (req.file && isLocalUploadsPath(imagePath)) {
-        await safeUnlink(toAbsoluteUploadsPath(imagePath));
-      }
-      return res.status(409).json({ message: "Ride type already exists" });
+      await cleanupNewUploadIfAny(req);
+      return res
+        .status(409)
+        .json({ success: false, message: "Ride type already exists" });
     }
 
     res.status(201).json({
+      success: true,
       message: "Ride type created successfully",
       ride_type_id: result.insertId,
     });
   } catch (error) {
-    // clean up uploaded file on error
-    const imagePath = extractIncomingImage(req);
-    if (req.file && isLocalUploadsPath(imagePath)) {
-      await safeUnlink(toAbsoluteUploadsPath(imagePath));
-    }
+    await cleanupNewUploadIfAny(req);
     console.error("Error creating ride type:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
@@ -100,68 +133,68 @@ const updateRideType = async (req, res) => {
     const actor = getActor(req);
     const id = req.params.id;
 
-    // fetch current to know previous image
     const current = await rideTypeModel.getRideTypeById(id);
     if (!current) {
-      if (req.file) {
-        const newImg = extractIncomingImage(req);
-        if (isLocalUploadsPath(newImg))
-          await safeUnlink(toAbsoluteUploadsPath(newImg));
-      }
-      return res.status(404).json({ message: "Ride type not found" });
+      await cleanupNewUploadIfAny(req);
+      return res
+        .status(404)
+        .json({ success: false, message: "Ride type not found" });
     }
 
-    const incomingImage = extractIncomingImage(req);
-    const imageToStore = incomingImage ?? current.image ?? null;
+    const incomingIcon = extractIncomingIcon(req);
+    const iconToStore = incomingIcon ?? current.icon_url ?? null;
+
+    const payload = {
+      name: req.body?.name ?? current.name,
+      code: req.body?.code ?? current.code,
+      description: req.body?.description ?? current.description,
+      base_fare: req.body?.base_fare ?? current.base_fare,
+      per_km_rate: req.body?.per_km_rate ?? current.per_km_rate,
+      min_fare: req.body?.min_fare ?? current.min_fare,
+      cancellation_fee: req.body?.cancellation_fee ?? current.cancellation_fee,
+      capacity: req.body?.capacity ?? current.capacity,
+      vehicle_type: req.body?.vehicle_type ?? current.vehicle_type,
+      icon_url: iconToStore,
+      is_active: req.body?.is_active ?? current.is_active,
+    };
 
     const affected = await rideTypeModel.updateRideType(
       id,
-      {
-        name: req.body?.name,
-        image: imageToStore,
-        base_fare: req.body?.base_fare,
-        per_km: req.body?.per_km,
-        per_min: req.body?.per_min,
-      },
+      payload,
       actor.user_id,
       actor.admin_name
     );
 
     if (affected === 0) {
-      // rollback: remove newly uploaded file if any
-      if (req.file && isLocalUploadsPath(incomingImage)) {
-        await safeUnlink(toAbsoluteUploadsPath(incomingImage));
-      }
-      return res.status(404).json({ message: "Ride type not found" });
+      await cleanupNewUploadIfAny(req);
+      return res
+        .status(404)
+        .json({ success: false, message: "Ride type not found" });
     }
 
-    // delete previous local image if new local one replaced it
+    // delete previous local icon if replaced by new local one
     if (
-      incomingImage &&
-      incomingImage !== current.image &&
-      isLocalUploadsPath(current.image || "")
+      incomingIcon &&
+      incomingIcon !== current.icon_url &&
+      isLocalUploadsPath(current.icon_url || "")
     ) {
-      await safeUnlink(toAbsoluteUploadsPath(current.image));
+      await safeUnlink(toAbsoluteUploadsPath(current.icon_url));
     }
 
-    res.json({ message: "Ride type updated" });
+    res.json({ success: true, message: "Ride type updated" });
   } catch (error) {
-    // cleanup new uploaded file on error
-    const incomingImage = extractIncomingImage(req);
-    if (req.file && isLocalUploadsPath(incomingImage)) {
-      await safeUnlink(toAbsoluteUploadsPath(incomingImage));
-    }
+    await cleanupNewUploadIfAny(req);
     console.error("Error updating ride type:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 const getAllRideTypes = async (_req, res) => {
   try {
     const rideTypes = await rideTypeModel.getRideTypes();
-    res.json(rideTypes);
+    res.json({ success: true, data: rideTypes });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
@@ -170,11 +203,13 @@ const getRideTypeById = async (req, res) => {
     const id = req.params.id;
     const rideType = await rideTypeModel.getRideTypeById(id);
     if (!rideType) {
-      return res.status(404).json({ message: "Ride type not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Ride type not found" });
     }
-    res.json(rideType);
+    res.json({ success: true, data: rideType });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
@@ -183,25 +218,28 @@ const deleteRideType = async (req, res) => {
     const actor = getActor(req);
     const { ride_type_id } = req.params;
 
-    // delete from DB (model will also return image path if existed)
-    const { affectedRows, deletedImage } = await rideTypeModel.deleteRideType(
+    const { affectedRows, deletedIcon } = await rideTypeModel.deleteRideType(
       ride_type_id,
       actor.user_id,
       actor.admin_name
     );
 
     if (affectedRows === 0) {
-      return res.status(404).json({ message: "Ride type not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Ride type not found" });
     }
 
-    // best-effort: remove local image
-    if (deletedImage && isLocalUploadsPath(deletedImage)) {
-      await safeUnlink(toAbsoluteUploadsPath(deletedImage));
+    if (deletedIcon && isLocalUploadsPath(deletedIcon)) {
+      await safeUnlink(toAbsoluteUploadsPath(deletedIcon));
     }
 
-    res.status(200).json({ message: "Ride type deleted successfully" });
+    res
+      .status(200)
+      .json({ success: true, message: "Ride type deleted successfully" });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error deleting ride type:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };
 

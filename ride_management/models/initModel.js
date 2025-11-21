@@ -1,3 +1,4 @@
+// initRideTables.js
 const db = require("../config/db");
 
 const tables = [
@@ -7,10 +8,20 @@ const tables = [
       CREATE TABLE ride_types (
         ride_type_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(50) NOT NULL,
-        image VARCHAR(1024) NULL,
-        base_fare INT NOT NULL,
-        per_km INT NOT NULL,
-        per_min INT NOT NULL
+        code VARCHAR(50) NOT NULL,
+        description TEXT NULL,
+        base_fare DECIMAL(10,2) NOT NULL DEFAULT 0,
+        per_km_rate DECIMAL(10,2) NOT NULL DEFAULT 0,
+        per_min_rate DECIMAL(10,2) NOT NULL DEFAULT 0,
+        min_fare DECIMAL(10,2) NOT NULL DEFAULT 0,
+        cancellation_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+        capacity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+        vehicle_type VARCHAR(100) NULL,
+        icon_url VARCHAR(1024) NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+          ON UPDATE CURRENT_TIMESTAMP
       );
     `,
   },
