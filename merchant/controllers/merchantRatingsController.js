@@ -1,4 +1,6 @@
 // controllers/merchantRatingsController.js
+const jwt = require("jsonwebtoken");
+
 const {
   fetchBusinessRatingsAuto,
   likeFoodRating,
@@ -203,24 +205,67 @@ exports.deleteRatingReplyCtrl = async (req, res) => {
  * DELETE /api/merchant/ratings/:type/:rating_id
  * Deletes the rating (comment) AND all its replies.
  */
+// helper: decode user_id directly from access token
+function getUserIdFromAccessToken(req) {
+  const auth = String(req.headers.authorization || "");
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : null;
+
+  if (!token) {
+    const err = new Error("Missing access token");
+    err.code = "UNAUTHORIZED";
+    throw err;
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const uid = Number(decoded?.user_id);
+
+    if (!Number.isFinite(uid) || uid <= 0) {
+      const err = new Error("Invalid token payload: user_id missing");
+      err.code = "UNAUTHORIZED";
+      throw err;
+    }
+
+    return uid;
+  } catch (e) {
+    const err = new Error("Invalid or expired access token");
+    err.code = "UNAUTHORIZED";
+    throw err;
+  }
+}
+
 exports.deleteRatingWithRepliesCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
-    // If later you want to restrict who can delete, use req.user.user_id here
+
+    const user_id = getUserIdFromAccessToken(req); // ✅ decode here
 
     const out = await deleteRatingWithReplies({
       rating_type: type,
       rating_id: Number(rating_id),
+      user_id,
     });
 
     return res.status(200).json(out);
   } catch (e) {
     console.error("[deleteRatingWithRepliesCtrl]", e?.message || e);
 
-    if (e && e.code === "NOT_FOUND") {
+    if (e?.code === "UNAUTHORIZED") {
+      return res
+        .status(401)
+        .json({ success: false, message: e.message || "Unauthorized" });
+    }
+
+    if (e?.code === "NOT_FOUND") {
       return res
         .status(404)
         .json({ success: false, message: e.message || "Rating not found" });
+    }
+
+    if (e?.code === "FORBIDDEN") {
+      return res
+        .status(403)
+        .json({ success: false, message: e.message || "Forbidden" });
     }
 
     return res.status(400).json({

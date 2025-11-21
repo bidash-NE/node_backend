@@ -23,6 +23,37 @@ async function assertBusinessExists(business_id) {
   if (!r.length) throw new Error("business not found");
 }
 
+/** hours since created_at in Asia/Thimphu */
+function hoursAgoBT(createdAt) {
+  const now = moment.tz("Asia/Thimphu");
+  const c = moment.tz(createdAt, "Asia/Thimphu");
+  if (!c.isValid()) return null;
+  const diff = now.diff(c, "hours");
+  return diff >= 0 ? diff : 0;
+}
+
+function hoursAgoFromMillis(ms) {
+  if (!ms) return null;
+  const now = moment.tz("Asia/Thimphu");
+  const c = moment.tz(ms, "Asia/Thimphu");
+  if (!c.isValid()) return null;
+  const diff = now.diff(c, "hours");
+  return diff >= 0 ? diff : 0;
+}
+
+/* We also reuse the table names in replies logic */
+const FOOD_TBL = "food_ratings";
+const MART_TBL = "mart_ratings";
+
+/* ---------- Redis keys (single source of truth) ---------- */
+const REPLY_SEQ_KEY = "rating:reply:seq";
+function replyKey(replyId) {
+  return `rating:reply:${replyId}`;
+}
+function replyIndexKey(rating_type, rating_id) {
+  return `rating:replies:idx:${rating_type}:${rating_id}`;
+}
+
 /**
  * Fetch replies for a list of rating rows from Redis + hydrate with user_name/profile_image.
  * Returns: { [ratingId]: [ { id, rating_type, rating_id, business_id, user_id, text, ts, hours_ago, user: {...} } ] }
@@ -39,7 +70,7 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
       (ownerType && ownerType.toLowerCase()) ||
       "food";
 
-    const idxKey = `rating:replies:idx:${t}:${ratingId}`;
+    const idxKey = replyIndexKey(t, ratingId);
     const replyIds = await redis.zrevrange(idxKey, 0, -1);
 
     if (!replyIds || replyIds.length === 0) {
@@ -48,8 +79,8 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
     }
 
     const replies = [];
-    for (const rid of replyIds) {
-      const hKey = `rating:reply:${rid}`;
+    for (const repId of replyIds) {
+      const hKey = replyKey(repId);
       const data = await redis.hgetall(hKey);
       if (!data || Object.keys(data).length === 0) continue;
 
@@ -59,7 +90,7 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
       const ts = Number(data.created_at || data.ts || 0);
 
       replies.push({
-        id: Number(data.id || rid),
+        id: Number(data.id || repId),
         rating_type: data.rating_type || t,
         rating_id: Number(data.rating_id || ratingId),
         business_id: data.business_id
@@ -126,28 +157,6 @@ async function getOwnerTypeForBusiness(business_id) {
   return "unknown";
 }
 
-/** hours since created_at in Asia/Thimphu */
-function hoursAgoBT(createdAt) {
-  const now = moment.tz("Asia/Thimphu");
-  const c = moment.tz(createdAt, "Asia/Thimphu");
-  if (!c.isValid()) return null;
-  const diff = now.diff(c, "hours");
-  return diff >= 0 ? diff : 0;
-}
-
-function hoursAgoFromMillis(ms) {
-  if (!ms) return null;
-  const now = moment.tz("Asia/Thimphu");
-  const c = moment.tz(ms, "Asia/Thimphu");
-  if (!c.isValid()) return null;
-  const diff = now.diff(c, "hours");
-  return diff >= 0 ? diff : 0;
-}
-
-/* We also reuse the table names in replies logic */
-const FOOD_TBL = "food_ratings";
-const MART_TBL = "mart_ratings";
-
 /* ---------- main: chooses table by owner_type, returns likes_count too ---------- */
 async function fetchBusinessRatingsAuto(
   business_id,
@@ -165,10 +174,6 @@ async function fetchBusinessRatingsAuto(
 
   // detect owner_type
   const ownerType = await getOwnerTypeForBusiness(bid);
-
-  // table names
-  const FOOD_TBL = "food_ratings";
-  const MART_TBL = "mart_ratings";
 
   let aggSql, aggParams, listSql, listParams;
 
@@ -276,7 +281,7 @@ async function fetchBusinessRatingsAuto(
   const [[agg]] = await db.query(aggSql, aggParams);
   const [rows] = await db.query(listSql, listParams);
 
-  // 🔁 NEW: fetch replies for all ratings on this page
+  // 🔁 fetch replies for all ratings on this page
   const repliesByRating = await fetchRepliesForRatings(ownerType, rows);
 
   const items = rows.map((r) => {
@@ -285,7 +290,7 @@ async function fetchBusinessRatingsAuto(
     return {
       id: r.id,
       business_id: r.business_id,
-      owner_type: r.owner_type || ownerType, // 'food'/'mart' if union path; else single-source
+      owner_type: r.owner_type || ownerType,
       user: {
         user_id: r.user_id,
         user_name: r.user_name || null,
@@ -297,7 +302,7 @@ async function fetchBusinessRatingsAuto(
       created_at: r.created_at,
       hours_ago: hoursAgoBT(r.created_at),
 
-      // 🔁 replies
+      // replies
       reply_count: replies.length,
       replies,
     };
@@ -308,7 +313,7 @@ async function fetchBusinessRatingsAuto(
     data: items,
     meta: {
       business_id: bid,
-      owner_type: ownerType, // 'food' | 'mart' | 'both' | 'unknown'
+      owner_type: ownerType,
       page: p,
       limit: l,
       totals: {
@@ -329,9 +334,6 @@ async function fetchBusinessRatingsAuto(
 
 /* ---------- simple like / unlike, NO user tracking ---------- */
 
-/**
- * FOOD rating like: increments likes_count by 1 for that rating id.
- */
 async function likeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
@@ -364,9 +366,6 @@ async function likeFoodRating(rating_id) {
   };
 }
 
-/**
- * FOOD rating unlike: decrements likes_count but never below 0.
- */
 async function unlikeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
@@ -399,9 +398,6 @@ async function unlikeFoodRating(rating_id) {
   };
 }
 
-/**
- * MART rating like: increments likes_count by 1 for that rating id.
- */
 async function likeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
@@ -434,9 +430,6 @@ async function likeMartRating(rating_id) {
   };
 }
 
-/**
- * MART rating unlike: decrements likes_count but never below 0.
- */
 async function unlikeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
@@ -469,17 +462,7 @@ async function unlikeMartRating(rating_id) {
   };
 }
 
-/* ---------- NEW: replies (Redis-backed) ---------- */
-
-const REPLY_SEQ_KEY = "rating:reply:seq";
-
-function replyKey(replyId) {
-  return `rating:reply:${replyId}`;
-}
-
-function replyIndexKey(rating_type, rating_id) {
-  return `rating:replies:idx:${rating_type}:${rating_id}`;
-}
+/* ---------- replies (Redis-backed) ---------- */
 
 /**
  * Ensure rating exists and return its business_id.
@@ -567,7 +550,7 @@ async function listRatingReplies({
 
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
-  // Optional existence check – cheap & nice:
+  // Optional existence check:
   await assertRatingExistsAndGetBusiness(type, rid);
 
   const p = clamp(Number(page) || 1, 1, 1e9);
@@ -621,23 +604,23 @@ async function listRatingReplies({
       created_at: createdAt,
       updated_at: Number(row.updated_at || createdAt),
       hours_ago: hoursAgoFromMillis(createdAt),
-      user: null, // will fill below
+      user: null,
     };
 
     if (item.user_id > 0) userIds.add(item.user_id);
     data.push(item);
   }
 
-  // hydrate user info for this endpoint as well
+  // hydrate user info
   if (userIds.size > 0) {
-    const ids = Array.from(userIds);
+    const idsArr = Array.from(userIds);
     const [userRows] = await db.query(
       `
       SELECT user_id, user_name, profile_image
       FROM users
       WHERE user_id IN (?)
     `,
-      [ids]
+      [idsArr]
     );
 
     const userMap = {};
@@ -706,14 +689,11 @@ async function deleteRatingReply({ reply_id, user_id }) {
     },
   };
 }
-// models/merchantRatingsModel.js
-// ...existing requires & code above...
 
 /**
  * Delete a rating (comment) and ALL its replies.
+ * Only the rating owner can delete.
  */
-// models/merchantRatingsModel.js
-
 async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
   const type = String(rating_type || "").toLowerCase();
   if (type !== "food" && type !== "mart") {
