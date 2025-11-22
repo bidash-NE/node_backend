@@ -2,7 +2,7 @@
 const db = require("../config/db");
 const moment = require("moment-timezone");
 
-// Helper functions to sanitize values for DB
+// Helpers
 function toDbIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -21,13 +21,14 @@ function toDbStrOrNull(v) {
   return s.length ? s : null;
 }
 
-// Function to get Bhutan time (Asia/Thimphu)
 function getBhutanTime() {
   return moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 }
 
-// Insert into admin_logs (with Bhutan's time for created_at)
+// ✅ Only insert log if adminName provided (no fake values)
 async function logAdmin(conn, userId, adminName, activity) {
+  if (!adminName) return;
+
   const createdAt = getBhutanTime();
   const sql = `
     INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
@@ -74,7 +75,8 @@ const createRideType = async (
     const [result] = await conn.query(
       `
       INSERT INTO ride_types
-        (name, code, description, base_fare, per_km_rate, min_fare, cancellation_fee, capacity, vehicle_type, icon_url, is_active)
+        (name, code, description, base_fare, per_km_rate, min_fare, cancellation_fee, capacity,
+         vehicle_type, icon_url, is_active)
       VALUES
         (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
@@ -97,7 +99,7 @@ const createRideType = async (
       conn,
       actorUserId,
       adminName,
-      `Added ride type "${name}" (code: ${code}, id: ${result.insertId}) base_fare=${base_fare}, per_km_rate=${per_km_rate}, min_fare=${min_fare}, cancellation_fee=${cancellation_fee}, capacity=${capacity}`
+      `Created ride type "${name}" (code: ${code}, id: ${result.insertId})`
     );
 
     await conn.commit();
@@ -148,7 +150,7 @@ const updateRideType = async (
              vehicle_type = ?,
              icon_url = ?,
              is_active = ?
-       WHERE ride_type_id = ?
+       WHERE id = ?
       `,
       [
         toDbStrOrNull(name),
@@ -171,7 +173,7 @@ const updateRideType = async (
         conn,
         actorUserId,
         adminName,
-        `Updated ride type (id: ${id}) -> name="${name}", code="${code}", base_fare=${base_fare}, per_km_rate=${per_km_rate}, min_fare=${min_fare}, cancellation_fee=${cancellation_fee}, capacity=${capacity}, vehicle_type="${vehicle_type}", is_active=${is_active}`
+        `Updated ride type (id: ${id}) -> name="${name}", code="${code}"`
       );
     }
 
@@ -191,40 +193,30 @@ const getRideTypes = async () => {
 };
 
 const getRideTypeById = async (id) => {
-  const [rows] = await db.query(
-    `SELECT * FROM ride_types WHERE ride_type_id = ?`,
-    [id]
-  );
+  const [rows] = await db.query(`SELECT * FROM ride_types WHERE id = ?`, [id]);
   return rows[0];
 };
 
-const deleteRideType = async (
-  ride_type_id,
-  actorUserId = null,
-  adminName = null
-) => {
+const deleteRideType = async (id, actorUserId = null, adminName = null) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
     const [[existing]] = await conn.query(
-      `SELECT name, code, icon_url FROM ride_types WHERE ride_type_id = ?`,
-      [ride_type_id]
+      `SELECT name, code, icon_url FROM ride_types WHERE id = ?`,
+      [id]
     );
 
-    const [result] = await conn.query(
-      `DELETE FROM ride_types WHERE ride_type_id = ?`,
-      [ride_type_id]
-    );
+    const [result] = await conn.query(`DELETE FROM ride_types WHERE id = ?`, [
+      id,
+    ]);
 
     if (result.affectedRows > 0) {
       await logAdmin(
         conn,
         actorUserId,
         adminName,
-        `Deleted ride type "${existing?.name || "(unknown)"}" (code: ${
-          existing?.code || "(unknown)"
-        }, id: ${ride_type_id})`
+        `Deleted ride type "${existing?.name}" (code: ${existing?.code}, id: ${id})`
       );
     }
 

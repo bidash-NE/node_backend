@@ -3,6 +3,7 @@ const express = require("express");
 const router = express.Router();
 const rideTypeController = require("../controllers/rideTypeController");
 const { uploadRideTypeImage } = require("../middleware/uploadRideTypeImage");
+const authAccessToken = require("../middleware/authAccessToken");
 
 // Create new ride type (supports multipart/form-data with field 'image')
 router.post("/", uploadRideTypeImage, rideTypeController.createRideType);
@@ -16,7 +17,7 @@ router.get("/getall", rideTypeController.getAllRideTypes);
 // Get one ride type by id
 router.get("/:id", rideTypeController.getRideTypeById);
 
-// Delete ride type by id
-router.delete("/:ride_type_id", rideTypeController.deleteRideType);
+// Delete ride type by id  ✅ param is :id
+router.delete("/:id", authAccessToken, rideTypeController.deleteRideType);
 
 module.exports = router;

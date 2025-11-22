@@ -13,12 +13,12 @@ function toIntOrNull(v) {
 function getActor(req) {
   return {
     user_id:
-      toIntOrNull(req.user?.user_id) ??
+      toIntOrNull(req.user?.user_id) ?? // set only on delete via authAccessToken
       toIntOrNull(req.headers["x-admin-id"]) ??
       toIntOrNull(req.body?.user_id) ??
       null,
     admin_name:
-      req.user?.admin_name ??
+      req.user?.admin_name ?? // set only on delete via authAccessToken
       req.headers["x-admin-name"] ??
       req.body?.admin_name ??
       null,
@@ -85,7 +85,6 @@ const createRideType = async (req, res) => {
       is_active: req.body?.is_active,
     };
 
-    // basic validation to avoid silent 500s
     if (
       !payload.name ||
       !payload.code ||
@@ -119,7 +118,7 @@ const createRideType = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Ride type created successfully",
-      ride_type_id: result.insertId,
+      id: result.insertId,
     });
   } catch (error) {
     await cleanupNewUploadIfAny(req);
@@ -172,7 +171,6 @@ const updateRideType = async (req, res) => {
         .json({ success: false, message: "Ride type not found" });
     }
 
-    // delete previous local icon if replaced by new local one
     if (
       incomingIcon &&
       incomingIcon !== current.icon_url &&
@@ -216,10 +214,10 @@ const getRideTypeById = async (req, res) => {
 const deleteRideType = async (req, res) => {
   try {
     const actor = getActor(req);
-    const { ride_type_id } = req.params;
+    const id = req.params.id;
 
     const { affectedRows, deletedIcon } = await rideTypeModel.deleteRideType(
-      ride_type_id,
+      id,
       actor.user_id,
       actor.admin_name
     );
