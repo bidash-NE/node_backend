@@ -71,11 +71,14 @@ async function registerMerchantModel(data) {
 
     const role = (data.role || "merchant").toLowerCase();
     const ownerType = String(owner_type || "").toLowerCase();
+    const cidStr = cid == null ? "" : String(cid).trim();
 
     if (!user_name) throw new Error("user_name is required");
     if (!email) throw new Error("email is required");
     if (!phone) throw new Error("phone is required");
-    if (!cid) throw new Error("cid is required for merchants");
+    if (!cidStr) throw new Error("cid is required for merchants");
+    if (cidStr.length !== 11)
+      throw new Error("cid must be exactly 11 characters long");
     if (!password) throw new Error("password is required");
     if (!business_name) throw new Error("business_name is required");
     if (!ownerType) throw new Error("owner_type is required");
@@ -139,7 +142,7 @@ async function registerMerchantModel(data) {
     const [uRes] = await conn.query(
       `INSERT INTO users (user_name, email, phone, cid, password_hash, role, is_active)
        VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [user_name, email, phone, cid, password_hash, role]
+      [user_name, email, phone, cidStr, password_hash, role]
     );
     const user_id = uRes.insertId;
 
