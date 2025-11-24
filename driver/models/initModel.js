@@ -9,6 +9,7 @@ const tables = [
       user_name VARCHAR(50) NOT NULL,
       email VARCHAR(100) UNIQUE NOT NULL,
       phone VARCHAR(20) UNIQUE NOT NULL,
+      cid VARCHAR(11) UNIQUE,
       password_hash VARCHAR(255) NOT NULL,
       role VARCHAR(20) NOT NULL DEFAULT 'user',
       profile_image VARCHAR(255) NOT NULL DEFAULT '/uploads/profiles/default.png',  

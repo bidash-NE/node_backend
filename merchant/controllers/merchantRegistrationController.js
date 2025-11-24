@@ -59,6 +59,7 @@ async function registerMerchant(req, res) {
       user_name: b.user_name,
       email: b.email,
       phone: b.phone,
+      cid: b.cid,
       password: b.password,
       role: (b.role || "merchant").toLowerCase(),
 

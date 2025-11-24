@@ -50,6 +50,7 @@ async function registerMerchantModel(data) {
       user_name,
       email,
       phone,
+      cid,
       password,
       business_name,
       business_type_ids,
@@ -74,6 +75,7 @@ async function registerMerchantModel(data) {
     if (!user_name) throw new Error("user_name is required");
     if (!email) throw new Error("email is required");
     if (!phone) throw new Error("phone is required");
+    if (!cid) throw new Error("cid is required for merchants");
     if (!password) throw new Error("password is required");
     if (!business_name) throw new Error("business_name is required");
     if (!ownerType) throw new Error("owner_type is required");
@@ -135,9 +137,9 @@ async function registerMerchantModel(data) {
     // Create user
     const password_hash = await bcrypt.hash(password, 10);
     const [uRes] = await conn.query(
-      `INSERT INTO users (user_name, email, phone, password_hash, role, is_active)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-      [user_name, email, phone, password_hash, role]
+      `INSERT INTO users (user_name, email, phone, cid, password_hash, role, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [user_name, email, phone, cid, password_hash, role]
     );
     const user_id = uRes.insertId;
 
