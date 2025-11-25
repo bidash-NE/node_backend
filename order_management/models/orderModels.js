@@ -6,8 +6,8 @@ const axios = require("axios");
 const ADMIN_WALLET_ID = "NET000001"; // admin wallet
 
 // 50/50 platform fee sharing
-const PLATFORM_USER_SHARE = 0.5;       // 50% from user side
-const PLATFORM_MERCHANT_SHARE = 0.5;   // 50% from merchant side
+const PLATFORM_USER_SHARE = 0.5;
+const PLATFORM_MERCHANT_SHARE = 0.5;
 
 // External ID services (all POST)
 const IDS_BOTH_URL =
@@ -21,7 +21,7 @@ const IDS_JRN_URL =
 
 /* ======================= UTILS ======================= */
 function generateOrderId() {
-  const n = Math.floor(10000000 + Math.random() * 90000000); // 8 digits
+  const n = Math.floor(10000000 + Math.random() * 90000000);
   return `ORD-${n}`;
 }
 
@@ -235,11 +235,11 @@ async function addUserUnavailableItemNotificationInternal(
       .map((x) => x.item_name || x.menu_id)
       .filter(Boolean)
       .join(", ");
-    if (names) {
-      lines.push(`Removed items: ${names}.`);
-    } else {
-      lines.push(`Some unavailable items were removed from your order.`);
-    }
+    lines.push(
+      names
+        ? `Removed items: ${names}.`
+        : `Some unavailable items were removed from your order.`
+    );
   }
 
   if (replaced.length) {
@@ -247,11 +247,11 @@ async function addUserUnavailableItemNotificationInternal(
       .map((x) => x.new?.item_name || x.old?.item_name || x.old?.menu_id)
       .filter(Boolean)
       .join(", ");
-    if (names) {
-      lines.push(`Replaced items: ${names}.`);
-    } else {
-      lines.push(`Some unavailable items were replaced with alternatives.`);
-    }
+    lines.push(
+      names
+        ? `Replaced items: ${names}.`
+        : `Some unavailable items were replaced with alternatives.`
+    );
   }
 
   if (!lines.length) return;
@@ -292,7 +292,7 @@ async function addUserWalletDebitNotificationInternal(
   const dbh = conn || db;
   const payMethod = String(method || "").toUpperCase();
   const orderAmt = Number(order_amount || 0);
-  const feeAmt = Number(platform_fee || 0); // here this is USER share only
+  const feeAmt = Number(platform_fee || 0); // user share only
 
   if (!(orderAmt > 0 || feeAmt > 0)) return;
 
@@ -352,16 +352,24 @@ async function captureExists(order_id, capture_type, conn = null) {
   return !!row;
 }
 
+/**
+ * ✅ NEW compute split:
+ * - delivery_fee is order-level, allocated proportionally by subtotal share
+ * - platform_fee is order-level, allocated proportionally by (subtotal+delivery_share)
+ * - still returns PRIMARY business split because capture supports only one merchant wallet
+ */
 async function computeBusinessSplit(order_id, conn = null) {
   const dbh = conn || db;
+
   const [[order]] = await dbh.query(
-    `SELECT order_id,total_amount,platform_fee FROM orders WHERE order_id = ? LIMIT 1`,
+    `SELECT order_id,total_amount,platform_fee,delivery_fee
+       FROM orders WHERE order_id = ? LIMIT 1`,
     [order_id]
   );
   if (!order) throw new Error("Order not found while computing split");
 
   const [items] = await dbh.query(
-    `SELECT business_id, subtotal, delivery_fee
+    `SELECT business_id, subtotal
        FROM order_items
       WHERE order_id = ?
       ORDER BY menu_id ASC`,
@@ -369,42 +377,52 @@ async function computeBusinessSplit(order_id, conn = null) {
   );
   if (!items.length) throw new Error("Order has no items");
 
+  // subtotal per business
   const byBiz = new Map();
   for (const it of items) {
-    const part = Number(it.subtotal || 0) + Number(it.delivery_fee || 0);
+    const part = Number(it.subtotal || 0);
     byBiz.set(it.business_id, (byBiz.get(it.business_id) || 0) + part);
   }
 
-  const total = Number(order.total_amount || 0);
-  const fee = Number(order.platform_fee || 0);
+  const subtotalTotal = Array.from(byBiz.values()).reduce((s, v) => s + v, 0);
+  const deliveryTotal = Number(order.delivery_fee || 0);
+  const feeTotal = Number(order.platform_fee || 0);
   const primaryBizId = items[0].business_id;
 
+  const primarySub = byBiz.get(primaryBizId) || 0;
+
+  // allocate delivery proportionally
+  const primaryDelivery =
+    subtotalTotal > 0
+      ? deliveryTotal * (primarySub / subtotalTotal)
+      : deliveryTotal;
+
+  const baseTotal = subtotalTotal + deliveryTotal;
+  const primaryBase = primarySub + primaryDelivery;
+
   if (byBiz.size === 1) {
-    const base = total - fee; // items+delivery for this merchant
     return {
       business_id: primaryBizId,
-      total_amount: base, // base share for this merchant
-      platform_fee: fee,
-      net_to_merchant: base - fee, // kept for backward compatibility (not used by new capture logic)
+      total_amount: Number(primaryBase.toFixed(2)), // items + delivery
+      platform_fee: feeTotal, // full fee for single merchant
+      net_to_merchant: Number((primaryBase - feeTotal).toFixed(2)),
     };
   }
 
-  const primaryShare = byBiz.get(primaryBizId) || 0;
-  const feeShare =
-    total > 0 ? fee * (primaryShare / total) : 0; // fee share for this merchant
+  // multi-biz: fee share based on base share
+  const primaryFeeShare =
+    baseTotal > 0 ? feeTotal * (primaryBase / baseTotal) : 0;
 
   return {
     business_id: primaryBizId,
-    total_amount: primaryShare, // base share (items+delivery) for this merchant
-    platform_fee: feeShare,
-    net_to_merchant: primaryShare - feeShare,
+    total_amount: Number(primaryBase.toFixed(2)),
+    platform_fee: Number(primaryFeeShare.toFixed(2)),
+    net_to_merchant: Number((primaryBase - primaryFeeShare).toFixed(2)),
   };
 }
 
 /**
- * Record a wallet transfer as TWO rows in wallet_transactions:
- *  - DR: debit from fromId
- *  - CR: credit to toId
+ * Record wallet transfer as DR & CR rows.
  */
 async function recordWalletTransfer(
   conn,
@@ -447,16 +465,15 @@ async function recordWalletTransfer(
 /* ================= PUBLIC CAPTURE APIS ================= */
 /**
  * WALLET orders:
- * - User pays: base (items+delivery) + 50% of platform fee
- * - Merchant receives: base - 50% of fee
- * - Admin receives: 100% fee = 50% user + 50% merchant
+ * - Customer pays: (items + delivery) + 50% platform fee
+ * - Merchant pays: 50% platform fee from their wallet
+ * - Admin receives: 100% platform fee
  */
 async function captureOrderFunds(order_id) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // prevent double-capture
     if (await captureExists(order_id, "WALLET_FULL", conn)) {
       await conn.commit();
       return { captured: false, alreadyCaptured: true };
@@ -467,7 +484,6 @@ async function captureOrderFunds(order_id) {
          FROM orders WHERE order_id = ? LIMIT 1`,
       [order_id]
     );
-
     if (!order) throw new Error("Order not found for capture");
 
     if (String(order.payment_method || "WALLET").toUpperCase() !== "WALLET") {
@@ -479,8 +495,8 @@ async function captureOrderFunds(order_id) {
       };
     }
 
-    // Split by business as before
     const split = await computeBusinessSplit(order_id, conn);
+
     const buyer = await getBuyerWalletByUserId(order.user_id, conn);
     const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
     const admin = await getAdminWallet(conn);
@@ -489,23 +505,24 @@ async function captureOrderFunds(order_id) {
     if (!merch) throw new Error("Merchant wallet missing");
     if (!admin) throw new Error("Admin wallet missing");
 
-    const total = Number(order.total_amount || 0);
-    const fee = Number(split.platform_fee || 0);
+    const baseToMerchant = Number(split.total_amount || 0); // items + delivery
+    const feeForPrimary = Number(split.platform_fee || 0);
 
-    // 50/50 platform fee split
-    const userFee = fee > 0 ? Number((fee / 2).toFixed(2)) : 0;
-    const merchFee = fee - userFee; // keeps total exact even with rounding
+    const userFee =
+      feeForPrimary > 0 ? Number((feeForPrimary / 2).toFixed(2)) : 0;
+    const merchFee = feeForPrimary - userFee;
 
-    // Make sure buyer has enough for the order amount
+    // buyer must have base + userFee
+    const needFromBuyer = baseToMerchant + userFee;
+
     const [[freshBuyer]] = await conn.query(
       `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
       [buyer.id]
     );
-    if (!freshBuyer || Number(freshBuyer.amount) < total) {
+    if (!freshBuyer || Number(freshBuyer.amount) < needFromBuyer) {
       throw new Error("Insufficient wallet balance during capture");
     }
 
-    // (optional) ensure merchant has enough for their fee share
     if (merchFee > 0) {
       const [[freshMerch]] = await conn.query(
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
@@ -518,19 +535,16 @@ async function captureOrderFunds(order_id) {
       }
     }
 
-    /* 1️⃣ ORDER AMOUNT: USER → MERCHANT
-       This is the main order capture.
-       Note clearly says it's the order amount, not the fee.
-    */
+    // 1️⃣ BASE ORDER AMOUNT: USER → MERCHANT
     const tOrder = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
-      amount: total,
+      amount: baseToMerchant,
       order_id,
-      note: `Order amount for ${order_id}`, // <-- main order amount
+      note: `Order base (items+delivery) for ${order_id}`,
     });
 
-    /* 2️⃣ USER PLATFORM FEE SHARE: USER → ADMIN */
+    // 2️⃣ USER 50% PLATFORM FEE: USER → ADMIN
     let tUserFee = null;
     if (userFee > 0) {
       tUserFee = await recordWalletTransfer(conn, {
@@ -538,11 +552,11 @@ async function captureOrderFunds(order_id) {
         toId: admin.wallet_id,
         amount: userFee,
         order_id,
-        note: `Platform fee (user share) for ${order_id}`, // <-- clearly user share
+        note: `Platform fee (user 50%) for ${order_id}`,
       });
     }
 
-    /* 3️⃣ MERCHANT PLATFORM FEE SHARE: MERCHANT → ADMIN */
+    // 3️⃣ MERCHANT 50% PLATFORM FEE: MERCHANT → ADMIN
     let tMerchFee = null;
     if (merchFee > 0) {
       tMerchFee = await recordWalletTransfer(conn, {
@@ -550,25 +564,19 @@ async function captureOrderFunds(order_id) {
         toId: admin.wallet_id,
         amount: merchFee,
         order_id,
-        note: `Platform fee (merchant share) for ${order_id}`, // <-- clearly merchant share
+        note: `Platform fee (merchant 50%) for ${order_id}`,
       });
     }
 
-    /* 4️⃣ SAVE A SINGLE PAIR PER COLUMN IN order_wallet_captures
-          - buyer_txn_id   -> user fee DR/CR pair (if any)
-          - merch_txn_id   -> merchant fee DR/CR pair (if any)
-          - admin_txn_id   -> main order DR/CR pair (user→merchant)
-       This keeps them "separate" and avoids Data too long issues.
-    */
     await conn.query(
       `INSERT INTO order_wallet_captures
          (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
        VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
       [
         order_id,
-        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,  // user fee
-        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null, // merchant fee
-        tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,        // main order
+        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
+        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
+        tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
       ]
     );
 
@@ -577,7 +585,7 @@ async function captureOrderFunds(order_id) {
     return {
       captured: true,
       user_id: order.user_id,
-      order_amount: total,
+      order_amount: baseToMerchant,
       platform_fee_user: userFee,
       platform_fee_merchant: merchFee,
     };
@@ -591,12 +599,11 @@ async function captureOrderFunds(order_id) {
   }
 }
 
-
 /**
  * COD orders:
  * - Customer pays cash for items+delivery.
- * - User wallet: 50% of platform fee → Admin.
- * - Merchant wallet: 50% of platform fee → Admin.
+ * - User wallet: 50% platform fee → Admin.
+ * - Merchant wallet: 50% platform fee → Admin.
  */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
@@ -623,11 +630,11 @@ async function captureOrderCODFee(order_id) {
       };
     }
 
-    // Use same split logic to find primary business & fee share
     const split = await computeBusinessSplit(order_id, conn);
-    const fee = Number(split.platform_fee || 0);
-    const userFee = fee * PLATFORM_USER_SHARE;
-    const merchantFee = fee - userFee;
+    const feeForPrimary = Number(split.platform_fee || 0);
+
+    const userFee = feeForPrimary * PLATFORM_USER_SHARE;
+    const merchantFee = feeForPrimary - userFee;
 
     const buyer = await getBuyerWalletByUserId(order.user_id, conn);
     const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
@@ -636,7 +643,7 @@ async function captureOrderCODFee(order_id) {
     if (!merch) throw new Error("Merchant wallet missing");
     if (!admin) throw new Error("Admin wallet missing");
 
-    if (fee > 0) {
+    if (feeForPrimary > 0) {
       const [[freshBuyer]] = await conn.query(
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
         [buyer.id]
@@ -706,7 +713,7 @@ async function captureOrderCODFee(order_id) {
       captured: true,
       user_id: order.user_id,
       order_amount: 0,
-      platform_fee: userFee, // Only user share for notification
+      platform_fee_user: userFee, // user share only for notification
     };
   } catch (e) {
     try {
@@ -722,14 +729,12 @@ async function captureOrderCODFee(order_id) {
 async function applyUnavailableItemChanges(order_id, changes) {
   const removed = Array.isArray(changes?.removed) ? changes.removed : [];
   const replaced = Array.isArray(changes?.replaced) ? changes.replaced : [];
-
   if (!removed.length && !replaced.length) return;
 
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // removed
     for (const r of removed) {
       const bid = Number(r.business_id);
       const mid = Number(r.menu_id);
@@ -743,7 +748,6 @@ async function applyUnavailableItemChanges(order_id, changes) {
       );
     }
 
-    // replaced
     for (const ch of replaced) {
       const old = ch.old || {};
       const neu = ch.new || {};
@@ -772,8 +776,6 @@ async function applyUnavailableItemChanges(order_id, changes) {
       const price = neu.price != null ? Number(neu.price) : row.price;
       const subtotal =
         neu.subtotal != null ? Number(neu.subtotal) : row.subtotal;
-      const deliveryFee =
-        neu.delivery_fee != null ? Number(neu.delivery_fee) : row.delivery_fee;
 
       await conn.query(
         `UPDATE order_items
@@ -784,8 +786,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
                 item_image = ?,
                 quantity = ?,
                 price = ?,
-                subtotal = ?,
-                delivery_fee = ?
+                subtotal = ?
           WHERE item_id = ?`,
         [
           bidNew,
@@ -796,7 +797,6 @@ async function applyUnavailableItemChanges(order_id, changes) {
           qty,
           price,
           subtotal,
-          deliveryFee,
           row.item_id,
         ]
       );
@@ -833,6 +833,7 @@ const Order = {
       user_id: orderData.user_id,
       total_amount: orderData.total_amount,
       discount_amount: orderData.discount_amount,
+      delivery_fee: orderData.delivery_fee ?? 0,
       platform_fee: orderData.platform_fee ?? 0,
       payment_method: orderData.payment_method,
       delivery_address:
@@ -862,8 +863,8 @@ const Order = {
         quantity: item.quantity,
         price: item.price,
         subtotal: item.subtotal,
-        platform_fee: 0,
-        delivery_fee: item.delivery_fee ?? 0,
+        platform_fee: 0, // ✅ always 0 per-item
+        delivery_fee: 0, // ✅ always 0 per-item
       });
     }
     return order_id;
@@ -904,6 +905,7 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.delivery_fee,
         o.platform_fee,
         o.payment_method,
         o.delivery_address,
@@ -956,6 +958,7 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.delivery_fee,
         o.platform_fee,
         o.payment_method,
         o.delivery_address,
@@ -993,16 +996,23 @@ const Order = {
     for (const o of orders) {
       const its = itemsByOrder.get(o.order_id) || [];
 
-      const share = its.reduce(
-        (s, it) => s + Number(it.subtotal || 0) + Number(it.delivery_fee || 0),
+      const shareSubtotal = its.reduce(
+        (s, it) => s + Number(it.subtotal || 0),
         0
       );
-      const fee_share =
-        Number(o.total_amount || 0) > 0
-          ? Number(o.platform_fee || 0) *
-            (share / Number(o.total_amount || 0))
+
+      const baseTotal =
+        its.length > 0
+          ? Number(o.total_amount || 0) - Number(o.platform_fee || 0)
           : 0;
-      const net_for_business = share - fee_share;
+
+      // business fee share proportional by subtotal
+      const fee_share =
+        baseTotal > 0 && shareSubtotal > 0
+          ? Number(o.platform_fee || 0) * (shareSubtotal / baseTotal)
+          : 0;
+
+      const net_for_business = shareSubtotal - fee_share;
 
       if (!grouped.has(o.user_id)) {
         grouped.set(o.user_id, {
@@ -1021,6 +1031,7 @@ const Order = {
         status_reason: o.status_reason || null,
         total_amount: o.total_amount,
         discount_amount: o.discount_amount,
+        delivery_fee: o.delivery_fee,
         platform_fee: o.platform_fee,
         payment_method: o.payment_method,
         delivery_address: parseDeliveryAddress(o.delivery_address),
@@ -1033,7 +1044,7 @@ const Order = {
         updated_at: o.updated_at,
         items: its,
         totals_for_business: {
-          business_share: Number(share.toFixed(2)),
+          business_share: Number(shareSubtotal.toFixed(2)),
           fee_share: Number(fee_share.toFixed(2)),
           net_for_business: Number(net_for_business.toFixed(2)),
         },
@@ -1057,6 +1068,7 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.delivery_fee,
         o.platform_fee,
         o.payment_method,
         o.delivery_address,
@@ -1100,6 +1112,7 @@ const Order = {
             status_reason: o.status_reason || null,
             total_amount: o.total_amount,
             discount_amount: o.discount_amount,
+            delivery_fee: o.delivery_fee,
             platform_fee: o.platform_fee,
             payment_method: o.payment_method,
             delivery_address: parseDeliveryAddress(o.delivery_address),
@@ -1128,6 +1141,7 @@ const Order = {
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
+        o.delivery_fee,
         o.platform_fee,
         o.payment_method,
         o.delivery_address,
@@ -1186,9 +1200,12 @@ const Order = {
           : null,
         deliver_to: parseDeliveryAddress(o.delivery_address),
         totals: {
-          items_subtotal: null,
-          platform_fee: Number(o.platform_fee || 0),
-          delivery_fee: 0,
+          items_subtotal: its.reduce(
+            (s, it) => s + Number(it.subtotal || 0),
+            0
+          ),
+          delivery_fee: Number(o.delivery_fee || 0), // ✅ order-level
+          platform_fee: Number(o.platform_fee || 0), // ✅ order-level
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
         },
@@ -1199,7 +1216,6 @@ const Order = {
           quantity: it.quantity,
           unit_price: it.price,
           line_subtotal: it.subtotal,
-          line_delivery_fee: it.delivery_fee,
         })),
       });
     }

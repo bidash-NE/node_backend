@@ -44,6 +44,22 @@ async function createOrder(req, res) {
     if (payload.discount_amount == null)
       return res.status(400).json({ message: "Missing discount_amount" });
 
+    // ✅ NEW: overall delivery_fee + platform_fee at order level
+    if (payload.delivery_fee == null)
+      return res.status(400).json({ message: "Missing delivery_fee" });
+    if (payload.platform_fee == null)
+      return res.status(400).json({ message: "Missing platform_fee" });
+
+    const deliveryFee = Number(payload.delivery_fee);
+    const platformFee = Number(payload.platform_fee);
+
+    if (!Number.isFinite(deliveryFee) || deliveryFee < 0) {
+      return res.status(400).json({ message: "Invalid delivery_fee" });
+    }
+    if (!Number.isFinite(platformFee) || platformFee < 0) {
+      return res.status(400).json({ message: "Invalid platform_fee" });
+    }
+
     const payMethod = String(payload.payment_method || "").toUpperCase();
     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
       return res
@@ -69,7 +85,7 @@ async function createOrder(req, res) {
       payload.delivery_address = String(payload.delivery_address || "");
     }
 
-    // ---- Validate item fields we persist (no math) ----
+    // ---- Validate item fields we persist (no item-level delivery/platform fee) ----
     for (const [idx, it] of items.entries()) {
       for (const f of [
         "business_id",
@@ -82,11 +98,6 @@ async function createOrder(req, res) {
         if (it[f] == null || it[f] === "") {
           return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
         }
-      }
-      if (it.delivery_fee != null && Number.isNaN(Number(it.delivery_fee))) {
-        return res
-          .status(400)
-          .json({ message: `Item[${idx}] invalid delivery_fee` });
       }
     }
 
@@ -109,6 +120,8 @@ async function createOrder(req, res) {
             "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
         });
       }
+
+      // customer pays total_amount (base + user 50% platform fee)
       const need = Number(payload.total_amount || 0);
       const have = Number(buyer.amount || 0);
       if (have < need) {
@@ -119,6 +132,7 @@ async function createOrder(req, res) {
           )}, available Nu. ${have.toFixed(2)}.`,
         });
       }
+
       const admin = await Order.getAdminWallet();
       if (!admin) {
         return res.status(500).json({
@@ -135,18 +149,22 @@ async function createOrder(req, res) {
             "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
         });
       }
-      const fee = Number(payload.platform_fee ?? 0);
-      if (fee > 0) {
+
+      // customer only needs enough for 50% platform fee in wallet
+      const userFee =
+        platformFee > 0 ? Number((platformFee / 2).toFixed(2)) : 0;
+      if (userFee > 0) {
         const have = Number(buyer.amount || 0);
-        if (have < fee) {
+        if (have < userFee) {
           return res.status(400).json({
             code: "INSUFFICIENT_BALANCE",
-            message: `Insufficient wallet balance for platform fee. Required Nu. ${fee.toFixed(
+            message: `Insufficient wallet balance for platform fee. Required Nu. ${userFee.toFixed(
               2
             )}, available Nu. ${have.toFixed(2)}.`,
           });
         }
       }
+
       const admin = await Order.getAdminWallet();
       if (!admin) {
         return res.status(500).json({
@@ -166,9 +184,12 @@ async function createOrder(req, res) {
 
     const order_id = await Order.create({
       ...payload,
-      if_unavailable, // use raw value from client (or null)
+      items,
+      if_unavailable, // raw client value
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
+      delivery_fee: deliveryFee,
+      platform_fee: platformFee,
     });
 
     // Group by business for notifications
@@ -232,6 +253,12 @@ async function createOrder(req, res) {
       order_id,
       message:
         "Order created successfully. Note: 50% of the platform fee will be deducted from the merchant side.",
+      totals: {
+        total_amount: Number(payload.total_amount),
+        discount_amount: Number(payload.discount_amount),
+        delivery_fee: deliveryFee,
+        platform_fee: platformFee,
+      },
       platform_fee_sharing: {
         user_share: 0.5,
         merchant_share: 0.5,
@@ -326,22 +353,17 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     if (!Number.isFinite(mins) || mins <= 0)
       throw new Error("Invalid estimated minutes");
 
-    // Use UTC so server timezone doesn't matter, then convert to Bhutan time (+06)
     const now = new Date();
-
-    // Start of window: now + merchant estimate
     const startDate = new Date(now.getTime() + mins * 60 * 1000);
-    // End of window: start + 30 minutes
     const endDate = new Date(startDate.getTime() + 30 * 60 * 1000);
 
     const BHUTAN_OFFSET_HOURS = 6;
 
     const toBhutanParts = (d) => {
-      // convert UTC → Bhutan local
       let hour24 = (d.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
       const minute = d.getUTCMinutes();
       const meridiem = hour24 >= 12 ? "PM" : "AM";
-      const hour12 = hour24 % 12 || 12; // 0 → 12
+      const hour12 = hour24 % 12 || 12;
       return { hour12, minute, meridiem };
     };
 
@@ -351,22 +373,16 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     const sStr = `${s.hour12}:${String(s.minute).padStart(2, "0")}`;
     const eStr = `${e.hour12}:${String(e.minute).padStart(2, "0")}`;
 
-    // If both sides are same AM/PM, show it once at the end.
-    // If it crosses noon/midnight, show both.
     let formattedRange;
     if (s.meridiem === e.meridiem) {
-      formattedRange = `${sStr} - ${eStr} ${s.meridiem}`; // e.g. "1:15 - 1:45 PM"
+      formattedRange = `${sStr} - ${eStr} ${s.meridiem}`;
     } else {
-      formattedRange = `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`; // e.g. "11:50 AM - 12:20 PM"
+      formattedRange = `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`;
     }
 
     await db.query(
       `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
       [formattedRange, order_id]
-    );
-
-    console.log(
-      `✅ estimated_arrivial_time updated for ${order_id} → ${formattedRange} (start in ${mins} mins, +30 min window)`
     );
   } catch (err) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
@@ -385,9 +401,10 @@ async function updateOrderStatus(req, res) {
       final_total_amount,
       final_platform_fee,
       final_discount_amount,
+      final_delivery_fee, // ✅ NEW
       unavailable_changes,
       unavailableChanges,
-      estimated_minutes, // from merchant
+      estimated_minutes,
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -417,7 +434,6 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // 1️⃣ Prevent late cancellations (your existing rule)
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -434,7 +450,6 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 2️⃣ NEW: Prevent accepting an already cancelled order
     if (current === "CANCELLED" && normalized === "CONFIRMED") {
       return res.status(400).json({
         success: false,
@@ -466,6 +481,8 @@ async function updateOrderStatus(req, res) {
         updatePayload.total_amount = Number(final_total_amount);
       if (final_platform_fee != null)
         updatePayload.platform_fee = Number(final_platform_fee);
+      if (final_delivery_fee != null)
+        updatePayload.delivery_fee = Number(final_delivery_fee);
       if (final_discount_amount != null)
         updatePayload.discount_amount = Number(final_discount_amount);
 
@@ -473,7 +490,7 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      // 3️⃣ Handle estimated arrival minutes (existing helper)
+      // 3️⃣ Handle estimated arrival minutes
       if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
       }
@@ -521,7 +538,7 @@ async function updateOrderStatus(req, res) {
       status: normalized,
     });
 
-    // 7️⃣ Completed order notifications
+    // 7️⃣ Completed merchant notifications
     if (normalized === "COMPLETED") {
       for (const business_id of business_ids) {
         await insertAndEmitNotification({
@@ -558,7 +575,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // 🔟 Wallet deduction notification
+    // 🔟 Wallet deduction notification (user share only)
     if (
       captureInfo &&
       captureInfo.captured &&
@@ -569,12 +586,11 @@ async function updateOrderStatus(req, res) {
         user_id: captureInfo.user_id,
         order_id,
         order_amount: captureInfo.order_amount,
-        platform_fee: captureInfo.platform_fee,
+        platform_fee: captureInfo.platform_fee_user, // ✅ user share only
         method: payMethod,
       });
     }
 
-    // 🔁 Custom response for CANCELLED
     if (normalized === "CANCELLED") {
       return res.json({
         success: true,
@@ -582,7 +598,6 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // Default response for other statuses
     return res.json({
       success: true,
       message: "Order status updated successfully",
@@ -628,18 +643,18 @@ async function getOrderStatusCountsByBusiness(req, res) {
     return res.status(500).json({ error: err.message });
   }
 }
+
 async function cancelOrderByUser(req, res) {
   try {
     const user_id_param = Number(req.params.user_id);
     const order_id = req.params.order_id;
     const body = req.body || {};
-    const userReason = String(body.reason || "").trim(); // optional from app
+    const userReason = String(body.reason || "").trim();
 
     if (!Number.isFinite(user_id_param) || user_id_param <= 0) {
       return res.status(400).json({ message: "Invalid user_id" });
     }
 
-    // Fetch order owner + current status
     const [[row]] = await db.query(
       `SELECT user_id, status 
          FROM orders 
@@ -660,7 +675,6 @@ async function cancelOrderByUser(req, res) {
 
     const current = String(row.status || "PENDING").toUpperCase();
 
-    // If already cancelled or declined, don't let them re-cancel
     if (current === "CANCELLED") {
       return res.status(400).json({
         code: "ALREADY_CANCELLED",
@@ -674,7 +688,6 @@ async function cancelOrderByUser(req, res) {
       });
     }
 
-    // Only allow cancel when still PENDING
     if (current !== "PENDING") {
       return res.status(400).json({
         code: "CANNOT_CANCEL_AFTER_ACCEPT",
@@ -683,26 +696,22 @@ async function cancelOrderByUser(req, res) {
       });
     }
 
-    // Build reason string for DB + notifications
     const reason =
       userReason.length > 0
         ? `Cancelled by customer: ${userReason}`
         : "Cancelled by customer before the store accepted the order.";
 
-    // Update status in DB
     const affected = await Order.updateStatus(order_id, "CANCELLED", reason);
     if (!affected) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // Get businesses to notify
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // Broadcast via websocket (user & merchant streams)
     broadcastOrderStatusToMany({
       order_id,
       user_id: user_id_param,
@@ -710,7 +719,6 @@ async function cancelOrderByUser(req, res) {
       status: "CANCELLED",
     });
 
-    // Merchant notifications
     for (const business_id of business_ids) {
       await insertAndEmitNotification({
         business_id,
@@ -722,7 +730,6 @@ async function cancelOrderByUser(req, res) {
       });
     }
 
-    // User notification
     await Order.addUserOrderStatusNotification({
       user_id: user_id_param,
       order_id,
@@ -741,6 +748,7 @@ async function cancelOrderByUser(req, res) {
     return res.status(500).json({ error: err.message });
   }
 }
+
 module.exports = {
   createOrder,
   getOrders,
