@@ -63,6 +63,7 @@ async function registerMerchantModel(data) {
       business_logo,
       delivery_option,
       owner_type, // e.g., "food" / "mart"
+      min_amount_for_fd, // 🔹 free-delivery threshold
       bank_name,
       account_holder_name,
       account_number,
@@ -146,12 +147,21 @@ async function registerMerchantModel(data) {
     );
     const user_id = uRes.insertId;
 
+    // Free-delivery threshold normalization (0 = feature disabled)
+    const minFD =
+      min_amount_for_fd !== undefined &&
+      min_amount_for_fd !== null &&
+      min_amount_for_fd !== ""
+        ? Number(min_amount_for_fd)
+        : 0;
+
     // Create business
     const [mbdRes] = await conn.query(
       `INSERT INTO merchant_business_details
         (user_id, business_name, business_license_number, license_image,
-         latitude, longitude, address, business_logo, delivery_option, owner_type)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         latitude, longitude, address, business_logo, delivery_option, owner_type,
+         min_amount_for_fd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         user_id,
         business_name,
@@ -163,6 +173,7 @@ async function registerMerchantModel(data) {
         business_logo || null,
         delivery_option || "SELF",
         ownerType || null,
+        minFD,
       ]
     );
     const business_id = mbdRes.insertId;
@@ -245,6 +256,12 @@ async function updateMerchantDetailsModel(business_id, data) {
     );
     setIfProvided("opening_time", data.opening_time);
     setIfProvided("closing_time", data.closing_time);
+
+    // 🔹 update free-delivery threshold (0 = disabled)
+    setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (v) => {
+      if (v === "" || v == null) return 0;
+      return Number(v);
+    });
 
     if (data.holidays !== undefined) {
       let arr = [];
@@ -350,6 +367,7 @@ async function getOwnersByKind(kind) {
         mbd.business_license_number, mbd.license_image,
         mbd.latitude, mbd.longitude, mbd.address,
         mbd.business_logo, mbd.delivery_option,
+        mbd.min_amount_for_fd,
         mbd.opening_time, mbd.closing_time, mbd.holidays,
         mbd.complementary AS complement, mbd.complementary_details AS complement_details,
         mbd.created_at, mbd.updated_at,
@@ -406,8 +424,6 @@ async function getOwnersByKind(kind) {
 
   const ratingsByBiz = new Map();
   for (const row of ratingRows) {
-    console.log(ratingRows);
-
     ratingsByBiz.set(row.business_id, {
       avg_rating: Number(row.avg_rating || 0),
       total_comments: Number(row.total_comments || 0),
@@ -426,6 +442,7 @@ async function getOwnersByKind(kind) {
     address: b.address,
     business_logo: b.business_logo,
     delivery_option: b.delivery_option,
+    min_amount_for_fd: b.min_amount_for_fd, // 🔹 expose in API
     opening_time: b.opening_time,
     closing_time: b.closing_time,
     holidays: b.holidays,

@@ -10,10 +10,14 @@ function toBizIdOrThrow(v) {
 
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+    `SELECT business_id, min_amount_for_fd
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
     [business_id]
   );
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
+  return r[0]; // return so we can use min_amount_for_fd
 }
 
 /**
@@ -25,7 +29,10 @@ async function assertBusinessExists(business_id) {
  */
 async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
   const bid = toBizIdOrThrow(business_id);
-  await assertBusinessExists(bid);
+
+  // Get business row (also has min_amount_for_fd)
+  const bizRow = await assertBusinessExists(bid);
+  const minFD = Number(bizRow.min_amount_for_fd || 0);
 
   // 1) Fetch all items for this business
   const [itemRows] = await db.query(
@@ -42,7 +49,12 @@ async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
     return {
       success: true,
       data: [],
-      meta: { business_id: bid, categories_count: 0, items_count: 0 },
+      meta: {
+        business_id: bid,
+        min_amount_for_fd: minFD,
+        categories_count: 0,
+        items_count: 0,
+      },
     };
   }
 
@@ -78,6 +90,7 @@ async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
       ],
       meta: {
         business_id: bid,
+        min_amount_for_fd: minFD,
         categories_count: 1,
         items_count: itemRows.length,
       },
@@ -85,7 +98,6 @@ async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
   }
 
   // 3) Enrich with food_category by case/space-insensitive name match
-  //    Build dynamic IN list using the original names (but we’ll match with LOWER(TRIM()))
   const originals = Array.from(catKeyToOriginal.values());
   const ph = originals.map(() => "?").join(",");
 
@@ -131,6 +143,7 @@ async function getFoodMenuGroupedByCategoryForBusiness(business_id) {
     data: grouped,
     meta: {
       business_id: bid,
+      min_amount_for_fd: minFD,
       categories_count: grouped.length,
       items_count: itemRows.length,
     },

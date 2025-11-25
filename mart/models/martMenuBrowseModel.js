@@ -10,10 +10,14 @@ function toBizIdOrThrow(v) {
 
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+    `SELECT business_id, min_amount_for_fd
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
     [business_id]
   );
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
+  return r[0]; // return row so we can read min_amount_for_fd
 }
 
 /**
@@ -26,7 +30,10 @@ async function assertBusinessExists(business_id) {
  */
 async function getMartMenuGroupedByCategoryForBusiness(business_id) {
   const bid = toBizIdOrThrow(business_id);
-  await assertBusinessExists(bid);
+
+  // get business row (also has min_amount_for_fd)
+  const bizRow = await assertBusinessExists(bid);
+  const minFD = Number(bizRow.min_amount_for_fd || 0);
 
   // 1) business_type names (MART only) for this business
   const [btRows] = await db.query(
@@ -42,7 +49,12 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
     return {
       success: true,
       data: [],
-      meta: { business_id: bid, categories_count: 0, items_count: 0 },
+      meta: {
+        business_id: bid,
+        min_amount_for_fd: minFD,
+        categories_count: 0,
+        items_count: 0,
+      },
     };
   }
   const btNames = btRows.map((r) => r.name);
@@ -60,7 +72,12 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
     return {
       success: true,
       data: [],
-      meta: { business_id: bid, categories_count: 0, items_count: 0 },
+      meta: {
+        business_id: bid,
+        min_amount_for_fd: minFD,
+        categories_count: 0,
+        items_count: 0,
+      },
     };
   }
   const catNames = catRows.map((c) => c.category_name);
@@ -106,6 +123,7 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
     data: groupedNonEmpty,
     meta: {
       business_id: bid,
+      min_amount_for_fd: minFD,
       categories_count: groupedNonEmpty.length,
       items_count: itemRows.length,
     },

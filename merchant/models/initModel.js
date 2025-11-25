@@ -158,6 +158,7 @@ async function ensureMerchantBusinessDetailsTable() {
         address TEXT,
         business_logo VARCHAR(255),
         delivery_option VARCHAR(50),
+        min_amount_for_fd DECIMAL(10,2) DEFAULT NULL,
         complementary VARCHAR(100),
         complementary_details TEXT,
         opening_time TIME,

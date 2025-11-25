@@ -93,6 +93,13 @@ async function registerMerchant(req, res) {
       delivery_option: b.delivery_option,
       owner_type: (b.owner_type || "individual").toLowerCase(),
 
+      // 🔹 free-delivery threshold (per merchant)
+      // missing / "" => 0 (feature off)
+      min_amount_for_fd:
+        b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== ""
+          ? Number(b.min_amount_for_fd)
+          : 0,
+
       // bank
       bank_name: b.bank_name,
       account_holder_name: b.account_holder_name,
@@ -173,6 +180,14 @@ async function updateMerchant(req, res) {
     if (typeof b.longitude !== "undefined") {
       updatePayload.longitude = b.longitude === "" ? null : Number(b.longitude);
     }
+
+    // 🔹 allow merchant to update min_amount_for_fd
+    // empty string => 0 (feature off)
+    if (typeof b.min_amount_for_fd !== "undefined") {
+      const raw = String(b.min_amount_for_fd).trim();
+      updatePayload.min_amount_for_fd = raw === "" ? 0 : Number(raw);
+    }
+
     if (b.holidays !== undefined) {
       updatePayload.holidays = Array.isArray(b.holidays)
         ? b.holidays
@@ -263,10 +278,9 @@ async function loginByEmail(req, res) {
     }
 
     /* -----------------------------------------------------------
-       ✅ Mark as verified on first successful login (idempotent)
+       Mark as verified on first successful login (idempotent)
     ----------------------------------------------------------- */
     try {
-      // If you store is_verified in the users table:
       await db.query(
         `UPDATE users
             SET is_verified = 1,
@@ -275,16 +289,6 @@ async function loginByEmail(req, res) {
             AND (is_verified IS NULL OR is_verified = 0)`,
         [user.user_id]
       );
-
-      // 🔸 If instead is_verified is stored in merchant_business_details:
-      // await db.query(
-      //   `UPDATE merchant_business_details
-      //       SET is_verified = 1,
-      //           verified_at = IFNULL(verified_at, NOW())
-      //     WHERE user_id = ?
-      //       AND (is_verified IS NULL OR is_verified = 0)`,
-      //   [user.user_id]
-      // );
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
     }
@@ -376,6 +380,7 @@ async function listFoodOwners(req, res) {
      MAX(mbd.longitude)                AS longitude,
      MAX(mbd.opening_time)             AS opening_time,
      MAX(mbd.closing_time)             AS closing_time,
+     MAX(mbd.min_amount_for_fd)        AS min_amount_for_fd,
      MAX(u.user_id)                    AS user_id,
      MAX(u.user_name)                  AS user_name,
      MAX(u.email)                      AS email,
@@ -443,6 +448,7 @@ async function listMartOwners(req, res) {
      MAX(mbd.longitude)                AS longitude,
      MAX(mbd.opening_time)             AS opening_time,
      MAX(mbd.closing_time)             AS closing_time,
+     MAX(mbd.min_amount_for_fd)        AS min_amount_for_fd,
      MAX(u.user_id)                    AS user_id,
      MAX(u.user_name)                  AS user_name,
      MAX(u.email)                      AS email,

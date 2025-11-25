@@ -12,7 +12,7 @@ async function listMartMenuGroupedByCategoryCtrl(req, res) {
       success: true,
       message: "Menu grouped by category fetched successfully.",
       data: out.data,
-      meta: out.meta,
+      meta: out.meta, // now includes min_amount_for_fd
     });
   } catch (e) {
     return res.status(400).json({
