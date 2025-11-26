@@ -44,7 +44,7 @@ async function createOrder(req, res) {
     if (payload.discount_amount == null)
       return res.status(400).json({ message: "Missing discount_amount" });
 
-    // ✅ NEW: overall delivery_fee + platform_fee at order level
+    // overall delivery_fee + platform_fee at order level
     if (payload.delivery_fee == null)
       return res.status(400).json({ message: "Missing delivery_fee" });
     if (payload.platform_fee == null)
@@ -58,6 +58,30 @@ async function createOrder(req, res) {
     }
     if (!Number.isFinite(platformFee) || platformFee < 0) {
       return res.status(400).json({ message: "Invalid platform_fee" });
+    }
+
+    // NEW: merchant_delivery_fee (for "free delivery" – user not paying)
+    let merchantDeliveryFee = null;
+    if (
+      payload.merchant_delivery_fee !== undefined &&
+      payload.merchant_delivery_fee !== null
+    ) {
+      merchantDeliveryFee = Number(payload.merchant_delivery_fee);
+      if (!Number.isFinite(merchantDeliveryFee) || merchantDeliveryFee < 0) {
+        return res
+          .status(400)
+          .json({ message: "Invalid merchant_delivery_fee" });
+      }
+    } else {
+      merchantDeliveryFee = null;
+    }
+
+    // optional rule: don't allow both to be > 0 simultaneously
+    if (deliveryFee > 0 && merchantDeliveryFee > 0) {
+      return res.status(400).json({
+        message:
+          "delivery_fee and merchant_delivery_fee cannot both be greater than 0.",
+      });
     }
 
     const payMethod = String(payload.payment_method || "").toUpperCase();
@@ -101,7 +125,7 @@ async function createOrder(req, res) {
       }
     }
 
-    // ---- if_unavailable: just take whatever client sends, no defaults ----
+    // if_unavailable: just take whatever client sends
     let if_unavailable = null;
     if (
       payload.if_unavailable !== undefined &&
@@ -121,7 +145,7 @@ async function createOrder(req, res) {
         });
       }
 
-      // customer pays total_amount (base + user 50% platform fee)
+      // customer pays total_amount (items + maybe delivery + user share of platform)
       const need = Number(payload.total_amount || 0);
       const have = Number(buyer.amount || 0);
       if (have < need) {
@@ -174,7 +198,7 @@ async function createOrder(req, res) {
       }
     }
 
-    // Persist exactly what FE sent (ensure delivery_address object is stringified)
+    // Persist delivery_address as JSON string if object
     if (
       payload.delivery_address &&
       typeof payload.delivery_address === "object"
@@ -185,11 +209,12 @@ async function createOrder(req, res) {
     const order_id = await Order.create({
       ...payload,
       items,
-      if_unavailable, // raw client value
+      if_unavailable,
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
       delivery_fee: deliveryFee,
       platform_fee: platformFee,
+      merchant_delivery_fee: merchantDeliveryFee,
     });
 
     // Group by business for notifications
@@ -258,6 +283,8 @@ async function createOrder(req, res) {
         discount_amount: Number(payload.discount_amount),
         delivery_fee: deliveryFee,
         platform_fee: platformFee,
+        merchant_delivery_fee:
+          merchantDeliveryFee !== null ? merchantDeliveryFee : null,
       },
       platform_fee_sharing: {
         user_share: 0.5,
@@ -401,7 +428,8 @@ async function updateOrderStatus(req, res) {
       final_total_amount,
       final_platform_fee,
       final_discount_amount,
-      final_delivery_fee, // ✅ NEW
+      final_delivery_fee,
+      final_merchant_delivery_fee, // NEW
       unavailable_changes,
       unavailableChanges,
       estimated_minutes,
@@ -460,7 +488,7 @@ async function updateOrderStatus(req, res) {
 
     // ===================== CONFIRMED FLOW =====================
     if (normalized === "CONFIRMED") {
-      // 1️⃣ Apply unavailable item changes
+      // 1) Apply unavailable item changes
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
@@ -475,7 +503,7 @@ async function updateOrderStatus(req, res) {
         }
       }
 
-      // 2️⃣ Update final totals
+      // 2) Update final totals
       const updatePayload = {};
       if (final_total_amount != null)
         updatePayload.total_amount = Number(final_total_amount);
@@ -483,6 +511,10 @@ async function updateOrderStatus(req, res) {
         updatePayload.platform_fee = Number(final_platform_fee);
       if (final_delivery_fee != null)
         updatePayload.delivery_fee = Number(final_delivery_fee);
+      if (final_merchant_delivery_fee != null)
+        updatePayload.merchant_delivery_fee = Number(
+          final_merchant_delivery_fee
+        );
       if (final_discount_amount != null)
         updatePayload.discount_amount = Number(final_discount_amount);
 
@@ -490,13 +522,13 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      // 3️⃣ Handle estimated arrival minutes
+      // 3) Handle estimated arrival minutes
       if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
       }
     }
 
-    // 3️⃣ Update order status + reason
+    // Update order status + reason
     const affected = await Order.updateStatus(
       order_id,
       normalized,
@@ -506,14 +538,14 @@ async function updateOrderStatus(req, res) {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // 4️⃣ Business IDs
+    // Business IDs
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // 5️⃣ Capture payment (if CONFIRMED)
+    // Capture payment (if CONFIRMED)
     let captureInfo = null;
     if (normalized === "CONFIRMED") {
       try {
@@ -530,7 +562,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 6️⃣ Broadcast status
+    // Broadcast status
     broadcastOrderStatusToMany({
       order_id,
       user_id,
@@ -538,7 +570,7 @@ async function updateOrderStatus(req, res) {
       status: normalized,
     });
 
-    // 7️⃣ Completed merchant notifications
+    // Completed merchant notifications
     if (normalized === "COMPLETED") {
       for (const business_id of business_ids) {
         await insertAndEmitNotification({
@@ -552,7 +584,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // 8️⃣ Notify user of status
+    // Notify user of status
     await Order.addUserOrderStatusNotification({
       user_id,
       order_id,
@@ -560,7 +592,7 @@ async function updateOrderStatus(req, res) {
       reason,
     });
 
-    // 9️⃣ Notify unavailable item changes
+    // Notify unavailable item changes
     if (
       normalized === "CONFIRMED" &&
       changes &&
@@ -575,7 +607,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // 🔟 Wallet deduction notification (user share only)
+    // Wallet deduction notification (user share only)
     if (
       captureInfo &&
       captureInfo.captured &&
@@ -586,7 +618,7 @@ async function updateOrderStatus(req, res) {
         user_id: captureInfo.user_id,
         order_id,
         order_amount: captureInfo.order_amount,
-        platform_fee: captureInfo.platform_fee_user, // ✅ user share only
+        platform_fee: captureInfo.platform_fee_user,
         method: payMethod,
       });
     }

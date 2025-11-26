@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS orders (
 
   delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0,   -- total delivery fee for the order
   platform_fee DECIMAL(10,2) NOT NULL DEFAULT 0,   -- total platform fee for the order
-
+  merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL, -- delivery cost borne by merchant (for free delivery cases)
   payment_method ENUM('COD','WALLET','CARD') NOT NULL,
   delivery_address VARCHAR(500) NOT NULL,
   note_for_restaurant VARCHAR(500),

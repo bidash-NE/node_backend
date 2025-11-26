@@ -353,16 +353,16 @@ async function captureExists(order_id, capture_type, conn = null) {
 }
 
 /**
- * ✅ NEW compute split:
+ * computeBusinessSplit
  * - delivery_fee is order-level, allocated proportionally by subtotal share
  * - platform_fee is order-level, allocated proportionally by (subtotal+delivery_share)
- * - still returns PRIMARY business split because capture supports only one merchant wallet
+ * - merchant_delivery_fee is NOT used here; it’s just stored for later (driver payout)
  */
 async function computeBusinessSplit(order_id, conn = null) {
   const dbh = conn || db;
 
   const [[order]] = await dbh.query(
-    `SELECT order_id,total_amount,platform_fee,delivery_fee
+    `SELECT order_id,total_amount,platform_fee,delivery_fee,merchant_delivery_fee
        FROM orders WHERE order_id = ? LIMIT 1`,
     [order_id]
   );
@@ -468,6 +468,7 @@ async function recordWalletTransfer(
  * - Customer pays: (items + delivery) + 50% platform fee
  * - Merchant pays: 50% platform fee from their wallet
  * - Admin receives: 100% platform fee
+ * - merchant_delivery_fee is not touched here; used later for driver payout
  */
 async function captureOrderFunds(order_id) {
   const conn = await db.getConnection();
@@ -535,7 +536,7 @@ async function captureOrderFunds(order_id) {
       }
     }
 
-    // 1️⃣ BASE ORDER AMOUNT: USER → MERCHANT
+    // 1) BASE ORDER AMOUNT: USER → MERCHANT
     const tOrder = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
@@ -544,7 +545,7 @@ async function captureOrderFunds(order_id) {
       note: `Order base (items+delivery) for ${order_id}`,
     });
 
-    // 2️⃣ USER 50% PLATFORM FEE: USER → ADMIN
+    // 2) USER 50% PLATFORM FEE: USER → ADMIN
     let tUserFee = null;
     if (userFee > 0) {
       tUserFee = await recordWalletTransfer(conn, {
@@ -556,7 +557,7 @@ async function captureOrderFunds(order_id) {
       });
     }
 
-    // 3️⃣ MERCHANT 50% PLATFORM FEE: MERCHANT → ADMIN
+    // 3) MERCHANT 50% PLATFORM FEE: MERCHANT → ADMIN
     let tMerchFee = null;
     if (merchFee > 0) {
       tMerchFee = await recordWalletTransfer(conn, {
@@ -604,6 +605,7 @@ async function captureOrderFunds(order_id) {
  * - Customer pays cash for items+delivery.
  * - User wallet: 50% platform fee → Admin.
  * - Merchant wallet: 50% platform fee → Admin.
+ * - merchant_delivery_fee is separate (used later).
  */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
@@ -835,6 +837,10 @@ const Order = {
       discount_amount: orderData.discount_amount,
       delivery_fee: orderData.delivery_fee ?? 0,
       platform_fee: orderData.platform_fee ?? 0,
+      merchant_delivery_fee:
+        orderData.merchant_delivery_fee !== undefined
+          ? orderData.merchant_delivery_fee
+          : null,
       payment_method: orderData.payment_method,
       delivery_address:
         orderData.delivery_address &&
@@ -863,8 +869,8 @@ const Order = {
         quantity: item.quantity,
         price: item.price,
         subtotal: item.subtotal,
-        platform_fee: 0, // ✅ always 0 per-item
-        delivery_fee: 0, // ✅ always 0 per-item
+        platform_fee: 0, // per-item stays 0
+        delivery_fee: 0, // per-item stays 0
       });
     }
     return order_id;
@@ -907,6 +913,7 @@ const Order = {
         o.discount_amount,
         o.delivery_fee,
         o.platform_fee,
+        o.merchant_delivery_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
@@ -960,6 +967,7 @@ const Order = {
         o.discount_amount,
         o.delivery_fee,
         o.platform_fee,
+        o.merchant_delivery_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
@@ -1033,6 +1041,7 @@ const Order = {
         discount_amount: o.discount_amount,
         delivery_fee: o.delivery_fee,
         platform_fee: o.platform_fee,
+        merchant_delivery_fee: o.merchant_delivery_fee,
         payment_method: o.payment_method,
         delivery_address: parseDeliveryAddress(o.delivery_address),
         note_for_restaurant: o.note_for_restaurant,
@@ -1070,6 +1079,7 @@ const Order = {
         o.discount_amount,
         o.delivery_fee,
         o.platform_fee,
+        o.merchant_delivery_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
@@ -1114,6 +1124,7 @@ const Order = {
             discount_amount: o.discount_amount,
             delivery_fee: o.delivery_fee,
             platform_fee: o.platform_fee,
+            merchant_delivery_fee: o.merchant_delivery_fee,
             payment_method: o.payment_method,
             delivery_address: parseDeliveryAddress(o.delivery_address),
             note_for_restaurant: o.note_for_restaurant,
@@ -1143,6 +1154,7 @@ const Order = {
         o.discount_amount,
         o.delivery_fee,
         o.platform_fee,
+        o.merchant_delivery_fee,
         o.payment_method,
         o.delivery_address,
         o.note_for_restaurant,
@@ -1204,8 +1216,12 @@ const Order = {
             (s, it) => s + Number(it.subtotal || 0),
             0
           ),
-          delivery_fee: Number(o.delivery_fee || 0), // ✅ order-level
-          platform_fee: Number(o.platform_fee || 0), // ✅ order-level
+          delivery_fee: Number(o.delivery_fee || 0), // order-level user delivery fee
+          merchant_delivery_fee:
+            o.merchant_delivery_fee !== null
+              ? Number(o.merchant_delivery_fee)
+              : null, // merchant-side delivery fee (for free-delivery scenario)
+          platform_fee: Number(o.platform_fee || 0),
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
         },
