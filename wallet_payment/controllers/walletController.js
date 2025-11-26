@@ -707,6 +707,55 @@ async function userTransfer(req, res) {
   }
 }
 
+// controllers/walletController.js
+// ... existing requires & helpers above
+
+/* ---------- GET USER_NAME BY WALLET_ID ---------- */
+async function getUserNameByWalletId(req, res) {
+  try {
+    const { wallet_id } = req.params;
+
+    if (!wallet_id || typeof wallet_id !== "string") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid wallet_id." });
+    }
+
+    // Use existing model helper: supports NET... or numeric id
+    const wallet = await getWallet({ key: wallet_id });
+    if (!wallet) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Wallet not found." });
+    }
+
+    const [rows] = await db.query(
+      "SELECT user_id, user_name FROM users WHERE user_id = ?",
+      [wallet.user_id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found for this wallet.",
+      });
+    }
+
+    const user = rows[0];
+
+    return res.json({
+      success: true,
+      data: {
+        user_id: user.user_id,
+        user_name: user.user_name,
+      },
+    });
+  } catch (e) {
+    console.error("Error in getUserNameByWalletId:", e);
+    res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 module.exports = {
   create,
   getAll,
@@ -721,4 +770,5 @@ module.exports = {
   forgotTPinVerify,
   userTransfer,
   checkTPinByUserId, // <-- exported new function
+  getUserNameByWalletId, // <-- exported new function
 };

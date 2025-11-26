@@ -8,6 +8,10 @@ router.post("/create", ctrl.create);
 // READ (GET)
 router.get("/getall", ctrl.getAll);
 router.get("/getone/:wallet_id", ctrl.getByIdParam);
+
+// ✅ NEW: get user_name by wallet_id
+router.get("/:wallet_id/user-name", ctrl.getUserNameByWalletId);
+
 router.get("/:wallet_id", ctrl.getByIdParam);
 router.get("/getbyuser/:user_id", ctrl.getByUserId);
 
@@ -35,6 +39,5 @@ router.post("/:wallet_id/forgot-tpin/verify", ctrl.forgotTPinVerify);
 router.post("/transfer", ctrl.userTransfer);
 
 router.get("/:user_id/has-tpin", ctrl.checkTPinByUserId);
-
 
 module.exports = router;
