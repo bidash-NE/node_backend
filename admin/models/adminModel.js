@@ -31,7 +31,7 @@ async function logAdmin(conn, actorUserId, adminName, activity) {
 
 // ===== existing + updated queries =====
 
-// ✅ Users (role='user') + wallet_id
+// ✅ Users (role='user') + wallet_id + points
 async function fetchUsersByRole() {
   const sql = `
     SELECT 
@@ -43,6 +43,7 @@ async function fetchUsersByRole() {
       u.is_active,
       u.role,
       u.profile_image,
+      u.points,
       w.wallet_id
     FROM users u
     LEFT JOIN wallets w ON w.user_id = u.user_id
@@ -53,7 +54,7 @@ async function fetchUsersByRole() {
   return rows;
 }
 
-// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating
+// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating + points
 async function fetchDrivers() {
   const userQuery = `
     SELECT 
@@ -65,6 +66,7 @@ async function fetchDrivers() {
       u.is_active,
       u.role,
       u.profile_image,
+      u.points,
       w.wallet_id
     FROM users u
     LEFT JOIN wallets w ON w.user_id = u.user_id
@@ -123,6 +125,7 @@ async function fetchDrivers() {
         role: user.role,
         profile_image: user.profile_image || null,
         wallet_id: user.wallet_id || null,
+        points: Number(user.points ?? 0),
         driver_id,
         license_number,
         vehicles,
@@ -134,7 +137,7 @@ async function fetchDrivers() {
   return detailedDrivers;
 }
 
-// ✅ Admins (role in 'admin','superadmin') + wallet_id
+// ✅ Admins (role in 'admin','superadmin') + wallet_id + points
 async function fetchAdmins() {
   const sql = `
     SELECT 
@@ -145,6 +148,7 @@ async function fetchAdmins() {
       u.is_active,
       u.role,
       u.profile_image,
+      u.points,
       w.wallet_id
     FROM users u
     LEFT JOIN wallets w ON w.user_id = u.user_id
@@ -155,7 +159,7 @@ async function fetchAdmins() {
   return rows;
 }
 
-// ✅ Merchants with business details + wallet_id + average_rating
+// ✅ Merchants with business details + wallet_id + average_rating + points
 // (uses business_logo as profile_image fallback)
 async function fetchMerchantsWithBusiness() {
   const sql = `
@@ -168,6 +172,7 @@ async function fetchMerchantsWithBusiness() {
       u.is_active,
       u.role,
       COALESCE(u.profile_image, mbd.business_logo) AS profile_image,
+      u.points,
       w.wallet_id,
       mbd.business_id,
       mbd.business_name,

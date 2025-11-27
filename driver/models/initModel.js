@@ -4,25 +4,30 @@ const tables = [
   {
     name: "users",
     sql: `
-      CREATE TABLE users (
-      user_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      user_name VARCHAR(50) NOT NULL,
-      email VARCHAR(100) UNIQUE NOT NULL,
-      phone VARCHAR(20) UNIQUE NOT NULL,
-      cid VARCHAR(11) UNIQUE,
-      password_hash VARCHAR(255) NOT NULL,
-      role VARCHAR(20) NOT NULL DEFAULT 'user',
-      profile_image VARCHAR(255) NOT NULL DEFAULT '/uploads/profiles/default.png',  
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      is_verified TINYINT(1) DEFAULT 0,
-      is_active TINYINT(1) DEFAULT 1,
-      last_login TIMESTAMP NULL,
-      INDEX (email),
-      INDEX (phone),
-      INDEX (is_active),
-      INDEX (role)
-    )  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+     CREATE TABLE users (
+  user_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_name VARCHAR(50) NOT NULL,
+  email VARCHAR(100) UNIQUE NOT NULL,
+  phone VARCHAR(20) UNIQUE NOT NULL,
+  cid VARCHAR(11) UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'user',
+
+  -- ⭐ New points column
+  points BIGINT UNSIGNED NOT NULL DEFAULT 0,
+
+  profile_image VARCHAR(255) NOT NULL DEFAULT '/uploads/profiles/default.png',  
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  is_verified TINYINT(1) DEFAULT 0,
+  is_active TINYINT(1) DEFAULT 1,
+  last_login TIMESTAMP NULL,
+  INDEX (email),
+  INDEX (phone),
+  INDEX (is_active),
+  INDEX (role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
     `,
   },
 
