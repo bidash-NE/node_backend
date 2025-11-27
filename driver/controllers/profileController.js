@@ -8,8 +8,19 @@ exports.getProfile = async (req, res) => {
   try {
     const userId = req.params.user_id;
     const [rows] = await db.query(
-      `SELECT user_id, user_name, email, phone, role, profile_image, is_verified, is_active, last_login 
-       FROM users WHERE user_id = ?`,
+      `SELECT 
+         user_id, 
+         user_name, 
+         email, 
+         phone, 
+         role, 
+         profile_image, 
+         is_verified, 
+         is_active, 
+         last_login,
+         points              -- ⭐ include points here
+       FROM users 
+       WHERE user_id = ?`,
       [userId]
     );
 
@@ -24,7 +35,6 @@ exports.getProfile = async (req, res) => {
   }
 };
 
-// UPDATE profile
 // UPDATE profile
 exports.updateProfile = async (req, res) => {
   try {
