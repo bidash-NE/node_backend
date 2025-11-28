@@ -462,6 +462,8 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
+    let pointsAwardInfo = null;
+
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -623,6 +625,15 @@ async function updateOrderStatus(req, res) {
       });
     }
 
+    // Award points when order is COMPLETED (only on first transition into COMPLETED)
+    if (normalized === "COMPLETED" && current !== "COMPLETED") {
+      try {
+        pointsAwardInfo = await Order.awardPointsForCompletedOrder(order_id);
+      } catch (e) {
+        console.error("[POINTS AWARD ERROR]", e);
+      }
+    }
+
     if (normalized === "CANCELLED") {
       return res.json({
         success: true,
@@ -636,6 +647,10 @@ async function updateOrderStatus(req, res) {
       estimated_arrivial_time_applied:
         normalized === "CONFIRMED" && estimated_minutes
           ? `${estimated_minutes} min`
+          : null,
+      points_awarded:
+        pointsAwardInfo && pointsAwardInfo.awarded
+          ? pointsAwardInfo.points_awarded
           : null,
     });
   } catch (err) {

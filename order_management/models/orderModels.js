@@ -324,6 +324,160 @@ async function addUserWalletDebitNotificationInternal(
   });
 }
 
+/* ================= POINT SYSTEM HELPERS (USERS) ================= */
+
+/**
+ * Fetch single active point rule:
+ *  - min_amount_per_point  (e.g. 100)
+ *  - point_to_award        (e.g. 1)
+ */
+async function getActivePointRule(conn = null) {
+  const dbh = conn || db;
+  const [rows] = await dbh.query(
+    `
+    SELECT point_id, min_amount_per_point, point_to_award, is_active
+      FROM point_system
+     WHERE is_active = 1
+     ORDER BY created_at DESC
+     LIMIT 1
+  `
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Check if points have already been awarded for an order
+ * by looking for an existing notification of type 'points_awarded'
+ * with data.order_id = :order_id
+ */
+async function hasPointsAwardNotification(order_id, conn = null) {
+  const dbh = conn || db;
+  const [rows] = await dbh.query(
+    `
+    SELECT id
+      FROM notifications
+     WHERE type = 'points_awarded'
+       AND JSON_EXTRACT(data, '$.order_id') = ?
+     LIMIT 1
+  `,
+    [order_id]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Award points to the user for a COMPLETED order:
+ *  - Uses active point_system rule
+ *  - Points = floor(total_amount / min_amount_per_point) * point_to_award
+ *  - Updates users.points
+ *  - Inserts notification (type = 'points_awarded')
+ */
+async function awardPointsForCompletedOrder(order_id) {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // 1) Fetch order and ensure COMPLETED
+    const [[order]] = await conn.query(
+      `
+      SELECT user_id, total_amount, status
+        FROM orders
+       WHERE order_id = ?
+       LIMIT 1
+    `,
+      [order_id]
+    );
+
+    if (!order) {
+      await conn.rollback();
+      return { awarded: false, reason: "order_not_found" };
+    }
+
+    const status = String(order.status || "").toUpperCase();
+    if (status !== "COMPLETED") {
+      await conn.rollback();
+      return { awarded: false, reason: "not_completed" };
+    }
+
+    // 2) Ensure no duplicate awarding
+    const already = await hasPointsAwardNotification(order_id, conn);
+    if (already) {
+      await conn.rollback();
+      return { awarded: false, reason: "already_awarded" };
+    }
+
+    // 3) Fetch active rule
+    const rule = await getActivePointRule(conn);
+    if (!rule) {
+      await conn.rollback();
+      return { awarded: false, reason: "no_active_rule" };
+    }
+
+    const totalAmount = Number(order.total_amount || 0);
+    const minAmount = Number(rule.min_amount_per_point || 0);
+    const perPoint = Number(rule.point_to_award || 0);
+
+    if (!(totalAmount > 0 && minAmount > 0 && perPoint > 0)) {
+      await conn.rollback();
+      return { awarded: false, reason: "invalid_rule_or_amount" };
+    }
+
+    // 4) Compute points
+    const units = Math.floor(totalAmount / minAmount);
+    const points = units * perPoint;
+
+    if (points <= 0) {
+      await conn.rollback();
+      return { awarded: false, reason: "computed_zero" };
+    }
+
+    // 5) Update user points
+    await conn.query(`UPDATE users SET points = points + ? WHERE user_id = ?`, [
+      points,
+      order.user_id,
+    ]);
+
+    // 6) Insert notification into notifications table
+    const msg = `You earned ${points} points for order ${order_id} (Nu. ${fmtNu(
+      totalAmount
+    )} spent).`;
+
+    await insertUserNotification(conn, {
+      user_id: order.user_id,
+      type: "points_awarded",
+      title: "Points earned",
+      message: msg,
+      data: {
+        order_id,
+        points_awarded: points,
+        total_amount: totalAmount,
+        min_amount_per_point: minAmount,
+        point_to_award: perPoint,
+        rule_id: rule.point_id,
+      },
+      status: "unread",
+    });
+
+    await conn.commit();
+
+    return {
+      awarded: true,
+      points_awarded: points,
+      total_amount: totalAmount,
+      rule_id: rule.point_id,
+      min_amount_per_point: minAmount,
+      point_to_award: perPoint,
+    };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 /* ================= OTHER HELPERS ================= */
 function parseDeliveryAddress(val) {
   if (val == null) return null;
@@ -1341,6 +1495,9 @@ const Order = {
       conn
     );
   },
+
+  // NEW: points awarding API used by controller
+  awardPointsForCompletedOrder,
 };
 
 /* ====================== KPI COUNTS BY BUSINESS ====================== */
