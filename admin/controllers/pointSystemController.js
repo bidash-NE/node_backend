@@ -1,5 +1,88 @@
 // controllers/pointSystemController.js
 const pointSystemModel = require("../models/pointSystemModel");
+const pool = require("../config/db");
+
+/**
+ * Resolve admin identity (name + role label) from token and DB
+ */
+async function resolveAdminIdentity(req) {
+  const u = req.user || {};
+  const adminUserId = u.user_id || u.id || null;
+
+  let tokenRole = u.role || null;
+  let tokenName = u.admin_name || u.user_name || u.name || null;
+
+  let dbName = null;
+  let dbRole = null;
+
+  // If we have user_id but no name, fetch from DB
+  if (adminUserId && !tokenName) {
+    try {
+      const [rows] = await pool.query(
+        `SELECT user_name, role FROM users WHERE user_id = ? LIMIT 1`,
+        [adminUserId]
+      );
+      if (rows && rows.length > 0) {
+        dbName = rows[0].user_name || null;
+        dbRole = rows[0].role || null;
+      }
+    } catch (err) {
+      console.error("Failed to fetch admin info from users table:", err);
+    }
+  }
+
+  const finalName = tokenName || dbName || null;
+  const rawRole = tokenRole || dbRole || "";
+
+  // Normalize role label for logging
+  const normalized = String(rawRole).trim().toLowerCase(); // e.g. 'super admin'
+  const compact = normalized.replace(/[\s_]+/g, ""); // 'superadmin'
+
+  let roleLabel = "Admin";
+  if (compact === "superadmin") roleLabel = "Super admin";
+  else if (normalized === "admin") roleLabel = "Admin";
+
+  return {
+    adminUserId,
+    adminName: finalName,
+    roleLabel,
+  };
+}
+
+/**
+ * Log admin action into admin_logs with clear message
+ */
+async function logAdminAction(req, actionDescription) {
+  try {
+    const { adminUserId, adminName, roleLabel } = await resolveAdminIdentity(
+      req
+    );
+
+    let base;
+    if (adminName && adminUserId) {
+      base = `${roleLabel} "${adminName}" (id: ${adminUserId}) `;
+    } else if (adminName) {
+      base = `${roleLabel} "${adminName}" `;
+    } else if (adminUserId) {
+      base = `${roleLabel} (id: ${adminUserId}) `;
+    } else {
+      base = `${roleLabel} `;
+    }
+
+    const activity = `${base}${actionDescription}`;
+
+    await pool.query(
+      `
+      INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
+      VALUES (?, ?, ?, UTC_TIMESTAMP())
+      `,
+      [adminUserId || null, adminName || null, activity]
+    );
+  } catch (err) {
+    // Do not block main flow if logging fails
+    console.error("Failed to write admin log (point_system):", err);
+  }
+}
 
 // GET /point-system?onlyActive=true
 exports.getAllPointRules = async (req, res) => {
@@ -84,6 +167,12 @@ exports.createPointRule = async (req, res) => {
       is_active: is_active !== undefined ? !!is_active : true,
     });
 
+    // 🔐 log admin action with clear name & role
+    await logAdminAction(
+      req,
+      `created point rule (id: ${rule.point_id}, min_amount_per_point: ${rule.min_amount_per_point}, point_to_award: ${rule.point_to_award}, is_active: ${rule.is_active})`
+    );
+
     return res.status(201).json({
       success: true,
       message: "Point rule created successfully.",
@@ -141,6 +230,12 @@ exports.updatePointRule = async (req, res) => {
         .json({ success: false, message: "Point rule not found." });
     }
 
+    // 🔐 log admin action with clear name & role
+    await logAdminAction(
+      req,
+      `updated point rule (id: ${updated.point_id}, min_amount_per_point: ${updated.min_amount_per_point}, point_to_award: ${updated.point_to_award}, is_active: ${updated.is_active})`
+    );
+
     return res.status(200).json({
       success: true,
       message: "Point rule updated successfully.",
@@ -166,6 +261,9 @@ exports.deletePointRule = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Point rule not found." });
     }
+
+    // 🔐 log admin action with clear name & role
+    await logAdminAction(req, `deleted point rule (id: ${id})`);
 
     return res.status(200).json({
       success: true,
