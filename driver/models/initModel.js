@@ -5,29 +5,46 @@ const tables = [
     name: "users",
     sql: `
      CREATE TABLE users (
-  user_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  user_name VARCHAR(50) NOT NULL,
-  email VARCHAR(100) UNIQUE NOT NULL,
-  phone VARCHAR(20) UNIQUE NOT NULL,
-  cid VARCHAR(11) UNIQUE,
-  password_hash VARCHAR(255) NOT NULL,
-  role VARCHAR(20) NOT NULL DEFAULT 'user',
+      user_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_name VARCHAR(50) NOT NULL,
+      email VARCHAR(100) UNIQUE NOT NULL,
+      phone VARCHAR(20) UNIQUE NOT NULL,
+      cid VARCHAR(11) UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      role VARCHAR(20) NOT NULL DEFAULT 'user',
 
-  -- ⭐ New points column
-  points BIGINT UNSIGNED NOT NULL DEFAULT 0,
+      -- ⭐ Points column
+      points BIGINT UNSIGNED NOT NULL DEFAULT 0,
 
-  profile_image VARCHAR(255) NOT NULL DEFAULT '/uploads/profiles/default.png',  
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  is_verified TINYINT(1) DEFAULT 0,
-  is_active TINYINT(1) DEFAULT 1,
-  last_login TIMESTAMP NULL,
-  INDEX (email),
-  INDEX (phone),
-  INDEX (is_active),
-  INDEX (role)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      profile_image VARCHAR(255) NOT NULL DEFAULT '/uploads/profiles/default.png',  
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      is_verified TINYINT(1) DEFAULT 0,
+      is_active TINYINT(1) DEFAULT 1,
+      last_login TIMESTAMP NULL,
+      INDEX (email),
+      INDEX (phone),
+      INDEX (is_active),
+      INDEX (role)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `,
+  },
 
+  // ✅ Point system config for users
+  {
+    name: "point_system",
+    sql: `
+      CREATE TABLE point_system (
+        point_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        -- Minimum order amount required to earn one "unit" of points
+        min_amount_per_point DECIMAL(10,2) NOT NULL,
+        -- How many points to award per "unit"
+        point_to_award INT UNSIGNED NOT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX (is_active)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
 
@@ -108,7 +125,7 @@ const tables = [
         license_plate VARCHAR(255) COLLATE utf8mb4_bin UNIQUE NOT NULL,
         vehicle_type VARCHAR(255) NOT NULL,
         is_approved TINYINT(1) DEFAULT 0,
-          actual_capacity INT UNSIGNED DEFAULT 0,
+        actual_capacity INT UNSIGNED DEFAULT 0,
         available_capacity INT UNSIGNED DEFAULT 0,
         features SET('wifi', 'child_seat', 'pet_friendly', 'wheelchair', 'extra_luggage','ac'),
         insurance_expiry DATE,
@@ -151,7 +168,7 @@ const tables = [
   {
     name: "notification",
     sql: `
-     CREATE TABLE notifications (
+      CREATE TABLE notifications (
         id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
         user_id      BIGINT UNSIGNED NOT NULL,
         type         VARCHAR(50) NOT NULL,          
@@ -161,7 +178,7 @@ const tables = [
         status       ENUM('unread','read') DEFAULT 'unread',
         created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_user_id (user_id)
-    );
+      );
     `,
   },
 ];
