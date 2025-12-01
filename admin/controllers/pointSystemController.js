@@ -35,8 +35,8 @@ async function resolveAdminIdentity(req) {
   const rawRole = tokenRole || dbRole || "";
 
   // Normalize role label for logging
-  const normalized = String(rawRole).trim().toLowerCase(); // e.g. 'super admin'
-  const compact = normalized.replace(/[\s_]+/g, ""); // 'superadmin'
+  const normalized = String(rawRole).trim().toLowerCase();
+  const compact = normalized.replace(/[\s_]+/g, "");
 
   let roleLabel = "Admin";
   if (compact === "superadmin") roleLabel = "Super admin";
@@ -83,6 +83,10 @@ async function logAdminAction(req, actionDescription) {
     console.error("Failed to write admin log (point_system):", err);
   }
 }
+
+/* =======================================================
+   POINT EARNING RULES (existing)
+======================================================= */
 
 // GET /point-system?onlyActive=true
 exports.getAllPointRules = async (req, res) => {
@@ -136,7 +140,6 @@ exports.createPointRule = async (req, res) => {
   try {
     const { min_amount_per_point, point_to_award, is_active } = req.body || {};
 
-    // Basic validation
     if (min_amount_per_point === undefined || point_to_award === undefined) {
       return res.status(400).json({
         success: false,
@@ -167,10 +170,9 @@ exports.createPointRule = async (req, res) => {
       is_active: is_active !== undefined ? !!is_active : true,
     });
 
-    // 🔐 log admin action with clear name & role
     await logAdminAction(
       req,
-      `created point rule (id: ${rule.point_id}, min_amount_per_point: ${rule.min_amount_per_point}, point_to_award: ${rule.point_to_award}, is_active: ${rule.is_active})`
+      `created point earning rule (id: ${rule.point_id}, min_amount_per_point: ${rule.min_amount_per_point}, point_to_award: ${rule.point_to_award}, is_active: ${rule.is_active})`
     );
 
     return res.status(201).json({
@@ -230,10 +232,9 @@ exports.updatePointRule = async (req, res) => {
         .json({ success: false, message: "Point rule not found." });
     }
 
-    // 🔐 log admin action with clear name & role
     await logAdminAction(
       req,
-      `updated point rule (id: ${updated.point_id}, min_amount_per_point: ${updated.min_amount_per_point}, point_to_award: ${updated.point_to_award}, is_active: ${updated.is_active})`
+      `updated point earning rule (id: ${updated.point_id}, min_amount_per_point: ${updated.min_amount_per_point}, point_to_award: ${updated.point_to_award}, is_active: ${updated.is_active})`
     );
 
     return res.status(200).json({
@@ -262,8 +263,7 @@ exports.deletePointRule = async (req, res) => {
         .json({ success: false, message: "Point rule not found." });
     }
 
-    // 🔐 log admin action with clear name & role
-    await logAdminAction(req, `deleted point rule (id: ${id})`);
+    await logAdminAction(req, `deleted point earning rule (id: ${id})`);
 
     return res.status(200).json({
       success: true,
@@ -271,6 +271,192 @@ exports.deletePointRule = async (req, res) => {
     });
   } catch (err) {
     console.error("Error deleting point rule:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error.",
+    });
+  }
+};
+
+/* =======================================================
+   POINT CONVERSION RULE (single-row)
+======================================================= */
+
+// GET /point-conversion-rule
+exports.getPointConversionRule = async (req, res) => {
+  try {
+    const rule = await pointSystemModel.getPointConversionRule();
+    if (!rule) {
+      return res.status(404).json({
+        success: false,
+        message: "Point conversion rule not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: rule,
+    });
+  } catch (err) {
+    console.error("Error fetching point conversion rule:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error.",
+    });
+  }
+};
+
+// POST /point-conversion-rule
+// body: { points_required, wallet_amount, is_active? }
+exports.createPointConversionRule = async (req, res) => {
+  try {
+    const { points_required, wallet_amount, is_active } = req.body || {};
+
+    if (points_required === undefined || wallet_amount === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: "points_required and wallet_amount are required.",
+      });
+    }
+
+    // Check if rule already exists
+    const existing = await pointSystemModel.getPointConversionRule();
+    if (existing) {
+      await logAdminAction(
+        req,
+        `attempted to create point conversion rule but one already exists (points_required: ${existing.points_required}, wallet_amount: ${existing.wallet_amount}, is_active: ${existing.is_active})`
+      );
+
+      return res.status(400).json({
+        success: false,
+        error:
+          "Point conversion rule already exists. Please edit the existing rule or delete it before creating a new one.",
+      });
+    }
+
+    const points = Number(points_required);
+    const amount = Number(wallet_amount);
+
+    if (!Number.isInteger(points) || points <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "points_required must be a positive integer.",
+      });
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: "wallet_amount must be a positive number.",
+      });
+    }
+
+    const rule = await pointSystemModel.createPointConversionRule({
+      points_required: points,
+      wallet_amount: amount,
+      is_active: is_active !== undefined ? !!is_active : true,
+    });
+
+    await logAdminAction(
+      req,
+      `created point conversion rule (points_required: ${rule.points_required}, wallet_amount: ${rule.wallet_amount}, is_active: ${rule.is_active})`
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Point conversion rule created successfully.",
+      data: rule,
+    });
+  } catch (err) {
+    console.error("Error creating point conversion rule:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error.",
+    });
+  }
+};
+
+// PUT /point-conversion-rule
+// body: { points_required?, wallet_amount?, is_active? }
+exports.updatePointConversionRule = async (req, res) => {
+  try {
+    const { points_required, wallet_amount, is_active } = req.body || {};
+    const updates = {};
+
+    if (points_required !== undefined) {
+      const points = Number(points_required);
+      if (!Number.isInteger(points) || points <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "points_required must be a positive integer.",
+        });
+      }
+      updates.points_required = points;
+    }
+
+    if (wallet_amount !== undefined) {
+      const amount = Number(wallet_amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "wallet_amount must be a positive number.",
+        });
+      }
+      updates.wallet_amount = amount;
+    }
+
+    if (is_active !== undefined) {
+      updates.is_active = !!is_active;
+    }
+
+    const updated = await pointSystemModel.updatePointConversionRule(updates);
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: "Point conversion rule not found.",
+      });
+    }
+
+    await logAdminAction(
+      req,
+      `updated point conversion rule (points_required: ${updated.points_required}, wallet_amount: ${updated.wallet_amount}, is_active: ${updated.is_active})`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Point conversion rule updated successfully.",
+      data: updated,
+    });
+  } catch (err) {
+    console.error("Error updating point conversion rule:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error.",
+    });
+  }
+};
+
+// DELETE /point-conversion-rule
+exports.deletePointConversionRule = async (req, res) => {
+  try {
+    const deleted = await pointSystemModel.deletePointConversionRule();
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: "Point conversion rule not found.",
+      });
+    }
+
+    await logAdminAction(req, "deleted point conversion rule (id: 1)");
+
+    return res.status(200).json({
+      success: true,
+      message: "Point conversion rule deleted successfully.",
+    });
+  } catch (err) {
+    console.error("Error deleting point conversion rule:", err);
     return res.status(500).json({
       success: false,
       error: "Internal server error.",

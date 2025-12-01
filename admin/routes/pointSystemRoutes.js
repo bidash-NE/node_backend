@@ -5,6 +5,11 @@ const router = express.Router();
 const pointSystemController = require("../controllers/pointSystemController");
 const adminOnly = require("../middleware/adminAuth");
 
+/* =======================================================
+   POINT EARNING RULES (existing)
+   /api/admin/point-system...
+======================================================= */
+
 // List all rules (optionally only active)
 // GET /api/admin/point-system?onlyActive=true
 router.get("/point-system", adminOnly, pointSystemController.getAllPointRules);
@@ -36,6 +41,43 @@ router.delete(
   "/point-system/:id",
   adminOnly,
   pointSystemController.deletePointRule
+);
+
+/* =======================================================
+   POINT CONVERSION RULE (single-row config)
+   /api/admin/point-conversion-rule...
+======================================================= */
+
+// Get current conversion rule
+// GET /api/admin/point-conversion-rule
+router.get(
+  "/point-conversion-rule",
+  adminOnly,
+  pointSystemController.getPointConversionRule
+);
+
+// Create or replace conversion rule
+// POST /api/admin/point-conversion-rule
+router.post(
+  "/point-conversion-rule",
+  adminOnly,
+  pointSystemController.createPointConversionRule
+);
+
+// Update conversion rule (partial)
+// PUT /api/admin/point-conversion-rule
+router.put(
+  "/point-conversion-rule",
+  adminOnly,
+  pointSystemController.updatePointConversionRule
+);
+
+// Delete conversion rule
+// DELETE /api/admin/point-conversion-rule
+router.delete(
+  "/point-conversion-rule",
+  adminOnly,
+  pointSystemController.deletePointConversionRule
 );
 
 module.exports = router;
