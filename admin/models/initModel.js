@@ -113,14 +113,45 @@ async function initAdminLogsTable() {
       COLLATE=utf8mb4_unicode_ci;
   `;
 
+  /* =======================================================
+     5. POINT CONVERSION RULE TABLE
+        (single row: rule for points -> wallet amount)
+  ======================================================= */
+  const sqlPointConversionRule = `
+    CREATE TABLE IF NOT EXISTS point_conversion_rule (
+      -- Always a single row with id = 1
+      id               TINYINT UNSIGNED NOT NULL DEFAULT 1,
+
+      -- How many points are needed to convert
+      points_required  INT UNSIGNED NOT NULL,          -- e.g. 100 points
+
+      -- Wallet amount given for those points
+      wallet_amount    DECIMAL(10,2) NOT NULL,         -- e.g. 10.00
+
+      -- To toggle the rule on/off without deleting it
+      is_active        TINYINT(1) NOT NULL DEFAULT 1,
+
+      created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+
+      PRIMARY KEY (id),
+
+      CONSTRAINT chk_point_rule_single CHECK (id = 1)
+    ) ENGINE=InnoDB
+      DEFAULT CHARSET=utf8mb4
+      COLLATE=utf8mb4_unicode_ci;
+  `;
+
   try {
     await db.query(sqlLogs);
     await db.query(sqlCollaborators);
     await db.query(sqlNotifications);
     await db.query(sqlAppRatings);
+    await db.query(sqlPointConversionRule);
 
     console.log(
-      "✔️ admin_logs, admin_collaborators, system_notifications, and app_ratings tables are ready"
+      "✔️ admin_logs, admin_collaborators, system_notifications, app_ratings, and point_conversion_rule tables are ready"
     );
   } catch (err) {
     console.error("❌ Error initializing admin tables:", err);

@@ -987,13 +987,19 @@ const Order = {
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-      total_amount: orderData.total_amount,
-      discount_amount: orderData.discount_amount,
-      delivery_fee: orderData.delivery_fee ?? 0,
-      platform_fee: orderData.platform_fee ?? 0,
+      total_amount:
+        orderData.total_amount != null ? Number(orderData.total_amount) : 0,
+      discount_amount:
+        orderData.discount_amount != null
+          ? Number(orderData.discount_amount)
+          : 0,
+      delivery_fee:
+        orderData.delivery_fee != null ? Number(orderData.delivery_fee) : 0,
+      platform_fee:
+        orderData.platform_fee != null ? Number(orderData.platform_fee) : 0,
       merchant_delivery_fee:
-        orderData.merchant_delivery_fee !== undefined
-          ? orderData.merchant_delivery_fee
+        orderData.merchant_delivery_fee != null
+          ? Number(orderData.merchant_delivery_fee)
           : null,
       payment_method: orderData.payment_method,
       delivery_address:
@@ -1496,7 +1502,7 @@ const Order = {
     );
   },
 
-  // NEW: points awarding API used by controller
+  // points awarding API used by controller
   awardPointsForCompletedOrder,
 };
 

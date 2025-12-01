@@ -206,15 +206,17 @@ async function createOrder(req, res) {
       payload.delivery_address = JSON.stringify(payload.delivery_address);
     }
 
+    // normalize numeric fields on payload
+    payload.delivery_fee = deliveryFee;
+    payload.platform_fee = platformFee;
+    payload.merchant_delivery_fee = merchantDeliveryFee;
+
     const order_id = await Order.create({
       ...payload,
       items,
       if_unavailable,
       status: (payload.status || "PENDING").toUpperCase(),
       fulfillment_type: fulfillment,
-      delivery_fee: deliveryFee,
-      platform_fee: platformFee,
-      merchant_delivery_fee: merchantDeliveryFee,
     });
 
     // Group by business for notifications
@@ -429,7 +431,7 @@ async function updateOrderStatus(req, res) {
       final_platform_fee,
       final_discount_amount,
       final_delivery_fee,
-      final_merchant_delivery_fee, // NEW
+      final_merchant_delivery_fee,
       unavailable_changes,
       unavailableChanges,
       estimated_minutes,
