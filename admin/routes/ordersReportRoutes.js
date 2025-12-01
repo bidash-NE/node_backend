@@ -4,12 +4,14 @@ const router = express.Router();
 const {
   getFoodOrdersReport,
   getMartOrdersReport,
+  getFoodMartRevenueReport,
 } = require("../controllers/ordersReportController");
 
-// Food report (owner_type = 'food')
+// Food / Mart ORDER reports (existing)
 router.get("/food-orders", getFoodOrdersReport);
-
-// Mart report (owner_type = 'mart')
 router.get("/mart-orders", getMartOrdersReport);
+
+// NEW: combined Food + Mart revenue report
+router.get("/food-mart-revenue", getFoodMartRevenueReport);
 
 module.exports = router;

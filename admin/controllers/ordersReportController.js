@@ -36,6 +36,8 @@ function parseQuery(req) {
   };
 }
 
+/* ---------------- existing ORDER reports ---------------- */
+
 exports.getFoodOrdersReport = async (req, res) => {
   try {
     const args = parseQuery(req);
@@ -61,5 +63,20 @@ exports.getMartOrdersReport = async (req, res) => {
   } catch (err) {
     console.error("[getMartOrdersReport] Error:", err);
     res.status(500).json({ error: "Failed to fetch mart orders report" });
+  }
+};
+
+/* ---------------- new FOOD + MART REVENUE report ---------------- */
+
+exports.getFoodMartRevenueReport = async (req, res) => {
+  try {
+    const args = parseQuery(req);
+    const rows = await Reports.fetchFoodMartRevenueReport(args);
+    res.json({ count: rows.length, data: rows });
+  } catch (err) {
+    console.error("[getFoodMartRevenueReport] Error:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch food & mart revenue report" });
   }
 };
