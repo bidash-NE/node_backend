@@ -34,7 +34,7 @@ exports.convertPointsToWallet = async (req, res) => {
     // {
     //   points_converted,
     //   wallet_amount,
-    //   transaction_ids,
+    //   transaction_id,   // ✅ only user-side ID
     //   journal_code,
     //   calculation: {...}
     // }
@@ -45,7 +45,7 @@ exports.convertPointsToWallet = async (req, res) => {
       data: {
         points_converted: result.points_converted,
         wallet_amount: result.wallet_amount,
-        transaction_ids: result.transaction_ids,
+        transaction_id: result.transaction_id, // ✅ single ID
         journal_code: result.journal_code,
         calculation: result.calculation,
       },

@@ -48,18 +48,9 @@ async function getActiveConversionRule() {
  *  {
  *    points_converted,
  *    wallet_amount,
- *    transaction_ids,
+ *    transaction_id,   // ✅ user-side tx id
  *    journal_code,
- *    calculation: {
- *      points_required,
- *      wallet_per_block,
- *      points_requested,
- *      total_points_before,
- *      total_points_after,
- *      amount_per_point,
- *      formula,
- *      leftover_points
- *    }
+ *    calculation: {...}
  *  }
  */
 async function convertPointsToWallet(userId, pointsToConvert) {
@@ -137,7 +128,7 @@ async function convertPointsToWallet(userId, pointsToConvert) {
     }
 
     // 3. Compute wallet amount using formula
-    const amountPerPoint = walletPerBlock / pointsRequired; // e.g. 100/500 = 0.2
+    const amountPerPoint = walletPerBlock / pointsRequired; // e.g. 10/500 = 0.02
     const walletAmountRaw = pointsToConvert * amountPerPoint;
     const walletAmount = Number(walletAmountRaw.toFixed(2)); // 2-decimal
 
@@ -272,7 +263,7 @@ async function convertPointsToWallet(userId, pointsToConvert) {
     }
 
     const adminTxnId = transactionIds[0];
-    const userTxnId = transactionIds[1] || transactionIds[0];
+    const userTxnId = transactionIds[1] || transactionIds[0]; // ✅ user-side id we will return
 
     /* -----------------------
        9. Insert wallet_transactions
@@ -335,8 +326,6 @@ async function convertPointsToWallet(userId, pointsToConvert) {
 
     /* -----------------------
        10. Insert notification for user
-       notifications table:
-       (user_id, type, title, message, data, status, created_at)
     ------------------------*/
     const notifyTitle = "Transaction successful";
     const notifyMessage = `Your account has been credited with Nu. ${walletAmount.toFixed(
@@ -349,7 +338,8 @@ async function convertPointsToWallet(userId, pointsToConvert) {
       amount: walletAmount,
       source: "points_conversion",
       journal_code: journalCode,
-      transaction_ids: transactionIds,
+      transaction_id: userTxnId,       // ✅ only user tx id here
+      admin_transaction_id: adminTxnId,
       points_converted: pointsToConvert,
     };
 
@@ -384,7 +374,7 @@ async function convertPointsToWallet(userId, pointsToConvert) {
     return {
       points_converted: pointsToConvert,
       wallet_amount: walletAmount,
-      transaction_ids: transactionIds,
+      transaction_id: userTxnId,   // ✅ only user-side transaction id
       journal_code: journalCode,
       calculation: {
         points_required: pointsRequired,
