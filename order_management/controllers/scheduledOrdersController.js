@@ -1,4 +1,5 @@
 // controllers/scheduledOrdersController.js
+const db = require("../config/db");
 
 const {
   addScheduledOrder,
@@ -169,6 +170,33 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
 
     const list = await getScheduledOrdersByBusiness(businessId);
 
+    if (!list.length) {
+      return res.json({
+        success: true,
+        data: [],
+      });
+    }
+
+    // collect distinct user_ids
+    const userIds = [
+      ...new Set(
+        list
+          .map((j) => j.user_id)
+          .filter((uid) => uid != null && !Number.isNaN(Number(uid)))
+      ),
+    ];
+
+    // fetch user_name for those user_ids
+    let userNameById = new Map();
+    if (userIds.length) {
+      const placeholders = userIds.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT user_id, user_name FROM users WHERE user_id IN (${placeholders})`,
+        userIds
+      );
+      userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
+    }
+
     // Sort by scheduled_at DESC (latest first)
     const sorted = [...list].sort((a, b) => {
       const da = new Date(a.scheduled_at).getTime();
@@ -209,9 +237,13 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
         // ignore formatting errors
       }
 
+      const uid = Number(job.user_id);
+      const name = userNameById.get(uid) || null; // 👈 keep as `name`
+
       return {
         job_id: job.job_id,
         user_id: job.user_id,
+        name, // 👈 exposed as `name`
         business_id: job.business_id ?? null,
         scheduled_at: scheduledLocal,
         created_at: createdLocal,
@@ -231,7 +263,6 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   }
 };
-
 /**
  * DELETE /api/scheduled-orders/:user_id/:jobId
  */
