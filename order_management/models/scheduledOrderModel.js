@@ -1,3 +1,4 @@
+// models/scheduledOrderModel.js
 const redis = require("../config/redis");
 
 const ZSET_KEY = "scheduled_orders";
@@ -19,6 +20,46 @@ function buildLockKey(jobId) {
   return `scheduled_order_lock:${jobId}`;
 }
 
+/**
+ * Try to extract a numeric business_id from a job-like object.
+ * This supports:
+ * - top-level business_id
+ * - order_payload.business_id / businessId / business.business_id
+ * - first item business_id / businessId / business.business_id
+ */
+function extractBusinessIdFromJob(data) {
+  if (!data) return null;
+
+  // 1) Top-level
+  let rawBizId =
+    data.business_id ??
+    data.order_payload?.business_id ??
+    data.order_payload?.businessId ??
+    data.order_payload?.business?.business_id ??
+    null;
+
+  // 2) Fallback: from items[0]
+  if (
+    rawBizId == null &&
+    data.order_payload &&
+    Array.isArray(data.order_payload.items) &&
+    data.order_payload.items.length
+  ) {
+    const first = data.order_payload.items[0] || {};
+    rawBizId =
+      first.business_id ??
+      first.businessId ??
+      first.business?.business_id ??
+      null;
+  }
+
+  if (rawBizId == null) return null;
+
+  const n = Number(rawBizId);
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
 /* ===================== Core Model ===================== */
 
 async function addScheduledOrder(scheduledAt, orderPayload, userId) {
@@ -30,17 +71,21 @@ async function addScheduledOrder(scheduledAt, orderPayload, userId) {
     scheduledAt instanceof Date ? scheduledAt : new Date(scheduledAt);
   const score = scheduledDate.getTime();
 
+  // 🔹 derive business_id once using the same helper (works from payload + items)
+  const tmpData = { order_payload: orderPayload };
+  const businessId = extractBusinessIdFromJob(tmpData);
+
   const payload = {
     job_id: jobId,
     user_id: userId,
+    business_id: businessId ?? null, // ✅ stored at top level
 
-    // 👇 keep EXACT same string that came from JSON (Bhutan time)
+    // keep EXACT same string that came from JSON if string; otherwise ISO
     scheduled_at:
       typeof scheduledAt === "string"
         ? scheduledAt
         : scheduledDate.toISOString(),
 
-    // if you want Bhutan time string for created_at, you can change this too
     created_at: now.toISOString(),
 
     order_payload: {
@@ -88,9 +133,62 @@ async function getScheduledOrdersByUser(userId) {
     try {
       const data = JSON.parse(raw);
       if (data.user_id === userId) {
+        // For old jobs, we can enrich business_id on the fly as well
+        if (!data.business_id) {
+          const bizId = extractBusinessIdFromJob(data);
+          if (bizId != null) data.business_id = bizId;
+        }
         list.push(data);
       }
-    } catch {}
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  list.sort(
+    (a, b) =>
+      new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
+  );
+
+  return list;
+}
+
+async function getScheduledOrdersByBusiness(businessId) {
+  const nowTs = Date.now();
+
+  const jobIds = await redis.zrangebyscore(
+    ZSET_KEY,
+    nowTs,
+    "+inf",
+    "LIMIT",
+    0,
+    100
+  );
+
+  if (!jobIds.length) return [];
+
+  const pipeline = redis.pipeline();
+  jobIds.forEach((jobId) => {
+    pipeline.get(buildJobKey(jobId));
+  });
+
+  const results = await pipeline.exec();
+
+  const list = [];
+  for (const [err, raw] of results) {
+    if (err || !raw) continue;
+    try {
+      const data = JSON.parse(raw);
+
+      const jobBizId = extractBusinessIdFromJob(data);
+      if (jobBizId === businessId) {
+        // also normalize business_id at top level for the response
+        data.business_id = jobBizId;
+        list.push(data);
+      }
+    } catch {
+      // ignore parse errors
+    }
   }
 
   list.sort(
@@ -130,6 +228,7 @@ async function cancelScheduledOrderForUser(jobId, userId) {
 module.exports = {
   addScheduledOrder,
   getScheduledOrdersByUser,
+  getScheduledOrdersByBusiness,
   cancelScheduledOrderForUser,
   ZSET_KEY,
   buildJobKey,

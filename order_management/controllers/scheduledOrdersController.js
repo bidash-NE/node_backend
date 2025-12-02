@@ -4,6 +4,7 @@ const {
   addScheduledOrder,
   getScheduledOrdersByUser,
   cancelScheduledOrderForUser,
+  getScheduledOrdersByBusiness,
 } = require("../models/scheduledOrderModel");
 
 const BHUTAN_TZ = "Asia/Thimphu";
@@ -130,6 +131,7 @@ exports.listScheduledOrders = async (req, res) => {
       return {
         job_id: job.job_id,
         user_id: job.user_id,
+        business_id: job.business_id ?? null,
         scheduled_at: scheduledLocal, // Bhutan time
         created_at: createdLocal, // Bhutan time
         order_payload: job.order_payload,
@@ -142,6 +144,87 @@ exports.listScheduledOrders = async (req, res) => {
     });
   } catch (err) {
     console.error("listScheduledOrders error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+    });
+  }
+};
+
+/**
+ * GET /api/scheduled-orders/business/:businessId
+ * Return:
+ * - scheduled_at and created_at in Bhutan time
+ * - items sorted from latest scheduled to earliest
+ */
+exports.listScheduledOrdersByBusiness = async (req, res) => {
+  try {
+    const businessId = Number(req.params.businessId);
+    if (!businessId) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid businessId parameter.",
+      });
+    }
+
+    const list = await getScheduledOrdersByBusiness(businessId);
+
+    // Sort by scheduled_at DESC (latest first)
+    const sorted = [...list].sort((a, b) => {
+      const da = new Date(a.scheduled_at).getTime();
+      const db = new Date(b.scheduled_at).getTime();
+      return db - da; // descending
+    });
+
+    const mapped = sorted.map((job) => {
+      let scheduledLocal = null;
+      let createdLocal = null;
+
+      try {
+        if (job.scheduled_at) {
+          const d = new Date(job.scheduled_at);
+          scheduledLocal = d.toLocaleString("en-GB", {
+            timeZone: BHUTAN_TZ,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          });
+        }
+        if (job.created_at) {
+          const d = new Date(job.created_at);
+          createdLocal = d.toLocaleString("en-GB", {
+            timeZone: BHUTAN_TZ,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          });
+        }
+      } catch (e) {
+        // ignore formatting errors
+      }
+
+      return {
+        job_id: job.job_id,
+        user_id: job.user_id,
+        business_id: job.business_id ?? null,
+        scheduled_at: scheduledLocal,
+        created_at: createdLocal,
+        order_payload: job.order_payload,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: mapped,
+    });
+  } catch (err) {
+    console.error("listScheduledOrdersByBusiness error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
