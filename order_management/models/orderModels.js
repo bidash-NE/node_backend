@@ -1149,8 +1149,26 @@ const Order = {
     if (!orders.length) return [];
 
     const orderIds = orders.map((o) => o.order_id);
+
+    // IMPORTANT CHANGE:
+    // Do NOT fetch per-item delivery_fee and platform_fee here.
     const [items] = await db.query(
-      `SELECT * FROM order_items WHERE business_id = ? AND order_id IN (?) ORDER BY order_id, business_id, menu_id`,
+      `
+      SELECT 
+        item_id,
+        order_id,
+        business_id,
+        business_name,
+        menu_id,
+        item_name,
+        item_image,
+        quantity,
+        price,
+        subtotal
+      FROM order_items
+      WHERE business_id = ? AND order_id IN (?)
+      ORDER BY order_id, business_id, menu_id
+      `,
       [business_id, orderIds]
     );
 
@@ -1211,7 +1229,7 @@ const Order = {
         priority: o.priority,
         created_at: o.created_at,
         updated_at: o.updated_at,
-        items: its,
+        items: its, // these items no longer have delivery_fee / platform_fee fields
         totals_for_business: {
           business_share: Number(shareSubtotal.toFixed(2)),
           fee_share: Number(fee_share.toFixed(2)),
