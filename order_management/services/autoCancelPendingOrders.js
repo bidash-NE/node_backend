@@ -53,7 +53,7 @@ function startPendingOrderAutoCanceller() {
       // Find PENDING orders older than timeoutMinutes
       const [rows] = await db.query(
         `
-        SELECT o.order_id, o.user_id, o.created_at
+        SELECT o.order_id, o.created_at
           FROM orders o
          WHERE o.status = 'PENDING'
            AND o.created_at <= (NOW() - INTERVAL ? MINUTE)
@@ -67,20 +67,23 @@ function startPendingOrderAutoCanceller() {
 
       for (const r of rows) {
         const order_id = String(r.order_id);
-        const user_id = Number(r.user_id);
 
         const reason = `Auto-cancelled: store did not accept within ${timeoutMinutes} minutes.`;
 
-        // Cancel only if it's STILL PENDING (prevents race conditions)
-        const cancelled = await Order.cancelIfStillPending(order_id, reason);
-        if (!cancelled) continue;
+        // ✅ IMPORTANT:
+        // cancelAndArchiveOrder() returns business_ids BEFORE delete
+        const out = await Order.cancelAndArchiveOrder(order_id, {
+          cancelled_by: "SYSTEM",
+          reason,
+          onlyIfStatus: "PENDING", // prevents race condition
+        });
 
-        // Get business ids for this order (for merchant notifications + broadcast)
-        const [bizRows] = await db.query(
-          `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
-          [order_id]
-        );
-        const business_ids = bizRows.map((x) => x.business_id);
+        if (!out || !out.ok) continue;
+
+        const user_id = Number(out.user_id);
+        const business_ids = Array.isArray(out.business_ids)
+          ? out.business_ids
+          : [];
 
         // Broadcast to user + merchants
         broadcastOrderStatusToMany({

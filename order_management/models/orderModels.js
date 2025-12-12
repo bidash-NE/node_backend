@@ -3,13 +3,10 @@ const db = require("../config/db");
 const axios = require("axios");
 
 /* ======================= CONFIG ======================= */
-const ADMIN_WALLET_ID = "NET000001"; // admin wallet
-
-// 50/50 platform fee sharing
+const ADMIN_WALLET_ID = "NET000001";
 const PLATFORM_USER_SHARE = 0.5;
 const PLATFORM_MERCHANT_SHARE = 0.5;
 
-// External ID services (all POST)
 const IDS_BOTH_URL =
   process.env.WALLET_IDS_BOTH_URL || "https://grab.newedge.bt/wallet/ids/both";
 const IDS_TXN_URL =
@@ -495,9 +492,6 @@ async function captureExists(order_id, capture_type, conn = null) {
   return !!row;
 }
 
-/**
- * computeBusinessSplit
- */
 async function computeBusinessSplit(order_id, conn = null) {
   const dbh = conn || db;
 
@@ -558,9 +552,6 @@ async function computeBusinessSplit(order_id, conn = null) {
   };
 }
 
-/**
- * Record wallet transfer as DR & CR rows.
- */
 async function recordWalletTransfer(
   conn,
   { fromId, toId, amount, order_id, note = null }
@@ -934,119 +925,250 @@ async function applyUnavailableItemChanges(order_id, changes) {
   }
 }
 
-/* ================= AUTO-CANCEL (PENDING > 1hr) ================= */
+/* ================= CANCELLED ARCHIVE HELPERS ================= */
+async function tableExists(table, conn = null) {
+  const dbh = conn || db;
+  const [rows] = await dbh.query(
+    `
+    SELECT 1
+      FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+     LIMIT 1
+    `,
+    [table]
+  );
+  return rows.length > 0;
+}
+
+async function getTableColumns(table, conn = null) {
+  const dbh = conn || db;
+  const [rows] = await dbh.query(
+    `
+    SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+    `,
+    [table]
+  );
+  return new Set(rows.map((r) => String(r.COLUMN_NAME)));
+}
+
+function pick(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+}
+
+async function archiveCancelledOrderInternal(
+  conn,
+  order_id,
+  { cancelled_by = "SYSTEM", reason = "" } = {}
+) {
+  const hasCancelledOrders = await tableExists("cancelled_orders", conn);
+  const hasCancelledItems = await tableExists("cancelled_order_items", conn);
+  if (!hasCancelledOrders && !hasCancelledItems) return { archived: false };
+
+  const [[order]] = await conn.query(
+    `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
+    [order_id]
+  );
+  if (!order) return { archived: false };
+
+  const [items] = await conn.query(
+    `SELECT * FROM order_items WHERE order_id = ?`,
+    [order_id]
+  );
+
+  if (hasCancelledOrders) {
+    const cols = await getTableColumns("cancelled_orders", conn);
+
+    const row = {};
+    if (cols.has("order_id")) row.order_id = order.order_id;
+    if (cols.has("user_id")) row.user_id = order.user_id;
+    if (cols.has("service_type")) row.service_type = order.service_type || null;
+    if (cols.has("payment_method")) row.payment_method = order.payment_method;
+    if (cols.has("total_amount")) row.total_amount = order.total_amount;
+    if (cols.has("discount_amount"))
+      row.discount_amount = order.discount_amount;
+    if (cols.has("delivery_fee")) row.delivery_fee = order.delivery_fee;
+    if (cols.has("merchant_delivery_fee"))
+      row.merchant_delivery_fee = order.merchant_delivery_fee;
+    if (cols.has("platform_fee")) row.platform_fee = order.platform_fee;
+    if (cols.has("delivery_address"))
+      row.delivery_address = order.delivery_address;
+    if (cols.has("note_for_restaurant"))
+      row.note_for_restaurant = order.note_for_restaurant;
+    if (cols.has("if_unavailable")) row.if_unavailable = order.if_unavailable;
+    if (cols.has("status")) row.status = "CANCELLED";
+
+    const r =
+      String(reason || "").trim() ||
+      String(order.status_reason || "").trim() ||
+      "";
+
+    if (cols.has("status_reason")) row.status_reason = r;
+    if (cols.has("cancel_reason")) row.cancel_reason = r;
+    if (cols.has("cancelled_reason")) row.cancelled_reason = r;
+    if (cols.has("reason")) row.reason = r;
+
+    if (cols.has("cancelled_by")) row.cancelled_by = cancelled_by;
+    if (cols.has("cancelled_at")) row.cancelled_at = new Date();
+
+    if (cols.has("created_at") && pick(row, "created_at") === undefined)
+      row.created_at = new Date();
+    if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
+      row.updated_at = new Date();
+
+    if (Object.keys(row).length) {
+      const fields = Object.keys(row);
+      const placeholders = fields.map(() => "?").join(", ");
+      const values = fields.map((k) => row[k]);
+
+      await conn.query(
+        `INSERT IGNORE INTO cancelled_orders (${fields.join(
+          ", "
+        )}) VALUES (${placeholders})`,
+        values
+      );
+    }
+  }
+
+  if (hasCancelledItems && items.length) {
+    const cols = await getTableColumns("cancelled_order_items", conn);
+
+    for (const it of items) {
+      const row = {};
+      if (cols.has("order_id")) row.order_id = it.order_id;
+      if (cols.has("business_id")) row.business_id = it.business_id;
+      if (cols.has("business_name")) row.business_name = it.business_name;
+      if (cols.has("menu_id")) row.menu_id = it.menu_id;
+      if (cols.has("item_name")) row.item_name = it.item_name;
+      if (cols.has("item_image")) row.item_image = it.item_image;
+      if (cols.has("quantity")) row.quantity = it.quantity;
+      if (cols.has("price")) row.price = it.price;
+      if (cols.has("subtotal")) row.subtotal = it.subtotal;
+
+      if (cols.has("cancelled_by")) row.cancelled_by = cancelled_by;
+      if (cols.has("reason")) row.reason = String(reason || "").trim() || null;
+      if (cols.has("cancelled_at")) row.cancelled_at = new Date();
+
+      if (cols.has("created_at") && pick(row, "created_at") === undefined)
+        row.created_at = new Date();
+      if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
+        row.updated_at = new Date();
+
+      if (Object.keys(row).length) {
+        const fields = Object.keys(row);
+        const placeholders = fields.map(() => "?").join(", ");
+        const values = fields.map((k) => row[k]);
+        await conn.query(
+          `INSERT IGNORE INTO cancelled_order_items (${fields.join(
+            ", "
+          )}) VALUES (${placeholders})`,
+          values
+        );
+      }
+    }
+  }
+
+  return { archived: true };
+}
+
+async function deleteOrderFromMainTablesInternal(conn, order_id) {
+  await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [order_id]);
+  await conn.query(`DELETE FROM orders WHERE order_id = ?`, [order_id]);
+}
+
 /**
- * Cancels PENDING orders older than N minutes (default 60).
- * - Updates orders.status/status_reason
- * - Inserts merchant notifications into order_notification (DB only)
- * - Inserts user notification into notifications table
- *
- * Call this from a timer in server.js (example):
- *   setInterval(() => Order.autoCancelExpiredPendingOrders({ olderThanMinutes: 60 }), 60*1000);
+ * ✅ FINAL: cancel + archive + delete (used by BOTH auto & user)
  */
-async function autoCancelExpiredPendingOrders({
-  olderThanMinutes = 60,
-  limit = 200,
-} = {}) {
-  const mins = Number(olderThanMinutes);
-  const lim = Number(limit);
-
-  if (!Number.isFinite(mins) || mins <= 0)
-    return { cancelled: 0, order_ids: [] };
-  if (!Number.isFinite(lim) || lim <= 0) return { cancelled: 0, order_ids: [] };
-
+async function cancelAndArchiveOrder(
+  order_id,
+  {
+    cancelled_by = "SYSTEM",
+    reason = "",
+    cancel_reason = "",
+    onlyIfStatus = null, // "PENDING" or null
+    expectedUserId = null, // user cancel verify
+  } = {}
+) {
   const conn = await db.getConnection();
-  const cancelledIds = [];
-
   try {
     await conn.beginTransaction();
 
-    const [[reasonSupported]] = await conn.query(
-      `
-      SELECT COUNT(*) AS c
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME='orders'
-        AND COLUMN_NAME='status_reason'
-      `
-    );
-    const hasReason = Number(reasonSupported?.c || 0) > 0;
-
-    const [rows] = await conn.query(
-      `
-      SELECT order_id, user_id
-      FROM orders
-      WHERE status = 'PENDING'
-        AND created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-      ORDER BY created_at ASC
-      LIMIT ?
-      FOR UPDATE
-      `,
-      [mins, lim]
+    const [[row]] = await conn.query(
+      `SELECT order_id, user_id, status FROM orders WHERE order_id = ? FOR UPDATE`,
+      [order_id]
     );
 
-    if (!rows.length) {
-      await conn.commit();
-      return { cancelled: 0, order_ids: [] };
+    if (!row) {
+      await conn.rollback();
+      return { ok: false, code: "NOT_FOUND" };
     }
 
-    const reason = `Auto-cancelled: store did not accept within ${mins} minutes.`;
+    const user_id = Number(row.user_id);
+    const current = String(row.status || "").toUpperCase();
 
-    for (const r of rows) {
-      const order_id = r.order_id;
-      const user_id = r.user_id;
+    if (expectedUserId != null && Number(expectedUserId) !== user_id) {
+      await conn.rollback();
+      return { ok: false, code: "FORBIDDEN" };
+    }
 
-      if (hasReason) {
-        await conn.query(
-          `UPDATE orders SET status='CANCELLED', status_reason=?, updated_at=NOW() WHERE order_id=? AND status='PENDING'`,
-          [reason, order_id]
-        );
-      } else {
-        await conn.query(
-          `UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE order_id=? AND status='PENDING'`,
-          [order_id]
-        );
-      }
+    if (onlyIfStatus && current !== String(onlyIfStatus).toUpperCase()) {
+      await conn.rollback();
+      return { ok: false, code: "SKIPPED", current_status: current };
+    }
 
-      const [bizRows] = await conn.query(
-        `SELECT DISTINCT business_id FROM order_items WHERE order_id=?`,
+    // business ids BEFORE deletion
+    const [bizRows] = await conn.query(
+      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+      [order_id]
+    );
+    const business_ids = bizRows.map((x) => x.business_id);
+
+    const finalReason = String(reason || cancel_reason || "").trim();
+
+    // mark cancelled (so archive copies status_reason if present)
+    const [rr] = await conn.query(
+      `
+      SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME='orders'
+         AND COLUMN_NAME='status_reason'
+       LIMIT 1
+      `
+    );
+    const hasReason = rr.length > 0;
+
+    if (hasReason) {
+      await conn.query(
+        `UPDATE orders
+            SET status='CANCELLED',
+                status_reason=?,
+                updated_at=NOW()
+          WHERE order_id=?`,
+        [finalReason, order_id]
+      );
+    } else {
+      await conn.query(
+        `UPDATE orders
+            SET status='CANCELLED',
+                updated_at=NOW()
+          WHERE order_id=?`,
         [order_id]
       );
-      const business_ids = bizRows.map((x) => x.business_id);
-
-      // merchant DB notifications (no socket emit here)
-      for (const business_id of business_ids) {
-        await conn.query(
-          `
-          INSERT INTO order_notification
-            (notification_id, order_id, business_id, user_id, type, title, body_preview, is_read, created_at)
-          VALUES
-            (UUID(), ?, ?, ?, 'order:status', ?, ?, 0, NOW())
-          `,
-          [
-            order_id,
-            business_id,
-            user_id,
-            `Order #${order_id} CANCELLED`,
-            `System cancelled: not accepted within ${mins} minutes.`,
-          ]
-        );
-      }
-
-      // user notification
-      await addUserOrderStatusNotificationInternal(
-        user_id,
-        order_id,
-        "CANCELLED",
-        reason,
-        conn
-      );
-
-      cancelledIds.push(order_id);
     }
 
+    // archive then delete
+    await archiveCancelledOrderInternal(conn, order_id, {
+      cancelled_by,
+      reason: finalReason,
+    });
+
+    await deleteOrderFromMainTablesInternal(conn, order_id);
+
     await conn.commit();
-    return { cancelled: cancelledIds.length, order_ids: cancelledIds };
+    return { ok: true, user_id, business_ids, status: "CANCELLED" };
   } catch (e) {
     try {
       await conn.rollback();
@@ -1057,17 +1179,57 @@ async function autoCancelExpiredPendingOrders({
   }
 }
 
+async function cancelIfStillPending(order_id, reason) {
+  const out = await cancelAndArchiveOrder(order_id, {
+    cancelled_by: "SYSTEM",
+    reason,
+    onlyIfStatus: "PENDING",
+  });
+  return !!out?.ok;
+}
+
 /* ================= PUBLIC MODEL API ================= */
 const Order = {
+  // wallets
   getBuyerWalletByUserId,
   getAdminWallet,
 
+  // capture
   captureOrderFunds,
   captureOrderCODFee,
 
+  // changes
   applyUnavailableItemChanges,
 
-  autoCancelExpiredPendingOrders, // ✅ NEW exported
+  // cancellation (FINAL)
+  cancelAndArchiveOrder,
+  cancelIfStillPending,
+
+  // optional direct archive (fixed signature)
+  archiveCancelledOrder: async (order_id, opts = {}) => {
+    const {
+      cancelled_by = "SYSTEM",
+      reason = "",
+      cancel_reason = "",
+    } = opts || {};
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      const out = await archiveCancelledOrderInternal(conn, order_id, {
+        cancelled_by,
+        reason: String(reason || cancel_reason || "").trim(),
+      });
+      await conn.commit();
+      return out;
+    } catch (e) {
+      try {
+        await conn.rollback();
+      } catch {}
+      throw e;
+    } finally {
+      conn.release();
+    }
+  },
 
   peekNewOrderId: () => generateOrderId(),
 
@@ -1082,8 +1244,6 @@ const Order = {
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
-
-      // ✅ NEW
       service_type: serviceType,
 
       total_amount:
@@ -1168,188 +1328,12 @@ const Order = {
     return orders;
   },
 
-  findById: async (order_id) => {
-    const hasReason = await ensureStatusReasonSupport();
-    const hasService = await ensureServiceTypeSupport();
-
-    const [orders] = await db.query(
-      `
-      SELECT
-        o.order_id,
-        o.user_id,
-        ${hasService ? "o.service_type," : "NULL AS service_type,"}
-        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
-        o.total_amount,
-        o.discount_amount,
-        o.delivery_fee,
-        o.platform_fee,
-        o.merchant_delivery_fee,
-        o.payment_method,
-        o.delivery_address,
-        o.note_for_restaurant,
-        o.if_unavailable,
-        o.estimated_arrivial_time,
-        o.status,
-        o.fulfillment_type,
-        o.priority,
-        o.created_at,
-        o.updated_at
-      FROM orders o
-      WHERE o.order_id = ?
-      `,
-      [order_id]
-    );
-    if (!orders.length) return null;
-
-    const [items] = await db.query(
-      `SELECT * FROM order_items WHERE order_id = ? ORDER BY order_id, business_id, menu_id`,
-      [order_id]
-    );
-    orders[0].items = items;
-    orders[0].delivery_address = parseDeliveryAddress(
-      orders[0].delivery_address
-    );
-    orders[0].if_unavailable = orders[0].if_unavailable || null;
-    return orders[0];
-  },
-
   findByBusinessId: async (business_id) => {
     const [items] = await db.query(
       `SELECT * FROM order_items WHERE business_id = ? ORDER BY order_id DESC, menu_id ASC`,
       [business_id]
     );
     return items;
-  },
-
-  findByBusinessGroupedByUser: async (business_id) => {
-    const hasReason = await ensureStatusReasonSupport();
-    const hasService = await ensureServiceTypeSupport();
-
-    const [orders] = await db.query(
-      `
-      SELECT DISTINCT
-        o.order_id,
-        o.user_id,
-        u.user_name AS user_name,
-        u.email     AS user_email,
-        u.phone     AS user_phone,
-        ${hasService ? "o.service_type," : "NULL AS service_type,"}
-        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
-        o.total_amount,
-        o.discount_amount,
-        o.delivery_fee,
-        o.platform_fee,
-        o.merchant_delivery_fee,
-        o.payment_method,
-        o.delivery_address,
-        o.note_for_restaurant,
-        o.if_unavailable,
-        o.estimated_arrivial_time,
-        o.status,
-        o.fulfillment_type,
-        o.priority,
-        o.created_at,
-        o.updated_at
-      FROM orders o
-      INNER JOIN order_items oi ON oi.order_id = o.order_id AND oi.business_id = ?
-      LEFT  JOIN users u ON u.user_id = o.user_id
-      ORDER BY o.created_at DESC
-      `,
-      [business_id]
-    );
-
-    if (!orders.length) return [];
-
-    const orderIds = orders.map((o) => o.order_id);
-
-    const [items] = await db.query(
-      `
-      SELECT 
-        item_id,
-        order_id,
-        business_id,
-        business_name,
-        menu_id,
-        item_name,
-        item_image,
-        quantity,
-        price,
-        subtotal
-      FROM order_items
-      WHERE business_id = ? AND order_id IN (?)
-      ORDER BY order_id, business_id, menu_id
-      `,
-      [business_id, orderIds]
-    );
-
-    const itemsByOrder = new Map();
-    for (const it of items) {
-      if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
-      itemsByOrder.get(it.order_id).push(it);
-    }
-
-    const grouped = new Map();
-    for (const o of orders) {
-      const its = itemsByOrder.get(o.order_id) || [];
-
-      const shareSubtotal = its.reduce(
-        (s, it) => s + Number(it.subtotal || 0),
-        0
-      );
-
-      const baseTotal =
-        its.length > 0
-          ? Number(o.total_amount || 0) - Number(o.platform_fee || 0)
-          : 0;
-
-      const fee_share =
-        baseTotal > 0 && shareSubtotal > 0
-          ? Number(o.platform_fee || 0) * (shareSubtotal / baseTotal)
-          : 0;
-
-      const net_for_business = shareSubtotal - fee_share;
-
-      if (!grouped.has(o.user_id)) {
-        grouped.set(o.user_id, {
-          user: {
-            user_id: o.user_id,
-            name: o.user_name || null,
-            email: o.user_email || null,
-            phone: o.user_phone || null,
-          },
-          orders: [],
-        });
-      }
-
-      grouped.get(o.user_id).orders.push({
-        order_id: o.order_id,
-        service_type: o.service_type || null,
-        status: o.status,
-        status_reason: o.status_reason || null,
-        total_amount: o.total_amount,
-        discount_amount: o.discount_amount,
-        delivery_fee: o.delivery_fee,
-        platform_fee: o.platform_fee,
-        merchant_delivery_fee: o.merchant_delivery_fee,
-        payment_method: o.payment_method,
-        delivery_address: parseDeliveryAddress(o.delivery_address),
-        note_for_restaurant: o.note_for_restaurant,
-        if_unavailable: o.if_unavailable || null,
-        estimated_arrivial_time: o.estimated_arrivial_time || null,
-        fulfillment_type: o.fulfillment_type,
-        priority: o.priority,
-        created_at: o.created_at,
-        updated_at: o.updated_at,
-        items: its,
-        totals_for_business: {
-          business_share: Number(shareSubtotal.toFixed(2)),
-          fee_share: Number(fee_share.toFixed(2)),
-          net_for_business: Number(net_for_business.toFixed(2)),
-        },
-      });
-    }
-
-    return Array.from(grouped.values());
   },
 
   findByOrderIdGrouped: async (order_id) => {
@@ -1433,9 +1417,16 @@ const Order = {
     ];
   },
 
-  findByUserIdForApp: async (user_id) => {
+  findByUserIdForApp: async (user_id, service_type = null) => {
     const hasReason = await ensureStatusReasonSupport();
     const hasService = await ensureServiceTypeSupport();
+
+    const params = [user_id];
+    let serviceWhere = "";
+    if (service_type && hasService) {
+      serviceWhere = " AND o.service_type = ? ";
+      params.push(service_type);
+    }
 
     const [orders] = await db.query(
       `
@@ -1461,9 +1452,10 @@ const Order = {
         o.updated_at
       FROM orders o
       WHERE o.user_id = ?
+      ${serviceWhere}
       ORDER BY o.created_at DESC
       `,
-      [user_id]
+      params
     );
     if (!orders.length) return [];
 
@@ -1539,11 +1531,8 @@ const Order = {
     if (orderData.status)
       orderData.status = String(orderData.status).toUpperCase();
 
-    // optional: normalize service_type if someone updates it
     if (Object.prototype.hasOwnProperty.call(orderData, "service_type")) {
-      if (orderData.service_type == null) {
-        // keep as-is; DB is NOT NULL so this would fail if set to null
-      } else {
+      if (orderData.service_type != null) {
         const st = String(orderData.service_type || "").toUpperCase();
         if (!["FOOD", "MART"].includes(st)) {
           throw new Error("Invalid service_type (must be FOOD or MART)");
@@ -1699,7 +1688,6 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
   );
 
   result.order_declined_today = Number(todayRows[0]?.declined_today || 0);
-
   return result;
 };
 

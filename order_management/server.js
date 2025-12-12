@@ -11,6 +11,7 @@ const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
 const usernotificationRoutes = require("./routes/userNotificationRoutes");
 const scheduledOrdersRoutes = require("./routes/scheduledOrdersRoutes");
+const cancelledOrderRoutes = require("./routes/cancelledOrderRoutes");
 const {
   startScheduledOrderProcessor,
 } = require("./services/scheduledOrderProcessor");
@@ -37,6 +38,7 @@ app.use("/", orderRoutes);
 app.use("/api/order_notification", notificationRoutes);
 app.use("/api/user_notification", usernotificationRoutes);
 app.use("/api", scheduledOrdersRoutes);
+app.use("/cancelled", cancelledOrderRoutes);
 
 // single HTTP server for REST + Socket.IO
 const server = http.createServer(app);
