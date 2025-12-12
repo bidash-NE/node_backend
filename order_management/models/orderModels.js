@@ -38,6 +38,19 @@ async function ensureStatusReasonSupport() {
   return _hasStatusReason;
 }
 
+let _hasServiceType = null;
+async function ensureServiceTypeSupport() {
+  if (_hasServiceType !== null) return _hasServiceType;
+  const [rows] = await db.query(`
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'orders'
+       AND COLUMN_NAME = 'service_type'
+  `);
+  _hasServiceType = rows.length > 0;
+  return _hasServiceType;
+}
+
 const fmtNu = (n) => Number(n || 0).toFixed(2);
 
 /* ================= HTTP & ID SERVICE HELPERS ================= */
@@ -129,7 +142,7 @@ async function getMerchantWalletByBusinessId(business_id, conn = null) {
     SELECT w.id, w.wallet_id, w.user_id, w.amount, w.status
       FROM merchant_business_details m
       JOIN wallets w ON w.user_id = m.user_id
-     WHERE m.business_id = ? 
+     WHERE m.business_id = ?
      LIMIT 1
     `,
     [business_id]
@@ -292,7 +305,7 @@ async function addUserWalletDebitNotificationInternal(
   const dbh = conn || db;
   const payMethod = String(method || "").toUpperCase();
   const orderAmt = Number(order_amount || 0);
-  const feeAmt = Number(platform_fee || 0); // user share only
+  const feeAmt = Number(platform_fee || 0);
 
   if (!(orderAmt > 0 || feeAmt > 0)) return;
 
@@ -325,12 +338,6 @@ async function addUserWalletDebitNotificationInternal(
 }
 
 /* ================= POINT SYSTEM HELPERS (USERS) ================= */
-
-/**
- * Fetch single active point rule:
- *  - min_amount_per_point  (e.g. 100)
- *  - point_to_award        (e.g. 1)
- */
 async function getActivePointRule(conn = null) {
   const dbh = conn || db;
   const [rows] = await dbh.query(
@@ -345,11 +352,6 @@ async function getActivePointRule(conn = null) {
   return rows[0] || null;
 }
 
-/**
- * Check if points have already been awarded for an order
- * by looking for an existing notification of type 'points_awarded'
- * with data.order_id = :order_id
- */
 async function hasPointsAwardNotification(order_id, conn = null) {
   const dbh = conn || db;
   const [rows] = await dbh.query(
@@ -365,19 +367,11 @@ async function hasPointsAwardNotification(order_id, conn = null) {
   return rows.length > 0;
 }
 
-/**
- * Award points to the user for a COMPLETED order:
- *  - Uses active point_system rule
- *  - Points = floor(total_amount / min_amount_per_point) * point_to_award
- *  - Updates users.points
- *  - Inserts notification (type = 'points_awarded')
- */
 async function awardPointsForCompletedOrder(order_id) {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // 1) Fetch order and ensure COMPLETED
     const [[order]] = await conn.query(
       `
       SELECT user_id, total_amount, status
@@ -399,14 +393,12 @@ async function awardPointsForCompletedOrder(order_id) {
       return { awarded: false, reason: "not_completed" };
     }
 
-    // 2) Ensure no duplicate awarding
     const already = await hasPointsAwardNotification(order_id, conn);
     if (already) {
       await conn.rollback();
       return { awarded: false, reason: "already_awarded" };
     }
 
-    // 3) Fetch active rule
     const rule = await getActivePointRule(conn);
     if (!rule) {
       await conn.rollback();
@@ -422,7 +414,6 @@ async function awardPointsForCompletedOrder(order_id) {
       return { awarded: false, reason: "invalid_rule_or_amount" };
     }
 
-    // 4) Compute points
     const units = Math.floor(totalAmount / minAmount);
     const points = units * perPoint;
 
@@ -431,13 +422,11 @@ async function awardPointsForCompletedOrder(order_id) {
       return { awarded: false, reason: "computed_zero" };
     }
 
-    // 5) Update user points
     await conn.query(`UPDATE users SET points = points + ? WHERE user_id = ?`, [
       points,
       order.user_id,
     ]);
 
-    // 6) Insert notification into notifications table
     const msg = `You earned ${points} points for order ${order_id} (Nu. ${fmtNu(
       totalAmount
     )} spent).`;
@@ -508,9 +497,6 @@ async function captureExists(order_id, capture_type, conn = null) {
 
 /**
  * computeBusinessSplit
- * - delivery_fee is order-level, allocated proportionally by subtotal share
- * - platform_fee is order-level, allocated proportionally by (subtotal+delivery_share)
- * - merchant_delivery_fee is NOT used here; it’s just stored for later (driver payout)
  */
 async function computeBusinessSplit(order_id, conn = null) {
   const dbh = conn || db;
@@ -531,7 +517,6 @@ async function computeBusinessSplit(order_id, conn = null) {
   );
   if (!items.length) throw new Error("Order has no items");
 
-  // subtotal per business
   const byBiz = new Map();
   for (const it of items) {
     const part = Number(it.subtotal || 0);
@@ -545,7 +530,6 @@ async function computeBusinessSplit(order_id, conn = null) {
 
   const primarySub = byBiz.get(primaryBizId) || 0;
 
-  // allocate delivery proportionally
   const primaryDelivery =
     subtotalTotal > 0
       ? deliveryTotal * (primarySub / subtotalTotal)
@@ -557,13 +541,12 @@ async function computeBusinessSplit(order_id, conn = null) {
   if (byBiz.size === 1) {
     return {
       business_id: primaryBizId,
-      total_amount: Number(primaryBase.toFixed(2)), // items + delivery
-      platform_fee: feeTotal, // full fee for single merchant
+      total_amount: Number(primaryBase.toFixed(2)),
+      platform_fee: feeTotal,
       net_to_merchant: Number((primaryBase - feeTotal).toFixed(2)),
     };
   }
 
-  // multi-biz: fee share based on base share
   const primaryFeeShare =
     baseTotal > 0 ? feeTotal * (primaryBase / baseTotal) : 0;
 
@@ -617,13 +600,6 @@ async function recordWalletTransfer(
 }
 
 /* ================= PUBLIC CAPTURE APIS ================= */
-/**
- * WALLET orders:
- * - Customer pays: (items + delivery) + 50% platform fee
- * - Merchant pays: 50% platform fee from their wallet
- * - Admin receives: 100% platform fee
- * - merchant_delivery_fee is not touched here; used later for driver payout
- */
 async function captureOrderFunds(order_id) {
   const conn = await db.getConnection();
   try {
@@ -660,14 +636,13 @@ async function captureOrderFunds(order_id) {
     if (!merch) throw new Error("Merchant wallet missing");
     if (!admin) throw new Error("Admin wallet missing");
 
-    const baseToMerchant = Number(split.total_amount || 0); // items + delivery
+    const baseToMerchant = Number(split.total_amount || 0);
     const feeForPrimary = Number(split.platform_fee || 0);
 
     const userFee =
       feeForPrimary > 0 ? Number((feeForPrimary / 2).toFixed(2)) : 0;
     const merchFee = feeForPrimary - userFee;
 
-    // buyer must have base + userFee
     const needFromBuyer = baseToMerchant + userFee;
 
     const [[freshBuyer]] = await conn.query(
@@ -690,7 +665,6 @@ async function captureOrderFunds(order_id) {
       }
     }
 
-    // 1) BASE ORDER AMOUNT: USER → MERCHANT
     const tOrder = await recordWalletTransfer(conn, {
       fromId: buyer.wallet_id,
       toId: merch.wallet_id,
@@ -699,7 +673,6 @@ async function captureOrderFunds(order_id) {
       note: `Order base (items+delivery) for ${order_id}`,
     });
 
-    // 2) USER 50% PLATFORM FEE: USER → ADMIN
     let tUserFee = null;
     if (userFee > 0) {
       tUserFee = await recordWalletTransfer(conn, {
@@ -711,7 +684,6 @@ async function captureOrderFunds(order_id) {
       });
     }
 
-    // 3) MERCHANT 50% PLATFORM FEE: MERCHANT → ADMIN
     let tMerchFee = null;
     if (merchFee > 0) {
       tMerchFee = await recordWalletTransfer(conn, {
@@ -754,13 +726,6 @@ async function captureOrderFunds(order_id) {
   }
 }
 
-/**
- * COD orders:
- * - Customer pays cash for items+delivery.
- * - User wallet: 50% platform fee → Admin.
- * - Merchant wallet: 50% platform fee → Admin.
- * - merchant_delivery_fee is separate (used later).
- */
 async function captureOrderCODFee(order_id) {
   const conn = await db.getConnection();
   try {
@@ -869,7 +834,7 @@ async function captureOrderCODFee(order_id) {
       captured: true,
       user_id: order.user_id,
       order_amount: 0,
-      platform_fee_user: userFee, // user share only for notification
+      platform_fee_user: userFee,
     };
   } catch (e) {
     try {
@@ -969,6 +934,129 @@ async function applyUnavailableItemChanges(order_id, changes) {
   }
 }
 
+/* ================= AUTO-CANCEL (PENDING > 1hr) ================= */
+/**
+ * Cancels PENDING orders older than N minutes (default 60).
+ * - Updates orders.status/status_reason
+ * - Inserts merchant notifications into order_notification (DB only)
+ * - Inserts user notification into notifications table
+ *
+ * Call this from a timer in server.js (example):
+ *   setInterval(() => Order.autoCancelExpiredPendingOrders({ olderThanMinutes: 60 }), 60*1000);
+ */
+async function autoCancelExpiredPendingOrders({
+  olderThanMinutes = 60,
+  limit = 200,
+} = {}) {
+  const mins = Number(olderThanMinutes);
+  const lim = Number(limit);
+
+  if (!Number.isFinite(mins) || mins <= 0)
+    return { cancelled: 0, order_ids: [] };
+  if (!Number.isFinite(lim) || lim <= 0) return { cancelled: 0, order_ids: [] };
+
+  const conn = await db.getConnection();
+  const cancelledIds = [];
+
+  try {
+    await conn.beginTransaction();
+
+    const [[reasonSupported]] = await conn.query(
+      `
+      SELECT COUNT(*) AS c
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME='orders'
+        AND COLUMN_NAME='status_reason'
+      `
+    );
+    const hasReason = Number(reasonSupported?.c || 0) > 0;
+
+    const [rows] = await conn.query(
+      `
+      SELECT order_id, user_id
+      FROM orders
+      WHERE status = 'PENDING'
+        AND created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      ORDER BY created_at ASC
+      LIMIT ?
+      FOR UPDATE
+      `,
+      [mins, lim]
+    );
+
+    if (!rows.length) {
+      await conn.commit();
+      return { cancelled: 0, order_ids: [] };
+    }
+
+    const reason = `Auto-cancelled: store did not accept within ${mins} minutes.`;
+
+    for (const r of rows) {
+      const order_id = r.order_id;
+      const user_id = r.user_id;
+
+      if (hasReason) {
+        await conn.query(
+          `UPDATE orders SET status='CANCELLED', status_reason=?, updated_at=NOW() WHERE order_id=? AND status='PENDING'`,
+          [reason, order_id]
+        );
+      } else {
+        await conn.query(
+          `UPDATE orders SET status='CANCELLED', updated_at=NOW() WHERE order_id=? AND status='PENDING'`,
+          [order_id]
+        );
+      }
+
+      const [bizRows] = await conn.query(
+        `SELECT DISTINCT business_id FROM order_items WHERE order_id=?`,
+        [order_id]
+      );
+      const business_ids = bizRows.map((x) => x.business_id);
+
+      // merchant DB notifications (no socket emit here)
+      for (const business_id of business_ids) {
+        await conn.query(
+          `
+          INSERT INTO order_notification
+            (notification_id, order_id, business_id, user_id, type, title, body_preview, is_read, created_at)
+          VALUES
+            (UUID(), ?, ?, ?, 'order:status', ?, ?, 0, NOW())
+          `,
+          [
+            order_id,
+            business_id,
+            user_id,
+            `Order #${order_id} CANCELLED`,
+            `System cancelled: not accepted within ${mins} minutes.`,
+          ]
+        );
+      }
+
+      // user notification
+      await addUserOrderStatusNotificationInternal(
+        user_id,
+        order_id,
+        "CANCELLED",
+        reason,
+        conn
+      );
+
+      cancelledIds.push(order_id);
+    }
+
+    await conn.commit();
+    return { cancelled: cancelledIds.length, order_ids: cancelledIds };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 /* ================= PUBLIC MODEL API ================= */
 const Order = {
   getBuyerWalletByUserId,
@@ -979,14 +1067,25 @@ const Order = {
 
   applyUnavailableItemChanges,
 
+  autoCancelExpiredPendingOrders, // ✅ NEW exported
+
   peekNewOrderId: () => generateOrderId(),
 
   create: async (orderData) => {
     const order_id = generateOrderId();
 
+    const serviceType = String(orderData.service_type || "").toUpperCase();
+    if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
+      throw new Error("Invalid service_type (must be FOOD or MART)");
+    }
+
     await db.query(`INSERT INTO orders SET ?`, {
       order_id,
       user_id: orderData.user_id,
+
+      // ✅ NEW
+      service_type: serviceType,
+
       total_amount:
         orderData.total_amount != null ? Number(orderData.total_amount) : 0,
       discount_amount:
@@ -1029,17 +1128,26 @@ const Order = {
         quantity: item.quantity,
         price: item.price,
         subtotal: item.subtotal,
-        platform_fee: 0, // per-item stays 0
-        delivery_fee: 0, // per-item stays 0
+        platform_fee: 0,
+        delivery_fee: 0,
       });
     }
     return order_id;
   },
 
   findAll: async () => {
-    await ensureStatusReasonSupport();
+    const hasReason = await ensureStatusReasonSupport();
+    const hasService = await ensureServiceTypeSupport();
+
     const [orders] = await db.query(
-      `SELECT o.* FROM orders o ORDER BY o.created_at DESC`
+      `
+      SELECT
+        o.*,
+        ${hasReason ? "o.status_reason" : "NULL AS status_reason"},
+        ${hasService ? "o.service_type" : "NULL AS service_type"}
+      FROM orders o
+      ORDER BY o.created_at DESC
+      `
     );
     if (!orders.length) return [];
 
@@ -1062,12 +1170,14 @@ const Order = {
 
   findById: async (order_id) => {
     const hasReason = await ensureStatusReasonSupport();
+    const hasService = await ensureServiceTypeSupport();
 
     const [orders] = await db.query(
       `
       SELECT
         o.order_id,
         o.user_id,
+        ${hasService ? "o.service_type," : "NULL AS service_type,"}
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
@@ -1113,6 +1223,7 @@ const Order = {
 
   findByBusinessGroupedByUser: async (business_id) => {
     const hasReason = await ensureStatusReasonSupport();
+    const hasService = await ensureServiceTypeSupport();
 
     const [orders] = await db.query(
       `
@@ -1122,6 +1233,7 @@ const Order = {
         u.user_name AS user_name,
         u.email     AS user_email,
         u.phone     AS user_phone,
+        ${hasService ? "o.service_type," : "NULL AS service_type,"}
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
@@ -1150,8 +1262,6 @@ const Order = {
 
     const orderIds = orders.map((o) => o.order_id);
 
-    // IMPORTANT CHANGE:
-    // Do NOT fetch per-item delivery_fee and platform_fee here.
     const [items] = await db.query(
       `
       SELECT 
@@ -1192,7 +1302,6 @@ const Order = {
           ? Number(o.total_amount || 0) - Number(o.platform_fee || 0)
           : 0;
 
-      // business fee share proportional by subtotal
       const fee_share =
         baseTotal > 0 && shareSubtotal > 0
           ? Number(o.platform_fee || 0) * (shareSubtotal / baseTotal)
@@ -1211,8 +1320,10 @@ const Order = {
           orders: [],
         });
       }
+
       grouped.get(o.user_id).orders.push({
         order_id: o.order_id,
+        service_type: o.service_type || null,
         status: o.status,
         status_reason: o.status_reason || null,
         total_amount: o.total_amount,
@@ -1229,7 +1340,7 @@ const Order = {
         priority: o.priority,
         created_at: o.created_at,
         updated_at: o.updated_at,
-        items: its, // these items no longer have delivery_fee / platform_fee fields
+        items: its,
         totals_for_business: {
           business_share: Number(shareSubtotal.toFixed(2)),
           fee_share: Number(fee_share.toFixed(2)),
@@ -1243,6 +1354,7 @@ const Order = {
 
   findByOrderIdGrouped: async (order_id) => {
     const hasReason = await ensureStatusReasonSupport();
+    const hasService = await ensureServiceTypeSupport();
 
     const [orders] = await db.query(
       `
@@ -1252,6 +1364,7 @@ const Order = {
         u.user_name AS user_name,
         u.email     AS user_email,
         u.phone     AS user_phone,
+        ${hasService ? "o.service_type," : "NULL AS service_type,"}
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
@@ -1296,6 +1409,7 @@ const Order = {
         orders: [
           {
             order_id: o.order_id,
+            service_type: o.service_type || null,
             status: o.status,
             status_reason: o.status_reason || null,
             total_amount: o.total_amount,
@@ -1321,12 +1435,14 @@ const Order = {
 
   findByUserIdForApp: async (user_id) => {
     const hasReason = await ensureStatusReasonSupport();
+    const hasService = await ensureServiceTypeSupport();
 
     const [orders] = await db.query(
       `
       SELECT
         o.order_id,
         o.user_id,
+        ${hasService ? "o.service_type," : "NULL AS service_type,"}
         ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
         o.total_amount,
         o.discount_amount,
@@ -1375,6 +1491,7 @@ const Order = {
 
       result.push({
         order_id: o.order_id,
+        service_type: o.service_type || null,
         status: o.status,
         status_reason: o.status_reason || null,
         payment_method: o.payment_method,
@@ -1394,11 +1511,11 @@ const Order = {
             (s, it) => s + Number(it.subtotal || 0),
             0
           ),
-          delivery_fee: Number(o.delivery_fee || 0), // order-level user delivery fee
+          delivery_fee: Number(o.delivery_fee || 0),
           merchant_delivery_fee:
             o.merchant_delivery_fee !== null
               ? Number(o.merchant_delivery_fee)
-              : null, // merchant-side delivery fee (for free-delivery scenario)
+              : null,
           platform_fee: Number(o.platform_fee || 0),
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
@@ -1421,6 +1538,19 @@ const Order = {
     if (!orderData || !Object.keys(orderData).length) return 0;
     if (orderData.status)
       orderData.status = String(orderData.status).toUpperCase();
+
+    // optional: normalize service_type if someone updates it
+    if (Object.prototype.hasOwnProperty.call(orderData, "service_type")) {
+      if (orderData.service_type == null) {
+        // keep as-is; DB is NOT NULL so this would fail if set to null
+      } else {
+        const st = String(orderData.service_type || "").toUpperCase();
+        if (!["FOOD", "MART"].includes(st)) {
+          throw new Error("Invalid service_type (must be FOOD or MART)");
+        }
+        orderData.service_type = st;
+      }
+    }
 
     if (Object.prototype.hasOwnProperty.call(orderData, "delivery_address")) {
       if (
@@ -1520,7 +1650,6 @@ const Order = {
     );
   },
 
-  // points awarding API used by controller
   awardPointsForCompletedOrder,
 };
 

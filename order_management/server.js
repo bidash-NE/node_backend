@@ -10,11 +10,15 @@ const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
 const usernotificationRoutes = require("./routes/userNotificationRoutes");
-// app.js or server.js
 const scheduledOrdersRoutes = require("./routes/scheduledOrdersRoutes");
 const {
   startScheduledOrderProcessor,
 } = require("./services/scheduledOrderProcessor");
+
+// ✅ NEW: auto-cancel pending orders
+const {
+  startPendingOrderAutoCanceller,
+} = require("./services/autoCancelPendingOrders");
 
 dotenv.config();
 
@@ -42,6 +46,10 @@ const server = http.createServer(app);
     await initOrderManagementTable(); // create tables if missing
     await attachRealtime(server); // bind socket.io to this server
     await startScheduledOrderProcessor(); // start the background job processor
+
+    // ✅ start auto-cancel worker (PENDING > 60min => CANCELLED)
+    startPendingOrderAutoCanceller();
+
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () =>
       console.log(`🚀 Order service + Realtime listening on :${PORT}`)

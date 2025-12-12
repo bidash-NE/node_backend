@@ -37,6 +37,17 @@ async function createOrder(req, res) {
     // ---- Base validations ----
     if (!payload.user_id)
       return res.status(400).json({ message: "Missing user_id" });
+
+    // ✅ NEW: service_type validation
+    const serviceType = String(payload.service_type || "")
+      .trim()
+      .toUpperCase();
+    if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
+      return res.status(400).json({
+        message: "Invalid or missing service_type. Allowed: FOOD, MART",
+      });
+    }
+
     if (!items.length)
       return res.status(400).json({ message: "Missing items" });
     if (payload.total_amount == null)
@@ -60,7 +71,7 @@ async function createOrder(req, res) {
       return res.status(400).json({ message: "Invalid platform_fee" });
     }
 
-    // NEW: merchant_delivery_fee (for "free delivery" – user not paying)
+    // merchant_delivery_fee (for "free delivery" – user not paying)
     let merchantDeliveryFee = null;
     if (
       payload.merchant_delivery_fee !== undefined &&
@@ -109,7 +120,7 @@ async function createOrder(req, res) {
       payload.delivery_address = String(payload.delivery_address || "");
     }
 
-    // ---- Validate item fields we persist (no item-level delivery/platform fee) ----
+    // ---- Validate item fields we persist ----
     for (const [idx, it] of items.entries()) {
       for (const f of [
         "business_id",
@@ -125,7 +136,7 @@ async function createOrder(req, res) {
       }
     }
 
-    // if_unavailable: just take whatever client sends
+    // if_unavailable: take whatever client sends
     let if_unavailable = null;
     if (
       payload.if_unavailable !== undefined &&
@@ -145,7 +156,6 @@ async function createOrder(req, res) {
         });
       }
 
-      // customer pays total_amount (items + maybe delivery + user share of platform)
       const need = Number(payload.total_amount || 0);
       const have = Number(buyer.amount || 0);
       if (have < need) {
@@ -174,7 +184,6 @@ async function createOrder(req, res) {
         });
       }
 
-      // customer only needs enough for 50% platform fee in wallet
       const userFee =
         platformFee > 0 ? Number((platformFee / 2).toFixed(2)) : 0;
       if (userFee > 0) {
@@ -213,6 +222,7 @@ async function createOrder(req, res) {
 
     const order_id = await Order.create({
       ...payload,
+      service_type: serviceType, // ✅ NEW
       items,
       if_unavailable,
       status: (payload.status || "PENDING").toUpperCase(),
@@ -627,7 +637,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // Award points when order is COMPLETED (only on first transition into COMPLETED)
+    // Award points when order is COMPLETED
     if (normalized === "COMPLETED" && current !== "COMPLETED") {
       try {
         pointsAwardInfo = await Order.awardPointsForCompletedOrder(order_id);

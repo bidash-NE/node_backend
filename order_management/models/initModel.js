@@ -1,3 +1,4 @@
+// config/initOrderManagementTable.js
 const db = require("../config/db");
 
 /* ----------------------- helpers ----------------------- */
@@ -36,81 +37,153 @@ async function columnExists(table, column) {
   return rows.length > 0;
 }
 
-async function getEnumDefinition(table, column) {
-  const [[row]] = await db.query(
-    `
-    SELECT COLUMN_TYPE
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = DATABASE()
-      AND TABLE_NAME = ?
-      AND COLUMN_NAME = ?
-    LIMIT 1
-    `,
-    [table, column]
-  );
-  return row ? String(row.COLUMN_TYPE || "") : "";
+async function ensureColumn(table, column, ddlSql) {
+  const exists = await columnExists(table, column);
+  if (!exists) await db.query(ddlSql);
 }
 
-/* Replace enum with a normalized one if needed */
-async function ensurePaymentMethodEnum() {
-  // Normalize to ENUM('COD','WALLET','CARD')
-  const desired = `enum('COD','WALLET','CARD')`;
-  const current = await getEnumDefinition("orders", "payment_method");
-  if (!current) return; // column created below (fresh DB)
-  if (current.toLowerCase() === desired.toLowerCase()) return;
-
-  await db.query(`
-    ALTER TABLE orders
-    MODIFY COLUMN payment_method ENUM('COD','WALLET','CARD') NOT NULL
-  `);
+async function tableExists(table) {
+  const [rows] = await db.query(
+    `
+    SELECT 1
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = ?
+    LIMIT 1
+    `,
+    [table]
+  );
+  return rows.length > 0;
 }
 
 /* ------------------- main initializer ------------------- */
 /**
  * Initialize (and patch) order management tables in a version-safe way.
- * - orders: ensures platform_fee and normalized payment_method ENUM
- * - order_items: ensures fee columns
- * - order_notification: as required (with indexes)
- * - order_wallet_captures: idempotency marker for wallet/COD captures
- * NOTE: We DO NOT touch wallet_transactions here (it already exists in your wallet service init).
+ * - orders, order_items, order_notification, order_wallet_captures
+ * - cancelled_orders, cancelled_order_items (archive tables)
  */
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
   await db.query(`
- -- ✅ MASTER orders table (delivery_fee + platform_fee included)
 CREATE TABLE IF NOT EXISTS orders (
-  order_id VARCHAR(12) PRIMARY KEY,
-  user_id INT NOT NULL,
-
+  order_id VARCHAR(12) NOT NULL,
+  user_id INT(11) NOT NULL,
+  service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD',
+  business_id INT(10) UNSIGNED DEFAULT NULL,
+  batch_id BIGINT(20) UNSIGNED DEFAULT NULL,
   total_amount DECIMAL(10,2) NOT NULL,
-  discount_amount DECIMAL(10,2) DEFAULT 0,
-
-  delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0,   -- total delivery fee for the order
-  platform_fee DECIMAL(10,2) NOT NULL DEFAULT 0,   -- total platform fee for the order
-  merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL, -- delivery cost borne by merchant (for free delivery cases)
-  payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+  discount_amount DECIMAL(10,2) DEFAULT 0.00,
+  delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  payment_method ENUM('COD','Wallet','Card') NOT NULL,
   delivery_address VARCHAR(500) NOT NULL,
-  note_for_restaurant VARCHAR(500),
-  if_unavailable VARCHAR(256),
+  delivery_lat DECIMAL(9,6) DEFAULT NULL,
+  delivery_lng DECIMAL(9,6) DEFAULT NULL,
+  note_for_restaurant VARCHAR(500) DEFAULT NULL,
+  if_unavailable VARCHAR(256) DEFAULT NULL,
   status VARCHAR(100) DEFAULT 'PENDING',
-  status_reason VARCHAR(255) NULL,
+  status_reason VARCHAR(255) DEFAULT NULL,
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
-  priority BOOLEAN DEFAULT 0,
+  priority TINYINT(1) DEFAULT 0,
   estimated_arrivial_time VARCHAR(40) DEFAULT NULL,
-
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-
+  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  platform_fee DECIMAL(10,2) DEFAULT 0.00,
+  merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
+  delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL,
+  delivery_driver_id INT(11) DEFAULT NULL,
+  delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+  delivery_ride_id BIGINT(20) DEFAULT NULL,
+  PRIMARY KEY (order_id),
+  KEY idx_orders_user (user_id),
+  KEY idx_orders_created (created_at),
+  KEY idx_orders_batch_id (batch_id),
+  KEY idx_orders_business_service_created (business_id, service_type, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `);
 
-  if (!(await columnExists("orders", "platform_fee"))) {
-    await db.query(
-      `ALTER TABLE orders ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
-    );
-  }
-  await ensurePaymentMethodEnum();
+  // Patches – safe if the table already existed with older schema.
+  await ensureColumn(
+    "orders",
+    "service_type",
+    `ALTER TABLE orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`
+  );
+  await ensureColumn(
+    "orders",
+    "business_id",
+    `ALTER TABLE orders ADD COLUMN business_id INT(10) UNSIGNED DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "batch_id",
+    `ALTER TABLE orders ADD COLUMN batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_lat",
+    `ALTER TABLE orders ADD COLUMN delivery_lat DECIMAL(9,6) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_lng",
+    `ALTER TABLE orders ADD COLUMN delivery_lng DECIMAL(9,6) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "platform_fee",
+    `ALTER TABLE orders ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0.00`
+  );
+  await ensureColumn(
+    "orders",
+    "merchant_delivery_fee",
+    `ALTER TABLE orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_batch_id",
+    `ALTER TABLE orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_driver_id",
+    `ALTER TABLE orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_status",
+    `ALTER TABLE orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'PENDING'`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_ride_id",
+    `ALTER TABLE orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "if_unavailable",
+    `ALTER TABLE orders ADD COLUMN if_unavailable VARCHAR(256) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "status_reason",
+    `ALTER TABLE orders ADD COLUMN status_reason VARCHAR(255) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "fulfillment_type",
+    `ALTER TABLE orders ADD COLUMN fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery'`
+  );
+  await ensureColumn(
+    "orders",
+    "priority",
+    `ALTER TABLE orders ADD COLUMN priority TINYINT(1) DEFAULT 0`
+  );
+  await ensureColumn(
+    "orders",
+    "estimated_arrivial_time",
+    `ALTER TABLE orders ADD COLUMN estimated_arrivial_time VARCHAR(40) DEFAULT NULL`
+  );
 
+  // Ensure indexes exist (idempotent)
   await ensureIndex(
     "orders",
     "idx_orders_user",
@@ -121,36 +194,46 @@ CREATE TABLE IF NOT EXISTS orders (
     "idx_orders_created",
     "CREATE INDEX idx_orders_created ON orders(created_at)"
   );
+  await ensureIndex(
+    "orders",
+    "idx_orders_batch_id",
+    "CREATE INDEX idx_orders_batch_id ON orders(batch_id)"
+  );
+  await ensureIndex(
+    "orders",
+    "idx_orders_business_service_created",
+    "CREATE INDEX idx_orders_business_service_created ON orders(business_id, service_type, created_at)"
+  );
 
   /* -------- Order items -------- */
   await db.query(`
-    CREATE TABLE IF NOT EXISTS order_items (
-      item_id INT AUTO_INCREMENT PRIMARY KEY,
-      order_id VARCHAR(12) NOT NULL,
-      business_id INT NOT NULL,
-      business_name VARCHAR(255) NOT NULL,
-      menu_id INT NOT NULL,
-      item_name VARCHAR(255) NOT NULL,
-      item_image VARCHAR(500),
-      quantity INT NOT NULL DEFAULT 1,
-      price DECIMAL(10,2) NOT NULL,
-      subtotal DECIMAL(10,2) NOT NULL,
-      platform_fee DECIMAL(10,2) DEFAULT 0,
-      delivery_fee DECIMAL(10,2) DEFAULT 0,
-      FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE
-    );
-  `);
+CREATE TABLE IF NOT EXISTS order_items (
+  item_id INT AUTO_INCREMENT PRIMARY KEY,
+  order_id VARCHAR(12) NOT NULL,
+  business_id INT NOT NULL,
+  business_name VARCHAR(255) NOT NULL,
+  menu_id INT NOT NULL,
+  item_name VARCHAR(255) NOT NULL,
+  item_image VARCHAR(500),
+  quantity INT NOT NULL DEFAULT 1,
+  price DECIMAL(10,2) NOT NULL,
+  subtotal DECIMAL(10,2) NOT NULL,
+  platform_fee DECIMAL(10,2) DEFAULT 0,
+  delivery_fee DECIMAL(10,2) DEFAULT 0,
+  FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
 
-  if (!(await columnExists("order_items", "platform_fee"))) {
-    await db.query(
-      `ALTER TABLE order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
-    );
-  }
-  if (!(await columnExists("order_items", "delivery_fee"))) {
-    await db.query(
-      `ALTER TABLE order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
-    );
-  }
+  await ensureColumn(
+    "order_items",
+    "platform_fee",
+    `ALTER TABLE order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
+  );
+  await ensureColumn(
+    "order_items",
+    "delivery_fee",
+    `ALTER TABLE order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
+  );
 
   await ensureIndex(
     "order_items",
@@ -165,39 +248,135 @@ CREATE TABLE IF NOT EXISTS orders (
 
   /* -------- Order notification -------- */
   await db.query(`
-    CREATE TABLE IF NOT EXISTS order_notification (
-      notification_id CHAR(36) PRIMARY KEY,    -- UUID
-      order_id VARCHAR(12) NOT NULL,
-      business_id INT NOT NULL,
-      user_id INT NOT NULL,
-      type VARCHAR(64) NOT NULL,             
-      title VARCHAR(160) NOT NULL,           
-      body_preview VARCHAR(220) NOT NULL,     
-      is_read TINYINT(1) NOT NULL DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      delivered_at TIMESTAMP NULL,
-      seen_at TIMESTAMP NULL,
-      INDEX idx_notif_merchant_time (business_id, created_at DESC),
-      INDEX idx_notif_merchant_unread (business_id, is_read, created_at DESC),
-      INDEX idx_notif_order (order_id)
-    );
-  `);
+CREATE TABLE IF NOT EXISTS order_notification (
+  notification_id CHAR(36) PRIMARY KEY,
+  order_id VARCHAR(12) NOT NULL,
+  business_id INT NOT NULL,
+  user_id INT NOT NULL,
+  type VARCHAR(64) NOT NULL,
+  title VARCHAR(160) NOT NULL,
+  body_preview VARCHAR(220) NOT NULL,
+  is_read TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  delivered_at TIMESTAMP NULL,
+  seen_at TIMESTAMP NULL,
+  INDEX idx_notif_merchant_time (business_id, created_at DESC),
+  INDEX idx_notif_merchant_unread (business_id, is_read, created_at DESC),
+  INDEX idx_notif_order (order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
 
   /* -------- Order wallet captures (idempotency) -------- */
   await db.query(`
-    CREATE TABLE IF NOT EXISTS order_wallet_captures (
-      order_id      VARCHAR(32) NOT NULL,
-      capture_type  VARCHAR(32) NOT NULL,   -- WALLET_FULL | COD_FEE
-      captured_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      buyer_txn_id  VARCHAR(64) DEFAULT NULL,
-      merch_txn_id  VARCHAR(64) DEFAULT NULL,
-      admin_txn_id  VARCHAR(64) DEFAULT NULL,
-      PRIMARY KEY (order_id, capture_type)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-  `);
+CREATE TABLE IF NOT EXISTS order_wallet_captures (
+  order_id      VARCHAR(32) NOT NULL,
+  capture_type  VARCHAR(32) NOT NULL,   -- WALLET_FULL | COD_FEE
+  captured_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  buyer_txn_id  VARCHAR(64) DEFAULT NULL,
+  merch_txn_id  VARCHAR(64) DEFAULT NULL,
+  admin_txn_id  VARCHAR(64) DEFAULT NULL,
+  PRIMARY KEY (order_id, capture_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
+
+  /* ================= Cancelled archive tables ================= */
+
+  // Cancelled orders (snapshot)
+  await db.query(`
+CREATE TABLE IF NOT EXISTS cancelled_orders (
+  cancelled_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_id VARCHAR(12) NOT NULL,
+  user_id INT NOT NULL,
+
+  status VARCHAR(100) NOT NULL DEFAULT 'CANCELLED',
+  status_reason VARCHAR(255) NULL,
+
+  total_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  discount_amount DECIMAL(10,2) DEFAULT 0,
+  delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  platform_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
+
+  payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+  delivery_address VARCHAR(500) NOT NULL,
+  note_for_restaurant VARCHAR(500),
+  if_unavailable VARCHAR(256),
+
+  fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
+  priority BOOLEAN DEFAULT 0,
+  estimated_arrivial_time VARCHAR(40) DEFAULT NULL,
+
+  cancelled_by ENUM('USER','MERCHANT','ADMIN','SYSTEM') NOT NULL DEFAULT 'USER',
+  cancelled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  original_created_at TIMESTAMP NULL,
+  original_updated_at TIMESTAMP NULL,
+
+  PRIMARY KEY (cancelled_id),
+  UNIQUE KEY uk_cancelled_order_id (order_id),
+  INDEX idx_cancelled_user (user_id),
+  INDEX idx_cancelled_time (cancelled_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
+
+  if (await tableExists("cancelled_orders")) {
+    await ensureColumn(
+      "cancelled_orders",
+      "merchant_delivery_fee",
+      `ALTER TABLE cancelled_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "status_reason",
+      `ALTER TABLE cancelled_orders ADD COLUMN status_reason VARCHAR(255) NULL`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "cancelled_by",
+      `ALTER TABLE cancelled_orders ADD COLUMN cancelled_by ENUM('USER','MERCHANT','ADMIN','SYSTEM') NOT NULL DEFAULT 'USER'`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "original_created_at",
+      `ALTER TABLE cancelled_orders ADD COLUMN original_created_at TIMESTAMP NULL`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "original_updated_at",
+      `ALTER TABLE cancelled_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
+    );
+  }
+
+  // Cancelled order items (snapshot)
+  await db.query(`
+CREATE TABLE IF NOT EXISTS cancelled_order_items (
+  cancelled_item_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_id VARCHAR(12) NOT NULL,
+
+  business_id INT NOT NULL,
+  business_name VARCHAR(255) NOT NULL,
+
+  menu_id INT NOT NULL,
+  item_name VARCHAR(255) NOT NULL,
+  item_image VARCHAR(500),
+
+  quantity INT NOT NULL DEFAULT 1,
+  price DECIMAL(10,2) NOT NULL,
+  subtotal DECIMAL(10,2) NOT NULL,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (cancelled_item_id),
+  INDEX idx_cancelled_items_order (order_id),
+  INDEX idx_cancelled_items_biz (business_id),
+  CONSTRAINT fk_cancelled_items_order
+    FOREIGN KEY (order_id) REFERENCES cancelled_orders(order_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
 
   console.log(
-    "✅ orders, order_items, order_notification, order_wallet_captures are ready (version-safe)."
+    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items* are ready (version-safe)."
   );
 }
 
