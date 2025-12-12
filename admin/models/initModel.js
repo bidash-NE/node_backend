@@ -1,4 +1,3 @@
-// models/adminLogs.init.js
 const db = require("../config/db"); // mysql2/promise pool or connection
 
 async function initAdminLogsTable() {

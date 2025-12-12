@@ -1,4 +1,3 @@
-// initRideTables.js
 const db = require("../config/db");
 
 const tables = [
@@ -22,7 +21,7 @@ const tables = [
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
           ON UPDATE CURRENT_TIMESTAMP
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -48,7 +47,7 @@ const tables = [
         FOREIGN KEY (rider_id) REFERENCES users(user_id),
         FOREIGN KEY (driver_id) REFERENCES drivers(driver_id),
         FOREIGN KEY (ride_type_id) REFERENCES ride_types(ride_type_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -60,7 +59,7 @@ const tables = [
         status ENUM('pending','accepted','in_progress','completed','cancelled') NOT NULL,
         changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (ride_request_id) REFERENCES ride_requests(ride_request_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -73,7 +72,7 @@ const tables = [
         method ENUM('CASH','CARD','GRABPAY') NOT NULL,
         paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (ride_request_id) REFERENCES ride_requests(ride_request_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -88,7 +87,7 @@ const tables = [
         recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (driver_id) REFERENCES drivers(driver_id),
         FOREIGN KEY (ride_request_id) REFERENCES ride_requests(ride_request_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -100,7 +99,7 @@ const tables = [
         loc POINT NOT NULL,
         recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (driver_id) REFERENCES drivers(driver_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
   {
@@ -116,7 +115,7 @@ const tables = [
         FOREIGN KEY (ride_request_id) REFERENCES ride_requests(ride_request_id),
         FOREIGN KEY (driver_id) REFERENCES drivers(driver_id),
         FOREIGN KEY (passenger_id) REFERENCES users(user_id)
-      );
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `,
   },
 ];

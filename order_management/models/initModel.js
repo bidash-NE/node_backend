@@ -1,4 +1,3 @@
-// models/initModel.js
 const db = require("../config/db");
 
 /* ----------------------- helpers ----------------------- */

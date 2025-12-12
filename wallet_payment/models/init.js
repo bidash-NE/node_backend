@@ -1,41 +1,40 @@
-// models/initModel.js
 const db = require("../config/db");
 
-// check if table exists
+// Check if table exists
 async function tableExists(table) {
   const [rows] = await db.query(
     `SELECT 1
        FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
+        AND TABLE_NAME = ? 
       LIMIT 1`,
     [table]
   );
   return rows.length > 0;
 }
 
-// check if column exists
+// Check if column exists
 async function columnExists(table, column) {
   const [rows] = await db.query(
     `SELECT 1
        FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
-        AND COLUMN_NAME = ?
+        AND TABLE_NAME = ? 
+        AND COLUMN_NAME = ? 
       LIMIT 1`,
     [table, column]
   );
   return rows.length > 0;
 }
 
-// ensure index exists
+// Ensure index exists
 async function ensureIndex(table, indexName, ddlSql) {
   const [rows] = await db.query(
     `SELECT 1
        FROM INFORMATION_SCHEMA.STATISTICS
       WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
-        AND INDEX_NAME = ?
+        AND TABLE_NAME = ? 
+        AND INDEX_NAME = ? 
       LIMIT 1`,
     [table, indexName]
   );
@@ -44,21 +43,21 @@ async function ensureIndex(table, indexName, ddlSql) {
   }
 }
 
-// check column meta
+// Get column meta (type, precision, scale)
 async function getNumericColumnMeta(table, column) {
   const [rows] = await db.query(
     `SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
        FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
-        AND COLUMN_NAME = ?
+        AND TABLE_NAME = ? 
+        AND COLUMN_NAME = ? 
       LIMIT 1`,
     [table, column]
   );
   return rows[0] || null;
 }
 
-// ---------- MAIN INITIALIZER ----------
+// Initialize wallet tables (wallets and wallet_transactions)
 async function initWalletTables() {
   console.log("🪙 Checking wallet & transaction tables...");
 
@@ -100,31 +99,31 @@ async function initWalletTables() {
   // ---------- TRANSACTION TABLE ----------
   if (!txExists) {
     await db.query(`
-     CREATE TABLE IF NOT EXISTS wallet_transactions (
-       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-       transaction_id VARCHAR(32) NOT NULL UNIQUE,     -- TNX...
-       journal_code  VARCHAR(36) NULL,                 -- JRN... link DR/CR pair
-       tnx_from      VARCHAR(20) NULL,                 -- NET...
-       tnx_to        VARCHAR(20) NULL,                 -- NET...
-       amount        DECIMAL(12,2) NOT NULL,           -- Nu with 2 decimals
-       remark        ENUM('CR','DR') NOT NULL,         -- Credit/Debit indicator
-       note          VARCHAR(255) NULL,                -- transfer notes
-       -- NEW: single wallet pointer for de-duplicated views
-       actual_wallet_id VARCHAR(20)
-         GENERATED ALWAYS AS (
-           CASE WHEN remark = 'DR' THEN tnx_from ELSE tnx_to END
-         ) STORED,
-       created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-       updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-       PRIMARY KEY (id),
-       KEY idx_journal_code (journal_code),
-       KEY idx_from (tnx_from),
-       KEY idx_to (tnx_to),
-       KEY idx_tx_created (created_at),
-       KEY idx_actual_wallet (actual_wallet_id, created_at)
-     ) ENGINE=InnoDB
-       DEFAULT CHARSET=utf8mb4
-       COLLATE=utf8mb4_unicode_ci;
+      CREATE TABLE IF NOT EXISTS wallet_transactions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        transaction_id VARCHAR(32) NOT NULL UNIQUE, -- TNX...
+        journal_code VARCHAR(36) NULL, -- JRN... link DR/CR pair
+        tnx_from VARCHAR(20) NULL, -- NET...
+        tnx_to VARCHAR(20) NULL, -- NET...
+        amount DECIMAL(12,2) NOT NULL, -- Nu with 2 decimals
+        remark ENUM('CR','DR') NOT NULL, -- Credit/Debit indicator
+        note VARCHAR(255) NULL, -- transfer notes
+        -- NEW: single wallet pointer for de-duplicated views
+        actual_wallet_id VARCHAR(20)
+          GENERATED ALWAYS AS (
+            CASE WHEN remark = 'DR' THEN tnx_from ELSE tnx_to END
+          ) STORED,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_journal_code (journal_code),
+        KEY idx_from (tnx_from),
+        KEY idx_to (tnx_to),
+        KEY idx_tx_created (created_at),
+        KEY idx_actual_wallet (actual_wallet_id, created_at)
+      ) ENGINE=InnoDB
+        DEFAULT CHARSET=utf8mb4
+        COLLATE=utf8mb4_unicode_ci;
     `);
     console.log("✅ Created table: wallet_transactions");
   } else {
@@ -132,7 +131,7 @@ async function initWalletTables() {
       "ℹ️  wallet_transactions table already exists — skipped creation."
     );
 
-    // ensure DECIMAL(12,2)
+    // Ensure DECIMAL(12,2) for amount
     const meta = await getNumericColumnMeta("wallet_transactions", "amount");
     if (meta && (meta.DATA_TYPE !== "decimal" || meta.NUMERIC_SCALE !== 2)) {
       await db.query(
@@ -141,7 +140,7 @@ async function initWalletTables() {
       console.log("🔧 Patched wallet_transactions.amount to DECIMAL(12,2)");
     }
 
-    // ensure the generated column exists
+    // Ensure the generated column exists
     const hasActual = await columnExists(
       "wallet_transactions",
       "actual_wallet_id"
@@ -159,7 +158,7 @@ async function initWalletTables() {
       );
     }
 
-    // ensure indexes
+    // Ensure indexes
     await ensureIndex(
       "wallet_transactions",
       "idx_journal_code",

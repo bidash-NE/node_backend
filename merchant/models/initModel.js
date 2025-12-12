@@ -1,4 +1,3 @@
-// initMerchantTables.js
 const db = require("../config/db");
 
 /* ---------------- helpers ---------------- */
@@ -6,6 +5,7 @@ async function tableExists(tableName) {
   const [rows] = await db.query(`SHOW TABLES LIKE ?`, [tableName]);
   return rows.length > 0;
 }
+
 async function columnExists(tableName, columnName) {
   const [rows] = await db.query(
     `SELECT 1
@@ -18,6 +18,7 @@ async function columnExists(tableName, columnName) {
   );
   return rows.length > 0;
 }
+
 async function indexExists(tableName, indexName) {
   const [rows] = await db.query(
     `SELECT 1
@@ -30,6 +31,7 @@ async function indexExists(tableName, indexName) {
   );
   return rows.length > 0;
 }
+
 async function fkConstraintNamesForColumn(tableName, columnName) {
   const [rows] = await db.query(
     `SELECT tc.CONSTRAINT_NAME AS name
@@ -46,6 +48,7 @@ async function fkConstraintNamesForColumn(tableName, columnName) {
   );
   return rows.map((r) => r.name);
 }
+
 async function executeIgnoreErr(sql, params = []) {
   try {
     await db.query(sql, params);
