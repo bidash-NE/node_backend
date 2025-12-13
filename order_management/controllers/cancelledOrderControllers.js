@@ -35,37 +35,23 @@ async function deleteCancelledOrder(req, res) {
 
     const out = await Cancelled.deleteCancelledOrderByUser(user_id, order_id);
 
-    if (!out.ok && out.code === "NOT_FOUND") {
+    if (!out.deleted) {
       return res
         .status(404)
-        .json({ success: false, message: "Cancelled order not found" });
+        .json({ success: false, message: "Order not found" });
     }
 
-    return res.json({
-      success: true,
-      message: "Cancelled order deleted",
-      deleted: out.deleted || 0,
-      order_id,
-    });
-  } catch (err) {
-    console.error("[deleteCancelledOrder] Error:", err);
-    // show nicer message for lock timeouts
-    if (err?.code === "ER_LOCK_WAIT_TIMEOUT") {
+    return res.json({ success: true, message: "Deleted", order_id });
+  } catch (e) {
+    if (e?.code === "ER_LOCK_WAIT_TIMEOUT") {
       return res.status(409).json({
         success: false,
-        code: "LOCK_WAIT_TIMEOUT",
-        message:
-          "Delete is busy (row locked). Try again in a moment. If it keeps happening, check long-running DB transactions.",
+        code: "ROW_LOCKED",
+        message: "This cancelled order is busy (locked). Try again.",
       });
     }
-    if (err?.code === "ER_LOCK_DEADLOCK") {
-      return res.status(409).json({
-        success: false,
-        code: "DEADLOCK",
-        message: "Deadlock occurred. Try again.",
-      });
-    }
-    return res.status(500).json({ success: false, error: err.message });
+    console.error("[deleteCancelledOrder] Error:", e);
+    return res.status(500).json({ success: false, error: e.message });
   }
 }
 

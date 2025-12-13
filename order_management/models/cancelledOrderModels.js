@@ -130,41 +130,33 @@ async function getCancelledOrdersByUser(
  * Uses a transaction + row lock to avoid race conditions.
  */
 async function deleteCancelledOrderByUser(user_id, order_id) {
-  return withRetry(async () => {
-    const conn = await db.getConnection();
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // fail fast instead of waiting 50s
+    await conn.query(`SET SESSION innodb_lock_wait_timeout = 3`);
+
+    // delete items first (works even if FK/cascade is missing)
+    await conn.query(`DELETE FROM cancelled_order_items WHERE order_id = ?`, [
+      order_id,
+    ]);
+
+    const [r] = await conn.query(
+      `DELETE FROM cancelled_orders WHERE user_id = ? AND order_id = ?`,
+      [user_id, order_id]
+    );
+
+    await conn.commit();
+    return { deleted: r.affectedRows > 0 };
+  } catch (e) {
     try {
-      await conn.beginTransaction();
-
-      // Lock the single row by unique key (order_id) first
-      const [[row]] = await conn.query(
-        `SELECT order_id FROM cancelled_orders WHERE order_id = ? AND user_id = ? FOR UPDATE`,
-        [order_id, user_id]
-      );
-      if (!row) {
-        await conn.rollback();
-        return { ok: false, code: "NOT_FOUND" };
-      }
-
-      // Explicitly delete items first (even if FK cascade exists)
-      await conn.query(`DELETE FROM cancelled_order_items WHERE order_id = ?`, [
-        order_id,
-      ]);
-      await conn.query(
-        `DELETE FROM cancelled_orders WHERE order_id = ? AND user_id = ?`,
-        [order_id, user_id]
-      );
-
-      await conn.commit();
-      return { ok: true, deleted: 1 };
-    } catch (e) {
-      try {
-        await conn.rollback();
-      } catch {}
-      throw e;
-    } finally {
-      conn.release();
-    }
-  });
+      await conn.rollback();
+    } catch {}
+    throw e;
+  } finally {
+    conn.release();
+  }
 }
 
 /**
