@@ -10,6 +10,8 @@ const {
 
 const BHUTAN_TZ = "Asia/Thimphu";
 
+const ALLOWED_SERVICE_TYPES = new Set(["FOOD", "MART"]);
+
 /**
  * POST /api/scheduled-orders
  * Body: normal order JSON + scheduled_at
@@ -54,6 +56,21 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
+    // ✅ service_type validation
+    const serviceType = String(orderPayload.service_type || "")
+      .trim()
+      .toUpperCase();
+
+    if (!serviceType || !ALLOWED_SERVICE_TYPES.has(serviceType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or missing service_type. Allowed: FOOD, MART",
+      });
+    }
+
+    // Normalize stored payload
+    orderPayload.service_type = serviceType;
+
     const saved = await addScheduledOrder(scheduledDate, orderPayload, userId);
 
     return res.json({
@@ -61,6 +78,7 @@ exports.scheduleOrder = async (req, res) => {
       message: "Order scheduled successfully.",
       job_id: saved.job_id,
       scheduled_at: saved.scheduled_at,
+      service_type: saved.order_payload?.service_type || serviceType,
     });
   } catch (err) {
     console.error("scheduleOrder error:", err);
@@ -92,7 +110,7 @@ exports.listScheduledOrders = async (req, res) => {
     const sorted = [...list].sort((a, b) => {
       const da = new Date(a.scheduled_at).getTime();
       const db = new Date(b.scheduled_at).getTime();
-      return db - da; // descending
+      return db - da;
     });
 
     const mapped = sorted.map((job) => {
@@ -124,17 +142,14 @@ exports.listScheduledOrders = async (req, res) => {
             second: "2-digit",
           });
         }
-      } catch (e) {
-        // ignore formatting errors
-      }
+      } catch (e) {}
 
-      // Build response object in desired order
       return {
         job_id: job.job_id,
         user_id: job.user_id,
         business_id: job.business_id ?? null,
-        scheduled_at: scheduledLocal, // Bhutan time
-        created_at: createdLocal, // Bhutan time
+        scheduled_at: scheduledLocal,
+        created_at: createdLocal,
         order_payload: job.order_payload,
       };
     });
@@ -154,9 +169,6 @@ exports.listScheduledOrders = async (req, res) => {
 
 /**
  * GET /api/scheduled-orders/business/:businessId
- * Return:
- * - scheduled_at and created_at in Bhutan time
- * - items sorted from latest scheduled to earliest
  */
 exports.listScheduledOrdersByBusiness = async (req, res) => {
   try {
@@ -177,7 +189,6 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       });
     }
 
-    // collect distinct user_ids
     const userIds = [
       ...new Set(
         list
@@ -186,7 +197,6 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       ),
     ];
 
-    // fetch user_name for those user_ids
     let userNameById = new Map();
     if (userIds.length) {
       const placeholders = userIds.map(() => "?").join(",");
@@ -197,11 +207,10 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
     }
 
-    // Sort by scheduled_at DESC (latest first)
     const sorted = [...list].sort((a, b) => {
       const da = new Date(a.scheduled_at).getTime();
       const db = new Date(b.scheduled_at).getTime();
-      return db - da; // descending
+      return db - da;
     });
 
     const mapped = sorted.map((job) => {
@@ -233,17 +242,15 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
             second: "2-digit",
           });
         }
-      } catch (e) {
-        // ignore formatting errors
-      }
+      } catch (e) {}
 
       const uid = Number(job.user_id);
-      const name = userNameById.get(uid) || null; // 👈 keep as `name`
+      const name = userNameById.get(uid) || null;
 
       return {
         job_id: job.job_id,
         user_id: job.user_id,
-        name, // 👈 exposed as `name`
+        name,
         business_id: job.business_id ?? null,
         scheduled_at: scheduledLocal,
         created_at: createdLocal,
@@ -263,6 +270,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   }
 };
+
 /**
  * DELETE /api/scheduled-orders/:user_id/:jobId
  */

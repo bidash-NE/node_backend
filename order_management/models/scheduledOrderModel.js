@@ -4,8 +4,6 @@ const redis = require("../config/redis");
 const ZSET_KEY = "scheduled_orders";
 const COUNTER_KEY = "scheduled_order_counter";
 
-/* ===================== Helpers ===================== */
-
 async function generateScheduledId() {
   const counter = await redis.incr(COUNTER_KEY);
   const padded = String(counter).padStart(6, "0");
@@ -20,17 +18,9 @@ function buildLockKey(jobId) {
   return `scheduled_order_lock:${jobId}`;
 }
 
-/**
- * Try to extract a numeric business_id from a job-like object.
- * This supports:
- * - top-level business_id
- * - order_payload.business_id / businessId / business.business_id
- * - first item business_id / businessId / business.business_id
- */
 function extractBusinessIdFromJob(data) {
   if (!data) return null;
 
-  // 1) Top-level
   let rawBizId =
     data.business_id ??
     data.order_payload?.business_id ??
@@ -38,7 +28,6 @@ function extractBusinessIdFromJob(data) {
     data.order_payload?.business?.business_id ??
     null;
 
-  // 2) Fallback: from items[0]
   if (
     rawBizId == null &&
     data.order_payload &&
@@ -47,10 +36,7 @@ function extractBusinessIdFromJob(data) {
   ) {
     const first = data.order_payload.items[0] || {};
     rawBizId =
-      first.business_id ??
-      first.businessId ??
-      first.business?.business_id ??
-      null;
+      first.business_id ?? first.businessId ?? first.business?.business_id ?? null;
   }
 
   if (rawBizId == null) return null;
@@ -60,31 +46,24 @@ function extractBusinessIdFromJob(data) {
   return n;
 }
 
-/* ===================== Core Model ===================== */
-
 async function addScheduledOrder(scheduledAt, orderPayload, userId) {
   const jobId = await generateScheduledId();
   const now = new Date();
 
-  // still parse it to compute the score for ZSET
   const scheduledDate =
     scheduledAt instanceof Date ? scheduledAt : new Date(scheduledAt);
   const score = scheduledDate.getTime();
 
-  // 🔹 derive business_id once using the same helper (works from payload + items)
   const tmpData = { order_payload: orderPayload };
   const businessId = extractBusinessIdFromJob(tmpData);
 
   const payload = {
     job_id: jobId,
     user_id: userId,
-    business_id: businessId ?? null, // ✅ stored at top level
+    business_id: businessId ?? null,
 
-    // keep EXACT same string that came from JSON if string; otherwise ISO
     scheduled_at:
-      typeof scheduledAt === "string"
-        ? scheduledAt
-        : scheduledDate.toISOString(),
+      typeof scheduledAt === "string" ? scheduledAt : scheduledDate.toISOString(),
 
     created_at: now.toISOString(),
 
@@ -121,9 +100,7 @@ async function getScheduledOrdersByUser(userId) {
   if (!jobIds.length) return [];
 
   const pipeline = redis.pipeline();
-  jobIds.forEach((jobId) => {
-    pipeline.get(buildJobKey(jobId));
-  });
+  jobIds.forEach((jobId) => pipeline.get(buildJobKey(jobId)));
 
   const results = await pipeline.exec();
 
@@ -133,16 +110,13 @@ async function getScheduledOrdersByUser(userId) {
     try {
       const data = JSON.parse(raw);
       if (data.user_id === userId) {
-        // For old jobs, we can enrich business_id on the fly as well
         if (!data.business_id) {
           const bizId = extractBusinessIdFromJob(data);
           if (bizId != null) data.business_id = bizId;
         }
         list.push(data);
       }
-    } catch {
-      // ignore parse errors
-    }
+    } catch {}
   }
 
   list.sort(
@@ -168,9 +142,7 @@ async function getScheduledOrdersByBusiness(businessId) {
   if (!jobIds.length) return [];
 
   const pipeline = redis.pipeline();
-  jobIds.forEach((jobId) => {
-    pipeline.get(buildJobKey(jobId));
-  });
+  jobIds.forEach((jobId) => pipeline.get(buildJobKey(jobId)));
 
   const results = await pipeline.exec();
 
@@ -179,16 +151,12 @@ async function getScheduledOrdersByBusiness(businessId) {
     if (err || !raw) continue;
     try {
       const data = JSON.parse(raw);
-
       const jobBizId = extractBusinessIdFromJob(data);
       if (jobBizId === businessId) {
-        // also normalize business_id at top level for the response
         data.business_id = jobBizId;
         list.push(data);
       }
-    } catch {
-      // ignore parse errors
-    }
+    } catch {}
   }
 
   list.sort(
@@ -222,8 +190,6 @@ async function cancelScheduledOrderForUser(jobId, userId) {
 
   return true;
 }
-
-/* ===================== Exports ===================== */
 
 module.exports = {
   addScheduledOrder,
