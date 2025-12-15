@@ -24,7 +24,7 @@ const validUserId = (req, res, next) => {
 
 /* CRUD */
 router.post("/orders", orderCtrl.createOrder);
-router.get("/orders", orderCtrl.getOrders);
+// router.get("/orders", orderCtrl.getOrders);
 router.get("/orders/:order_id", validOrderId, orderCtrl.getOrderById);
 router.put("/orders/:order_id", validOrderId, orderCtrl.updateOrder);
 router.delete("/orders/:order_id", validOrderId, orderCtrl.deleteOrder);
