@@ -21,6 +21,14 @@ function buildLockKey(jobId) {
   return `scheduled_order_lock:${jobId}`;
 }
 
+function buildAttemptsKey(jobId) {
+  return `scheduled_order_attempts:${jobId}`;
+}
+
+function buildErrorKey(jobId) {
+  return `scheduled_order_error:${jobId}`;
+}
+
 /**
  * If input has timezone info (Z or +06:00 etc) => Date.parse is fine.
  * If input has NO timezone => treat as BHUTAN LOCAL TIME.
@@ -29,14 +37,10 @@ function parseScheduledToEpochMs(input) {
   if (!input) return NaN;
 
   // Date object
-  if (input instanceof Date) {
-    return input.getTime();
-  }
+  if (input instanceof Date) return input.getTime();
 
   // number (epoch ms)
-  if (typeof input === "number") {
-    return Number.isFinite(input) ? input : NaN;
-  }
+  if (typeof input === "number") return Number.isFinite(input) ? input : NaN;
 
   const s = String(input).trim();
   if (!s) return NaN;
@@ -64,9 +68,7 @@ function parseScheduledToEpochMs(input) {
   // Convert Bhutan local => UTC epoch
   // UTC time = local time - 6 hours
   const utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
-  const epochMs = utcMs - BHUTAN_OFFSET_MINUTES * 60 * 1000;
-
-  return epochMs;
+  return utcMs - BHUTAN_OFFSET_MINUTES * 60 * 1000;
 }
 
 /**
@@ -123,7 +125,7 @@ function extractBusinessIdFromJob(data) {
  * ✅ Stores:
  * - scheduled_at (UTC ISO) for machine
  * - scheduled_at_local (+06:00) for display
- * - score uses epochMs (Bhutan-correct)
+ * - score uses epochMs (Bhutan-correct trigger)
  */
 async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
   const jobId = await generateScheduledId();
@@ -134,8 +136,8 @@ async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
     throw new Error("Invalid scheduled_at (cannot parse to time).");
   }
 
-  const scheduled_at = new Date(epochMs).toISOString(); // UTC ISO
-  const scheduled_at_local = epochToBhutanIso(epochMs); // Bhutan wall clock +06:00
+  const scheduled_at = new Date(epochMs).toISOString(); // UTC ISO (machine)
+  const scheduled_at_local = epochToBhutanIso(epochMs); // Bhutan wall clock +06:00 (display)
 
   const tmpData = { order_payload: orderPayload };
   const businessId = extractBusinessIdFromJob(tmpData);
@@ -145,10 +147,9 @@ async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
     user_id: userId,
     business_id: businessId ?? null,
 
-    // keep both for clarity
-    scheduled_at, // UTC ISO (machine)
-    scheduled_at_local, // Bhutan ISO +06:00 (display)
-    scheduled_epoch_ms: epochMs, // optional debug
+    scheduled_at, // UTC ISO
+    scheduled_at_local, // +06:00 display
+    scheduled_epoch_ms: epochMs, // debug/trace
 
     created_at: now.toISOString(),
 
@@ -164,7 +165,7 @@ async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
   await redis
     .multi()
     .set(jobKey, JSON.stringify(payload))
-    .zadd(ZSET_KEY, epochMs, jobId) // ✅ score is epochMs (correct trigger)
+    .zadd(ZSET_KEY, epochMs, jobId)
     .exec();
 
   return payload;
@@ -204,11 +205,7 @@ async function getScheduledOrdersByUser(userId) {
     } catch {}
   }
 
-  list.sort(
-    (a, b) =>
-      new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
-  );
-
+  list.sort((a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0));
   return list;
 }
 
@@ -244,11 +241,7 @@ async function getScheduledOrdersByBusiness(businessId) {
     } catch {}
   }
 
-  list.sort(
-    (a, b) =>
-      new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime()
-  );
-
+  list.sort((a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0));
   return list;
 }
 
@@ -271,6 +264,8 @@ async function cancelScheduledOrderForUser(jobId, userId) {
     .del(jobKey)
     .zrem(ZSET_KEY, jobId)
     .del(buildLockKey(jobId))
+    .del(buildAttemptsKey(jobId))
+    .del(buildErrorKey(jobId))
     .exec();
 
   return true;
@@ -281,7 +276,14 @@ module.exports = {
   getScheduledOrdersByUser,
   getScheduledOrdersByBusiness,
   cancelScheduledOrderForUser,
+
   ZSET_KEY,
   buildJobKey,
   buildLockKey,
+  buildAttemptsKey,
+  buildErrorKey,
+
+  // exporting helpers is optional, but useful for testing
+  parseScheduledToEpochMs,
+  epochToBhutanIso,
 };
