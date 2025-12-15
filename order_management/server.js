@@ -6,12 +6,15 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 
 const { initOrderManagementTable } = require("./models/initModel");
+const { startDeliveredMigrationJob } = require("./jobs/deliveredMigrationJob");
+
 const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // <- socket attach
 const notificationRoutes = require("./routes/notificationRoutes");
 const usernotificationRoutes = require("./routes/userNotificationRoutes");
 const scheduledOrdersRoutes = require("./routes/scheduledOrdersRoutes");
 const cancelledOrderRoutes = require("./routes/cancelledOrderRoutes");
+const deliveredOrderRoutes = require("./routes/deliveredOrderRoutes");
 const {
   startScheduledOrderProcessor,
 } = require("./services/scheduledOrderProcessor");
@@ -39,6 +42,7 @@ app.use("/api/order_notification", notificationRoutes);
 app.use("/api/user_notification", usernotificationRoutes);
 app.use("/api", scheduledOrdersRoutes);
 app.use("/cancelled", cancelledOrderRoutes);
+app.use("/api/delivered-orders", deliveredOrderRoutes);
 
 // single HTTP server for REST + Socket.IO
 const server = http.createServer(app);
@@ -51,8 +55,14 @@ const server = http.createServer(app);
 
     // ✅ start auto-cancel worker (PENDING > 60min => CANCELLED)
     startPendingOrderAutoCanceller();
+    await initOrderManagementTable(); // must create delivered_* tables too (your updated init)
 
-    const PORT = Number(process.env.PORT || 1001);
+    // ✅ start migration job
+    startDeliveredMigrationJob({
+      intervalMs: 60_000, // 1 min
+      batchSize: 50,
+    });
+    const PORT = Number(process.env.PORT || 3000);
     server.listen(PORT, "0.0.0.0", () =>
       console.log(`🚀 Order service + Realtime listening on :${PORT}`)
     );

@@ -13,7 +13,7 @@ const ALLOWED_STATUSES = new Set([
   "PREPARING",
   "READY",
   "OUT_FOR_DELIVERY",
-  "COMPLETED",
+  "DELIVERED", // ✅ FINAL
   "CANCELLED",
 ]);
 
@@ -445,7 +445,8 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 
 /**
  * PATCH/PUT /orders/:order_id/status
- * ✅ FINAL FIX: If status=CANCELLED => archive+delete via cancelAndArchiveOrder()
+ * ✅ FINAL FIX: If status=DELIVERED => archive+delete via completeAndArchiveDeliveredOrder()
+ * ✅ Backward compatible: if status=COMPLETED, treat as DELIVERED
  */
 async function updateOrderStatus(req, res) {
   try {
@@ -462,6 +463,7 @@ async function updateOrderStatus(req, res) {
       unavailableChanges,
       estimated_minutes,
       cancelled_by, // optional
+      delivered_by, // optional
     } = req.body || {};
 
     const changes = unavailable_changes || unavailableChanges || null;
@@ -470,7 +472,10 @@ async function updateOrderStatus(req, res) {
       return res.status(400).json({ message: "Status is required" });
     }
 
-    const normalized = String(status).trim().toUpperCase();
+    const normalizedRaw = String(status).trim().toUpperCase();
+    const normalized =
+      normalizedRaw === "COMPLETED" ? "DELIVERED" : normalizedRaw;
+
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
         message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
@@ -493,14 +498,106 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
 
-    // ✅ If CANCELLED, do archive+delete (do NOT just update status)
+    /* =========================================================
+       ✅ DELIVERED => archive to delivered_* and delete main rows
+       ========================================================= */
+    if (normalized === "DELIVERED") {
+      const by =
+        String(delivered_by || "SYSTEM")
+          .trim()
+          .toUpperCase() || "SYSTEM";
+      const finalReason = String(reason || "").trim();
+
+      const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
+        delivered_by: by,
+        reason: finalReason,
+      });
+
+      if (!out || !out.ok) {
+        if (out?.code === "NOT_FOUND")
+          return res.status(404).json({ message: "Order not found" });
+
+        if (out?.code === "SKIPPED") {
+          return res.status(400).json({
+            message: "Unable to mark this order as delivered.",
+            current_status: out.current_status,
+          });
+        }
+
+        return res
+          .status(400)
+          .json({ message: "Unable to mark this order as delivered." });
+      }
+
+      const business_ids = Array.isArray(out.business_ids)
+        ? out.business_ids
+        : [];
+
+      // broadcast AFTER delete using returned ids
+      broadcastOrderStatusToMany({
+        order_id,
+        user_id: out.user_id,
+        business_ids,
+        status: "DELIVERED",
+      });
+
+      for (const business_id of business_ids) {
+        try {
+          await insertAndEmitNotification({
+            business_id,
+            user_id: out.user_id,
+            order_id,
+            type: "order:status",
+            title: `Order #${order_id} DELIVERED`,
+            body_preview: finalReason || "Order delivered.",
+          });
+        } catch (e) {
+          console.error(
+            "[updateOrderStatus DELIVERED notify merchant failed]",
+            {
+              order_id,
+              business_id,
+              err: e?.message,
+            }
+          );
+        }
+      }
+
+      try {
+        await Order.addUserOrderStatusNotification({
+          user_id: out.user_id,
+          order_id,
+          status: "DELIVERED",
+          reason: finalReason,
+        });
+      } catch (e) {
+        console.error("[updateOrderStatus DELIVERED notify user failed]", {
+          order_id,
+          user_id: out.user_id,
+          err: e?.message,
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Order delivered and archived successfully.",
+        order_id,
+        status: "DELIVERED",
+        points_awarded:
+          out.points && out.points.awarded ? out.points.points_awarded : null,
+      });
+    }
+
+    /* =========================================================
+       ✅ CANCELLED => archive+delete (existing logic kept)
+       ========================================================= */
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
         "PREPARING",
         "READY",
         "OUT_FOR_DELIVERY",
-        "COMPLETED",
+        "DELIVERED",
       ]);
       if (locked.has(current)) {
         return res.status(400).json({
@@ -516,12 +613,11 @@ async function updateOrderStatus(req, res) {
 
       const finalReason = String(reason || "").trim();
 
-      // ✅ One transaction: lock → mark cancelled → archive → delete
       const out = await Order.cancelAndArchiveOrder(order_id, {
         cancelled_by: by,
         reason: finalReason,
-        onlyIfStatus: null, // allow PENDING/DECLINED (but we blocked accepted above)
-        expectedUserId: null, // this endpoint is general
+        onlyIfStatus: null,
+        expectedUserId: null,
       });
 
       if (!out || !out.ok) {
@@ -544,7 +640,6 @@ async function updateOrderStatus(req, res) {
         ? out.business_ids
         : [];
 
-      // ✅ Broadcast + notifications AFTER delete using returned business_ids
       broadcastOrderStatusToMany({
         order_id,
         user_id: out.user_id,
@@ -597,7 +692,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // ✅ Existing protections
+    /* ================= Existing protections ================= */
     if (current === "CANCELLED" && normalized === "CONFIRMED") {
       return res.status(400).json({
         success: false,
@@ -606,7 +701,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // ✅ CONFIRMED logic
+    /* ================= CONFIRMED logic ================= */
     if (normalized === "CONFIRMED") {
       if (
         changes &&
@@ -645,7 +740,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // ✅ normal status update (non-cancel)
+    /* ================= normal status update (non-cancel/non-delivered) ================= */
     const affected = await Order.updateStatus(
       order_id,
       normalized,
@@ -653,14 +748,12 @@ async function updateOrderStatus(req, res) {
     );
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
-    // Business IDs (safe because order not deleted)
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
-    // Capture payment (if CONFIRMED)
     let captureInfo = null;
     if (normalized === "CONFIRMED") {
       try {
@@ -683,19 +776,6 @@ async function updateOrderStatus(req, res) {
       business_ids,
       status: normalized,
     });
-
-    if (normalized === "COMPLETED") {
-      for (const business_id of business_ids) {
-        await insertAndEmitNotification({
-          business_id,
-          user_id,
-          order_id,
-          type: "order:status",
-          title: `Order #${order_id} COMPLETED`,
-          body_preview: `Status changed to COMPLETED`,
-        });
-      }
-    }
 
     try {
       await Order.addUserOrderStatusNotification({
@@ -752,25 +832,12 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    let pointsAwardInfo = null;
-    if (normalized === "COMPLETED" && current !== "COMPLETED") {
-      try {
-        pointsAwardInfo = await Order.awardPointsForCompletedOrder(order_id);
-      } catch (e) {
-        console.error("[POINTS AWARD ERROR]", e);
-      }
-    }
-
     return res.json({
       success: true,
       message: "Order status updated successfully",
       estimated_arrivial_time_applied:
         normalized === "CONFIRMED" && estimated_minutes
           ? `${estimated_minutes} min`
-          : null,
-      points_awarded:
-        pointsAwardInfo && pointsAwardInfo.awarded
-          ? pointsAwardInfo.points_awarded
           : null,
     });
   } catch (err) {
@@ -834,8 +901,8 @@ async function cancelOrderByUser(req, res) {
     const out = await Order.cancelAndArchiveOrder(order_id, {
       cancelled_by: "USER",
       reason,
-      onlyIfStatus: "PENDING", // ✅ user allowed only if still pending
-      expectedUserId: user_id_param, // ✅ must belong to this user
+      onlyIfStatus: "PENDING",
+      expectedUserId: user_id_param,
     });
 
     if (!out.ok) {

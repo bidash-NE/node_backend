@@ -179,8 +179,10 @@ function humanOrderStatus(status) {
       return "ready for pickup";
     case "OUT_FOR_DELIVERY":
       return "out for delivery";
-    case "COMPLETED":
-      return "completed";
+    case "DELIVERED":
+      return "delivered";
+    case "COMPLETED": // backward text only
+      return "delivered";
     case "CANCELLED":
       return "cancelled";
     case "DECLINED":
@@ -198,7 +200,11 @@ async function addUserOrderStatusNotificationInternal(
   conn = null
 ) {
   const dbh = conn || db;
-  const normalized = String(status || "").toUpperCase();
+  let normalized = String(status || "").toUpperCase();
+
+  // backward compatible
+  if (normalized === "COMPLETED") normalized = "DELIVERED";
+
   const trimmedReason = String(reason || "").trim();
 
   let message;
@@ -364,6 +370,7 @@ async function hasPointsAwardNotification(order_id, conn = null) {
   return rows.length > 0;
 }
 
+// ✅ name kept for compatibility, but logic is DELIVERED
 async function awardPointsForCompletedOrder(order_id) {
   const conn = await db.getConnection();
   try {
@@ -384,10 +391,12 @@ async function awardPointsForCompletedOrder(order_id) {
       return { awarded: false, reason: "order_not_found" };
     }
 
-    const status = String(order.status || "").toUpperCase();
-    if (status !== "COMPLETED") {
+    let status = String(order.status || "").toUpperCase();
+    if (status === "COMPLETED") status = "DELIVERED";
+
+    if (status !== "DELIVERED") {
       await conn.rollback();
-      return { awarded: false, reason: "not_completed" };
+      return { awarded: false, reason: "not_delivered" };
     }
 
     const already = await hasPointsAwardNotification(order_id, conn);
@@ -1079,6 +1088,31 @@ async function deleteOrderFromMainTablesInternal(conn, order_id) {
   await conn.query(`DELETE FROM orders WHERE order_id = ?`, [order_id]);
 }
 
+async function trimDeliveredOrdersForUser(conn, userId, keep = 10) {
+  const [oldRows] = await conn.query(
+    `
+    SELECT order_id
+      FROM delivered_orders
+     WHERE user_id = ?
+     ORDER BY delivered_at DESC, delivered_id DESC
+     LIMIT ?, 100000
+     FOR UPDATE
+    `,
+    [userId, keep]
+  );
+
+  if (!oldRows.length) return { trimmed: 0 };
+
+  const oldIds = oldRows.map((r) => r.order_id);
+
+  const [del] = await conn.query(
+    `DELETE FROM delivered_orders WHERE user_id = ? AND order_id IN (?)`,
+    [userId, oldIds]
+  );
+
+  return { trimmed: del.affectedRows || 0 };
+}
+
 /**
  * ✅ FINAL: cancel + archive + delete (used by BOTH auto & user)
  */
@@ -1088,8 +1122,8 @@ async function cancelAndArchiveOrder(
     cancelled_by = "SYSTEM",
     reason = "",
     cancel_reason = "",
-    onlyIfStatus = null, // "PENDING" or null
-    expectedUserId = null, // user cancel verify
+    onlyIfStatus = null,
+    expectedUserId = null,
   } = {}
 ) {
   const conn = await db.getConnection();
@@ -1119,7 +1153,6 @@ async function cancelAndArchiveOrder(
       return { ok: false, code: "SKIPPED", current_status: current };
     }
 
-    // business ids BEFORE deletion
     const [bizRows] = await conn.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id]
@@ -1128,7 +1161,6 @@ async function cancelAndArchiveOrder(
 
     const finalReason = String(reason || cancel_reason || "").trim();
 
-    // mark cancelled (so archive copies status_reason if present)
     const [rr] = await conn.query(
       `
       SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -1159,7 +1191,6 @@ async function cancelAndArchiveOrder(
       );
     }
 
-    // archive then delete
     await archiveCancelledOrderInternal(conn, order_id, {
       cancelled_by,
       reason: finalReason,
@@ -1188,6 +1219,319 @@ async function cancelIfStillPending(order_id, reason) {
   return !!out?.ok;
 }
 
+/* ================= DELIVERED ARCHIVE HELPERS ================= */
+async function archiveDeliveredOrderInternal(
+  conn,
+  order_id,
+  { delivered_by = "SYSTEM", reason = "" } = {}
+) {
+  const hasDeliveredOrders = await tableExists("delivered_orders", conn);
+  const hasDeliveredItems = await tableExists("delivered_order_items", conn);
+  if (!hasDeliveredOrders && !hasDeliveredItems) return { archived: false };
+
+  const [[order]] = await conn.query(
+    `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
+    [order_id]
+  );
+  if (!order) return { archived: false };
+
+  const [items] = await conn.query(
+    `SELECT * FROM order_items WHERE order_id = ?`,
+    [order_id]
+  );
+
+  const finalReason = String(reason || "").trim();
+
+  if (hasDeliveredOrders) {
+    const cols = await getTableColumns("delivered_orders", conn);
+
+    const row = {};
+
+    if (cols.has("order_id")) row.order_id = order.order_id;
+    if (cols.has("user_id")) row.user_id = order.user_id;
+
+    if (cols.has("service_type"))
+      row.service_type = order.service_type || "FOOD";
+
+    if (cols.has("status")) row.status = "DELIVERED"; // ✅ FINAL
+
+    if (cols.has("status_reason")) {
+      const r = finalReason || String(order.status_reason || "").trim() || null;
+      row.status_reason = r;
+    }
+
+    if (cols.has("total_amount")) row.total_amount = order.total_amount;
+    if (cols.has("discount_amount"))
+      row.discount_amount = order.discount_amount;
+    if (cols.has("delivery_fee")) row.delivery_fee = order.delivery_fee;
+    if (cols.has("platform_fee")) row.platform_fee = order.platform_fee;
+    if (cols.has("merchant_delivery_fee"))
+      row.merchant_delivery_fee = order.merchant_delivery_fee;
+
+    const pm = String(order.payment_method || "").trim();
+    const pmUpper = pm.toUpperCase();
+    if (cols.has("payment_method")) row.payment_method = pmUpper || pm || "COD";
+
+    if (cols.has("delivery_address"))
+      row.delivery_address = order.delivery_address;
+    if (cols.has("note_for_restaurant"))
+      row.note_for_restaurant = order.note_for_restaurant;
+    if (cols.has("if_unavailable")) row.if_unavailable = order.if_unavailable;
+
+    if (cols.has("fulfillment_type"))
+      row.fulfillment_type = order.fulfillment_type || "Delivery";
+    if (cols.has("priority")) row.priority = !!order.priority;
+    if (cols.has("estimated_arrivial_time"))
+      row.estimated_arrivial_time = order.estimated_arrivial_time;
+
+    if (cols.has("delivered_by")) row.delivered_by = delivered_by;
+    if (cols.has("delivered_at")) row.delivered_at = new Date();
+
+    if (cols.has("delivery_batch_id"))
+      row.delivery_batch_id = order.delivery_batch_id ?? null;
+    if (cols.has("delivery_driver_id"))
+      row.delivery_driver_id = order.delivery_driver_id ?? null;
+    if (cols.has("delivery_status")) row.delivery_status = "DELIVERED";
+    if (cols.has("delivery_ride_id"))
+      row.delivery_ride_id = order.delivery_ride_id ?? null;
+
+    if (cols.has("original_created_at"))
+      row.original_created_at = order.created_at ?? null;
+    if (cols.has("original_updated_at"))
+      row.original_updated_at = order.updated_at ?? null;
+
+    if (cols.has("created_at") && pick(row, "created_at") === undefined)
+      row.created_at = new Date();
+    if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
+      row.updated_at = new Date();
+
+    const fields = Object.keys(row);
+    if (fields.length) {
+      const placeholders = fields.map(() => "?").join(", ");
+      const values = fields.map((k) => row[k]);
+
+      await conn.query(
+        `INSERT IGNORE INTO delivered_orders (${fields.join(", ")})
+         VALUES (${placeholders})`,
+        values
+      );
+    }
+  }
+
+  if (hasDeliveredItems && items.length) {
+    const cols = await getTableColumns("delivered_order_items", conn);
+
+    for (const it of items) {
+      const row = {};
+      if (cols.has("order_id")) row.order_id = it.order_id;
+
+      if (cols.has("business_id")) row.business_id = it.business_id;
+      if (cols.has("business_name")) row.business_name = it.business_name;
+
+      if (cols.has("menu_id")) row.menu_id = it.menu_id;
+      if (cols.has("item_name")) row.item_name = it.item_name;
+      if (cols.has("item_image")) row.item_image = it.item_image;
+
+      if (cols.has("quantity")) row.quantity = it.quantity;
+      if (cols.has("price")) row.price = it.price;
+      if (cols.has("subtotal")) row.subtotal = it.subtotal;
+
+      if (cols.has("platform_fee")) row.platform_fee = it.platform_fee ?? 0;
+      if (cols.has("delivery_fee")) row.delivery_fee = it.delivery_fee ?? 0;
+
+      if (cols.has("created_at") && pick(row, "created_at") === undefined)
+        row.created_at = new Date();
+      if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
+        row.updated_at = new Date();
+
+      const fields = Object.keys(row);
+      if (fields.length) {
+        const placeholders = fields.map(() => "?").join(", ");
+        const values = fields.map((k) => row[k]);
+
+        await conn.query(
+          `INSERT IGNORE INTO delivered_order_items (${fields.join(", ")})
+           VALUES (${placeholders})`,
+          values
+        );
+      }
+    }
+  }
+
+  return { archived: true };
+}
+
+// award points using SAME transaction connection
+async function awardPointsForCompletedOrderWithConn(conn, order_id) {
+  const [[order]] = await conn.query(
+    `SELECT user_id, total_amount, status FROM orders WHERE order_id = ? LIMIT 1`,
+    [order_id]
+  );
+  if (!order) return { awarded: false, reason: "order_not_found" };
+
+  let status = String(order.status || "").toUpperCase();
+  if (status === "COMPLETED") status = "DELIVERED";
+
+  if (status !== "DELIVERED")
+    return { awarded: false, reason: "not_delivered" };
+
+  const already = await hasPointsAwardNotification(order_id, conn);
+  if (already) return { awarded: false, reason: "already_awarded" };
+
+  const rule = await getActivePointRule(conn);
+  if (!rule) return { awarded: false, reason: "no_active_rule" };
+
+  const totalAmount = Number(order.total_amount || 0);
+  const minAmount = Number(rule.min_amount_per_point || 0);
+  const perPoint = Number(rule.point_to_award || 0);
+
+  if (!(totalAmount > 0 && minAmount > 0 && perPoint > 0)) {
+    return { awarded: false, reason: "invalid_rule_or_amount" };
+  }
+
+  const units = Math.floor(totalAmount / minAmount);
+  const points = units * perPoint;
+  if (points <= 0) return { awarded: false, reason: "computed_zero" };
+
+  await conn.query(`UPDATE users SET points = points + ? WHERE user_id = ?`, [
+    points,
+    order.user_id,
+  ]);
+
+  const msg = `You earned ${points} points for order ${order_id} (Nu. ${fmtNu(
+    totalAmount
+  )} spent).`;
+
+  await insertUserNotification(conn, {
+    user_id: order.user_id,
+    type: "points_awarded",
+    title: "Points earned",
+    message: msg,
+    data: {
+      order_id,
+      points_awarded: points,
+      total_amount: totalAmount,
+      min_amount_per_point: minAmount,
+      point_to_award: perPoint,
+      rule_id: rule.point_id,
+    },
+    status: "unread",
+  });
+
+  return {
+    awarded: true,
+    points_awarded: points,
+    total_amount: totalAmount,
+    rule_id: rule.point_id,
+  };
+}
+
+/**
+ * ✅ FINAL: DELIVERED + archive to delivered_* + delete from main tables
+ * Name kept for compatibility with your controller.
+ */
+async function completeAndArchiveDeliveredOrder(
+  order_id,
+  { delivered_by = "SYSTEM", reason = "" } = {}
+) {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[row]] = await conn.query(
+      `SELECT order_id, user_id, status FROM orders WHERE order_id = ? FOR UPDATE`,
+      [order_id]
+    );
+    if (!row) {
+      await conn.rollback();
+      return { ok: false, code: "NOT_FOUND" };
+    }
+
+    const user_id = Number(row.user_id);
+    const current = String(row.status || "").toUpperCase();
+
+    if (current === "CANCELLED") {
+      await conn.rollback();
+      return { ok: false, code: "SKIPPED", current_status: current };
+    }
+
+    const [bizRows] = await conn.query(
+      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+      [order_id]
+    );
+    const business_ids = bizRows.map((x) => x.business_id);
+
+    const finalReason = String(reason || "").trim();
+
+    const [rr] = await conn.query(
+      `
+      SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME='orders'
+         AND COLUMN_NAME='status_reason'
+       LIMIT 1
+      `
+    );
+    const hasReason = rr.length > 0;
+
+    // ✅ mark as DELIVERED first
+    if (hasReason) {
+      await conn.query(
+        `UPDATE orders
+            SET status='DELIVERED',
+                status_reason=?,
+                updated_at=NOW()
+          WHERE order_id=?`,
+        [finalReason, order_id]
+      );
+    } else {
+      await conn.query(
+        `UPDATE orders
+            SET status='DELIVERED',
+                updated_at=NOW()
+          WHERE order_id=?`,
+        [order_id]
+      );
+    }
+
+    // points inside same transaction (do not fail delivery if points fail)
+    let pointsInfo = null;
+    try {
+      pointsInfo = await awardPointsForCompletedOrderWithConn(conn, order_id);
+    } catch (e) {
+      pointsInfo = {
+        awarded: false,
+        reason: "points_error",
+        error: e?.message,
+      };
+    }
+
+    await archiveDeliveredOrderInternal(conn, order_id, {
+      delivered_by,
+      reason: finalReason,
+    });
+
+    await deleteOrderFromMainTablesInternal(conn, order_id);
+    await trimDeliveredOrdersForUser(conn, user_id, 10);
+
+    await conn.commit();
+    return {
+      ok: true,
+      user_id,
+      business_ids,
+      status: "DELIVERED",
+      points: pointsInfo,
+    };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
 /* ================= PUBLIC MODEL API ================= */
 const Order = {
   // wallets
@@ -1201,11 +1545,12 @@ const Order = {
   // changes
   applyUnavailableItemChanges,
 
-  // cancellation (FINAL)
+  // cancellation + delivery archive
   cancelAndArchiveOrder,
   cancelIfStillPending,
+  completeAndArchiveDeliveredOrder,
 
-  // optional direct archive (fixed signature)
+  // optional direct archive (kept)
   archiveCancelledOrder: async (order_id, opts = {}) => {
     const {
       cancelled_by = "SYSTEM",
@@ -1528,8 +1873,11 @@ const Order = {
 
   update: async (order_id, orderData) => {
     if (!orderData || !Object.keys(orderData).length) return 0;
-    if (orderData.status)
-      orderData.status = String(orderData.status).toUpperCase();
+    if (orderData.status) {
+      let st = String(orderData.status).toUpperCase();
+      if (st === "COMPLETED") st = "DELIVERED";
+      orderData.status = st;
+    }
 
     if (Object.prototype.hasOwnProperty.call(orderData, "service_type")) {
       if (orderData.service_type != null) {
@@ -1567,16 +1915,20 @@ const Order = {
 
   updateStatus: async (order_id, status, reason) => {
     const hasReason = await ensureStatusReasonSupport();
+
+    let st = String(status).toUpperCase();
+    if (st === "COMPLETED") st = "DELIVERED";
+
     if (hasReason) {
       const [r] = await db.query(
         `UPDATE orders SET status = ?, status_reason = ?, updated_at = NOW() WHERE order_id = ?`,
-        [String(status).toUpperCase(), String(reason || "").trim(), order_id]
+        [st, String(reason || "").trim(), order_id]
       );
       return r.affectedRows;
     } else {
       const [r] = await db.query(
         `UPDATE orders SET status = ?, updated_at = NOW() WHERE order_id = ?`,
-        [String(status).toUpperCase(), order_id]
+        [st, order_id]
       );
       return r.affectedRows;
     }
@@ -1661,7 +2013,7 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
     "PREPARING",
     "READY",
     "OUT_FOR_DELIVERY",
-    "COMPLETED",
+    "DELIVERED",
     "CANCELLED",
     "REJECTED",
     "DECLINED",
@@ -1671,7 +2023,8 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
   for (const s of allStatuses) result[s] = 0;
 
   for (const row of rows) {
-    const key = String(row.status || "").toUpperCase();
+    let key = String(row.status || "").toUpperCase();
+    if (key === "COMPLETED") key = "DELIVERED";
     if (key) result[key] = Number(row.count) || 0;
   }
 
@@ -1690,9 +2043,9 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
   result.order_declined_today = Number(todayRows[0]?.declined_today || 0);
   return result;
 };
+
 /**
  * ✅ Merchant view: get orders for ONE business, grouped by user_id
- * Used by controller: Order.findByBusinessGroupedByUser(business_id)
  */
 Order.findByBusinessGroupedByUser = async (business_id) => {
   const bid = Number(business_id);
@@ -1752,7 +2105,6 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
 
   if (!rows.length) return [];
 
-  // Group: user_id -> orders -> items
   const byUser = new Map();
 
   for (const r of rows) {
@@ -1767,17 +2119,20 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
           phone: r.phone || null,
         },
         orders: [],
-        _ordersMap: new Map(), // internal map
+        _ordersMap: new Map(),
       });
     }
 
     const group = byUser.get(uid);
 
     if (!group._ordersMap.has(r.order_id)) {
+      let st = String(r.status || "").toUpperCase();
+      if (st === "COMPLETED") st = "DELIVERED";
+
       const orderObj = {
         order_id: r.order_id,
         service_type: r.service_type || null,
-        status: r.status,
+        status: st,
         status_reason: r.status_reason || null,
 
         payment_method: r.payment_method,
@@ -1816,7 +2171,6 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
       group.orders.push(orderObj);
     }
 
-    // push item (only this business's items)
     const orderRef = group._ordersMap.get(r.order_id);
     orderRef.items.push({
       item_id: r.item_id,
@@ -1833,7 +2187,6 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
     });
   }
 
-  // cleanup internal maps
   const out = Array.from(byUser.values()).map((g) => {
     delete g._ordersMap;
     return g;

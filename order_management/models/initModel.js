@@ -61,6 +61,7 @@ async function tableExists(table) {
  * Initialize (and patch) order management tables in a version-safe way.
  * - orders, order_items, order_notification, order_wallet_captures
  * - cancelled_orders, cancelled_order_items (archive tables)
+ * - delivered_orders, delivered_order_items (archive tables)
  */
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
@@ -375,8 +376,187 @@ CREATE TABLE IF NOT EXISTS cancelled_order_items (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `);
 
+  /* ================= Delivered archive tables ================= */
+
+  // Delivered orders (snapshot)
+  await db.query(`
+CREATE TABLE IF NOT EXISTS delivered_orders (
+  delivered_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_id VARCHAR(12) NOT NULL,
+  user_id INT NOT NULL,
+
+  service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD',
+
+  status VARCHAR(100) NOT NULL DEFAULT 'COMPLETED',
+  status_reason VARCHAR(255) NULL,
+
+  total_amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+  discount_amount DECIMAL(10,2) DEFAULT 0,
+  delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  platform_fee DECIMAL(10,2) NOT NULL DEFAULT 0,
+  merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
+
+  payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+  delivery_address VARCHAR(500) NOT NULL,
+  note_for_restaurant VARCHAR(500),
+  if_unavailable VARCHAR(256),
+
+  fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
+  priority BOOLEAN DEFAULT 0,
+  estimated_arrivial_time VARCHAR(40) DEFAULT NULL,
+
+  delivered_by ENUM('USER','MERCHANT','ADMIN','SYSTEM','DRIVER') NOT NULL DEFAULT 'SYSTEM',
+  delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL,
+  delivery_driver_id INT(11) DEFAULT NULL,
+  delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'DELIVERED',
+  delivery_ride_id BIGINT(20) DEFAULT NULL,
+
+  original_created_at TIMESTAMP NULL,
+  original_updated_at TIMESTAMP NULL,
+
+  PRIMARY KEY (delivered_id),
+  UNIQUE KEY uk_delivered_order_id (order_id),
+  INDEX idx_delivered_user (user_id),
+  INDEX idx_delivered_time (delivered_at),
+  INDEX idx_delivered_service_created (service_type, original_created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
+
+  if (await tableExists("delivered_orders")) {
+    await ensureColumn(
+      "delivered_orders",
+      "service_type",
+      `ALTER TABLE delivered_orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "status_reason",
+      `ALTER TABLE delivered_orders ADD COLUMN status_reason VARCHAR(255) NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "merchant_delivery_fee",
+      `ALTER TABLE delivered_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivered_by",
+      `ALTER TABLE delivered_orders ADD COLUMN delivered_by ENUM('USER','MERCHANT','ADMIN','SYSTEM','DRIVER') NOT NULL DEFAULT 'SYSTEM'`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivered_at",
+      `ALTER TABLE delivered_orders ADD COLUMN delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+    );
+
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_batch_id",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_driver_id",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_status",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'DELIVERED'`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_ride_id",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`
+    );
+
+    await ensureColumn(
+      "delivered_orders",
+      "original_created_at",
+      `ALTER TABLE delivered_orders ADD COLUMN original_created_at TIMESTAMP NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "original_updated_at",
+      `ALTER TABLE delivered_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
+    );
+  }
+
+  // Delivered order items (snapshot)
+  await db.query(`
+CREATE TABLE IF NOT EXISTS delivered_order_items (
+  delivered_item_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  order_id VARCHAR(12) NOT NULL,
+
+  business_id INT NOT NULL,
+  business_name VARCHAR(255) NOT NULL,
+
+  menu_id INT NOT NULL,
+  item_name VARCHAR(255) NOT NULL,
+  item_image VARCHAR(500),
+
+  quantity INT NOT NULL DEFAULT 1,
+  price DECIMAL(10,2) NOT NULL,
+  subtotal DECIMAL(10,2) NOT NULL,
+
+  platform_fee DECIMAL(10,2) DEFAULT 0,
+  delivery_fee DECIMAL(10,2) DEFAULT 0,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (delivered_item_id),
+  INDEX idx_delivered_items_order (order_id),
+  INDEX idx_delivered_items_biz (business_id),
+  CONSTRAINT fk_delivered_items_order
+    FOREIGN KEY (order_id) REFERENCES delivered_orders(order_id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
+
+  if (await tableExists("delivered_order_items")) {
+    await ensureColumn(
+      "delivered_order_items",
+      "platform_fee",
+      `ALTER TABLE delivered_order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
+    );
+    await ensureColumn(
+      "delivered_order_items",
+      "delivery_fee",
+      `ALTER TABLE delivered_order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
+    );
+  }
+
+  // Ensure indexes exist (idempotent)
+  await ensureIndex(
+    "delivered_orders",
+    "idx_delivered_user",
+    "CREATE INDEX idx_delivered_user ON delivered_orders(user_id)"
+  );
+  await ensureIndex(
+    "delivered_orders",
+    "idx_delivered_time",
+    "CREATE INDEX idx_delivered_time ON delivered_orders(delivered_at)"
+  );
+  await ensureIndex(
+    "delivered_orders",
+    "idx_delivered_service_created",
+    "CREATE INDEX idx_delivered_service_created ON delivered_orders(service_type, original_created_at)"
+  );
+  await ensureIndex(
+    "delivered_order_items",
+    "idx_delivered_items_order",
+    "CREATE INDEX idx_delivered_items_order ON delivered_order_items(order_id)"
+  );
+  await ensureIndex(
+    "delivered_order_items",
+    "idx_delivered_items_biz",
+    "CREATE INDEX idx_delivered_items_biz ON delivered_order_items(business_id)"
+  );
+
   console.log(
-    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items* are ready (version-safe)."
+    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items*, delivered_orders*, delivered_order_items* are ready (version-safe)."
   );
 }
 
