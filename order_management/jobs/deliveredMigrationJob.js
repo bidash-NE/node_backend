@@ -8,7 +8,7 @@ let _running = false;
 async function migrateDELIVEREDOrdersOnce({
   batchSize = Number(process.env.DELIVERED_MIGRATION_BATCH || 50),
   delivered_by = "SYSTEM",
-  reason = "Auto-migrate existing DELIVERED orders",
+  reason = "Successsfully delivered",
 } = {}) {
   if (_running) return;
   _running = true;

@@ -49,19 +49,18 @@ const server = http.createServer(app);
 
 (async () => {
   try {
-    await initOrderManagementTable(); // create tables if missing
-    await attachRealtime(server); // bind socket.io to this server
-    await startScheduledOrderProcessor(); // start the background job processor
+    await initOrderManagementTable();
 
-    // ✅ start auto-cancel worker (PENDING > 60min => CANCELLED)
+    await attachRealtime(server);
+
+    startScheduledOrderProcessor();
     startPendingOrderAutoCanceller();
-    await initOrderManagementTable(); // must create delivered_* tables too (your updated init)
 
-    // ✅ start migration job
     startDeliveredMigrationJob({
-      intervalMs: 60_000, // 1 min
+      intervalMs: 60_000,
       batchSize: 50,
     });
+
     const PORT = Number(process.env.PORT || 3000);
     server.listen(PORT, "0.0.0.0", () =>
       console.log(`🚀 Order service + Realtime listening on :${PORT}`)
