@@ -1690,5 +1690,156 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
   result.order_declined_today = Number(todayRows[0]?.declined_today || 0);
   return result;
 };
+/**
+ * ✅ Merchant view: get orders for ONE business, grouped by user_id
+ * Used by controller: Order.findByBusinessGroupedByUser(business_id)
+ */
+Order.findByBusinessGroupedByUser = async (business_id) => {
+  const bid = Number(business_id);
+  if (!Number.isFinite(bid) || bid <= 0) return [];
+
+  const hasReason = await ensureStatusReasonSupport();
+  const hasService = await ensureServiceTypeSupport();
+
+  const [rows] = await db.query(
+    `
+    SELECT
+      o.order_id,
+      o.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
+
+      ${hasService ? "o.service_type" : "NULL AS service_type"},
+      o.status,
+      ${hasReason ? "o.status_reason" : "NULL AS status_reason"},
+
+      o.total_amount,
+      o.discount_amount,
+      o.delivery_fee,
+      o.platform_fee,
+      o.merchant_delivery_fee,
+      o.payment_method,
+      o.delivery_address,
+      o.note_for_restaurant,
+      o.if_unavailable,
+      o.estimated_arrivial_time,
+      o.fulfillment_type,
+      o.priority,
+      o.created_at,
+      o.updated_at,
+
+      oi.item_id,
+      oi.business_id,
+      oi.business_name,
+      oi.menu_id,
+      oi.item_name,
+      oi.item_image,
+      oi.quantity,
+      oi.price,
+      oi.subtotal,
+      oi.platform_fee AS item_platform_fee,
+      oi.delivery_fee AS item_delivery_fee
+
+    FROM order_items oi
+    INNER JOIN orders o ON o.order_id = oi.order_id
+    LEFT JOIN users u ON u.user_id = o.user_id
+    WHERE oi.business_id = ?
+    ORDER BY o.created_at DESC, o.order_id DESC, oi.menu_id ASC
+    `,
+    [bid]
+  );
+
+  if (!rows.length) return [];
+
+  // Group: user_id -> orders -> items
+  const byUser = new Map();
+
+  for (const r of rows) {
+    const uid = Number(r.user_id);
+
+    if (!byUser.has(uid)) {
+      byUser.set(uid, {
+        user: {
+          user_id: uid,
+          name: r.user_name || null,
+          email: r.email || null,
+          phone: r.phone || null,
+        },
+        orders: [],
+        _ordersMap: new Map(), // internal map
+      });
+    }
+
+    const group = byUser.get(uid);
+
+    if (!group._ordersMap.has(r.order_id)) {
+      const orderObj = {
+        order_id: r.order_id,
+        service_type: r.service_type || null,
+        status: r.status,
+        status_reason: r.status_reason || null,
+
+        payment_method: r.payment_method,
+        fulfillment_type: r.fulfillment_type,
+        priority: r.priority,
+        estimated_arrivial_time: r.estimated_arrivial_time || null,
+
+        note_for_restaurant: r.note_for_restaurant || null,
+        if_unavailable: r.if_unavailable || null,
+
+        deliver_to: parseDeliveryAddress(r.delivery_address),
+
+        totals: {
+          total_amount: Number(r.total_amount || 0),
+          discount_amount: Number(r.discount_amount || 0),
+          delivery_fee: Number(r.delivery_fee || 0),
+          platform_fee: Number(r.platform_fee || 0),
+          merchant_delivery_fee:
+            r.merchant_delivery_fee != null
+              ? Number(r.merchant_delivery_fee)
+              : null,
+        },
+
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+
+        business: {
+          business_id: r.business_id,
+          business_name: r.business_name || null,
+        },
+
+        items: [],
+      };
+
+      group._ordersMap.set(r.order_id, orderObj);
+      group.orders.push(orderObj);
+    }
+
+    // push item (only this business's items)
+    const orderRef = group._ordersMap.get(r.order_id);
+    orderRef.items.push({
+      item_id: r.item_id,
+      business_id: r.business_id,
+      business_name: r.business_name,
+      menu_id: r.menu_id,
+      item_name: r.item_name,
+      item_image: r.item_image || null,
+      quantity: r.quantity,
+      price: r.price,
+      subtotal: r.subtotal,
+      platform_fee: Number(r.item_platform_fee || 0),
+      delivery_fee: Number(r.item_delivery_fee || 0),
+    });
+  }
+
+  // cleanup internal maps
+  const out = Array.from(byUser.values()).map((g) => {
+    delete g._ordersMap;
+    return g;
+  });
+
+  return out;
+};
 
 module.exports = Order;
