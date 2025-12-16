@@ -14,6 +14,7 @@ on:
       - "Map_and_location_services/**"
       - "wallet_payment/**"
       - "grablike-backend/**"
+      - "sms-gateway-backend/**"
       - "k8s/**"
       - ".github/workflows/deploy.yml"
 
@@ -33,6 +34,7 @@ jobs:
       map_location: ${{ steps.filter.outputs.map_location }}
       wallet_payment: ${{ steps.filter.outputs.wallet_payment }}
       grablike_backend: ${{ steps.filter.outputs.grablike_backend }}
+      sms_gateway: ${{ steps.filter.outputs.sms_gateway }}
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +53,7 @@ jobs:
             map_location:         'Map_and_location_services/**'
             wallet_payment:       'wallet_payment/**'
             grablike_backend:     'grablike-backend/**'
+            sms_gateway:          'sms-gateway-backend/**'
             k8s:                  'k8s/**'
             any:
               - 'food/**'
@@ -63,6 +66,7 @@ jobs:
               - 'Map_and_location_services/**'
               - 'wallet_payment/**'
               - 'grablike-backend/**'
+              - 'sms-gateway-backend/**'
               - 'k8s/**'
 
   build:
@@ -179,6 +183,16 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-grablike-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-grablike-backend:${{ github.sha }}
 
+      - name: Build & push SMS Gateway Backend
+        if: needs.changes.outputs.sms_gateway == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./sms-gateway-backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:latest
+            ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:${{ github.sha }}
+
   deploy:
     name: Deploy changed services to k3s (prod)
     runs-on: self-hosted
@@ -199,6 +213,7 @@ jobs:
       MAP_CHANGED: ${{ needs.changes.outputs.map_location }}
       WALLET_CHANGED: ${{ needs.changes.outputs.wallet_payment }}
       GRABLIKE_CHANGED: ${{ needs.changes.outputs.grablike_backend }}
+      SMS_GATEWAY_CHANGED: ${{ needs.changes.outputs.sms_gateway }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -261,6 +276,9 @@ jobs:
           fi
           if [ "${GRABLIKE_CHANGED:-}" = "true" ]; then
             deploy_if_exists grablike-backend grablike-backend "${DOCKER_USER}/superapp-grablike-backend:${SHA}"
+          fi
+          if [ "${SMS_GATEWAY_CHANGED:-}" = "true" ]; then
+            deploy_if_exists sms-gateway-backend sms-gateway-backend "${DOCKER_USER}/superapp-sms-gateway-backend:${SHA}"
           fi
 
           exit 0
