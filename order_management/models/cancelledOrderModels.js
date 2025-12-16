@@ -46,6 +46,10 @@ async function getCancelledOrdersByUser(
       co.cancelled_id,
       co.order_id,
       co.user_id,
+
+      -- ✅ ADD THIS:
+      co.service_type,
+
       co.status,
       co.status_reason,
       co.total_amount,
@@ -86,6 +90,7 @@ async function getCancelledOrdersByUser(
   }
 
   const ids = orders.map((o) => o.order_id);
+
   const [items] = await db.query(
     `
     SELECT
@@ -113,7 +118,7 @@ async function getCancelledOrdersByUser(
   }
 
   const out = orders.map((o) => ({
-    ...o,
+    ...o, // ✅ includes service_type now
     items: itemsByOrder.get(o.order_id) || [],
   }));
 
