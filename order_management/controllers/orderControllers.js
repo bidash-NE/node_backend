@@ -7,6 +7,7 @@ const {
 } = require("../realtime");
 
 const ALLOWED_STATUSES = new Set([
+  "ASSIGNED",
   "PENDING",
   "DECLINED",
   "CONFIRMED",
@@ -450,7 +451,9 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
  */
 async function updateOrderStatus(req, res) {
   try {
-    const order_id = req.params.order_id;
+    const order_id = String(req.params.order_id || "").trim();
+
+    const body = req.body || {};
     const {
       status,
       reason,
@@ -464,23 +467,25 @@ async function updateOrderStatus(req, res) {
       estimated_minutes,
       cancelled_by, // optional
       delivered_by, // optional
-    } = req.body || {};
+    } = body;
 
-    const changes = unavailable_changes || unavailableChanges || null;
-
-    if (!status) {
+    // ✅ STRICT: status must be provided and must match the allowed set (after normalization)
+    if (typeof status !== "string" || !status.trim()) {
       return res.status(400).json({ message: "Status is required" });
     }
 
-    const normalizedRaw = String(status).trim().toUpperCase();
+    const normalizedRaw = status.trim().toUpperCase();
     const normalized =
       normalizedRaw === "COMPLETED" ? "DELIVERED" : normalizedRaw;
 
+    // ✅ STRICT: DO NOT allow anything outside ALLOWED_STATUSES
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
         message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
           ", "
         )}`,
+        received: normalizedRaw,
+        normalized,
       });
     }
 
@@ -492,11 +497,15 @@ async function updateOrderStatus(req, res) {
         LIMIT 1`,
       [order_id]
     );
+
     if (!row) return res.status(404).json({ message: "Order not found" });
 
     const user_id = Number(row.user_id);
     const current = String(row.current_status || "PENDING").toUpperCase();
     const payMethod = String(row.payment_method || "").toUpperCase();
+
+    const changes = unavailable_changes || unavailableChanges || null;
+    const finalReason = String(reason || "").trim();
 
     /* =========================================================
        ✅ DELIVERED => archive to delivered_* and delete main rows
@@ -506,7 +515,6 @@ async function updateOrderStatus(req, res) {
         String(delivered_by || "SYSTEM")
           .trim()
           .toUpperCase() || "SYSTEM";
-      const finalReason = String(reason || "").trim();
 
       const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
         delivered_by: by,
@@ -514,16 +522,15 @@ async function updateOrderStatus(req, res) {
       });
 
       if (!out || !out.ok) {
-        if (out?.code === "NOT_FOUND")
+        if (out?.code === "NOT_FOUND") {
           return res.status(404).json({ message: "Order not found" });
-
+        }
         if (out?.code === "SKIPPED") {
           return res.status(400).json({
             message: "Unable to mark this order as delivered.",
             current_status: out.current_status,
           });
         }
-
         return res
           .status(400)
           .json({ message: "Unable to mark this order as delivered." });
@@ -533,7 +540,6 @@ async function updateOrderStatus(req, res) {
         ? out.business_ids
         : [];
 
-      // broadcast AFTER delete using returned ids
       broadcastOrderStatusToMany({
         order_id,
         user_id: out.user_id,
@@ -589,7 +595,7 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       ✅ CANCELLED => archive+delete (existing logic kept)
+       ✅ CANCELLED => archive+delete
        ========================================================= */
     if (normalized === "CANCELLED") {
       const locked = new Set([
@@ -599,6 +605,7 @@ async function updateOrderStatus(req, res) {
         "OUT_FOR_DELIVERY",
         "DELIVERED",
       ]);
+
       if (locked.has(current)) {
         return res.status(400).json({
           message:
@@ -611,8 +618,6 @@ async function updateOrderStatus(req, res) {
           .trim()
           .toUpperCase() || "SYSTEM";
 
-      const finalReason = String(reason || "").trim();
-
       const out = await Order.cancelAndArchiveOrder(order_id, {
         cancelled_by: by,
         reason: finalReason,
@@ -621,16 +626,15 @@ async function updateOrderStatus(req, res) {
       });
 
       if (!out || !out.ok) {
-        if (out?.code === "NOT_FOUND")
+        if (out?.code === "NOT_FOUND") {
           return res.status(404).json({ message: "Order not found" });
-
+        }
         if (out?.code === "SKIPPED") {
           return res.status(400).json({
             message: "Unable to cancel this order.",
             current_status: out.current_status,
           });
         }
-
         return res
           .status(400)
           .json({ message: "Unable to cancel this order." });
@@ -735,7 +739,10 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      if (estimated_minutes && !isNaN(Number(estimated_minutes))) {
+      if (
+        estimated_minutes != null &&
+        Number.isFinite(Number(estimated_minutes))
+      ) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
       }
     }
@@ -744,7 +751,7 @@ async function updateOrderStatus(req, res) {
     const affected = await Order.updateStatus(
       order_id,
       normalized,
-      (reason ?? "").toString().trim()
+      finalReason
     );
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
@@ -782,7 +789,7 @@ async function updateOrderStatus(req, res) {
         user_id,
         order_id,
         status: normalized,
-        reason,
+        reason: finalReason,
       });
     } catch (e) {
       console.error("[updateOrderStatus notify user failed]", {
