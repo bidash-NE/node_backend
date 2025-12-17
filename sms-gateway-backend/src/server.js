@@ -14,7 +14,7 @@ app.use(pinoHttp({ logger }));
 const smpp = new SmppClient({ logger });
 smpp.start();
 
-app.get("/health", (req, res) => {
+app.get("/sms/health", (req, res) => {
   res.json({
     ok: true,
     smpp: { ready: smpp.isReady() },
@@ -23,7 +23,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/sms", smsRouter({ smpp, logger }));
-
+app.use("/sms/api/sms", smsRouter({ smpp, logger }));
 app.listen(config.port, () => {
   logger.info(`SMS Gateway listening on http://localhost:${config.port}`);
 });
