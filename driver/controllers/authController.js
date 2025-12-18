@@ -1,5 +1,5 @@
 const redis = require("../models/redisClient");
-const transporter = require("../config/mailer");
+const { transporter, from } = require("../config/mailer");
 const db = require("../config/db");
 
 // ✅ Send OTP
@@ -27,37 +27,47 @@ const db = require("../config/db");
 // };
 exports.sendOtp = async (req, res) => {
   const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email is required" });
+
+  const cleanEmail = String(email).trim().toLowerCase();
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
   try {
-    // Check if email exists in users table
     const [rows] = await db.execute(
       "SELECT user_id FROM users WHERE email = ?",
-      [email]
+      [cleanEmail]
     );
 
     if (rows.length > 0) {
-      // Email already exists
       return res
         .status(400)
         .json({ error: "Email already registered. OTP not sent." });
     }
 
-    // Save OTP in Redis with expiration (5 mins)
-    await redis.set(`otp:${email}`, otp, { ex: 300 });
+    await redis.set(`otp:${cleanEmail}`, otp, { ex: 300 });
+    console.log("[OTP] sending to:", cleanEmail);
 
-    // Send OTP email
-    await transporter.sendMail({
-      from: `"Ride App" <${process.env.EMAIL_USER}>`,
-      to: email,
+    const info = await transporter.sendMail({
+      from,
+      to: cleanEmail,
       subject: "Your OTP Code",
       text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
+      html: `<p>Your OTP is:</p><h2>${otp}</h2><p>Expires in 5 minutes.</p>`,
+      envelope: { from, to: [cleanEmail] },
     });
 
-    res.status(200).json({ message: "OTP sent to email" });
+    console.log("[OTP] messageId:", info.messageId);
+    console.log("[OTP] accepted:", info.accepted);
+    console.log("[OTP] rejected:", info.rejected);
+    console.log("[OTP] response:", info.response);
+
+    // If server didn't accept any recipient, treat as failure:
+    if (!info.accepted || info.accepted.length === 0) {
+      return res.status(500).json({ error: "SMTP did not accept recipient" });
+    }
   } catch (err) {
     console.error("Error sending OTP:", err.message);
-    res.status(500).json({ error: "Failed to send OTP" });
+    return res.status(500).json({ error: "Failed to send OTP" });
   }
 };
 // ✅ Verify OTP

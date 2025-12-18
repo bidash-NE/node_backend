@@ -12,6 +12,7 @@ const deviceRoutes = require("./routes/deviceRoute");
 const driverRoutes = require("./routes/driverRoute");
 const forgotPasswordRoute = require("./routes/forgotPasswordRoute");
 const profileRoutes = require("./routes/profileRoute");
+const smsOtpRoutes = require("./routes/smsOtpRoutes");
 
 dotenv.config();
 const app = express();
@@ -34,12 +35,12 @@ checkAndCreateTables();
 
 // Register your routes
 app.use("/api/auth", authRoutes);
+app.use("/api/sms-otp", smsOtpRoutes);
 app.use("/api", registrationRoutes);
 app.use("/api", deviceRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/forgotpassword", forgotPasswordRoute);
 app.use("/api/profile", profileRoutes);
-
 // Default test route
 app.get("/", (req, res) => {
   res.send("🚗 Ride App Backend Running");
