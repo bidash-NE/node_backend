@@ -323,119 +323,258 @@ async function fetchFoodMartRevenueReport({
   dateTo,
   limit = 100,
   offset = 0,
+  debug = false, // optional (if you want logs)
 }) {
-  const where = [];
-  const params = [];
+  const REPORT_DEBUG =
+    Boolean(debug) ||
+    String(process.env.REPORT_DEBUG || "").toLowerCase() === "true";
 
-  // only food & mart businesses
-  where.push(`LOWER(mbd.${OWNER_TYPE_COL}) IN ('food','mart')`);
+  const dlog = (...args) => {
+    if (REPORT_DEBUG) console.log(...args);
+  };
 
-  if (businessIds.length) {
-    where.push(`ai.business_id IN (${businessIds.map(() => "?").join(",")})`);
-    params.push(...businessIds);
-  }
-  if (userId) {
-    where.push("o.user_id = ?");
-    params.push(userId);
-  }
-  if (status) {
-    where.push("o.status = ?");
-    params.push(status.toUpperCase());
-  }
-  if (dateFrom) {
-    where.push("o.created_at >= ?");
-    params.push(`${dateFrom} 00:00:00`);
-  }
-  if (dateTo) {
-    where.push("o.created_at < DATE_ADD(?, INTERVAL 1 DAY)");
-    params.push(`${dateTo} 00:00:00`);
-  }
+  const L = Math.min(Math.max(Number(limit), 1), 500);
+  const O = Math.max(Number(offset), 0);
 
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  // overfetch per source then paginate after merge
+  const perSourceLimit = Math.min(5000, Math.max((L + O) * 30, 500));
+  const perSourceOffset = 0;
 
-  const sql = `
-    SELECT
-      o.order_id AS order_id,
-      o.user_id AS user_id,
-      LOWER(mbd.${OWNER_TYPE_COL}) AS owner_type,
-      COALESCE(NULLIF(TRIM(MAX(u.user_name)), ''), CONCAT('User ', o.user_id)) AS customer_name,
-      MAX(u.phone) AS customer_phone,
-      MAX(ai.business_id) AS business_id,
-      MAX(ai.business_name) AS business_name,
-      GROUP_CONCAT(CONCAT(ai.item_name, ' x', ai.qty) ORDER BY ai.item_name SEPARATOR ', ') AS items_name,
-      SUM(ai.qty) AS total_quantity,
-      o.total_amount AS total_amount,
-      o.platform_fee AS platform_fee,
-      o.payment_method AS payment_method,
-      o.status AS status,
-      o.created_at AS placed_at
-    FROM orders o
-    JOIN (
-      SELECT
-        order_id,
-        business_id,
-        business_name,
-        item_name,
-        SUM(quantity) AS qty
-      FROM order_items
-      GROUP BY order_id, business_id, business_name, item_name
-    ) ai ON ai.order_id = o.order_id
-    LEFT JOIN users u ON u.user_id = o.user_id
-    JOIN \`${MERCHANT_TABLE}\` mbd ON mbd.business_id = ai.business_id
-    ${whereSql}
-    GROUP BY o.order_id, owner_type
-    ORDER BY o.created_at DESC
-    LIMIT ? OFFSET ?;
-  `;
+  // helper to build where + params
+  function buildWhereForRevenue({ placedAtCol, statusExpr }) {
+    const where = [];
+    const params = [];
 
-  const paramsWithLimit = [...params, Number(limit), Number(offset)];
-  const [rows] = await db.query(sql, paramsWithLimit);
+    // only food & mart businesses
+    where.push(`LOWER(mbd.${OWNER_TYPE_COL}) IN ('food','mart')`);
 
-  return rows.map((r) => {
-    const totalAmount = Number(r.total_amount || 0);
-    const platformFee = Number(r.platform_fee || 0);
-    const ownerTypeLabel = String(r.owner_type || "").toUpperCase(); // FOOD / MART
-    const revenueEarned = platformFee;
-
-    const details = {
-      order: {
-        id: r.order_id,
-        status: r.status,
-        placed_at: r.placed_at,
-        owner_type: ownerTypeLabel,
-      },
-      customer: {
-        id: r.user_id,
-        name: r.customer_name,
-        phone: r.customer_phone || null,
-      },
-      business: {
-        id: r.business_id,
-        name: r.business_name,
-        owner_type: ownerTypeLabel,
-      },
-      items: {
-        summary: r.items_name || "",
-        total_quantity: Number(r.total_quantity || 0),
-      },
-      amounts: {
-        total_amount: totalAmount,
-        platform_fee: platformFee,
-        revenue_earned: revenueEarned,
-        tax: 0,
-      },
-      payment: { method: r.payment_method },
-    };
+    if (businessIds.length) {
+      where.push(
+        `ai_order.business_id IN (${businessIds.map(() => "?").join(",")})`
+      );
+      params.push(...businessIds);
+    }
+    if (userId) {
+      where.push(`o.user_id = ?`);
+      params.push(userId);
+    }
+    if (status) {
+      where.push(`UPPER(${statusExpr}) = ?`);
+      params.push(String(status).toUpperCase());
+    }
+    if (dateFrom) {
+      where.push(`o.${placedAtCol} >= ?`);
+      params.push(`${dateFrom} 00:00:00`);
+    }
+    if (dateTo) {
+      where.push(`o.${placedAtCol} < DATE_ADD(?, INTERVAL 1 DAY)`);
+      params.push(`${dateTo} 00:00:00`);
+    }
 
     return {
-      order_id: r.order_id,
-      owner_type: ownerTypeLabel,
-      platform_fee: platformFee,
-      revenue_earned: revenueEarned,
-      total_amount: totalAmount,
-      details,
+      whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
+      params,
     };
-  });
+  }
+
+  // ✅ One source runner (orders/cancelled/delivered)
+  async function runRevenueSource({
+    sourceLabel,
+    ordersTable,
+    itemsTable,
+    placedAtCol, // created_at / cancelled_at / delivered_at
+    ownerTypeFallback, // optional if table doesn't store owner_type (we still derive from mbd)
+    statusFallback, // e.g. 'CANCELLED', 'DELIVERED'
+    platformFeeCol, // platform_fee if exists in that table, else null
+  }) {
+    // status expression with fallback for cancelled/delivered
+    const statusExpr = statusFallback
+      ? `COALESCE(o.status, '${statusFallback}')`
+      : `o.status`;
+
+    const platformExpr = platformFeeCol
+      ? `COALESCE(o.${platformFeeCol}, 0)`
+      : `0`;
+
+    const { whereSql, params } = buildWhereForRevenue({
+      placedAtCol,
+      statusExpr,
+    });
+
+    // ✅ Two-level item aggregation (same pattern you used for orders report)
+    const sql = `
+      SELECT
+        '${sourceLabel}' AS source,
+        o.order_id AS order_id,
+        o.user_id AS user_id,
+        LOWER(mbd.${OWNER_TYPE_COL}) AS owner_type,
+
+        COALESCE(NULLIF(TRIM(u.user_name), ''), CONCAT('User ', o.user_id)) AS customer_name,
+        u.phone AS customer_phone,
+
+        ai_order.business_id AS business_id,
+        COALESCE(NULLIF(TRIM(ai_order.business_name), ''), NULLIF(TRIM(mbd.business_name), '')) AS business_name,
+
+        ai_order.items_name AS items_name,
+        ai_order.total_quantity AS total_quantity,
+
+        COALESCE(o.total_amount, 0) AS total_amount,
+        ${platformExpr} AS platform_fee,   -- admin platform fee
+        ${platformExpr} AS revenue_earned, -- revenue == platform fee
+
+        o.payment_method AS payment_method,
+        ${statusExpr} AS status,
+        o.${placedAtCol} AS placed_at
+
+      FROM \`${ordersTable}\` o
+
+      JOIN (
+        SELECT
+          item_qty.order_id AS order_id,
+          MAX(item_qty.business_id) AS business_id,
+          MAX(item_qty.business_name) AS business_name,
+          GROUP_CONCAT(
+            CONCAT(item_qty.item_name, ' x', item_qty.qty)
+            ORDER BY item_qty.item_name
+            SEPARATOR ', '
+          ) AS items_name,
+          SUM(item_qty.qty) AS total_quantity
+        FROM (
+          SELECT
+            i.order_id AS order_id,
+            i.business_id AS business_id,
+            i.business_name AS business_name,
+            i.item_name AS item_name,
+            SUM(i.quantity) AS qty
+          FROM \`${itemsTable}\` i
+          GROUP BY i.order_id, i.business_id, i.business_name, i.item_name
+        ) item_qty
+        GROUP BY item_qty.order_id
+      ) ai_order ON ai_order.order_id = o.order_id
+
+      JOIN \`${MERCHANT_TABLE}\` mbd ON mbd.business_id = ai_order.business_id
+      LEFT JOIN users u ON u.user_id = o.user_id
+
+      ${whereSql}
+      ORDER BY o.${placedAtCol} DESC
+      LIMIT ? OFFSET ?;
+    `;
+
+    const paramsWithLimit = [
+      ...params,
+      Number(perSourceLimit),
+      Number(perSourceOffset),
+    ];
+
+    dlog(`\n[REVENUE] SOURCE=${sourceLabel}`);
+    dlog(sql);
+    dlog(paramsWithLimit);
+
+    const [rows] = await db.query(sql, paramsWithLimit);
+
+    return rows.map((r) => {
+      const ownerTypeLabel = String(r.owner_type || "").toUpperCase(); // FOOD / MART
+
+      const totalAmount = Number(r.total_amount || 0);
+      const platformFee = Number(r.platform_fee || 0);
+      const revenueEarned = Number(r.revenue_earned || 0);
+
+      const details = {
+        order: {
+          id: r.order_id,
+          status: r.status,
+          placed_at: r.placed_at,
+          owner_type: ownerTypeLabel,
+          source: r.source, // orders/cancelled/delivered (handy)
+        },
+        customer: {
+          id: r.user_id,
+          name: r.customer_name,
+          phone: r.customer_phone || null,
+        },
+        business: {
+          id: r.business_id,
+          name: r.business_name,
+          owner_type: ownerTypeLabel,
+        },
+        items: {
+          summary: r.items_name || "",
+          total_quantity: Number(r.total_quantity || 0),
+        },
+        amounts: {
+          total_amount: totalAmount,
+          platform_fee: platformFee,
+          revenue_earned: revenueEarned,
+          tax: 0,
+        },
+        payment: {
+          method: r.payment_method,
+        },
+      };
+
+      return {
+        order_id: r.order_id,
+        owner_type: ownerTypeLabel,
+        platform_fee: platformFee,
+        revenue_earned: revenueEarned,
+        total_amount: totalAmount,
+        details,
+      };
+    });
+  }
+
+  // ✅ If your delivered table uses created_at, change here:
+  const deliveredPlacedAt = "delivered_at"; // or "created_at"
+  const cancelledPlacedAt = "cancelled_at"; // or "created_at" if your schema differs
+
+  // ✅ Run 3 sources (in parallel)
+  const [ordersRows, cancelledRows, deliveredRows] = await Promise.all([
+    runRevenueSource({
+      sourceLabel: "orders",
+      ordersTable: "orders",
+      itemsTable: "order_items",
+      placedAtCol: "created_at",
+      statusFallback: null,
+      platformFeeCol: "platform_fee", // exists in orders
+    }),
+    runRevenueSource({
+      sourceLabel: "cancelled",
+      ordersTable: "cancelled_orders",
+      itemsTable: "cancelled_order_items",
+      placedAtCol: cancelledPlacedAt,
+      statusFallback: "CANCELLED",
+      platformFeeCol: "platform_fee", // if NOT present in cancelled_orders, set null
+    }),
+    runRevenueSource({
+      sourceLabel: "delivered",
+      ordersTable: "delivered_orders",
+      itemsTable: "delivered_order_items",
+      placedAtCol: deliveredPlacedAt,
+      statusFallback: "DELIVERED",
+      platformFeeCol: "platform_fee", // if NOT present in delivered_orders, set null
+    }),
+  ]);
+
+  dlog(
+    `[REVENUE] counts: orders=${ordersRows.length}, cancelled=${cancelledRows.length}, delivered=${deliveredRows.length}`
+  );
+
+  // merge + sort newest first
+  const all = [...ordersRows, ...cancelledRows, ...deliveredRows].sort(
+    (a, b) => {
+      const ta = a?.details?.order?.placed_at
+        ? new Date(a.details.order.placed_at).getTime()
+        : 0;
+      const tb = b?.details?.order?.placed_at
+        ? new Date(b.details.order.placed_at).getTime()
+        : 0;
+      return tb - ta;
+    }
+  );
+
+  // final pagination
+  const page = all.slice(O, O + L);
+  return page;
 }
 
 module.exports = {
