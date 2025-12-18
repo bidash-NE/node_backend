@@ -4,11 +4,11 @@ const Reports = require("../models/ordersReportModel");
 function parseQuery(req) {
   const {
     business_id,
-    business_ids, // e.g., "26,27,31"
+    business_ids,
     user_id,
     status,
-    date_from, // YYYY-MM-DD
-    date_to, // YYYY-MM-DD
+    date_from,
+    date_to,
     limit,
     offset,
   } = req.query;
@@ -36,8 +36,6 @@ function parseQuery(req) {
   };
 }
 
-/* ---------------- existing ORDER reports ---------------- */
-
 exports.getFoodOrdersReport = async (req, res) => {
   try {
     const args = parseQuery(req);
@@ -54,6 +52,7 @@ exports.getFoodOrdersReport = async (req, res) => {
 
 exports.getMartOrdersReport = async (req, res) => {
   try {
+    // console.log("Mart orders report API called");
     const args = parseQuery(req);
     const rows = await Reports.fetchOrdersReportByOwnerType({
       ...args,
@@ -65,8 +64,6 @@ exports.getMartOrdersReport = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch mart orders report" });
   }
 };
-
-/* ---------------- new FOOD + MART REVENUE report ---------------- */
 
 exports.getFoodMartRevenueReport = async (req, res) => {
   try {
