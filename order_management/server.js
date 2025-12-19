@@ -130,7 +130,7 @@ const server = http.createServer(app);
 
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Order service + Realtime listening on :${PORT}`);
+      console.log(`🚀 Order service + Realtime listening on port :${PORT}`);
       console.log(`📦 Uploads served at: http://localhost:${PORT}/uploads/...`);
     });
   } catch (err) {
