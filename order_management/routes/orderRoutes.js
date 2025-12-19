@@ -35,11 +35,7 @@ const validUserId = (req, res, next) => {
  * - payload: JSON string
  * - delivery_photo: image file
  */
-router.post(
-  "/orders",
-  uploadDeliveryPhoto.single("delivery_photo"),
-  orderCtrl.createOrder
-);
+router.post("/orders", uploadDeliveryPhoto, orderCtrl.createOrder);
 
 router.get("/orders/:order_id", validOrderId, orderCtrl.getOrderById);
 router.put("/orders/:order_id", validOrderId, orderCtrl.updateOrder);
