@@ -57,6 +57,7 @@ async function deleteCancelledOrder(req, res) {
 
 async function deleteManyCancelledOrders(req, res) {
   try {
+    console.log("[deleteManyCancelledOrders] Body:", req.body);
     const user_id = Number(req.params.user_id);
     const body = req.body || {};
     const order_ids = Array.isArray(body.order_ids) ? body.order_ids : [];

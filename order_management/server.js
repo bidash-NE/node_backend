@@ -30,6 +30,7 @@ const app = express();
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // serve simple test pages (optional)
 app.use(express.static(path.join(__dirname, "public")));

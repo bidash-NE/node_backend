@@ -58,7 +58,30 @@ async function postJson(url, body = {}, timeout = 8000) {
   });
   return data;
 }
-
+async function ensureDeliveryExtrasSupport() {
+  const [rows] = await db.query(
+    `
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'orders'
+      AND COLUMN_NAME IN (
+        'delivery_lat','delivery_lng',
+        'delivery_floor_unit','delivery_instruction_note',
+        'delivery_special_mode','delivery_photo_url'
+      )
+    `
+  );
+  const set = new Set(rows.map((r) => r.COLUMN_NAME));
+  return {
+    hasLat: set.has("delivery_lat"),
+    hasLng: set.has("delivery_lng"),
+    hasFloor: set.has("delivery_floor_unit"),
+    hasInstr: set.has("delivery_instruction_note"),
+    hasMode: set.has("delivery_special_mode"),
+    hasPhoto: set.has("delivery_photo_url"),
+  };
+}
 function extractIdsShape(payload) {
   const p = payload?.data ? payload.data : payload;
 
@@ -117,7 +140,10 @@ async function fetchTxnAndJournalIds() {
 async function getBuyerWalletByUserId(user_id, conn = null) {
   const dbh = conn || db;
   const [rows] = await dbh.query(
-    `SELECT id, wallet_id, user_id, amount, status FROM wallets WHERE user_id = ? LIMIT 1`,
+    `SELECT id, wallet_id, user_id, amount, status
+       FROM wallets
+      WHERE user_id = ?
+      LIMIT 1`,
     [user_id]
   );
   return rows[0] || null;
@@ -126,7 +152,10 @@ async function getBuyerWalletByUserId(user_id, conn = null) {
 async function getAdminWallet(conn = null) {
   const dbh = conn || db;
   const [rows] = await dbh.query(
-    `SELECT id, wallet_id, user_id, amount, status FROM wallets WHERE wallet_id = ? LIMIT 1`,
+    `SELECT id, wallet_id, user_id, amount, status
+       FROM wallets
+      WHERE wallet_id = ?
+      LIMIT 1`,
     [ADMIN_WALLET_ID]
   );
   return rows[0] || null;
@@ -145,6 +174,69 @@ async function getMerchantWalletByBusinessId(business_id, conn = null) {
     [business_id]
   );
   return rows[0] || null;
+}
+
+/* ================= SERVICE TYPE RESOLUTION (✅ NEW) ================= */
+// Uses merchant_business_details.owner_type to derive FOOD/MART when orders.service_type is missing/null.
+async function getOwnerTypeByBusinessId(business_id, conn = null) {
+  const dbh = conn || db;
+  const bid = Number(business_id);
+  if (!Number.isFinite(bid) || bid <= 0) return null;
+
+  const [rows] = await dbh.query(
+    `SELECT owner_type
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
+    [bid]
+  );
+
+  const ot = rows[0]?.owner_type;
+  if (!ot) return null;
+
+  const norm = String(ot).trim().toUpperCase();
+  if (norm === "FOOD" || norm === "MART") return norm;
+
+  // tolerate stored values like "food" / "mart"
+  if (String(ot).toLowerCase().includes("mart")) return "MART";
+  if (String(ot).toLowerCase().includes("food")) return "FOOD";
+
+  return null;
+}
+
+async function resolveOrderServiceType(order_id, conn = null) {
+  const dbh = conn || db;
+
+  // If orders.service_type exists and filled, use it
+  try {
+    const hasService = await ensureServiceTypeSupport();
+    if (hasService) {
+      const [[row]] = await dbh.query(
+        `SELECT service_type FROM orders WHERE order_id = ? LIMIT 1`,
+        [order_id]
+      );
+      const st = row?.service_type
+        ? String(row.service_type).trim().toUpperCase()
+        : "";
+      if (st === "FOOD" || st === "MART") return st;
+    }
+  } catch (_) {}
+
+  // Otherwise derive from primary business_id in order_items
+  const [[primary]] = await dbh.query(
+    `SELECT business_id
+       FROM order_items
+      WHERE order_id = ?
+      ORDER BY menu_id ASC
+      LIMIT 1`,
+    [order_id]
+  );
+
+  const derived = primary?.business_id
+    ? await getOwnerTypeByBusinessId(primary.business_id, dbh)
+    : null;
+
+  return derived || "FOOD";
 }
 
 /* ================= USER NOTIFICATIONS ================= */
@@ -181,7 +273,7 @@ function humanOrderStatus(status) {
       return "out for delivery";
     case "DELIVERED":
       return "delivered";
-    case "COMPLETED": // backward text only
+    case "COMPLETED":
       return "delivered";
     case "CANCELLED":
       return "cancelled";
@@ -201,8 +293,6 @@ async function addUserOrderStatusNotificationInternal(
 ) {
   const dbh = conn || db;
   let normalized = String(status || "").toUpperCase();
-
-  // backward compatible
   if (normalized === "COMPLETED") normalized = "DELIVERED";
 
   const trimmedReason = String(reason || "").trim();
@@ -215,9 +305,7 @@ async function addUserOrderStatusNotificationInternal(
     message = `Your order ${order_id} is now ${nice}.`;
   }
 
-  if (trimmedReason) {
-    message += ` Reason: ${trimmedReason}`;
-  }
+  if (trimmedReason) message += ` Reason: ${trimmedReason}`;
 
   await insertUserNotification(dbh, {
     user_id,
@@ -314,11 +402,12 @@ async function addUserWalletDebitNotificationInternal(
 
   let message;
   if (payMethod === "WALLET") {
-    message = `Your order ${order_id} is accepted successfully. Nu. ${fmtNu(
-      orderAmt
-    )} has been deducted from your wallet for the order and Nu. ${fmtNu(
-      feeAmt
-    )} as platform fee (your share).`;
+    message =
+      `Your order ${order_id} is accepted successfully. ` +
+      `Nu. ${fmtNu(
+        orderAmt
+      )} has been deducted from your wallet for the order and ` +
+      `Nu. ${fmtNu(feeAmt)} as platform fee (your share).`;
   } else {
     message = `Order ${order_id}: Nu. ${fmtNu(
       feeAmt
@@ -370,7 +459,6 @@ async function hasPointsAwardNotification(order_id, conn = null) {
   return rows.length > 0;
 }
 
-// ✅ name kept for compatibility, but logic is DELIVERED
 async function awardPointsForCompletedOrder(order_id) {
   const conn = await db.getConnection();
   try {
@@ -495,7 +583,10 @@ function parseDeliveryAddress(val) {
 async function captureExists(order_id, capture_type, conn = null) {
   const dbh = conn || db;
   const [[row]] = await dbh.query(
-    `SELECT order_id FROM order_wallet_captures WHERE order_id = ? AND capture_type = ? LIMIT 1`,
+    `SELECT order_id
+       FROM order_wallet_captures
+      WHERE order_id = ? AND capture_type = ?
+      LIMIT 1`,
     [order_id, capture_type]
   );
   return !!row;
@@ -506,7 +597,9 @@ async function computeBusinessSplit(order_id, conn = null) {
 
   const [[order]] = await dbh.query(
     `SELECT order_id,total_amount,platform_fee,delivery_fee,merchant_delivery_fee
-       FROM orders WHERE order_id = ? LIMIT 1`,
+       FROM orders
+      WHERE order_id = ?
+      LIMIT 1`,
     [order_id]
   );
   if (!order) throw new Error("Order not found while computing split");
@@ -569,14 +662,18 @@ async function recordWalletTransfer(
   if (!(amt > 0)) return null;
 
   const [dr] = await conn.query(
-    `UPDATE wallets SET amount = amount - ? WHERE wallet_id = ? AND amount >= ?`,
+    `UPDATE wallets
+        SET amount = amount - ?
+      WHERE wallet_id = ? AND amount >= ?`,
     [amt, fromId, amt]
   );
   if (!dr.affectedRows)
     throw new Error(`Insufficient funds or missing wallet: ${fromId}`);
 
   await conn.query(
-    `UPDATE wallets SET amount = amount + ? WHERE wallet_id = ?`,
+    `UPDATE wallets
+        SET amount = amount + ?
+      WHERE wallet_id = ?`,
     [amt, toId]
   );
 
@@ -612,7 +709,9 @@ async function captureOrderFunds(order_id) {
 
     const [[order]] = await conn.query(
       `SELECT user_id, total_amount, platform_fee, payment_method
-         FROM orders WHERE order_id = ? LIMIT 1`,
+         FROM orders
+        WHERE order_id = ?
+        LIMIT 1`,
       [order_id]
     );
     if (!order) throw new Error("Order not found for capture");
@@ -738,10 +837,13 @@ async function captureOrderCODFee(order_id) {
 
     const [[order]] = await conn.query(
       `SELECT user_id, platform_fee, payment_method
-         FROM orders WHERE order_id = ? LIMIT 1`,
+         FROM orders
+        WHERE order_id = ?
+        LIMIT 1`,
       [order_id]
     );
     if (!order) throw new Error("Order not found for COD fee capture");
+
     if (String(order.payment_method || "").toUpperCase() !== "COD") {
       await conn.commit();
       return {
@@ -760,6 +862,7 @@ async function captureOrderCODFee(order_id) {
     const buyer = await getBuyerWalletByUserId(order.user_id, conn);
     const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
     const admin = await getAdminWallet(conn);
+
     if (!buyer) throw new Error("Buyer wallet missing");
     if (!merch) throw new Error("Merchant wallet missing");
     if (!admin) throw new Error("Admin wallet missing");
@@ -988,13 +1091,27 @@ async function archiveCancelledOrderInternal(
     [order_id]
   );
 
+  // ✅ NEW: always resolve service type (FOOD/MART) even if orders.service_type is missing
+  let resolvedServiceType = null;
+  try {
+    resolvedServiceType = await resolveOrderServiceType(order_id, conn);
+  } catch {
+    resolvedServiceType =
+      (order.service_type ? String(order.service_type).toUpperCase() : null) ||
+      "FOOD";
+  }
+
   if (hasCancelledOrders) {
     const cols = await getTableColumns("cancelled_orders", conn);
 
     const row = {};
     if (cols.has("order_id")) row.order_id = order.order_id;
     if (cols.has("user_id")) row.user_id = order.user_id;
-    if (cols.has("service_type")) row.service_type = order.service_type || null;
+
+    // ✅ NEW: use resolvedServiceType (not just order.service_type)
+    if (cols.has("service_type"))
+      row.service_type = resolvedServiceType || null;
+
     if (cols.has("payment_method")) row.payment_method = order.payment_method;
     if (cols.has("total_amount")) row.total_amount = order.total_amount;
     if (cols.has("discount_amount"))
@@ -1070,6 +1187,7 @@ async function archiveCancelledOrderInternal(
         const fields = Object.keys(row);
         const placeholders = fields.map(() => "?").join(", ");
         const values = fields.map((k) => row[k]);
+
         await conn.query(
           `INSERT IGNORE INTO cancelled_order_items (${fields.join(
             ", "
@@ -1242,6 +1360,16 @@ async function archiveDeliveredOrderInternal(
 
   const finalReason = String(reason || "").trim();
 
+  // ✅ NEW: resolve service type for delivered archive too
+  let resolvedServiceType = null;
+  try {
+    resolvedServiceType = await resolveOrderServiceType(order_id, conn);
+  } catch {
+    resolvedServiceType =
+      (order.service_type ? String(order.service_type).toUpperCase() : null) ||
+      "FOOD";
+  }
+
   if (hasDeliveredOrders) {
     const cols = await getTableColumns("delivered_orders", conn);
 
@@ -1251,9 +1379,9 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("user_id")) row.user_id = order.user_id;
 
     if (cols.has("service_type"))
-      row.service_type = order.service_type || "FOOD";
+      row.service_type = resolvedServiceType || "FOOD";
 
-    if (cols.has("status")) row.status = "DELIVERED"; // ✅ FINAL
+    if (cols.has("status")) row.status = "DELIVERED";
 
     if (cols.has("status_reason")) {
       const r = finalReason || String(order.status_reason || "").trim() || null;
@@ -1311,8 +1439,9 @@ async function archiveDeliveredOrderInternal(
       const values = fields.map((k) => row[k]);
 
       await conn.query(
-        `INSERT IGNORE INTO delivered_orders (${fields.join(", ")})
-         VALUES (${placeholders})`,
+        `INSERT IGNORE INTO delivered_orders (${fields.join(
+          ", "
+        )}) VALUES (${placeholders})`,
         values
       );
     }
@@ -1350,8 +1479,9 @@ async function archiveDeliveredOrderInternal(
         const values = fields.map((k) => row[k]);
 
         await conn.query(
-          `INSERT IGNORE INTO delivered_order_items (${fields.join(", ")})
-           VALUES (${placeholders})`,
+          `INSERT IGNORE INTO delivered_order_items (${fields.join(
+            ", "
+          )}) VALUES (${placeholders})`,
           values
         );
       }
@@ -1361,7 +1491,6 @@ async function archiveDeliveredOrderInternal(
   return { archived: true };
 }
 
-// award points using SAME transaction connection
 async function awardPointsForCompletedOrderWithConn(conn, order_id) {
   const [[order]] = await conn.query(
     `SELECT user_id, total_amount, status FROM orders WHERE order_id = ? LIMIT 1`,
@@ -1371,7 +1500,6 @@ async function awardPointsForCompletedOrderWithConn(conn, order_id) {
 
   let status = String(order.status || "").toUpperCase();
   if (status === "COMPLETED") status = "DELIVERED";
-
   if (status !== "DELIVERED")
     return { awarded: false, reason: "not_delivered" };
 
@@ -1474,7 +1602,6 @@ async function completeAndArchiveDeliveredOrder(
     );
     const hasReason = rr.length > 0;
 
-    // ✅ mark as DELIVERED first
     if (hasReason) {
       await conn.query(
         `UPDATE orders
@@ -1494,7 +1621,6 @@ async function completeAndArchiveDeliveredOrder(
       );
     }
 
-    // points inside same transaction (do not fail delivery if points fail)
     let pointsInfo = null;
     try {
       pointsInfo = await awardPointsForCompletedOrderWithConn(conn, order_id);
@@ -1532,6 +1658,35 @@ async function completeAndArchiveDeliveredOrder(
   }
 }
 
+/* ================= OPTIONAL: CAPTURE ON ACCEPT (✅ NEW helper) ================= */
+// Call this from your "accept/confirm order" controller if you want deduction on accept.
+async function captureOnAccept(order_id, conn = null) {
+  const dbh = conn || db;
+
+  const [[order]] = await dbh.query(
+    `SELECT user_id, payment_method, platform_fee
+       FROM orders
+      WHERE order_id = ?
+      LIMIT 1`,
+    [order_id]
+  );
+  if (!order) return { ok: false, code: "NOT_FOUND" };
+
+  const pm = String(order.payment_method || "WALLET").toUpperCase();
+
+  if (pm === "WALLET") {
+    const out = await captureOrderFunds(order_id);
+    return { ok: true, payment_method: "WALLET", capture: out };
+  }
+
+  if (pm === "COD") {
+    const out = await captureOrderCODFee(order_id);
+    return { ok: true, payment_method: "COD", capture: out };
+  }
+
+  return { ok: true, payment_method: pm, skipped: true };
+}
+
 /* ================= PUBLIC MODEL API ================= */
 const Order = {
   // wallets
@@ -1541,6 +1696,11 @@ const Order = {
   // capture
   captureOrderFunds,
   captureOrderCODFee,
+
+  // ✅ NEW helpers
+  getOwnerTypeByBusinessId,
+  resolveOrderServiceType,
+  captureOnAccept,
 
   // changes
   applyUnavailableItemChanges,
@@ -1578,18 +1738,36 @@ const Order = {
 
   peekNewOrderId: () => generateOrderId(),
 
+  // models/orderModels.js (replace only create:)
   create: async (orderData) => {
-    const order_id = generateOrderId();
+    // ✅ use passed order_id (DO NOT generate a new one)
+    const order_id = String(orderData.order_id || generateOrderId())
+      .trim()
+      .toUpperCase();
 
-    const serviceType = String(orderData.service_type || "").toUpperCase();
-    if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
-      throw new Error("Invalid service_type (must be FOOD or MART)");
+    // detect columns once per call (safe with schema differences)
+    const [colsRows] = await db.query(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orders'`
+    );
+    const cols = new Set(colsRows.map((r) => r.COLUMN_NAME));
+
+    const hasService = await ensureServiceTypeSupport();
+
+    // validate service_type only if column exists
+    let serviceType = null;
+    if (hasService) {
+      serviceType = String(orderData.service_type || "").toUpperCase();
+      if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
+        throw new Error("Invalid service_type (must be FOOD or MART)");
+      }
     }
 
-    await db.query(`INSERT INTO orders SET ?`, {
+    const payload = {
       order_id,
       user_id: orderData.user_id,
-      service_type: serviceType,
 
       total_amount:
         orderData.total_amount != null ? Number(orderData.total_amount) : 0,
@@ -1605,23 +1783,55 @@ const Order = {
         orderData.merchant_delivery_fee != null
           ? Number(orderData.merchant_delivery_fee)
           : null,
-      payment_method: orderData.payment_method,
+
+      payment_method: String(orderData.payment_method || "").trim(),
       delivery_address:
         orderData.delivery_address &&
         typeof orderData.delivery_address === "object"
           ? JSON.stringify(orderData.delivery_address)
           : orderData.delivery_address,
+
       note_for_restaurant: orderData.note_for_restaurant || null,
       if_unavailable:
         orderData.if_unavailable !== undefined &&
         orderData.if_unavailable !== null
           ? String(orderData.if_unavailable)
           : null,
+
       status: (orderData.status || "PENDING").toUpperCase(),
       fulfillment_type: orderData.fulfillment_type || "Delivery",
       priority: !!orderData.priority,
-    });
+    };
 
+    if (hasService) payload.service_type = serviceType;
+
+    // ✅ save these ONLY if columns exist
+    if (cols.has("delivery_floor_unit"))
+      payload.delivery_floor_unit = orderData.delivery_floor_unit || null;
+    if (cols.has("delivery_instruction_note"))
+      payload.delivery_instruction_note =
+        orderData.delivery_instruction_note || null;
+    if (cols.has("delivery_photo_url"))
+      payload.delivery_photo_url = orderData.delivery_photo_url || null;
+
+    // ✅ special mode (DROP_OFF / MEET_UP)
+    if (cols.has("delivery_special_mode"))
+      payload.delivery_special_mode = orderData.delivery_special_mode || null;
+    if (cols.has("special_mode"))
+      payload.special_mode =
+        orderData.delivery_special_mode || orderData.special_mode || null;
+
+    // ✅ IMPORTANT: if delivery_status exists and is NOT NULL, set default
+    if (cols.has("delivery_status")) {
+      payload.delivery_status = String(
+        orderData.delivery_status || "PENDING"
+      ).toUpperCase();
+    }
+
+    // ✅ insert order
+    await db.query(`INSERT INTO orders SET ?`, payload);
+
+    // ✅ insert items
     for (const item of orderData.items || []) {
       await db.query(`INSERT INTO order_items SET ?`, {
         order_id,
@@ -1637,6 +1847,7 @@ const Order = {
         delivery_fee: 0,
       });
     }
+
     return order_id;
   },
 
@@ -1727,6 +1938,14 @@ const Order = {
     const o = orders[0];
     o.items = items;
 
+    // ✅ NEW: if service_type missing in orders table, still provide it in response
+    let resolvedServiceType = o.service_type || null;
+    if (!resolvedServiceType) {
+      try {
+        resolvedServiceType = await resolveOrderServiceType(order_id, db);
+      } catch {}
+    }
+
     return [
       {
         user: {
@@ -1738,7 +1957,7 @@ const Order = {
         orders: [
           {
             order_id: o.order_id,
-            service_type: o.service_type || null,
+            service_type: resolvedServiceType || null,
             status: o.status,
             status_reason: o.status_reason || null,
             total_amount: o.total_amount,
@@ -1826,9 +2045,17 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
+      // ✅ NEW: ensure service_type exists in response even if orders table lacks it
+      let st = o.service_type || null;
+      if (!st) {
+        try {
+          st = await resolveOrderServiceType(o.order_id, db);
+        } catch {}
+      }
+
       result.push({
         order_id: o.order_id,
-        service_type: o.service_type || null,
+        service_type: st || null,
         status: o.status,
         status_reason: o.status_reason || null,
         payment_method: o.payment_method,
@@ -1873,6 +2100,7 @@ const Order = {
 
   update: async (order_id, orderData) => {
     if (!orderData || !Object.keys(orderData).length) return 0;
+
     if (orderData.status) {
       let st = String(orderData.status).toUpperCase();
       if (st === "COMPLETED") st = "DELIVERED";
@@ -2053,6 +2281,10 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
 
   const hasReason = await ensureStatusReasonSupport();
   const hasService = await ensureServiceTypeSupport();
+  const extras = await ensureDeliveryExtrasSupport();
+
+  // ✅ compute once (don’t do this inside loop)
+  const derivedServiceType = (await getOwnerTypeByBusinessId(bid, db)) || null;
 
   const [rows] = await db.query(
     `
@@ -2073,7 +2305,30 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
       o.platform_fee,
       o.merchant_delivery_fee,
       o.payment_method,
+
       o.delivery_address,
+      ${extras.hasLat ? "o.delivery_lat" : "NULL AS delivery_lat"},
+      ${extras.hasLng ? "o.delivery_lng" : "NULL AS delivery_lng"},
+
+      ${
+        extras.hasFloor
+          ? "o.delivery_floor_unit"
+          : "NULL AS delivery_floor_unit"
+      },
+      ${
+        extras.hasInstr
+          ? "o.delivery_instruction_note"
+          : "NULL AS delivery_instruction_note"
+      },
+      ${
+        extras.hasMode
+          ? "o.delivery_special_mode"
+          : "NULL AS delivery_special_mode"
+      },
+      ${
+        extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"
+      },
+
       o.note_for_restaurant,
       o.if_unavailable,
       o.estimated_arrivial_time,
@@ -2129,9 +2384,26 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
       let st = String(r.status || "").toUpperCase();
       if (st === "COMPLETED") st = "DELIVERED";
 
+      // base deliver_to (your existing parser)
+      const deliverTo = parseDeliveryAddress(r.delivery_address) || {};
+
+      // ✅ prefer explicit columns if present
+      if (deliverTo.lat == null && r.delivery_lat != null)
+        deliverTo.lat = Number(r.delivery_lat);
+      if (deliverTo.lng == null && r.delivery_lng != null)
+        deliverTo.lng = Number(r.delivery_lng);
+
+      // ✅ attach new fields
+      deliverTo.delivery_floor_unit = r.delivery_floor_unit || null;
+      deliverTo.delivery_instruction_note = r.delivery_instruction_note || null;
+      deliverTo.delivery_special_mode = r.delivery_special_mode || null;
+      deliverTo.delivery_photo_url = r.delivery_photo_url || null;
+
       const orderObj = {
         order_id: r.order_id,
-        service_type: r.service_type || null,
+
+        service_type: r.service_type || derivedServiceType,
+
         status: st,
         status_reason: r.status_reason || null,
 
@@ -2143,7 +2415,7 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
         note_for_restaurant: r.note_for_restaurant || null,
         if_unavailable: r.if_unavailable || null,
 
-        deliver_to: parseDeliveryAddress(r.delivery_address),
+        deliver_to: deliverTo,
 
         totals: {
           total_amount: Number(r.total_amount || 0),

@@ -62,6 +62,14 @@ async function tableExists(table) {
  * - orders, order_items, order_notification, order_wallet_captures
  * - cancelled_orders, cancelled_order_items (archive tables)
  * - delivered_orders, delivered_order_items (archive tables)
+ *
+ * ✅ Address-details fields:
+ * - delivery_floor_unit (VARCHAR 80)
+ * - delivery_instruction_note (VARCHAR 256)
+ * - delivery_photo_url (VARCHAR 500)
+ *
+ * ✅ NEW SPECIAL MODE:
+ * - delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL
  */
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
@@ -72,28 +80,46 @@ CREATE TABLE IF NOT EXISTS orders (
   service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD',
   business_id INT(10) UNSIGNED DEFAULT NULL,
   batch_id BIGINT(20) UNSIGNED DEFAULT NULL,
+
   total_amount DECIMAL(10,2) NOT NULL,
   discount_amount DECIMAL(10,2) DEFAULT 0.00,
   delivery_fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+
   payment_method ENUM('COD','Wallet','Card') NOT NULL,
+
   delivery_address VARCHAR(500) NOT NULL,
   delivery_lat DECIMAL(9,6) DEFAULT NULL,
   delivery_lng DECIMAL(9,6) DEFAULT NULL,
+
+  -- ✅ NEW address-details fields
+  delivery_floor_unit VARCHAR(80) DEFAULT NULL,
+  delivery_instruction_note VARCHAR(256) DEFAULT NULL,
+  delivery_photo_url VARCHAR(500) DEFAULT NULL,
+
+  -- ✅ NEW special instruction mode (DROP_OFF / MEET_UP)
+  delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
+
   note_for_restaurant VARCHAR(500) DEFAULT NULL,
   if_unavailable VARCHAR(256) DEFAULT NULL,
+
   status VARCHAR(100) DEFAULT 'PENDING',
   status_reason VARCHAR(255) DEFAULT NULL,
+
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
   priority TINYINT(1) DEFAULT 0,
   estimated_arrivial_time VARCHAR(40) DEFAULT NULL,
+
   created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
   platform_fee DECIMAL(10,2) DEFAULT 0.00,
   merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
+
   delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL,
   delivery_driver_id INT(11) DEFAULT NULL,
   delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'PENDING',
   delivery_ride_id BIGINT(20) DEFAULT NULL,
+
   PRIMARY KEY (order_id),
   KEY idx_orders_user (user_id),
   KEY idx_orders_created (created_at),
@@ -182,6 +208,30 @@ CREATE TABLE IF NOT EXISTS orders (
     "orders",
     "estimated_arrivial_time",
     `ALTER TABLE orders ADD COLUMN estimated_arrivial_time VARCHAR(40) DEFAULT NULL`
+  );
+
+  // ✅ NEW columns (version-safe)
+  await ensureColumn(
+    "orders",
+    "delivery_floor_unit",
+    `ALTER TABLE orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_instruction_note",
+    `ALTER TABLE orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
+  );
+  await ensureColumn(
+    "orders",
+    "delivery_photo_url",
+    `ALTER TABLE orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
+  );
+
+  // ✅ NEW special mode column (version-safe)
+  await ensureColumn(
+    "orders",
+    "delivery_special_mode",
+    `ALTER TABLE orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
   );
 
   // Ensure indexes exist (idempotent)
@@ -299,9 +349,18 @@ CREATE TABLE IF NOT EXISTS cancelled_orders (
   merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
 
   payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+
   delivery_address VARCHAR(500) NOT NULL,
   note_for_restaurant VARCHAR(500),
   if_unavailable VARCHAR(256),
+
+  -- ✅ NEW address-details fields (snapshot)
+  delivery_floor_unit VARCHAR(80) DEFAULT NULL,
+  delivery_instruction_note VARCHAR(256) DEFAULT NULL,
+  delivery_photo_url VARCHAR(500) DEFAULT NULL,
+
+  -- ✅ NEW special mode (snapshot)
+  delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
 
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
   priority BOOLEAN DEFAULT 0,
@@ -345,6 +404,30 @@ CREATE TABLE IF NOT EXISTS cancelled_orders (
       "cancelled_orders",
       "original_updated_at",
       `ALTER TABLE cancelled_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
+    );
+
+    // ✅ NEW columns (version-safe)
+    await ensureColumn(
+      "cancelled_orders",
+      "delivery_floor_unit",
+      `ALTER TABLE cancelled_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "delivery_instruction_note",
+      `ALTER TABLE cancelled_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "cancelled_orders",
+      "delivery_photo_url",
+      `ALTER TABLE cancelled_orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
+    );
+
+    // ✅ NEW special mode (version-safe)
+    await ensureColumn(
+      "cancelled_orders",
+      "delivery_special_mode",
+      `ALTER TABLE cancelled_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
     );
   }
 
@@ -397,9 +480,18 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
   merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL,
 
   payment_method ENUM('COD','WALLET','CARD') NOT NULL,
+
   delivery_address VARCHAR(500) NOT NULL,
   note_for_restaurant VARCHAR(500),
   if_unavailable VARCHAR(256),
+
+  -- ✅ NEW address-details fields (snapshot)
+  delivery_floor_unit VARCHAR(80) DEFAULT NULL,
+  delivery_instruction_note VARCHAR(256) DEFAULT NULL,
+  delivery_photo_url VARCHAR(500) DEFAULT NULL,
+
+  -- ✅ NEW special mode (snapshot)
+  delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
 
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
   priority BOOLEAN DEFAULT 0,
@@ -481,6 +573,30 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
       "delivered_orders",
       "original_updated_at",
       `ALTER TABLE delivered_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
+    );
+
+    // ✅ NEW columns (version-safe)
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_floor_unit",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_instruction_note",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
+    );
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_photo_url",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
+    );
+
+    // ✅ NEW special mode (version-safe)
+    await ensureColumn(
+      "delivered_orders",
+      "delivery_special_mode",
+      `ALTER TABLE delivered_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
     );
   }
 

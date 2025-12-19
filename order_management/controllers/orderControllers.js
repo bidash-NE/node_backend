@@ -6,6 +6,98 @@ const {
   broadcastOrderStatusToMany,
 } = require("../realtime");
 
+/* ===================== NEW: uploads support ===================== */
+const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
+const multer = require("multer");
+
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+const ORDERS_UPLOAD_DIR = path.join(UPLOAD_ROOT, "orders");
+
+function ensureDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+}
+ensureDir(ORDERS_UPLOAD_DIR);
+
+const ALLOWED_IMAGE_MIME = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+]);
+
+function guessExtFromMime(mime) {
+  switch (mime) {
+    case "image/jpeg":
+    case "image/jpg":
+      return ".jpg";
+    case "image/png":
+      return ".png";
+    case "image/webp":
+      return ".webp";
+    default:
+      return "";
+  }
+}
+
+// Public URL prefix for returning uploaded images
+const PUBLIC_UPLOAD_BASE =
+  (process.env.PUBLIC_UPLOAD_BASE || "/uploads").replace(/\/+$/, "") + "/";
+
+function toPublicUploadUrl(absPath) {
+  // absPath is something like: <root>/uploads/orders/ORD-xxx/filename.jpg
+  // return: /uploads/orders/ORD-xxx/filename.jpg (or configured PUBLIC_UPLOAD_BASE)
+  const rel = path.relative(UPLOAD_ROOT, absPath).split(path.sep).join("/");
+  return `${PUBLIC_UPLOAD_BASE}${rel}`;
+}
+
+// Multer storage: store into /uploads/orders/<order_id>/... (order_id from req.body.order_id or req.generated_order_id)
+const storage = multer.diskStorage({
+  destination: (req, _file, cb) => {
+    const orderId = String(req.body?.order_id || req.generated_order_id || "")
+      .trim()
+      .toUpperCase();
+    const safeId = orderId && /^ORD-\d{8}$/.test(orderId) ? orderId : "TMP";
+    const dir = path.join(ORDERS_UPLOAD_DIR, safeId);
+    ensureDir(dir);
+    cb(null, dir);
+  },
+  filename: (_req, file, cb) => {
+    const ext =
+      path.extname(file.originalname) || guessExtFromMime(file.mimetype);
+    const name = `${Date.now()}_${crypto.randomBytes(6).toString("hex")}${ext}`;
+    cb(null, name);
+  },
+});
+
+function fileFilter(_req, file, cb) {
+  if (!ALLOWED_IMAGE_MIME.has(file.mimetype)) {
+    return cb(new Error("Only image files are allowed (jpg, png, webp)."));
+  }
+  cb(null, true);
+}
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: Number(process.env.UPLOAD_MAX_BYTES || 4 * 1024 * 1024), // 4MB default
+    files: Number(process.env.UPLOAD_MAX_FILES || 10),
+  },
+});
+
+// ✅ Export this to use in your routes for multipart/form-data
+// Fields supported:
+//  - order_images (multiple)
+//  - item_image_0, item_image_1 ... (per item index)
+//  - item_image_<menu_id> (per menu_id)
+const uploadOrderImages = upload.any();
+
+/* ===================== status rules ===================== */
 const ALLOWED_STATUSES = new Set([
   "ASSIGNED",
   "PENDING",
@@ -17,6 +109,45 @@ const ALLOWED_STATUSES = new Set([
   "DELIVERED", // ✅ FINAL
   "CANCELLED",
 ]);
+function safeJsonParse(val) {
+  try {
+    return JSON.parse(val);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeServiceType(v) {
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
+  return s || null;
+}
+
+function normalizePaymentMethod(v) {
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
+  return s || null;
+}
+
+function normalizeFulfillment(v) {
+  const s = String(v || "Delivery").trim();
+  return s || "Delivery";
+}
+
+function normalizeSpecialMode(v) {
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
+  if (!s) return null;
+
+  // tolerate variations
+  if (s === "DROP_OFF" || s === "DROPOFF" || s === "DROP") return "DROP_OFF";
+  if (s === "MEET_UP" || s === "MEETUP" || s === "MEET") return "MEET_UP";
+
+  return null;
+}
 
 function buildPreview(items = [], total_amount) {
   const parts = items
@@ -27,180 +158,307 @@ function buildPreview(items = [], total_amount) {
   return `${parts.join(", ")}${more} · Total Nu ${totalStr}`;
 }
 
+/* ===================== NEW: json normalization helpers ===================== */
+function safeJsonParse(val) {
+  try {
+    return JSON.parse(val);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeServiceType(v) {
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
+  return s || null;
+}
+
+function normalizePaymentMethod(v) {
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
+  return s || null;
+}
+
+function normalizeFulfillment(v) {
+  const s = String(v || "Delivery").trim();
+  return s || "Delivery";
+}
+
+// Accept BOTH old and new item shapes
+function normalizeItemShape(raw = {}, idx = 0) {
+  const it = raw && typeof raw === "object" ? raw : {};
+
+  const business_id =
+    it.business_id ??
+    it.businessId ??
+    it.businessID ??
+    it.business?.id ??
+    it.business?.business_id ??
+    it.business?.businessId ??
+    null;
+
+  const business_name =
+    it.business_name ??
+    it.businessName ??
+    it.business?.name ??
+    it.business?.business_name ??
+    null;
+
+  const menu_id =
+    it.menu_id ??
+    it.menuId ??
+    it.product_id ??
+    it.productId ??
+    it.product?.id ??
+    it.menu?.id ??
+    it.item?.id ??
+    null;
+
+  const item_name =
+    it.item_name ??
+    it.name ??
+    it.itemName ??
+    it.product?.name ??
+    it.menu?.name ??
+    it.item?.name ??
+    null;
+
+  const quantity =
+    it.quantity ?? it.qty ?? it.count ?? it.units ?? it.unit_count ?? null;
+
+  const price =
+    it.price ?? it.unit_price ?? it.unitPrice ?? it.rate ?? it.cost ?? null;
+
+  const subtotal =
+    it.subtotal ??
+    it.line_subtotal ??
+    it.lineSubtotal ??
+    it.line_total ??
+    it.lineTotal ??
+    (quantity != null && price != null
+      ? Number(quantity) * Number(price)
+      : null);
+
+  const item_image =
+    it.item_image ??
+    it.image ??
+    it.itemImage ??
+    it.product?.image ??
+    it.product?.image_url ??
+    it.menu?.image ??
+    it.item?.image ??
+    null;
+
+  return {
+    ...it,
+    business_id,
+    business_name,
+    menu_id,
+    item_name,
+    item_image,
+    quantity,
+    price,
+    subtotal,
+    _index: idx, // keep for mapping uploads
+  };
+}
+
+function isDataUrlImage(str) {
+  return (
+    typeof str === "string" &&
+    /^data:image\/(png|jpeg|jpg|webp);base64,/.test(str)
+  );
+}
+
+function writeBase64ImageToOrderDir(order_id, dataUrl, prefix = "img") {
+  const m = String(dataUrl).match(
+    /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/
+  );
+  if (!m) return null;
+  const ext = m[1] === "jpeg" ? ".jpg" : m[1] === "jpg" ? ".jpg" : `.${m[1]}`;
+  const base64 = m[2];
+  const buf = Buffer.from(base64, "base64");
+  if (!buf?.length) return null;
+
+  const dir = path.join(ORDERS_UPLOAD_DIR, order_id);
+  ensureDir(dir);
+
+  const name = `${prefix}_${Date.now()}_${crypto
+    .randomBytes(6)
+    .toString("hex")}${ext}`;
+  const abs = path.join(dir, name);
+  fs.writeFileSync(abs, buf);
+  return toPublicUploadUrl(abs);
+}
+
+function mapUploadedFilesToPayload(req, order_id, items) {
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) return { order_images: [], item_images: new Map() };
+
+  // If multer stored into TMP but we now have a real order_id, move them
+  const tmpDir = path.join(ORDERS_UPLOAD_DIR, "TMP");
+  const finalDir = path.join(ORDERS_UPLOAD_DIR, order_id);
+  ensureDir(finalDir);
+
+  const orderImages = [];
+  const itemImages = new Map(); // key: index OR menu_id, value: url
+
+  for (const f of files) {
+    // f.path exists for diskStorage
+    const field = String(f.fieldname || "");
+    let absPath = f.path;
+
+    // Move from TMP into final order folder if needed
+    try {
+      if (absPath && absPath.startsWith(tmpDir + path.sep)) {
+        const dest = path.join(finalDir, path.basename(absPath));
+        fs.renameSync(absPath, dest);
+        absPath = dest;
+      }
+    } catch {}
+
+    const url = absPath ? toPublicUploadUrl(absPath) : null;
+    if (!url) continue;
+
+    if (
+      field === "order_images" ||
+      field === "order_image" ||
+      field === "images"
+    ) {
+      orderImages.push(url);
+      continue;
+    }
+
+    // item_image_0, item_image_1 ...
+    const idxMatch = field.match(/^item_image_(\d+)$/);
+    if (idxMatch) {
+      itemImages.set(Number(idxMatch[1]), url);
+      continue;
+    }
+
+    // item_image_<menu_id>
+    const midMatch = field.match(/^item_image_(\d{1,10})$/);
+    if (midMatch) {
+      itemImages.set(String(midMatch[1]), url);
+      continue;
+    }
+
+    // fallback: try originalname mapping "menuId-123.png"
+    const name = String(f.originalname || "");
+    const om = name.match(/(\d{1,10})/);
+    if (om) itemImages.set(String(om[1]), url);
+  }
+
+  // Apply mapped item images to normalized items
+  for (const it of items) {
+    const idx = Number(it._index);
+    const menuId = it.menu_id != null ? String(it.menu_id) : null;
+
+    if (itemImages.has(idx)) it.item_image = itemImages.get(idx);
+    else if (menuId && itemImages.has(menuId))
+      it.item_image = itemImages.get(menuId);
+  }
+
+  return { order_images: orderImages, item_images: itemImages };
+}
+
 /**
  * POST /orders
  */
 async function createOrder(req, res) {
   try {
-    const payload = req.body || {};
-    const items = Array.isArray(payload.items) ? payload.items : [];
+    // ✅ support JSON and multipart(payload)
+    let payload = req.body || {};
+    if (typeof payload.payload === "string")
+      payload = safeJsonParse(payload.payload) || payload;
 
+    // items may be stringified
+    let itemsRaw = payload.items;
+    if (typeof itemsRaw === "string") itemsRaw = safeJsonParse(itemsRaw);
+    const items = Array.isArray(itemsRaw) ? itemsRaw : [];
+
+    // basic validation
     if (!payload.user_id)
       return res.status(400).json({ message: "Missing user_id" });
 
-    // ✅ service_type validation
-    const serviceType = String(payload.service_type || "")
-      .trim()
-      .toUpperCase();
+    const serviceType = normalizeServiceType(payload.service_type);
     if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
       return res.status(400).json({
         message: "Invalid or missing service_type. Allowed: FOOD, MART",
       });
     }
 
-    if (!items.length)
-      return res.status(400).json({ message: "Missing items" });
-    if (payload.total_amount == null)
-      return res.status(400).json({ message: "Missing total_amount" });
-    if (payload.discount_amount == null)
-      return res.status(400).json({ message: "Missing discount_amount" });
-
-    if (payload.delivery_fee == null)
-      return res.status(400).json({ message: "Missing delivery_fee" });
-    if (payload.platform_fee == null)
-      return res.status(400).json({ message: "Missing platform_fee" });
-
-    const deliveryFee = Number(payload.delivery_fee);
-    const platformFee = Number(payload.platform_fee);
-
-    if (!Number.isFinite(deliveryFee) || deliveryFee < 0) {
-      return res.status(400).json({ message: "Invalid delivery_fee" });
-    }
-    if (!Number.isFinite(platformFee) || platformFee < 0) {
-      return res.status(400).json({ message: "Invalid platform_fee" });
-    }
-
-    let merchantDeliveryFee = null;
-    if (
-      payload.merchant_delivery_fee !== undefined &&
-      payload.merchant_delivery_fee !== null
-    ) {
-      merchantDeliveryFee = Number(payload.merchant_delivery_fee);
-      if (!Number.isFinite(merchantDeliveryFee) || merchantDeliveryFee < 0) {
-        return res
-          .status(400)
-          .json({ message: "Invalid merchant_delivery_fee" });
-      }
-    } else {
-      merchantDeliveryFee = null;
-    }
-
-    if (deliveryFee > 0 && merchantDeliveryFee > 0) {
-      return res.status(400).json({
-        message:
-          "delivery_fee and merchant_delivery_fee cannot both be greater than 0.",
-      });
-    }
-
-    const payMethod = String(payload.payment_method || "").toUpperCase();
+    const payMethod = normalizePaymentMethod(payload.payment_method);
     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
       return res
         .status(400)
         .json({ message: "Invalid or missing payment_method" });
     }
 
-    const fulfillment = String(payload.fulfillment_type || "Delivery");
+    if (!items.length)
+      return res.status(400).json({ message: "Missing items" });
+
+    // ✅ stable order_id (IMPORTANT)
+    const order_id = String(payload.order_id || Order.peekNewOrderId())
+      .trim()
+      .toUpperCase();
+    payload.order_id = order_id;
+
+    // ✅ map AddressDetails fields
+    payload.delivery_floor_unit =
+      payload.delivery_floor_unit ??
+      payload.floor_unit ??
+      payload.floorUnit ??
+      payload.unit_floor ??
+      null;
+
+    payload.delivery_instruction_note =
+      payload.delivery_instruction_note ??
+      payload.special_instructions ??
+      payload.delivery_note ??
+      payload.instruction_note ??
+      null;
+
+    payload.delivery_special_mode = normalizeSpecialMode(
+      payload.delivery_special_mode ??
+        payload.special_mode ??
+        payload.special_instruction_mode ??
+        payload.dropoff_or_meetup
+    );
+
+    // ✅ photo url from multer (uploadDeliveryPhoto.single("delivery_photo"))
+    if (req.file?.path) {
+      const UPLOAD_ROOT =
+        process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+      const rel = path
+        .relative(UPLOAD_ROOT, req.file.path)
+        .split(path.sep)
+        .join("/");
+      payload.delivery_photo_url = `/uploads/${rel}`;
+    }
+
+    const fulfillment = normalizeFulfillment(payload.fulfillment_type);
+
+    // delivery_address required for Delivery
     if (fulfillment === "Delivery") {
       const addrObj = payload.delivery_address;
-      const isObj =
-        addrObj && typeof addrObj === "object" && !Array.isArray(addrObj);
-      const addrStr = isObj
-        ? String(addrObj.address || "").trim()
-        : String(addrObj || "").trim();
+      const addrStr =
+        addrObj && typeof addrObj === "object"
+          ? String(
+              addrObj.address || addrObj.addr || addrObj.full_address || ""
+            ).trim()
+          : String(addrObj || "").trim();
+
       if (!addrStr) {
         return res
           .status(400)
           .json({ message: "delivery_address is required for Delivery" });
       }
-    } else if (fulfillment === "Pickup") {
-      payload.delivery_address = String(payload.delivery_address || "");
     }
 
-    for (const [idx, it] of items.entries()) {
-      for (const f of [
-        "business_id",
-        "menu_id",
-        "item_name",
-        "quantity",
-        "price",
-        "subtotal",
-      ]) {
-        if (it[f] == null || it[f] === "") {
-          return res.status(400).json({ message: `Item[${idx}] missing ${f}` });
-        }
-      }
-    }
-
-    let if_unavailable = null;
-    if (
-      payload.if_unavailable !== undefined &&
-      payload.if_unavailable !== null
-    ) {
-      if_unavailable = String(payload.if_unavailable);
-    }
-
-    // ================== Preflight wallet checks ==================
-    if (payMethod === "WALLET") {
-      const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
-      if (!buyer) {
-        return res.status(400).json({
-          code: "WALLET_NOT_FOUND",
-          message:
-            "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
-        });
-      }
-
-      const need = Number(payload.total_amount || 0);
-      const have = Number(buyer.amount || 0);
-      if (have < need) {
-        return res.status(400).json({
-          code: "INSUFFICIENT_BALANCE",
-          message: `Insufficient wallet balance. Required Nu. ${need.toFixed(
-            2
-          )}, available Nu. ${have.toFixed(2)}.`,
-        });
-      }
-
-      const admin = await Order.getAdminWallet();
-      if (!admin) {
-        return res.status(500).json({
-          code: "ADMIN_WALLET_MISSING",
-          message: "Admin wallet is not configured.",
-        });
-      }
-    } else if (payMethod === "COD") {
-      const buyer = await Order.getBuyerWalletByUserId(payload.user_id);
-      if (!buyer) {
-        return res.status(400).json({
-          code: "WALLET_NOT_FOUND",
-          message:
-            "The wallet does not exist for your account. Please try creating one. HAPPY SHOPPING!",
-        });
-      }
-
-      const userFee =
-        platformFee > 0 ? Number((platformFee / 2).toFixed(2)) : 0;
-      if (userFee > 0) {
-        const have = Number(buyer.amount || 0);
-        if (have < userFee) {
-          return res.status(400).json({
-            code: "INSUFFICIENT_BALANCE",
-            message: `Insufficient wallet balance for platform fee. Required Nu. ${userFee.toFixed(
-              2
-            )}, available Nu. ${have.toFixed(2)}.`,
-          });
-        }
-      }
-
-      const admin = await Order.getAdminWallet();
-      if (!admin) {
-        return res.status(500).json({
-          code: "ADMIN_WALLET_MISSING",
-          message: "Admin wallet is not configured.",
-        });
-      }
-    }
-
+    // ✅ stringify delivery_address object for DB
     if (
       payload.delivery_address &&
       typeof payload.delivery_address === "object"
@@ -208,20 +466,17 @@ async function createOrder(req, res) {
       payload.delivery_address = JSON.stringify(payload.delivery_address);
     }
 
-    payload.delivery_fee = deliveryFee;
-    payload.platform_fee = platformFee;
-    payload.merchant_delivery_fee = merchantDeliveryFee;
-
-    const order_id = await Order.create({
+    // ✅ create
+    const created_id = await Order.create({
       ...payload,
       service_type: serviceType,
-      items,
-      if_unavailable,
-      status: (payload.status || "PENDING").toUpperCase(),
+      payment_method: payMethod,
       fulfillment_type: fulfillment,
+      status: String(payload.status || "PENDING").toUpperCase(),
+      items,
     });
 
-    // Group by business for notifications
+    // Notifications (same idea)
     const byBiz = new Map();
     for (const it of items) {
       const bid = Number(it.business_id);
@@ -231,72 +486,47 @@ async function createOrder(req, res) {
     }
     const businessIds = Array.from(byBiz.keys());
 
-    // Merchant notifications (order:create)
     for (const business_id of businessIds) {
       const its = byBiz.get(business_id) || [];
-      const title = `New order #${order_id}`;
+      const title = `New order #${created_id}`;
       const preview = buildPreview(its, payload.total_amount);
 
       try {
         await insertAndEmitNotification({
           business_id,
           user_id: payload.user_id,
-          order_id,
+          order_id: created_id,
           type: "order:create",
           title,
           body_preview: preview,
         });
       } catch (e) {
         console.error("[NOTIFY INSERT FAILED]", {
-          order_id,
+          order_id: created_id,
           business_id,
           err: e?.message,
         });
       }
     }
 
-    const initialStatus = (payload.status || "PENDING").toUpperCase();
-
     broadcastOrderStatusToMany({
-      order_id,
+      order_id: created_id,
       user_id: payload.user_id,
       business_ids: businessIds,
-      status: initialStatus,
+      status: String(payload.status || "PENDING").toUpperCase(),
     });
-
-    try {
-      await Order.addUserOrderStatusNotification({
-        user_id: payload.user_id,
-        order_id,
-        status: initialStatus,
-        reason: "",
-      });
-    } catch (e) {
-      console.error("[USER ORDER STATUS NOTIFY FAILED on create]", {
-        order_id,
-        err: e?.message,
-      });
-    }
 
     return res.status(201).json({
-      order_id,
-      message:
-        "Order created successfully. Note: 50% of the platform fee will be deducted from the merchant side.",
-      totals: {
-        total_amount: Number(payload.total_amount),
-        discount_amount: Number(payload.discount_amount),
-        delivery_fee: deliveryFee,
-        platform_fee: platformFee,
-        merchant_delivery_fee:
-          merchantDeliveryFee !== null ? merchantDeliveryFee : null,
-      },
-      platform_fee_sharing: {
-        user_share: 0.5,
-        merchant_share: 0.5,
-      },
+      ok: true,
+      order_id: created_id,
+      delivery_floor_unit: payload.delivery_floor_unit || null,
+      delivery_instruction_note: payload.delivery_instruction_note || null,
+      delivery_special_mode: payload.delivery_special_mode || null,
+      delivery_photo_url: payload.delivery_photo_url || null,
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error("[createOrder ERROR]", err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 }
 
@@ -987,6 +1217,10 @@ async function cancelOrderByUser(req, res) {
 }
 
 module.exports = {
+  // ✅ NEW: use this middleware in routes before createOrder
+  // Example: router.post("/orders", uploadOrderImages, createOrder)
+  uploadOrderImages,
+
   createOrder,
   getOrders,
   getOrderById,
