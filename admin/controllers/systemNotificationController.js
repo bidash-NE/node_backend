@@ -9,6 +9,9 @@ const adminLogModel = require("../models/adminlogModel");
 const {
   sendNotificationEmails,
 } = require("../services/emailNotificationService");
+const {
+  sendNotificationSmsBulk,
+} = require("../services/smsNotificationService");
 
 /* ---------------------------------------------------
    POST /api/system-notifications
@@ -19,7 +22,7 @@ const {
        -> Do NOT save in system_notifications,
           just send emails + log in admin_logs
    - If "sms" is in delivery_channels:
-       -> Only log (no SMS sending implemented)
+       -> Send bulk SMS using SMS gateway bulk endpoint
 --------------------------------------------------- */
 async function createSystemNotification(req, res) {
   try {
@@ -62,13 +65,14 @@ async function createSystemNotification(req, res) {
 
     let notificationId = null;
     let emailSummary = null;
+    let smsSummary = null;
 
     // 1️⃣ IN_APP: save into system_notifications
     if (wantsInApp) {
       notificationId = await insertSystemNotification({
         title,
         message,
-        deliveryChannels: ["in_app"], // store only in_app
+        deliveryChannels: ["in_app"],
         targetAudience: target_audience,
         createdBy,
       });
@@ -85,19 +89,16 @@ async function createSystemNotification(req, res) {
     // 2️⃣ EMAIL: send but do NOT save in system_notifications
     if (wantsEmail) {
       emailSummary = await sendNotificationEmails({
-        notificationId, // may be null if no in_app
+        notificationId,
         title,
         message,
         roles: target_audience,
       });
 
-      // Build a clean log message without "N/A"
       let logMessage = `Sent EMAIL notification to roles [${target_audience.join(
         ", "
       )}]`;
-      if (notificationId) {
-        logMessage += ` (Notification #${notificationId})`;
-      }
+      if (notificationId) logMessage += ` (Notification #${notificationId})`;
       logMessage += ` — sent: ${emailSummary.sent}, failed: ${emailSummary.failed}`;
 
       await adminLogModel.addLog({
@@ -107,15 +108,19 @@ async function createSystemNotification(req, res) {
       });
     }
 
-    // 3️⃣ SMS: only log (no actual sending implemented)
+    // 3️⃣ SMS: send bulk SMS using gateway
     if (wantsSms) {
-      let logMessage = `Requested SMS notification to roles [${target_audience.join(
+      smsSummary = await sendNotificationSmsBulk({
+        title,
+        message,
+        roles: target_audience,
+      });
+
+      let logMessage = `Sent SMS notification to roles [${target_audience.join(
         ", "
       )}]`;
-      if (notificationId) {
-        logMessage += ` (Notification #${notificationId})`;
-      }
-      logMessage += " — SMS sending not yet implemented";
+      if (notificationId) logMessage += ` (Notification #${notificationId})`;
+      logMessage += ` — total: ${smsSummary.total}, sent: ${smsSummary.sent}, failed: ${smsSummary.failed}, batches: ${smsSummary.batches}`;
 
       await adminLogModel.addLog({
         user_id: createdBy,
@@ -127,8 +132,9 @@ async function createSystemNotification(req, res) {
     return res.status(201).json({
       success: true,
       message: "Notification processed successfully.",
-      notification_id: notificationId, // null if only email/sms
+      notification_id: notificationId,
       email_summary: emailSummary,
+      sms_summary: smsSummary,
     });
   } catch (err) {
     console.error("❌ Error creating notification:", err);
@@ -140,7 +146,6 @@ async function createSystemNotification(req, res) {
 
 /* ---------------------------------------------------
    GET /api/system-notifications/all  (Admin)
-   Only IN_APP notifications from system_notifications table
 --------------------------------------------------- */
 async function getAllSystemNotificationsController(req, res) {
   try {
@@ -158,7 +163,6 @@ async function getAllSystemNotificationsController(req, res) {
 
 /* ---------------------------------------------------
    GET /api/system-notifications/user/:userId  (App)
-   Only IN_APP notifications (filtered by user's role)
 --------------------------------------------------- */
 async function getSystemNotificationsByUser(req, res) {
   try {

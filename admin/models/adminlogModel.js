@@ -1,7 +1,6 @@
 // models/adminLogModel.js
 const pool = require("../config/db");
 
-/** Return ALL admin logs (latest first). */
 async function getAll() {
   const sql = `
     SELECT
@@ -22,20 +21,25 @@ async function getAll() {
   }
 }
 
-/**
- * Save a descriptive activity log.
- * Used by many modules (including system notifications).
- *
- * @param {Object} log
- * @param {number} log.user_id
- * @param {string} log.admin_name
- * @param {string} log.activity
- */
 async function addLog({ user_id = null, admin_name = "API", activity }) {
   if (!activity || !String(activity).trim()) return;
+
+  let uid = user_id;
+
+  // ✅ Ensure FK won't fail: if uid not in users table -> set NULL
+  if (uid !== null && uid !== undefined) {
+    const [rows] = await pool.query(
+      "SELECT user_id FROM users WHERE user_id = ? LIMIT 1",
+      [uid]
+    );
+    if (!rows.length) uid = null;
+  } else {
+    uid = null;
+  }
+
   await pool.query(
     `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
-    [user_id, admin_name, activity]
+    [uid, admin_name, activity]
   );
 }
 
