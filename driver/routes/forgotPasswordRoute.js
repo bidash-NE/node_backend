@@ -10,4 +10,6 @@ router.post("/verify-otp-sms", controller.verifyOtpSms);
 
 router.post("/reset-password", controller.resetPassword);
 
+router.post("/reset-password-sms", controller.resetPasswordSms);
+
 module.exports = router;

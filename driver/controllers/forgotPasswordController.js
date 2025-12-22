@@ -27,16 +27,15 @@ function buildLookupCandidates(input) {
   const digits = raw.replace(/[^\d]/g, "");
   const candidates = new Set();
 
-  // as-is raw (sometimes DB stores with +975, spaces, etc. unlikely but safe)
+  // as-is raw (maybe DB stores like "975...." or "17....")
   candidates.add(raw);
 
-  // digits-only version (e.g. "+975 17xxxxxx" -> "97517xxxxxx")
+  // digits-only version
   if (digits) candidates.add(digits);
 
-  // if user typed 8 digits, also try adding 975 for lookup (but we will only use it if user exists)
+  // if user typed 8 digits, also try adding 975 for lookup
   if (digits.length === 8) candidates.add(`975${digits}`);
 
-  // if user typed +975..., digits already covers it
   return Array.from(candidates).filter(Boolean);
 }
 
@@ -86,22 +85,21 @@ async function findUserByPhoneNoNormalize(inputPhone) {
 
   const placeholders = candidates.map(() => "?").join(",");
 
-  // Adjust columns to match your schema (phone / phone)
+  // ✅ Only phone column (your schema has just phone)
   const sql = `
-    SELECT user_id, role, phone, phone
+    SELECT user_id, role, phone
     FROM users
-    WHERE (phone IN (${placeholders}) OR phone IN (${placeholders}))
+    WHERE phone IN (${placeholders})
     LIMIT 1
   `;
 
-  const params = [...candidates, ...candidates];
-  const [rows] = await db.execute(sql, params);
+  const [rows] = await db.execute(sql, candidates);
 
   const user = rows?.[0] || null;
   if (!user) return { user: null, gatewayPhone: null };
 
   // Normalize only AFTER user exists (prefer DB stored phone)
-  const stored = user.phone || user.phone || "";
+  const stored = user.phone || "";
   const gatewayPhone =
     normalizeForGateway(stored) || normalizeForGateway(candidates[0]);
 
@@ -111,8 +109,7 @@ async function findUserByPhoneNoNormalize(inputPhone) {
 /* ============================================================
    ✅ 1) SEND OTP SMS (Forgot password)
    Body: { phone }
-   - phone must exist in DB (checked without normalizing input first)
-   - only after found, normalize for gateway sending
+   - OTP valid: 5 minutes
    ============================================================ */
 exports.sendOtpSms = async (req, res) => {
   try {
@@ -149,7 +146,7 @@ exports.sendOtpSms = async (req, res) => {
       `This code is valid for 5 minutes.\n` +
       `Do not share this code with anyone.`;
 
-    const gatewayResp = await sendSmsGateway({
+    await sendSmsGateway({
       to: gatewayPhone,
       text,
       from: SMS_FROM,
@@ -157,8 +154,6 @@ exports.sendOtpSms = async (req, res) => {
 
     return res.status(200).json({
       message: "OTP sent via SMS.",
-      to: gatewayPhone,
-      gateway: gatewayResp,
     });
   } catch (err) {
     console.error("Send OTP SMS Error:", err.message);
@@ -169,8 +164,7 @@ exports.sendOtpSms = async (req, res) => {
 /* ============================================================
    ✅ 2) VERIFY OTP SMS
    Body: { phone, otp }
-   - finds user without normalizing input first
-   - compares OTP using normalized gatewayPhone key (only after user exists)
+   - sets verified flag for 15 mins
    ============================================================ */
 exports.verifyOtpSms = async (req, res) => {
   try {
@@ -208,6 +202,81 @@ exports.verifyOtpSms = async (req, res) => {
     return res.status(500).json({ error: "Internal server error." });
   }
 };
+
+/* ============================================================
+   ✅ 3) RESET PASSWORD BY PHONE (NEW)
+   POST /reset-password-sms
+   Body: { phone, newPassword }
+   - requires verifyOtpSms first (verified flag)
+   ============================================================ */
+exports.resetPasswordSms = async (req, res) => {
+  try {
+    const inputPhone = req.body.phone;
+    const newPassword = String(req.body.newPassword || "");
+
+    if (!inputPhone || !newPassword) {
+      return res.status(400).json({
+        error: "Phone and newPassword are required.",
+      });
+    }
+
+    if (newPassword.trim().length < 6) {
+      return res.status(400).json({
+        error: "Password must be at least 6 characters.",
+      });
+    }
+
+    const { user, gatewayPhone } = await findUserByPhoneNoNormalize(inputPhone);
+    if (!user)
+      return res.status(404).json({ error: "Phone number not found." });
+
+    if (!gatewayPhone) {
+      return res
+        .status(400)
+        .json({ error: "No valid phone number found for this account." });
+    }
+
+    // must be verified
+    const verifiedKey = `fp_sms_verified:${gatewayPhone}`;
+    const verified = await redisClient.get(verifiedKey);
+
+    if (!verified) {
+      return res.status(403).json({
+        error: "OTP not verified. Please verify OTP first.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update MySQL (by user_id is safest)
+    await db.query("UPDATE users SET password_hash = ? WHERE user_id = ?", [
+      hashedPassword,
+      user.user_id,
+    ]);
+
+    // If driver, also update in MongoDB
+    if (String(user.role || "").toLowerCase() === "driver") {
+      await Driver.updateOne(
+        { user_id: user.user_id },
+        { $set: { password: hashedPassword } }
+      );
+    }
+
+    // cleanup verification flag
+    await redisClient.del(verifiedKey);
+
+    return res.status(200).json({ message: "Password reset successfully." });
+  } catch (err) {
+    console.error("Reset Password SMS Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+/* ===========================
+   EXISTING EMAIL OTP FLOW
+   (UNCHANGED)
+=========================== */
+
 // Send OTP to email
 exports.sendOtp = async (req, res) => {
   const { email } = req.body;
@@ -223,13 +292,13 @@ exports.sendOtp = async (req, res) => {
 
     // Send OTP via nodemailer
     const transporter = nodemailer.createTransport({
-      service: "Gmail", // or use your SMTP settings
+      service: "Gmail",
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
       },
       tls: {
-        rejectUnauthorized: false, // 👈 Accept self-signed certs
+        rejectUnauthorized: false,
       },
     });
 
@@ -259,9 +328,6 @@ exports.verifyOtp = async (req, res) => {
     const redisKey = `otp:${email.trim().toLowerCase()}`;
     const storedOtp = await redisClient.get(redisKey);
 
-    console.log("Stored OTP:", storedOtp, "| Type:", typeof storedOtp);
-    console.log("Entered OTP:", otp, "| Type:", typeof otp);
-
     if (!storedOtp) {
       return res.status(400).json({ error: "OTP expired or not found" });
     }
@@ -270,7 +336,7 @@ exports.verifyOtp = async (req, res) => {
       return res.status(400).json({ error: "Invalid OTP" });
     }
 
-    await redisClient.del(redisKey); // Clean up after successful verification
+    await redisClient.del(redisKey);
 
     return res.status(200).json({ message: "OTP verified successfully" });
   } catch (err) {
@@ -279,7 +345,7 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// Reset Password
+// Reset Password (email)
 exports.resetPassword = async (req, res) => {
   const { email, newPassword } = req.body;
 
@@ -290,7 +356,6 @@ exports.resetPassword = async (req, res) => {
   }
 
   try {
-    // Check user in MySQL
     const [userRows] = await db.query("SELECT * FROM users WHERE email = ?", [
       email,
     ]);
@@ -301,13 +366,11 @@ exports.resetPassword = async (req, res) => {
     const user = userRows[0];
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update MySQL
     await db.query("UPDATE users SET password_hash = ? WHERE email = ?", [
       hashedPassword,
       email,
     ]);
 
-    // If driver, also update in MongoDB
     if (user.role === "driver") {
       await Driver.updateOne(
         { user_id: user.user_id },
