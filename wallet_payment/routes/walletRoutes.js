@@ -36,6 +36,12 @@ router.post("/:wallet_id/forgot-tpin", ctrl.forgotTPinRequest);
 // ✅ FORGOT T-PIN: verify OTP and set new T-PIN
 router.post("/:wallet_id/forgot-tpin/verify", ctrl.forgotTPinVerify);
 
+// ✅ NEW: FORGOT T-PIN via SMS (send OTP)
+router.post("/:wallet_id/forgot-tpin-sms", ctrl.forgotTPinRequestSms);
+
+// ✅ NEW: FORGOT T-PIN via SMS (verify OTP + set new T-PIN)
+router.post("/:wallet_id/forgot-tpin-sms/verify", ctrl.forgotTPinVerifySms);
+
 router.post("/transfer", ctrl.userTransfer);
 
 router.get("/:user_id/has-tpin", ctrl.checkTPinByUserId);

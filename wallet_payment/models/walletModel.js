@@ -153,7 +153,6 @@ async function deleteWallet({ key }) {
  * @param {string} params.t_pin_hash - encrypted / hashed PIN
  */
 async function setWalletTPin({ key, t_pin_hash }) {
-  // Resolve wallet id first (supports NETxxx or numeric)
   const [existing] = await db.query(
     /^NET/i.test(String(key))
       ? "SELECT id FROM wallets WHERE wallet_id = ?"
@@ -164,13 +163,11 @@ async function setWalletTPin({ key, t_pin_hash }) {
 
   const walletId = existing[0].id;
 
-  // Update t_pin
   await db.query("UPDATE wallets SET t_pin = ? WHERE id = ?", [
     t_pin_hash,
     walletId,
   ]);
 
-  // Return fresh row
   const [rows] = await db.query("SELECT * FROM wallets WHERE id = ?", [
     walletId,
   ]);
@@ -184,5 +181,5 @@ module.exports = {
   listWallets,
   updateWalletStatus,
   deleteWallet,
-  setWalletTPin, // ✅ export
+  setWalletTPin,
 };

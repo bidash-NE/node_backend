@@ -8,6 +8,7 @@ const {
   deleteWallet,
   setWalletTPin,
 } = require("../models/walletModel");
+
 const { adminTipTransfer } = require("../models/adminTransferModel");
 const { userWalletTransfer } = require("../models/userTransferModel");
 const { toThimphuString } = require("../utils/time");
@@ -15,6 +16,13 @@ const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const redis = require("../utils/redisClient");
 const { sendOtpEmail } = require("../utils/mailer");
+
+/* ---------------- SMS ENV ---------------- */
+const SMS_API_URL =
+  (process.env.SMS_API_URL && process.env.SMS_API_URL.trim()) ||
+  "https://grab.newedge.bt/sms/api/sms/send";
+const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
+const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
 
 /* ---------- helpers ---------- */
 
@@ -30,7 +38,7 @@ function mapLocalTimes(row) {
 // NET000069 -> NET*****69
 function maskWallet(walletId) {
   if (!walletId || walletId.length < 5) return walletId;
-  const prefix = walletId.slice(0, 3); // NET
+  const prefix = walletId.slice(0, 3);
   const last2 = walletId.slice(-2);
   const maskedMid = "*".repeat(walletId.length - prefix.length - 2);
   return prefix + maskedMid + last2;
@@ -44,16 +52,68 @@ function formatReceiptDateTime(date) {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }); // e.g. 10 Nov 2025
+  });
 
   const timeStr = d.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
-  }); // e.g. 09:51:10 AM
+  });
 
   return { dateStr, timeStr };
+}
+
+function normalizeBhutanPhone(phone) {
+  const raw = String(phone || "").trim();
+  if (!raw) return null;
+
+  const digits = raw.replace(/[^\d]/g, "");
+
+  // 8-digit local -> prefix 975
+  if (digits.length === 8) return `975${digits}`;
+
+  // already 975xxxxxxxx
+  if (digits.length === 11 && digits.startsWith("975")) return digits;
+
+  return digits || null;
+}
+
+async function sendOtpSms({
+  to,
+  otp,
+  purposeTitle = "Verification code",
+  ttlMinutes = 5,
+}) {
+  if (!SMS_API_KEY) throw new Error("SMS_API_KEY missing in env");
+
+  // ✅ Your requested format: title + message + advice (OTP only ONCE)
+  const text =
+    `${purposeTitle}\n\n` +
+    `${otp}\n\n` +
+    `This code is valid for ${ttlMinutes} minutes.\n` +
+    `Do not share this code with anyone.`;
+
+  const resp = await fetch(SMS_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": SMS_API_KEY,
+    },
+    body: JSON.stringify({ to, text, from: SMS_FROM }),
+  });
+
+  const bodyText = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
+  }
+
+  // may be JSON or string
+  try {
+    return JSON.parse(bodyText);
+  } catch {
+    return { ok: true, response: bodyText };
+  }
 }
 
 /* ---------- CREATE ---------- */
@@ -145,8 +205,7 @@ async function getByUserId(req, res) {
   }
 }
 
-// NEW: Check whether a wallet for given user_id has a T-PIN set
-// NEW: Check whether a wallet for given user_id has a T-PIN set
+/* ---------- HAS T-PIN (by user_id) ---------- */
 async function checkTPinByUserId(req, res) {
   try {
     const { user_id } = req.params;
@@ -342,7 +401,7 @@ async function setTPin(req, res) {
   }
 }
 
-/* ---------- CHANGE T-PIN (with old PIN verification) ---------- */
+/* ---------- CHANGE T-PIN ---------- */
 async function changeTPin(req, res) {
   try {
     const { wallet_id } = req.params;
@@ -423,8 +482,7 @@ async function changeTPin(req, res) {
   }
 }
 
-/* ---------- FORGOT T-PIN: REQUEST OTP ---------- */
-/* ---------- FORGOT T-PIN: REQUEST OTP ---------- */
+/* ---------- FORGOT T-PIN: REQUEST OTP (EMAIL) ---------- */
 async function forgotTPinRequest(req, res) {
   try {
     const { wallet_id } = req.params;
@@ -458,14 +516,10 @@ async function forgotTPinRequest(req, res) {
     const email = user.email;
     const userName = user.user_name || null;
 
-    const otp = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
 
-    // ❌ OLD (causes ERR syntax error for your client)
-    // await redis.set(redisKey, otp, { EX: 600 });
-
-    // ✅ NEW: use positional EX argument (works with ioredis / node-redis v3)
-    await redis.set(redisKey, otp, "EX", 600);
+    await redis.set(redisKey, otp, "EX", 300);
 
     await sendOtpEmail({
       to: email,
@@ -485,7 +539,7 @@ async function forgotTPinRequest(req, res) {
   }
 }
 
-/* ---------- FORGOT T-PIN: VERIFY OTP & SET NEW T-PIN ---------- */
+/* ---------- FORGOT T-PIN: VERIFY OTP (EMAIL) & SET NEW T-PIN ---------- */
 async function forgotTPinVerify(req, res) {
   try {
     const { wallet_id } = req.params;
@@ -562,17 +616,155 @@ async function forgotTPinVerify(req, res) {
   }
 }
 
-/* ---------- USER / MERCHANT / DRIVER WALLET TRANSFER ---------- */
-/**
- * Body:
- * {
- *   "sender_wallet_id": "NET000123",
- *   "recipient_wallet_id": "NET000456",
- *   "amount": 225,
- *   "note": "Tt",
- *   "t_pin": "1234"
- * }
- */
+/* =========================================================
+   ✅ NEW: FORGOT T-PIN (SMS): REQUEST OTP
+   POST /wallet/:wallet_id/forgot-tpin-sms
+========================================================= */
+async function forgotTPinRequestSms(req, res) {
+  try {
+    const { wallet_id } = req.params;
+
+    if (!wallet_id || typeof wallet_id !== "string") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid wallet_id." });
+    }
+
+    const wallet = await getWallet({ key: wallet_id });
+    if (!wallet) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Wallet not found." });
+    }
+
+    const [rows] = await db.query(
+      "SELECT user_id, phone, user_name FROM users WHERE user_id = ? LIMIT 1",
+      [wallet.user_id]
+    );
+
+    if (!rows.length || !rows[0].phone) {
+      return res.status(404).json({
+        success: false,
+        message: "User phone not found.",
+      });
+    }
+
+    const user = rows[0];
+    const phoneToSend = normalizeBhutanPhone(user.phone);
+
+    if (!phoneToSend) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid phone number format.",
+      });
+    }
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const redisKey = `tpin_reset_sms:${wallet.user_id}:${wallet.wallet_id}`;
+
+    // 10 minutes
+    await redis.set(redisKey, otp, "EX", 300);
+
+    await sendOtpSms({
+      to: phoneToSend,
+      otp,
+      purposeTitle: "T-PIN reset code",
+      ttlMinutes: 5,
+    });
+
+    return res.json({
+      success: true,
+      message:
+        "OTP has been sent to your registered phone number. It is valid for 10 minutes.",
+    });
+  } catch (e) {
+    console.error("Error in forgotTPinRequestSms:", e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+/* =========================================================
+   ✅ NEW: FORGOT T-PIN (SMS): VERIFY OTP & SET NEW T-PIN
+   POST /wallet/:wallet_id/forgot-tpin-sms/verify
+   body: { otp, new_t_pin }
+========================================================= */
+async function forgotTPinVerifySms(req, res) {
+  try {
+    const { wallet_id } = req.params;
+    const { otp, new_t_pin } = req.body || {};
+
+    if (!wallet_id || typeof wallet_id !== "string") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid wallet_id." });
+    }
+
+    const otpStr = String(otp || "").trim();
+    if (!/^\d{6}$/.test(otpStr)) {
+      return res.status(400).json({
+        success: false,
+        message: "otp must be a 6-digit numeric code.",
+      });
+    }
+
+    const newPinStr = String(new_t_pin || "").trim();
+    if (!/^\d{4}$/.test(newPinStr)) {
+      return res.status(400).json({
+        success: false,
+        message: "new_t_pin must be a 4-digit numeric code.",
+      });
+    }
+
+    const wallet = await getWallet({ key: wallet_id });
+    if (!wallet) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Wallet not found." });
+    }
+
+    const redisKey = `tpin_reset_sms:${wallet.user_id}:${wallet.wallet_id}`;
+    const savedOtp = await redis.get(redisKey);
+
+    if (!savedOtp) {
+      return res.status(410).json({
+        success: false,
+        message: "OTP expired or not found. Please request a new OTP.",
+      });
+    }
+
+    if (String(savedOtp).trim() !== otpStr) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP.",
+      });
+    }
+
+    const hashed = await bcrypt.hash(newPinStr, 10);
+    const updated = await setWalletTPin({
+      key: wallet_id,
+      t_pin_hash: hashed,
+    });
+
+    await redis.del(redisKey);
+
+    if (!updated) {
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to update T-PIN." });
+    }
+
+    return res.json({
+      success: true,
+      message: "T-PIN reset successfully.",
+      data: mapLocalTimes(updated),
+    });
+  } catch (e) {
+    console.error("Error in forgotTPinVerifySms:", e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+/* ---------- USER WALLET TRANSFER ---------- */
 async function userTransfer(req, res) {
   try {
     const {
@@ -683,12 +875,12 @@ async function userTransfer(req, res) {
       ? transaction_ids[0]
       : null;
 
-    const { dateStr, timeStr } = formatReceiptDateTime(); // use current time
+    const { dateStr, timeStr } = formatReceiptDateTime();
 
     const receipt = {
       amount: `Nu. ${Number(amount).toFixed(2)}`,
       journal_no: journal_code,
-      transaction_id: primaryTxnId, // ✅ only first ID shown
+      transaction_id: primaryTxnId,
       from_account: maskWallet(sender_wallet_id),
       to_account: maskWallet(recipient_wallet_id),
       purpose: note || "N/A",
@@ -707,9 +899,6 @@ async function userTransfer(req, res) {
   }
 }
 
-// controllers/walletController.js
-// ... existing requires & helpers above
-
 /* ---------- GET USER_NAME BY WALLET_ID ---------- */
 async function getUserNameByWalletId(req, res) {
   try {
@@ -721,7 +910,6 @@ async function getUserNameByWalletId(req, res) {
         .json({ success: false, message: "Invalid wallet_id." });
     }
 
-    // Use existing model helper: supports NET... or numeric id
     const wallet = await getWallet({ key: wallet_id });
     if (!wallet) {
       return res
@@ -766,9 +954,11 @@ module.exports = {
   adminTipTransfer: adminTipTransferHandler,
   setTPin,
   changeTPin,
-  forgotTPinRequest,
-  forgotTPinVerify,
+  forgotTPinRequest, // email send
+  forgotTPinVerify, // email verify
+  forgotTPinRequestSms, // ✅ sms send
+  forgotTPinVerifySms, // ✅ sms verify
   userTransfer,
-  checkTPinByUserId, // <-- exported new function
-  getUserNameByWalletId, // <-- exported new function
+  checkTPinByUserId,
+  getUserNameByWalletId,
 };
