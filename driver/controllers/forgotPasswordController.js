@@ -1,3 +1,4 @@
+// controllers/forgotPasswordController.js
 const db = require("../config/db"); // MySQL pool
 const redisClient = require("../models/redisClient");
 const Driver = require("../models/driverModel");
@@ -109,6 +110,7 @@ async function findUserByPhoneNoNormalize(inputPhone) {
 /* ============================================================
    ✅ 1) SEND OTP SMS (Forgot password)
    Body: { phone }
+   - ✅ ONLY sends if phone exists in DB
    - OTP valid: 5 minutes
    ============================================================ */
 exports.sendOtpSms = async (req, res) => {
@@ -116,8 +118,13 @@ exports.sendOtpSms = async (req, res) => {
     const inputPhone = req.body.phone;
 
     const { user, gatewayPhone } = await findUserByPhoneNoNormalize(inputPhone);
-    if (!user)
-      return res.status(404).json({ error: "Phone number not found." });
+
+    // ✅ IMPORTANT: don't send if not registered
+    if (!user) {
+      return res.status(404).json({
+        error: "This phone number is not yet registered.",
+      });
+    }
 
     if (!gatewayPhone) {
       return res
@@ -164,6 +171,7 @@ exports.sendOtpSms = async (req, res) => {
 /* ============================================================
    ✅ 2) VERIFY OTP SMS
    Body: { phone, otp }
+   - ✅ verifies only if phone exists in DB
    - sets verified flag for 15 mins
    ============================================================ */
 exports.verifyOtpSms = async (req, res) => {
@@ -176,8 +184,13 @@ exports.verifyOtpSms = async (req, res) => {
     }
 
     const { user, gatewayPhone } = await findUserByPhoneNoNormalize(inputPhone);
-    if (!user)
-      return res.status(404).json({ error: "Phone number not found." });
+
+    if (!user) {
+      return res.status(404).json({
+        error: "This phone number is not yet registered.",
+      });
+    }
+
     if (!gatewayPhone) {
       return res
         .status(400)
@@ -227,8 +240,12 @@ exports.resetPasswordSms = async (req, res) => {
     }
 
     const { user, gatewayPhone } = await findUserByPhoneNoNormalize(inputPhone);
-    if (!user)
-      return res.status(404).json({ error: "Phone number not found." });
+
+    if (!user) {
+      return res.status(404).json({
+        error: "This phone number is not yet registered.",
+      });
+    }
 
     if (!gatewayPhone) {
       return res
