@@ -1,2 +1,25 @@
-node_modules
-tryHTML
+# dependencies
+node_modules/
+
+# build outputs (optional)
+dist/
+build/
+
+# env / secrets
+.env
+.env.*
+
+# logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# if this is a folder
+tryHTML/
