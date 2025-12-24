@@ -1,2 +1,4 @@
 node_modules
 tryHTML
+.env
+.env.*
