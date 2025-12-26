@@ -366,13 +366,22 @@ function mapUploadedFilesToPayload(req, order_id, items) {
 
 /**
  * POST /orders
+ * router.post("/orders", uploadOrderImages, createOrder)
  */
 async function createOrder(req, res) {
+  // small helper: delete orphan uploads on validation fail
+  const safeUnlink = (p) => {
+    try {
+      if (p && fs.existsSync(p)) fs.unlinkSync(p);
+    } catch {}
+  };
+
   try {
     // ✅ support JSON and multipart(payload)
     let payload = req.body || {};
-    if (typeof payload.payload === "string")
+    if (typeof payload.payload === "string") {
       payload = safeJsonParse(payload.payload) || payload;
+    }
 
     // items may be stringified
     let itemsRaw = payload.items;
@@ -380,11 +389,19 @@ async function createOrder(req, res) {
     const items = Array.isArray(itemsRaw) ? itemsRaw : [];
 
     // basic validation
-    if (!payload.user_id)
+    if (!payload.user_id) {
+      // cleanup any uploads
+      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+        safeUnlink(f?.path)
+      );
       return res.status(400).json({ message: "Missing user_id" });
+    }
 
     const serviceType = normalizeServiceType(payload.service_type);
     if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
+      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+        safeUnlink(f?.path)
+      );
       return res.status(400).json({
         message: "Invalid or missing service_type. Allowed: FOOD, MART",
       });
@@ -392,13 +409,23 @@ async function createOrder(req, res) {
 
     const payMethod = normalizePaymentMethod(payload.payment_method);
     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
+      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+        safeUnlink(f?.path)
+      );
       return res
         .status(400)
         .json({ message: "Invalid or missing payment_method" });
     }
 
-    if (!items.length)
+    if (!items.length) {
+      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+        safeUnlink(f?.path)
+      );
       return res.status(400).json({ message: "Missing items" });
+    }
+
+    // ✅ normalize item shapes (so item_image mapping works)
+    const normalizedItems = items.map((it, idx) => normalizeItemShape(it, idx));
 
     // ✅ stable order_id (IMPORTANT)
     const order_id = String(payload.order_id || Order.peekNewOrderId())
@@ -428,17 +455,6 @@ async function createOrder(req, res) {
         payload.dropoff_or_meetup
     );
 
-    // ✅ photo url from multer (uploadDeliveryPhoto.single("delivery_photo"))
-    if (req.file?.path) {
-      const UPLOAD_ROOT =
-        process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
-      const rel = path
-        .relative(UPLOAD_ROOT, req.file.path)
-        .split(path.sep)
-        .join("/");
-      payload.delivery_photo_url = `/uploads/${rel}`;
-    }
-
     const fulfillment = normalizeFulfillment(payload.fulfillment_type);
 
     // delivery_address required for Delivery
@@ -452,6 +468,9 @@ async function createOrder(req, res) {
           : String(addrObj || "").trim();
 
       if (!addrStr) {
+        (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+          safeUnlink(f?.path)
+        );
         return res
           .status(400)
           .json({ message: "delivery_address is required for Delivery" });
@@ -466,19 +485,67 @@ async function createOrder(req, res) {
       payload.delivery_address = JSON.stringify(payload.delivery_address);
     }
 
-    // ✅ create
+    /* =========================================================
+       ✅ UPLOADS (single OR multiple up to 6)
+       - Accepts: order_images/order_image/images + delivery_photo/image
+       - Maps per-item images too (item_image_0, item_image_<menu_id>)
+       ========================================================= */
+
+    // Map uploaded files to public URLs + apply item_images to normalizedItems
+    const { order_images } = mapUploadedFilesToPayload(
+      req,
+      order_id,
+      normalizedItems
+    );
+
+    // also accept delivery_photo/image as "photos"
+    const files = Array.isArray(req.files) ? req.files : [];
+    const extraPhotoFields = new Set([
+      "delivery_photo",
+      "delivery_photos",
+      "image",
+    ]);
+    const extraPhotos = [];
+
+    for (const f of files) {
+      if (!f?.path) continue;
+      if (!extraPhotoFields.has(String(f.fieldname || ""))) continue;
+      extraPhotos.push(toPublicUploadUrl(f.path));
+    }
+
+    // final photo list (dedupe)
+    const allPhotos = Array.from(
+      new Set([...(order_images || []), ...(extraPhotos || [])])
+    );
+
+    // ✅ enforce max 6
+    if (allPhotos.length > 6) {
+      // cleanup uploads if too many
+      files.forEach((f) => safeUnlink(f?.path));
+      return res.status(400).json({
+        ok: false,
+        message: "Maximum 6 photos are allowed.",
+        received: allPhotos.length,
+      });
+    }
+
+    // If you want to keep one "delivery_photo_url" for backward compatibility:
+    // store the first photo (if any)
+    payload.delivery_photo_url = allPhotos[0] || null;
+
+    /* ===================== CREATE ORDER ===================== */
     const created_id = await Order.create({
       ...payload,
       service_type: serviceType,
       payment_method: payMethod,
       fulfillment_type: fulfillment,
       status: String(payload.status || "PENDING").toUpperCase(),
-      items,
+      items: normalizedItems,
     });
 
     // Notifications (same idea)
     const byBiz = new Map();
-    for (const it of items) {
+    for (const it of normalizedItems) {
       const bid = Number(it.business_id);
       if (!bid || Number.isNaN(bid)) continue;
       if (!byBiz.has(bid)) byBiz.set(bid, []);
@@ -519,13 +586,21 @@ async function createOrder(req, res) {
     return res.status(201).json({
       ok: true,
       order_id: created_id,
+
+      // ✅ return photos to app
+      order_images: allPhotos, // (0..6)
+      delivery_photo_url: payload.delivery_photo_url || null,
+
       delivery_floor_unit: payload.delivery_floor_unit || null,
       delivery_instruction_note: payload.delivery_instruction_note || null,
       delivery_special_mode: payload.delivery_special_mode || null,
-      delivery_photo_url: payload.delivery_photo_url || null,
     });
   } catch (err) {
     console.error("[createOrder ERROR]", err);
+    // cleanup uploads on crash
+    (Array.isArray(req.files) ? req.files : []).forEach((f) =>
+      safeUnlink(f?.path)
+    );
     return res.status(500).json({ ok: false, error: err.message });
   }
 }

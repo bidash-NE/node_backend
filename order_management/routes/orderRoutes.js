@@ -1,8 +1,9 @@
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
+
 const orderCtrl = require("../controllers/orderControllers");
-const { uploadDeliveryPhoto } = require("../middleware/uploadDeliveryPhoto");
+const { uploadDeliveryPhotos } = require("../middleware/uploadDeliveryPhoto");
 
 /* validators */
 const validOrderId = (req, res, next) => {
@@ -27,15 +28,13 @@ const validUserId = (req, res, next) => {
 };
 
 /**
- * ✅ Supports BOTH:
- * - application/json
- * - multipart/form-data (payload + delivery_photo)
- *
- * multipart fields:
- * - payload: JSON string
- * - delivery_photo: image file
+ * multipart/form-data fields supported by uploadDeliveryPhotos():
+ * - delivery_photo (single/multi)
+ * - delivery_photos (multi)
+ * - image (single/multi)
+ * - images (multi)
  */
-router.post("/orders", uploadDeliveryPhoto, orderCtrl.createOrder);
+router.post("/orders", uploadDeliveryPhotos, orderCtrl.createOrder);
 
 router.get("/orders/:order_id", validOrderId, orderCtrl.getOrderById);
 router.put("/orders/:order_id", validOrderId, orderCtrl.updateOrder);

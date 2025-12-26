@@ -9,8 +9,9 @@ const {
   listScheduledOrdersByBusiness,
 } = require("../controllers/scheduledOrdersController");
 
-// CREATE (body has user_id + scheduled_at + order fields)
-router.post("/scheduled-orders", scheduleOrder);
+const { uploadDeliveryPhotos } = require("../middleware/uploadDeliveryPhoto");
+
+router.post("/scheduled-orders", uploadDeliveryPhotos, scheduleOrder);
 
 // FETCH all scheduled orders for a user
 router.get("/scheduled-orders/:user_id", listScheduledOrders);
