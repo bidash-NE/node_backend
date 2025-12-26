@@ -1984,6 +1984,7 @@ const Order = {
   findByUserIdForApp: async (user_id, service_type = null) => {
     const hasReason = await ensureStatusReasonSupport();
     const hasService = await ensureServiceTypeSupport();
+    const extras = await ensureDeliveryExtrasSupport(); // ✅ NEW
 
     const params = [user_id];
     let serviceWhere = "";
@@ -1994,31 +1995,53 @@ const Order = {
 
     const [orders] = await db.query(
       `
-      SELECT
-        o.order_id,
-        o.user_id,
-        ${hasService ? "o.service_type," : "NULL AS service_type,"}
-        ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
-        o.total_amount,
-        o.discount_amount,
-        o.delivery_fee,
-        o.platform_fee,
-        o.merchant_delivery_fee,
-        o.payment_method,
-        o.delivery_address,
-        o.note_for_restaurant,
-        o.if_unavailable,
-        o.estimated_arrivial_time,
-        o.status,
-        o.fulfillment_type,
-        o.priority,
-        o.created_at,
-        o.updated_at
-      FROM orders o
-      WHERE o.user_id = ?
-      ${serviceWhere}
-      ORDER BY o.created_at DESC
-      `,
+    SELECT
+      o.order_id,
+      o.user_id,
+      ${hasService ? "o.service_type," : "NULL AS service_type,"}
+      ${hasReason ? "o.status_reason," : "NULL AS status_reason,"}
+      o.total_amount,
+      o.discount_amount,
+      o.delivery_fee,
+      o.platform_fee,
+      o.merchant_delivery_fee,
+      o.payment_method,
+      o.delivery_address,
+
+      ${extras.hasLat ? "o.delivery_lat" : "NULL AS delivery_lat"},
+      ${extras.hasLng ? "o.delivery_lng" : "NULL AS delivery_lng"},
+      ${
+        extras.hasFloor
+          ? "o.delivery_floor_unit"
+          : "NULL AS delivery_floor_unit"
+      },
+      ${
+        extras.hasInstr
+          ? "o.delivery_instruction_note"
+          : "NULL AS delivery_instruction_note"
+      },
+      ${
+        extras.hasMode
+          ? "o.delivery_special_mode"
+          : "NULL AS delivery_special_mode"
+      },
+      ${
+        extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"
+      },
+
+      o.note_for_restaurant,
+      o.if_unavailable,
+      o.estimated_arrivial_time,
+      o.status,
+      o.fulfillment_type,
+      o.priority,
+      o.created_at,
+      o.updated_at
+    FROM orders o
+    WHERE o.user_id = ?
+    ${serviceWhere}
+    ORDER BY o.created_at DESC
+    `,
       params
     );
     if (!orders.length) return [];
@@ -2026,11 +2049,11 @@ const Order = {
     const orderIds = orders.map((o) => o.order_id);
     const [items] = await db.query(
       `
-      SELECT order_id,business_id,business_name,menu_id,item_name,item_image,quantity,price,subtotal,platform_fee,delivery_fee
-      FROM order_items
-      WHERE order_id IN (?)
-      ORDER BY order_id, business_id, menu_id
-      `,
+    SELECT order_id,business_id,business_name,menu_id,item_name,item_image,quantity,price,subtotal,platform_fee,delivery_fee
+    FROM order_items
+    WHERE order_id IN (?)
+    ORDER BY order_id, business_id, menu_id
+    `,
       [orderIds]
     );
 
@@ -2045,13 +2068,25 @@ const Order = {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
 
-      // ✅ NEW: ensure service_type exists in response even if orders table lacks it
+      // ✅ ensure service_type exists in response even if orders table lacks it
       let st = o.service_type || null;
       if (!st) {
         try {
           st = await resolveOrderServiceType(o.order_id, db);
         } catch {}
       }
+
+      // ✅ deliver_to with new fields
+      const deliverTo = parseDeliveryAddress(o.delivery_address) || {};
+      if (deliverTo.lat == null && o.delivery_lat != null)
+        deliverTo.lat = Number(o.delivery_lat);
+      if (deliverTo.lng == null && o.delivery_lng != null)
+        deliverTo.lng = Number(o.delivery_lng);
+
+      deliverTo.delivery_floor_unit = o.delivery_floor_unit || null;
+      deliverTo.delivery_instruction_note = o.delivery_instruction_note || null;
+      deliverTo.delivery_special_mode = o.delivery_special_mode || null;
+      deliverTo.delivery_photo_url = o.delivery_photo_url || null;
 
       result.push({
         order_id: o.order_id,
@@ -2069,7 +2104,7 @@ const Order = {
               name: primaryBiz.business_name,
             }
           : null,
-        deliver_to: parseDeliveryAddress(o.delivery_address),
+        deliver_to: deliverTo,
         totals: {
           items_subtotal: its.reduce(
             (s, it) => s + Number(it.subtotal || 0),
