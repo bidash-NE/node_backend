@@ -14,7 +14,7 @@ const ALLOWED_SERVICE_TYPES = new Set(["FOOD", "MART"]);
 exports.scheduleOrder = async (req, res) => {
   try {
     const { user_id, scheduled_at, ...orderPayload } = req.body;
-
+    console.log("scheduleOrder req.body:", req.body);
     const userId = Number(user_id);
     if (!Number.isFinite(userId) || userId <= 0) {
       return res.status(400).json({
@@ -46,7 +46,11 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
-    if (!orderPayload.items || !Array.isArray(orderPayload.items) || !orderPayload.items.length) {
+    if (
+      !orderPayload.items ||
+      !Array.isArray(orderPayload.items) ||
+      !orderPayload.items.length
+    ) {
       return res.status(400).json({
         success: false,
         message: "Order items are required.",
