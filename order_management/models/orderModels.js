@@ -68,10 +68,12 @@ async function ensureDeliveryExtrasSupport() {
       AND COLUMN_NAME IN (
         'delivery_lat','delivery_lng',
         'delivery_floor_unit','delivery_instruction_note',
-        'delivery_special_mode','delivery_photo_url'
+        'delivery_special_mode','delivery_photo_url',
+        'delivery_photo_urls'
       )
     `
   );
+
   const set = new Set(rows.map((r) => r.COLUMN_NAME));
   return {
     hasLat: set.has("delivery_lat"),
@@ -80,8 +82,10 @@ async function ensureDeliveryExtrasSupport() {
     hasInstr: set.has("delivery_instruction_note"),
     hasMode: set.has("delivery_special_mode"),
     hasPhoto: set.has("delivery_photo_url"),
+    hasPhotoList: set.has("delivery_photo_urls"),
   };
 }
+
 function extractIdsShape(payload) {
   const p = payload?.data ? payload.data : payload;
 
@@ -1808,15 +1812,29 @@ const Order = {
     // ✅ save these ONLY if columns exist
     if (cols.has("delivery_floor_unit"))
       payload.delivery_floor_unit = orderData.delivery_floor_unit || null;
+
     if (cols.has("delivery_instruction_note"))
       payload.delivery_instruction_note =
         orderData.delivery_instruction_note || null;
+
+    // ✅ legacy single thumbnail
     if (cols.has("delivery_photo_url"))
       payload.delivery_photo_url = orderData.delivery_photo_url || null;
+
+    // ✅ NEW list (stored as JSON string)
+    if (cols.has("delivery_photo_urls")) {
+      const arr = Array.isArray(orderData.delivery_photo_urls)
+        ? orderData.delivery_photo_urls
+            .map((x) => (x == null ? "" : String(x).trim()))
+            .filter(Boolean)
+        : [];
+      payload.delivery_photo_urls = arr.length ? JSON.stringify(arr) : null;
+    }
 
     // ✅ special mode (DROP_OFF / MEET_UP)
     if (cols.has("delivery_special_mode"))
       payload.delivery_special_mode = orderData.delivery_special_mode || null;
+
     if (cols.has("special_mode"))
       payload.special_mode =
         orderData.delivery_special_mode || orderData.special_mode || null;
@@ -1984,7 +2002,7 @@ const Order = {
   findByUserIdForApp: async (user_id, service_type = null) => {
     const hasReason = await ensureStatusReasonSupport();
     const hasService = await ensureServiceTypeSupport();
-    const extras = await ensureDeliveryExtrasSupport(); // ✅ NEW
+    const extras = await ensureDeliveryExtrasSupport(); // includes hasPhotoList
 
     const params = [user_id];
     let serviceWhere = "";
@@ -2028,6 +2046,11 @@ const Order = {
       ${
         extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"
       },
+      ${
+        extras.hasPhotoList
+          ? "o.delivery_photo_urls"
+          : "NULL AS delivery_photo_urls"
+      },
 
       o.note_for_restaurant,
       o.if_unavailable,
@@ -2044,12 +2067,25 @@ const Order = {
     `,
       params
     );
+
     if (!orders.length) return [];
 
     const orderIds = orders.map((o) => o.order_id);
+
     const [items] = await db.query(
       `
-    SELECT order_id,business_id,business_name,menu_id,item_name,item_image,quantity,price,subtotal,platform_fee,delivery_fee
+    SELECT
+      order_id,
+      business_id,
+      business_name,
+      menu_id,
+      item_name,
+      item_image,
+      quantity,
+      price,
+      subtotal,
+      platform_fee,
+      delivery_fee
     FROM order_items
     WHERE order_id IN (?)
     ORDER BY order_id, business_id, menu_id
@@ -2063,7 +2099,23 @@ const Order = {
       itemsByOrder.get(it.order_id).push(it);
     }
 
+    // helper: parse JSON list stored in TEXT
+    const parsePhotoList = (v) => {
+      if (v == null) return [];
+      if (Array.isArray(v)) return v.map(String).filter(Boolean);
+      const s = String(v).trim();
+      if (!s) return [];
+      try {
+        const arr = JSON.parse(s);
+        return Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
+      } catch {
+        // if someone stored a single url in this column, tolerate it
+        return [s].filter(Boolean);
+      }
+    };
+
     const result = [];
+
     for (const o of orders) {
       const its = itemsByOrder.get(o.order_id) || [];
       const primaryBiz = its[0] || null;
@@ -2076,8 +2128,10 @@ const Order = {
         } catch {}
       }
 
-      // ✅ deliver_to with new fields
+      // base deliver_to
       const deliverTo = parseDeliveryAddress(o.delivery_address) || {};
+
+      // prefer explicit columns if present
       if (deliverTo.lat == null && o.delivery_lat != null)
         deliverTo.lat = Number(o.delivery_lat);
       if (deliverTo.lng == null && o.delivery_lng != null)
@@ -2086,7 +2140,19 @@ const Order = {
       deliverTo.delivery_floor_unit = o.delivery_floor_unit || null;
       deliverTo.delivery_instruction_note = o.delivery_instruction_note || null;
       deliverTo.delivery_special_mode = o.delivery_special_mode || null;
-      deliverTo.delivery_photo_url = o.delivery_photo_url || null;
+
+      // ✅ photos: list + legacy
+      const listFromCol = parsePhotoList(o.delivery_photo_urls);
+      const legacy = o.delivery_photo_url
+        ? String(o.delivery_photo_url).trim()
+        : "";
+
+      const merged = Array.from(
+        new Set([...listFromCol, ...(legacy ? [legacy] : [])])
+      ).filter(Boolean);
+
+      deliverTo.delivery_photo_urls = merged; // always array
+      deliverTo.delivery_photo_url = merged[0] || null; // thumbnail/back-compat
 
       result.push({
         order_id: o.order_id,
@@ -2096,15 +2162,19 @@ const Order = {
         payment_method: o.payment_method,
         fulfillment_type: o.fulfillment_type,
         created_at: o.created_at,
+        updated_at: o.updated_at,
         if_unavailable: o.if_unavailable || null,
         estimated_arrivial_time: o.estimated_arrivial_time || null,
+
         restaurant: primaryBiz
           ? {
               business_id: primaryBiz.business_id,
               name: primaryBiz.business_name,
             }
           : null,
+
         deliver_to: deliverTo,
+
         totals: {
           items_subtotal: its.reduce(
             (s, it) => s + Number(it.subtotal || 0),
@@ -2119,6 +2189,7 @@ const Order = {
           discount_amount: Number(o.discount_amount || 0),
           total_amount: Number(o.total_amount || 0),
         },
+
         items: its.map((it) => ({
           menu_id: it.menu_id,
           name: it.item_name,

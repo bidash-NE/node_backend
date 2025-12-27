@@ -368,6 +368,7 @@ function mapUploadedFilesToPayload(req, order_id, items) {
  * POST /orders
  * router.post("/orders", uploadOrderImages, createOrder)
  */
+
 async function createOrder(req, res) {
   // small helper: delete orphan uploads on validation fail
   const safeUnlink = (p) => {
@@ -390,7 +391,6 @@ async function createOrder(req, res) {
 
     // basic validation
     if (!payload.user_id) {
-      // cleanup any uploads
       (Array.isArray(req.files) ? req.files : []).forEach((f) =>
         safeUnlink(f?.path)
       );
@@ -486,12 +486,12 @@ async function createOrder(req, res) {
     }
 
     /* =========================================================
-       ✅ UPLOADS (single OR multiple up to 6)
-       - Accepts: order_images/order_image/images + delivery_photo/image
-       - Maps per-item images too (item_image_0, item_image_<menu_id>)
+       ✅ UPLOADS + BODY PHOTOS (IMPORTANT FIX)
+       - DO NOT overwrite body delivery_photo_url when no uploads
+       - Always build a LIST: delivery_photo_urls
        ========================================================= */
 
-    // Map uploaded files to public URLs + apply item_images to normalizedItems
+    // 1) uploaded files -> urls
     const { order_images } = mapUploadedFilesToPayload(
       req,
       order_id,
@@ -513,14 +513,34 @@ async function createOrder(req, res) {
       extraPhotos.push(toPublicUploadUrl(f.path));
     }
 
-    // final photo list (dedupe)
-    const allPhotos = Array.from(
+    const uploadedPhotos = Array.from(
       new Set([...(order_images || []), ...(extraPhotos || [])])
+    );
+
+    // 2) body photos (JSON direct order / scheduled order)
+    const bodyPhotosRaw = Array.isArray(payload.delivery_photo_urls)
+      ? payload.delivery_photo_urls
+      : Array.isArray(payload.special_photos)
+      ? payload.special_photos
+      : null;
+
+    const bodyPhotos = Array.isArray(bodyPhotosRaw)
+      ? bodyPhotosRaw
+          .map((x) => (x == null ? "" : String(x).trim()))
+          .filter(Boolean)
+      : [];
+
+    const bodySingle = payload.delivery_photo_url
+      ? [String(payload.delivery_photo_url).trim()].filter(Boolean)
+      : [];
+
+    // 3) merge + dedupe
+    const allPhotos = Array.from(
+      new Set([...bodyPhotos, ...bodySingle, ...uploadedPhotos])
     );
 
     // ✅ enforce max 6
     if (allPhotos.length > 6) {
-      // cleanup uploads if too many
       files.forEach((f) => safeUnlink(f?.path));
       return res.status(400).json({
         ok: false,
@@ -529,9 +549,11 @@ async function createOrder(req, res) {
       });
     }
 
-    // If you want to keep one "delivery_photo_url" for backward compatibility:
-    // store the first photo (if any)
-    payload.delivery_photo_url = allPhotos[0] || null;
+    // ✅ store both
+    payload.delivery_photo_urls = allPhotos; // list (even if 1)
+    payload.delivery_photo_url = allPhotos.length
+      ? allPhotos[0]
+      : payload.delivery_photo_url || null; // keep body value if no uploads
 
     /* ===================== CREATE ORDER ===================== */
     const created_id = await Order.create({
@@ -588,7 +610,7 @@ async function createOrder(req, res) {
       order_id: created_id,
 
       // ✅ return photos to app
-      order_images: allPhotos, // (0..6)
+      delivery_photo_urls: payload.delivery_photo_urls || [],
       delivery_photo_url: payload.delivery_photo_url || null,
 
       delivery_floor_unit: payload.delivery_floor_unit || null,
