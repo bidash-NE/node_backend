@@ -42,6 +42,30 @@ async function ensureColumn(table, column, ddlSql) {
   if (!exists) await db.query(ddlSql);
 }
 
+async function getColumnDataType(table, column) {
+  const [rows] = await db.query(
+    `
+    SELECT DATA_TYPE, COLUMN_TYPE, CHARACTER_MAXIMUM_LENGTH
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = ?
+      AND COLUMN_NAME = ?
+    LIMIT 1
+    `,
+    [table, column]
+  );
+  return rows[0] || null;
+}
+
+// If column exists but type is too small/incorrect, modify it.
+async function ensureColumnType(table, column, shouldModifyFn, modifySql) {
+  const info = await getColumnDataType(table, column);
+  if (!info) return; // doesn't exist yet; ensureColumn should handle add
+  if (shouldModifyFn(info)) {
+    await db.query(modifySql);
+  }
+}
+
 async function tableExists(table) {
   const [rows] = await db.query(
     `
@@ -59,17 +83,8 @@ async function tableExists(table) {
 /* ------------------- main initializer ------------------- */
 /**
  * Initialize (and patch) order management tables in a version-safe way.
- * - orders, order_items, order_notification, order_wallet_captures
- * - cancelled_orders, cancelled_order_items (archive tables)
- * - delivered_orders, delivered_order_items (archive tables)
  *
- * ✅ Address-details fields:
- * - delivery_floor_unit (VARCHAR 80)
- * - delivery_instruction_note (VARCHAR 256)
- * - delivery_photo_url (VARCHAR 500)
- *
- * ✅ NEW SPECIAL MODE:
- * - delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL
+ * ✅ Change: delivery_photo_url is now TEXT (stores JSON array string or long URI list)
  */
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
@@ -94,7 +109,9 @@ CREATE TABLE IF NOT EXISTS orders (
   -- ✅ NEW address-details fields
   delivery_floor_unit VARCHAR(80) DEFAULT NULL,
   delivery_instruction_note VARCHAR(256) DEFAULT NULL,
-  delivery_photo_url VARCHAR(500) DEFAULT NULL,
+
+  -- ✅ UPDATED: was VARCHAR(500); now TEXT so you can store JSON array string
+  delivery_photo_url TEXT NULL,
 
   -- ✅ NEW special instruction mode (DROP_OFF / MEET_UP)
   delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
@@ -129,109 +146,105 @@ CREATE TABLE IF NOT EXISTS orders (
 `);
 
   // Patches – safe if the table already existed with older schema.
-  await ensureColumn(
-    "orders",
-    "service_type",
-    `ALTER TABLE orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`
-  );
-  await ensureColumn(
-    "orders",
-    "business_id",
-    `ALTER TABLE orders ADD COLUMN business_id INT(10) UNSIGNED DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "batch_id",
-    `ALTER TABLE orders ADD COLUMN batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_lat",
-    `ALTER TABLE orders ADD COLUMN delivery_lat DECIMAL(9,6) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_lng",
-    `ALTER TABLE orders ADD COLUMN delivery_lng DECIMAL(9,6) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "platform_fee",
-    `ALTER TABLE orders ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0.00`
-  );
-  await ensureColumn(
-    "orders",
-    "merchant_delivery_fee",
-    `ALTER TABLE orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_batch_id",
-    `ALTER TABLE orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_driver_id",
-    `ALTER TABLE orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_status",
-    `ALTER TABLE orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'PENDING'`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_ride_id",
-    `ALTER TABLE orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "if_unavailable",
-    `ALTER TABLE orders ADD COLUMN if_unavailable VARCHAR(256) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "status_reason",
-    `ALTER TABLE orders ADD COLUMN status_reason VARCHAR(255) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "fulfillment_type",
-    `ALTER TABLE orders ADD COLUMN fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery'`
-  );
-  await ensureColumn(
-    "orders",
-    "priority",
-    `ALTER TABLE orders ADD COLUMN priority TINYINT(1) DEFAULT 0`
-  );
-  await ensureColumn(
-    "orders",
-    "estimated_arrivial_time",
-    `ALTER TABLE orders ADD COLUMN estimated_arrivial_time VARCHAR(40) DEFAULT NULL`
-  );
+  const ordersCols = [
+    [
+      "service_type",
+      `ALTER TABLE orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`,
+    ],
+    [
+      "business_id",
+      `ALTER TABLE orders ADD COLUMN business_id INT(10) UNSIGNED DEFAULT NULL`,
+    ],
+    [
+      "batch_id",
+      `ALTER TABLE orders ADD COLUMN batch_id BIGINT(20) UNSIGNED DEFAULT NULL`,
+    ],
+    [
+      "delivery_lat",
+      `ALTER TABLE orders ADD COLUMN delivery_lat DECIMAL(9,6) DEFAULT NULL`,
+    ],
+    [
+      "delivery_lng",
+      `ALTER TABLE orders ADD COLUMN delivery_lng DECIMAL(9,6) DEFAULT NULL`,
+    ],
+    [
+      "platform_fee",
+      `ALTER TABLE orders ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0.00`,
+    ],
+    [
+      "merchant_delivery_fee",
+      `ALTER TABLE orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`,
+    ],
+    [
+      "delivery_batch_id",
+      `ALTER TABLE orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`,
+    ],
+    [
+      "delivery_driver_id",
+      `ALTER TABLE orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`,
+    ],
+    [
+      "delivery_status",
+      `ALTER TABLE orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'PENDING'`,
+    ],
+    [
+      "delivery_ride_id",
+      `ALTER TABLE orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`,
+    ],
+    [
+      "if_unavailable",
+      `ALTER TABLE orders ADD COLUMN if_unavailable VARCHAR(256) DEFAULT NULL`,
+    ],
+    [
+      "status_reason",
+      `ALTER TABLE orders ADD COLUMN status_reason VARCHAR(255) DEFAULT NULL`,
+    ],
+    [
+      "fulfillment_type",
+      `ALTER TABLE orders ADD COLUMN fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery'`,
+    ],
+    ["priority", `ALTER TABLE orders ADD COLUMN priority TINYINT(1) DEFAULT 0`],
+    [
+      "estimated_arrivial_time",
+      `ALTER TABLE orders ADD COLUMN estimated_arrivial_time VARCHAR(40) DEFAULT NULL`,
+    ],
 
-  // ✅ NEW columns (version-safe)
-  await ensureColumn(
-    "orders",
-    "delivery_floor_unit",
-    `ALTER TABLE orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
-  );
-  await ensureColumn(
-    "orders",
-    "delivery_instruction_note",
-    `ALTER TABLE orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
-  );
-  await ensureColumn(
+    [
+      "delivery_floor_unit",
+      `ALTER TABLE orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`,
+    ],
+    [
+      "delivery_instruction_note",
+      `ALTER TABLE orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`,
+    ],
+
+    // ✅ add if missing (new installs)
+    [
+      "delivery_photo_url",
+      `ALTER TABLE orders ADD COLUMN delivery_photo_url TEXT NULL`,
+    ],
+
+    [
+      "delivery_special_mode",
+      `ALTER TABLE orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`,
+    ],
+  ];
+
+  for (const [col, ddl] of ordersCols) {
+    await ensureColumn("orders", col, ddl);
+  }
+
+  // ✅ IMPORTANT: if column existed as VARCHAR(500), upgrade it to TEXT
+  await ensureColumnType(
     "orders",
     "delivery_photo_url",
-    `ALTER TABLE orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
-  );
-
-  // ✅ NEW special mode column (version-safe)
-  await ensureColumn(
-    "orders",
-    "delivery_special_mode",
-    `ALTER TABLE orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
+    (info) => {
+      const t = String(info.DATA_TYPE || "").toLowerCase();
+      return (
+        t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
+      );
+    },
+    `ALTER TABLE orders MODIFY COLUMN delivery_photo_url TEXT NULL`
   );
 
   // Ensure indexes exist (idempotent)
@@ -332,7 +345,6 @@ CREATE TABLE IF NOT EXISTS order_wallet_captures (
 
   /* ================= Cancelled archive tables ================= */
 
-  // Cancelled orders (snapshot)
   await db.query(`
 CREATE TABLE IF NOT EXISTS cancelled_orders (
   cancelled_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -354,12 +366,12 @@ CREATE TABLE IF NOT EXISTS cancelled_orders (
   note_for_restaurant VARCHAR(500),
   if_unavailable VARCHAR(256),
 
-  -- ✅ NEW address-details fields (snapshot)
   delivery_floor_unit VARCHAR(80) DEFAULT NULL,
   delivery_instruction_note VARCHAR(256) DEFAULT NULL,
-  delivery_photo_url VARCHAR(500) DEFAULT NULL,
 
-  -- ✅ NEW special mode (snapshot)
+  -- ✅ UPDATED: TEXT
+  delivery_photo_url TEXT NULL,
+
   delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
 
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
@@ -380,58 +392,61 @@ CREATE TABLE IF NOT EXISTS cancelled_orders (
 `);
 
   if (await tableExists("cancelled_orders")) {
-    await ensureColumn(
-      "cancelled_orders",
-      "merchant_delivery_fee",
-      `ALTER TABLE cancelled_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
-    );
-    await ensureColumn(
-      "cancelled_orders",
-      "status_reason",
-      `ALTER TABLE cancelled_orders ADD COLUMN status_reason VARCHAR(255) NULL`
-    );
-    await ensureColumn(
-      "cancelled_orders",
-      "cancelled_by",
-      `ALTER TABLE cancelled_orders ADD COLUMN cancelled_by ENUM('USER','MERCHANT','ADMIN','SYSTEM') NOT NULL DEFAULT 'USER'`
-    );
-    await ensureColumn(
-      "cancelled_orders",
-      "original_created_at",
-      `ALTER TABLE cancelled_orders ADD COLUMN original_created_at TIMESTAMP NULL`
-    );
-    await ensureColumn(
-      "cancelled_orders",
-      "original_updated_at",
-      `ALTER TABLE cancelled_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
-    );
+    const cancelledCols = [
+      [
+        "merchant_delivery_fee",
+        `ALTER TABLE cancelled_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`,
+      ],
+      [
+        "status_reason",
+        `ALTER TABLE cancelled_orders ADD COLUMN status_reason VARCHAR(255) NULL`,
+      ],
+      [
+        "cancelled_by",
+        `ALTER TABLE cancelled_orders ADD COLUMN cancelled_by ENUM('USER','MERCHANT','ADMIN','SYSTEM') NOT NULL DEFAULT 'USER'`,
+      ],
+      [
+        "original_created_at",
+        `ALTER TABLE cancelled_orders ADD COLUMN original_created_at TIMESTAMP NULL`,
+      ],
+      [
+        "original_updated_at",
+        `ALTER TABLE cancelled_orders ADD COLUMN original_updated_at TIMESTAMP NULL`,
+      ],
+      [
+        "delivery_floor_unit",
+        `ALTER TABLE cancelled_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`,
+      ],
+      [
+        "delivery_instruction_note",
+        `ALTER TABLE cancelled_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`,
+      ],
+      [
+        "delivery_photo_url",
+        `ALTER TABLE cancelled_orders ADD COLUMN delivery_photo_url TEXT NULL`,
+      ],
+      [
+        "delivery_special_mode",
+        `ALTER TABLE cancelled_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`,
+      ],
+    ];
+    for (const [col, ddl] of cancelledCols) {
+      await ensureColumn("cancelled_orders", col, ddl);
+    }
 
-    // ✅ NEW columns (version-safe)
-    await ensureColumn(
-      "cancelled_orders",
-      "delivery_floor_unit",
-      `ALTER TABLE cancelled_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
-    );
-    await ensureColumn(
-      "cancelled_orders",
-      "delivery_instruction_note",
-      `ALTER TABLE cancelled_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
-    );
-    await ensureColumn(
+    await ensureColumnType(
       "cancelled_orders",
       "delivery_photo_url",
-      `ALTER TABLE cancelled_orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
-    );
-
-    // ✅ NEW special mode (version-safe)
-    await ensureColumn(
-      "cancelled_orders",
-      "delivery_special_mode",
-      `ALTER TABLE cancelled_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
+      (info) => {
+        const t = String(info.DATA_TYPE || "").toLowerCase();
+        return (
+          t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
+        );
+      },
+      `ALTER TABLE cancelled_orders MODIFY COLUMN delivery_photo_url TEXT NULL`
     );
   }
 
-  // Cancelled order items (snapshot)
   await db.query(`
 CREATE TABLE IF NOT EXISTS cancelled_order_items (
   cancelled_item_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -461,7 +476,6 @@ CREATE TABLE IF NOT EXISTS cancelled_order_items (
 
   /* ================= Delivered archive tables ================= */
 
-  // Delivered orders (snapshot)
   await db.query(`
 CREATE TABLE IF NOT EXISTS delivered_orders (
   delivered_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -485,12 +499,12 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
   note_for_restaurant VARCHAR(500),
   if_unavailable VARCHAR(256),
 
-  -- ✅ NEW address-details fields (snapshot)
   delivery_floor_unit VARCHAR(80) DEFAULT NULL,
   delivery_instruction_note VARCHAR(256) DEFAULT NULL,
-  delivery_photo_url VARCHAR(500) DEFAULT NULL,
 
-  -- ✅ NEW special mode (snapshot)
+  -- ✅ UPDATED: TEXT
+  delivery_photo_url TEXT NULL,
+
   delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL,
 
   fulfillment_type ENUM('Delivery','Pickup') DEFAULT 'Delivery',
@@ -517,90 +531,89 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
 `);
 
   if (await tableExists("delivered_orders")) {
-    await ensureColumn(
-      "delivered_orders",
-      "service_type",
-      `ALTER TABLE delivered_orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "status_reason",
-      `ALTER TABLE delivered_orders ADD COLUMN status_reason VARCHAR(255) NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "merchant_delivery_fee",
-      `ALTER TABLE delivered_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivered_by",
-      `ALTER TABLE delivered_orders ADD COLUMN delivered_by ENUM('USER','MERCHANT','ADMIN','SYSTEM','DRIVER') NOT NULL DEFAULT 'SYSTEM'`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivered_at",
-      `ALTER TABLE delivered_orders ADD COLUMN delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
-    );
+    const deliveredCols = [
+      [
+        "service_type",
+        `ALTER TABLE delivered_orders ADD COLUMN service_type ENUM('FOOD','MART') NOT NULL DEFAULT 'FOOD'`,
+      ],
+      [
+        "status_reason",
+        `ALTER TABLE delivered_orders ADD COLUMN status_reason VARCHAR(255) NULL`,
+      ],
+      [
+        "merchant_delivery_fee",
+        `ALTER TABLE delivered_orders ADD COLUMN merchant_delivery_fee DECIMAL(10,2) DEFAULT NULL`,
+      ],
+      [
+        "delivered_by",
+        `ALTER TABLE delivered_orders ADD COLUMN delivered_by ENUM('USER','MERCHANT','ADMIN','SYSTEM','DRIVER') NOT NULL DEFAULT 'SYSTEM'`,
+      ],
+      [
+        "delivered_at",
+        `ALTER TABLE delivered_orders ADD COLUMN delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+      ],
 
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_batch_id",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_driver_id",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_status",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'DELIVERED'`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_ride_id",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`
-    );
+      [
+        "delivery_batch_id",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`,
+      ],
+      [
+        "delivery_driver_id",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_driver_id INT(11) DEFAULT NULL`,
+      ],
+      [
+        "delivery_status",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_status ENUM('PENDING','ASSIGNED','PICKED_UP','ON_ROAD','DELIVERED','CANCELLED') NOT NULL DEFAULT 'DELIVERED'`,
+      ],
+      [
+        "delivery_ride_id",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`,
+      ],
 
-    await ensureColumn(
-      "delivered_orders",
-      "original_created_at",
-      `ALTER TABLE delivered_orders ADD COLUMN original_created_at TIMESTAMP NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "original_updated_at",
-      `ALTER TABLE delivered_orders ADD COLUMN original_updated_at TIMESTAMP NULL`
-    );
+      [
+        "original_created_at",
+        `ALTER TABLE delivered_orders ADD COLUMN original_created_at TIMESTAMP NULL`,
+      ],
+      [
+        "original_updated_at",
+        `ALTER TABLE delivered_orders ADD COLUMN original_updated_at TIMESTAMP NULL`,
+      ],
 
-    // ✅ NEW columns (version-safe)
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_floor_unit",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`
-    );
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_instruction_note",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`
-    );
-    await ensureColumn(
+      [
+        "delivery_floor_unit",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`,
+      ],
+      [
+        "delivery_instruction_note",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`,
+      ],
+      [
+        "delivery_photo_url",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_photo_url TEXT NULL`,
+      ],
+      [
+        "delivery_special_mode",
+        `ALTER TABLE delivered_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`,
+      ],
+    ];
+
+    for (const [col, ddl] of deliveredCols) {
+      await ensureColumn("delivered_orders", col, ddl);
+    }
+
+    await ensureColumnType(
       "delivered_orders",
       "delivery_photo_url",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_photo_url VARCHAR(500) DEFAULT NULL`
-    );
-
-    // ✅ NEW special mode (version-safe)
-    await ensureColumn(
-      "delivered_orders",
-      "delivery_special_mode",
-      `ALTER TABLE delivered_orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`
+      (info) => {
+        const t = String(info.DATA_TYPE || "").toLowerCase();
+        return (
+          t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
+        );
+      },
+      `ALTER TABLE delivered_orders MODIFY COLUMN delivery_photo_url TEXT NULL`
     );
   }
 
-  // Delivered order items (snapshot)
   await db.query(`
 CREATE TABLE IF NOT EXISTS delivered_order_items (
   delivered_item_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

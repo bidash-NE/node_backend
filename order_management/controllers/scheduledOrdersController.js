@@ -33,7 +33,6 @@ exports.scheduleOrder = async (req, res) => {
       if (typeof v !== "string") return v;
       const s = v.trim();
       if (!s) return v;
-      // parse only if it looks like JSON
       if (
         (s.startsWith("{") && s.endsWith("}")) ||
         (s.startsWith("[") && s.endsWith("]"))
@@ -63,8 +62,6 @@ exports.scheduleOrder = async (req, res) => {
     };
 
     // ---------- raw body ----------
-    // In multipart, req.body fields are usually strings.
-    // We do NOT destructure req.body directly without guarding (your server log showed req.body undefined sometimes).
     const body = req.body || {};
     console.log("[scheduleOrder] content-type:", req.headers["content-type"]);
     console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
@@ -73,10 +70,21 @@ exports.scheduleOrder = async (req, res) => {
       Object.keys(req.files || {})
     );
 
+    // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
+    // Merge it into body so special_photos doesn't get lost.
+    let mergedBody = { ...body };
+    if (typeof body.payload === "string") {
+      const parsed = safeJsonParse(body.payload);
+      if (parsed && typeof parsed === "object") {
+        mergedBody = { ...mergedBody, ...parsed };
+      }
+    }
+
     // ---------- extract required fields ----------
-    const user_id = body.user_id ?? body.userId ?? body.userid;
+    const user_id =
+      mergedBody.user_id ?? mergedBody.userId ?? mergedBody.userid;
     const scheduled_at =
-      body.scheduled_at ?? body.scheduledAt ?? body.scheduled;
+      mergedBody.scheduled_at ?? mergedBody.scheduledAt ?? mergedBody.scheduled;
 
     const userId = asNumber(user_id);
     if (!Number.isFinite(userId) || userId <= 0) {
@@ -110,17 +118,17 @@ exports.scheduleOrder = async (req, res) => {
     }
 
     // ---------- build orderPayload ----------
-    // everything except user_id and scheduled_at
-    const orderPayload = { ...body };
+    const orderPayload = { ...mergedBody };
+
     delete orderPayload.user_id;
     delete orderPayload.userId;
     delete orderPayload.userid;
+
     delete orderPayload.scheduled_at;
     delete orderPayload.scheduledAt;
     delete orderPayload.scheduled;
 
     // Parse JSON-like string fields (common with multipart)
-    // Only parse fields that are known to often arrive stringified.
     orderPayload.items = safeJsonParse(orderPayload.items);
     orderPayload.totals = safeJsonParse(orderPayload.totals);
     orderPayload.delivery_address = safeJsonParse(
@@ -128,13 +136,16 @@ exports.scheduleOrder = async (req, res) => {
     );
     orderPayload.special_photos = safeJsonParse(orderPayload.special_photos);
 
-    // Normalize a few common types if they come as strings
+    // Normalize types if strings
     if (orderPayload.priority != null)
       orderPayload.priority = normalizeBool(orderPayload.priority);
+
     if (orderPayload.delivery_lat != null)
       orderPayload.delivery_lat = asNumber(orderPayload.delivery_lat);
+
     if (orderPayload.delivery_lng != null)
       orderPayload.delivery_lng = asNumber(orderPayload.delivery_lng);
+
     if (orderPayload.business_id != null)
       orderPayload.business_id = asNumber(orderPayload.business_id);
 
@@ -167,28 +178,21 @@ exports.scheduleOrder = async (req, res) => {
         .map((u) => (u == null ? "" : String(u).trim()))
         .filter(Boolean);
     } else if (typeof orderPayload.special_photos === "string") {
-      // if still string somehow
       bodyUris = [orderPayload.special_photos.trim()].filter(Boolean);
     }
 
     // 2) uploaded files from multer (multipart)
-    // Accept multiple possible field names (depends on your frontend & multer config)
     const files = []
       .concat(req.files?.delivery_photo || [])
       .concat(req.files?.delivery_photos || [])
       .concat(req.files?.image || [])
       .concat(req.files?.images || []);
 
-    // Convert uploaded files to web paths (must match how you serve /uploads)
-    // Your middleware uses: /uploads/order_delivery_photos/<filename>
     const uploadedUris = files
       .map((f) =>
         f?.filename ? `/uploads/order_delivery_photos/${f.filename}` : null
       )
       .filter(Boolean);
-
-    // Enforce max 6 across both sources
-    const merged = [...bodyUris, ...uploadedUris].slice(0, MAX_PHOTOS);
 
     if (bodyUris.length + uploadedUris.length > MAX_PHOTOS) {
       return res.status(400).json({
@@ -197,7 +201,17 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
+    const merged = [...bodyUris, ...uploadedUris].slice(0, MAX_PHOTOS);
+
+    // keep array form
     orderPayload.special_photos = merged;
+
+    // ✅ IMPORTANT: your orders table column is delivery_photo_url (VARCHAR 500)
+    // Option A (safe): store ONLY first photo to avoid truncation
+    orderPayload.delivery_photo_url = merged[0] || null;
+
+    // Option B (if you change column to TEXT): store JSON string
+    // orderPayload.delivery_photo_url = merged.length ? JSON.stringify(merged) : null;
 
     // ---------- save ----------
     const saved = await addScheduledOrder(scheduled_at, orderPayload, userId);
@@ -206,13 +220,9 @@ exports.scheduleOrder = async (req, res) => {
       success: true,
       message: "Order scheduled successfully.",
       job_id: saved.job_id,
-
       scheduled_at_utc: saved.scheduled_at,
       scheduled_at_local: saved.scheduled_at_local,
-
       service_type: saved.order_payload?.service_type || serviceType,
-
-      // optional debug/confirm
       photo_count: merged.length,
       photos: merged,
     });

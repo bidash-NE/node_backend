@@ -2,7 +2,11 @@
 const axios = require("axios");
 const redis = require("../config/redis");
 const db = require("../config/db");
-const { ZSET_KEY, buildJobKey, buildLockKey } = require("../models/scheduledOrderModel");
+const {
+  ZSET_KEY,
+  buildJobKey,
+  buildLockKey,
+} = require("../models/scheduledOrderModel");
 
 const BHUTAN_TZ = "Asia/Thimphu";
 
@@ -26,6 +30,76 @@ function sum(nums) {
   return nums.reduce((s, n) => s + (Number(n) || 0), 0);
 }
 
+/* ===================== helpers ===================== */
+
+function safeJsonParse(s) {
+  if (typeof s !== "string") return null;
+  const t = s.trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract photos from any known key and normalize.
+ * Returns: { arr: string[], str: string|null }
+ *
+ * - arr: array of photo paths/urls (cleaned)
+ * - str: value to store in orders.delivery_photo_url (string)
+ *
+ * NOTE:
+ * - If your DB column is VARCHAR(500), storing JSON of many paths may truncate.
+ * - But you said it’s saving NULL now — so at least this makes it non-null.
+ */
+function normalizePhotos(rawPayload) {
+  const p = rawPayload || {};
+
+  // Candidate sources (array or string)
+  const candidates = [
+    p.special_photos,
+    p.delivery_photos,
+    p.delivery_photo_urls,
+    p.delivery_photo_url, // could be string or array in some cases
+    p.photo_urls,
+  ];
+
+  let arr = [];
+
+  for (const c of candidates) {
+    if (!c) continue;
+
+    if (Array.isArray(c)) {
+      arr = c;
+      break;
+    }
+
+    if (typeof c === "string" && c.trim()) {
+      // allow single string, or JSON array string
+      const parsed = safeJsonParse(c);
+      if (Array.isArray(parsed)) {
+        arr = parsed;
+      } else {
+        arr = [c.trim()];
+      }
+      break;
+    }
+  }
+
+  // Clean values
+  arr = (arr || [])
+    .map((x) => (x == null ? "" : String(x).trim()))
+    .filter(Boolean);
+
+  // Choose what to store into orders.delivery_photo_url
+  // Best: JSON string of array so you don’t lose photos
+  const str = arr.length ? JSON.stringify(arr) : null;
+
+  return { arr, str };
+}
+
 /**
  * Make sure payload matches createOrder(req,res) validations
  */
@@ -47,16 +121,15 @@ function normalizeCreateOrderPayload(raw = {}) {
     p.payment_method = String(p.payment_method).trim().toUpperCase();
   }
 
-  // normalize fulfillment_type (your controller checks "Delivery" and "Pickup")
+  // normalize fulfillment_type
   if (p.fulfillment_type != null) {
     const f = String(p.fulfillment_type).trim();
-    // keep exact "Delivery"/"Pickup" casing that your controller compares
     p.fulfillment_type = f.toLowerCase() === "pickup" ? "Pickup" : "Delivery";
   } else {
     p.fulfillment_type = "Delivery";
   }
 
-  // map deliver_to -> delivery_address (your API uses delivery_address)
+  // map deliver_to -> delivery_address
   if (!p.delivery_address && p.deliver_to) {
     p.delivery_address = p.deliver_to;
   }
@@ -65,27 +138,29 @@ function normalizeCreateOrderPayload(raw = {}) {
   const items = Array.isArray(p.items) ? p.items : [];
   p.items = items;
 
-  // ✅ delivery_fee is REQUIRED by createOrder, even if 0
+  // ✅ delivery_fee required
   if (p.delivery_fee == null) {
-    // if items have per-item delivery_fee, sum it, else 0
     const perItem = items.map((it) => it?.delivery_fee);
     p.delivery_fee = Number(sum(perItem).toFixed(2));
   } else {
     p.delivery_fee = Number(p.delivery_fee);
   }
 
-  // platform_fee + discount_amount are required (can be 0)
   if (p.platform_fee == null) p.platform_fee = 0;
   if (p.discount_amount == null) p.discount_amount = 0;
 
   p.platform_fee = Number(p.platform_fee);
   p.discount_amount = Number(p.discount_amount);
 
-  // total_amount required; compute if missing
   if (p.total_amount == null) {
     const itemsSubtotal = sum(items.map((it) => it?.subtotal));
     p.total_amount = Number(
-      (itemsSubtotal + (Number(p.delivery_fee) || 0) + (Number(p.platform_fee) || 0) - (Number(p.discount_amount) || 0)).toFixed(2)
+      (
+        itemsSubtotal +
+        (Number(p.delivery_fee) || 0) +
+        (Number(p.platform_fee) || 0) -
+        (Number(p.discount_amount) || 0)
+      ).toFixed(2)
     );
   } else {
     p.total_amount = Number(p.total_amount);
@@ -97,6 +172,22 @@ function normalizeCreateOrderPayload(raw = {}) {
   // status should be PENDING for creation
   p.status = "PENDING";
 
+  // ✅ PHOTO MAPPING (this is the main fix)
+  // scheduled jobs contain special_photos[] but orders table uses delivery_photo_url
+  const photos = Array.isArray(p.special_photos)
+    ? p.special_photos
+        .map((x) => (x == null ? "" : String(x).trim()))
+        .filter(Boolean)
+    : [];
+
+  // If your order API expects delivery_photo_url (single string):
+  if (!p.delivery_photo_url) {
+    p.delivery_photo_url = photos[0] || null;
+  }
+
+  // If your order API expects special_photos too, keep it (no harm):
+  p.special_photos = photos;
+
   return p;
 }
 
@@ -106,7 +197,35 @@ async function createOrderFromScheduledPayload(orderPayload) {
   const payloadToSend = normalizeCreateOrderPayload(orderPayload);
 
   try {
-    console.log("[SCHED] sending payload:", JSON.stringify(payloadToSend, null, 2));
+    const photoLen =
+      payloadToSend?.delivery_photo_url != null
+        ? String(payloadToSend.delivery_photo_url).length
+        : 0;
+
+    console.log(
+      "[SCHED] photo mapping:",
+      JSON.stringify(
+        {
+          has_special_photos: Array.isArray(payloadToSend.special_photos),
+          special_photos_count: Array.isArray(payloadToSend.special_photos)
+            ? payloadToSend.special_photos.length
+            : 0,
+          has_delivery_photo_url: payloadToSend.delivery_photo_url != null,
+          delivery_photo_url_len: photoLen,
+          delivery_photo_url_preview:
+            payloadToSend.delivery_photo_url && photoLen > 120
+              ? String(payloadToSend.delivery_photo_url).slice(0, 120) + "..."
+              : payloadToSend.delivery_photo_url || null,
+        },
+        null,
+        2
+      )
+    );
+
+    console.log(
+      "[SCHED] sending payload:",
+      JSON.stringify(payloadToSend, null, 2)
+    );
 
     const response = await axios.post(ORDER_CREATE_URL, payloadToSend, {
       timeout: 15000,
@@ -119,9 +238,13 @@ async function createOrderFromScheduledPayload(orderPayload) {
       throw new Error(data.message || "Order API returned success=false");
     }
 
-    const orderId = data.order_id || data.id || (data.data && data.data.order_id);
+    const orderId =
+      data.order_id || data.id || (data.data && data.data.order_id);
     if (!orderId) {
-      console.warn("[SCHED] Order created but order_id not found in response:", data);
+      console.warn(
+        "[SCHED] Order created but order_id not found in response:",
+        data
+      );
     }
 
     return orderId || null;
@@ -135,7 +258,10 @@ async function createOrderFromScheduledPayload(orderPayload) {
     console.error("[SCHED] Response body:", JSON.stringify(body, null, 2));
 
     // show what we sent
-    console.error("[SCHED] Sent payload keys:", Object.keys(payloadToSend || {}));
+    console.error(
+      "[SCHED] Sent payload keys:",
+      Object.keys(payloadToSend || {})
+    );
 
     throw err;
   }
@@ -143,7 +269,11 @@ async function createOrderFromScheduledPayload(orderPayload) {
 
 /* ===================== Helper: notification insert ===================== */
 
-async function insertNotificationForScheduledOrder(userId, orderId, scheduledAt) {
+async function insertNotificationForScheduledOrder(
+  userId,
+  orderId,
+  scheduledAt
+) {
   try {
     const dateObj = new Date(scheduledAt);
 
@@ -204,7 +334,13 @@ async function tryClaimJob(jobId) {
   const lockKey = buildLockKey(jobId);
   const lockValue = `${process.pid}:${Date.now()}`;
 
-  const result = await redis.set(lockKey, lockValue, "NX", "EX", LOCK_TTL_SECONDS);
+  const result = await redis.set(
+    lockKey,
+    lockValue,
+    "NX",
+    "EX",
+    LOCK_TTL_SECONDS
+  );
   if (result === "OK") return true;
 
   const ttl = await getLockTTL(lockKey);
@@ -214,7 +350,13 @@ async function tryClaimJob(jobId) {
     console.warn(`[SCHED] lock has no TTL, deleting stale lock: ${lockKey}`);
     await redis.del(lockKey);
 
-    const retry = await redis.set(lockKey, lockValue, "NX", "EX", LOCK_TTL_SECONDS);
+    const retry = await redis.set(
+      lockKey,
+      lockValue,
+      "NX",
+      "EX",
+      LOCK_TTL_SECONDS
+    );
     if (retry === "OK") return true;
   }
 
@@ -230,7 +372,12 @@ async function markFailed(jobId, errMessage, errBody = null) {
     error: String(errMessage || "").slice(0, 1000),
     response: errBody || null,
   };
-  await redis.set(failedKey, JSON.stringify(payload), "EX", ATTEMPT_TTL_SECONDS);
+  await redis.set(
+    failedKey,
+    JSON.stringify(payload),
+    "EX",
+    ATTEMPT_TTL_SECONDS
+  );
 }
 
 async function failAndMaybeStopRetry(jobId, err) {
@@ -243,17 +390,29 @@ async function failAndMaybeStopRetry(jobId, err) {
 
   // 400 => validation/wallet issues: retrying will usually never help.
   if (status === 400) {
-    await redis.set(buildErrorKey(jobId), String(err.message).slice(0, 1000), "EX", ATTEMPT_TTL_SECONDS);
+    await redis.set(
+      buildErrorKey(jobId),
+      String(err.message).slice(0, 1000),
+      "EX",
+      ATTEMPT_TTL_SECONDS
+    );
     await markFailed(jobId, err.message, body);
 
     // remove from queue so it stops spamming
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
-    console.error(`[SCHED] job ${jobId} marked FAILED due to HTTP 400 (payload/validation).`);
+    console.error(
+      `[SCHED] job ${jobId} marked FAILED due to HTTP 400 (payload/validation).`
+    );
     return;
   }
 
   // other errors: allow a few retries
-  await redis.set(buildErrorKey(jobId), String(err.message).slice(0, 1000), "EX", ATTEMPT_TTL_SECONDS);
+  await redis.set(
+    buildErrorKey(jobId),
+    String(err.message).slice(0, 1000),
+    "EX",
+    ATTEMPT_TTL_SECONDS
+  );
 
   if (attempts >= MAX_ATTEMPTS) {
     await markFailed(jobId, err.message, body);
@@ -264,7 +423,9 @@ async function failAndMaybeStopRetry(jobId, err) {
 
   // let it retry later (do NOT remove from ZSET)
   await redis.del(buildLockKey(jobId));
-  console.warn(`[SCHED] job ${jobId} will retry later. attempts=${attempts}/${MAX_ATTEMPTS}`);
+  console.warn(
+    `[SCHED] job ${jobId} will retry later. attempts=${attempts}/${MAX_ATTEMPTS}`
+  );
 }
 
 async function processJob(jobId) {
@@ -280,7 +441,8 @@ async function processJob(jobId) {
     const data = JSON.parse(raw);
     const { order_payload } = data;
 
-    if (!order_payload) throw new Error("Missing order_payload in scheduled job");
+    if (!order_payload)
+      throw new Error("Missing order_payload in scheduled job");
 
     // force PENDING
     order_payload.status = "PENDING";
@@ -306,7 +468,9 @@ async function processJob(jobId) {
       .del(buildErrorKey(jobId))
       .exec();
 
-    console.log(`[SCHED] ✅ job ${jobId} processed. Order ID: ${orderId || "N/A"}`);
+    console.log(
+      `[SCHED] ✅ job ${jobId} processed. Order ID: ${orderId || "N/A"}`
+    );
   } catch (err) {
     console.error(`[SCHED] Error processing ${jobId}:`, err.message);
     await failAndMaybeStopRetry(jobId, err);
