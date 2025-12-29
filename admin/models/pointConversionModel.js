@@ -3,12 +3,10 @@ const pool = require("../config/db");
 const axios = require("axios");
 
 // Admin wallet that funds the conversion
-const ADMIN_WALLET_ID = "NET000001";
+const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID;
 
 // Endpoint that generates transaction_ids + journal_code
-const WALLET_IDS_BOTH_ENDPOINT =
-  process.env.WALLET_IDS_BOTH_ENDPOINT ||
-  "https://grab.newedge.bt/wallet/ids/both";
+const WALLET_IDS_BOTH_ENDPOINT = process.env.WALLET_IDS_BOTH_ENDPOINT;
 
 /**
  * Get active conversion rule from point_conversion_rule (id = 1, is_active = 1)
@@ -338,7 +336,7 @@ async function convertPointsToWallet(userId, pointsToConvert) {
       amount: walletAmount,
       source: "points_conversion",
       journal_code: journalCode,
-      transaction_id: userTxnId,       // ✅ only user tx id here
+      transaction_id: userTxnId, // ✅ only user tx id here
       admin_transaction_id: adminTxnId,
       points_converted: pointsToConvert,
     };
@@ -374,7 +372,7 @@ async function convertPointsToWallet(userId, pointsToConvert) {
     return {
       points_converted: pointsToConvert,
       wallet_amount: walletAmount,
-      transaction_id: userTxnId,   // ✅ only user-side transaction id
+      transaction_id: userTxnId, // ✅ only user-side transaction id
       journal_code: journalCode,
       calculation: {
         points_required: pointsRequired,
