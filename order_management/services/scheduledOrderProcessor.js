@@ -10,8 +10,7 @@ const {
 
 const BHUTAN_TZ = "Asia/Thimphu";
 
-const ORDER_CREATE_URL =
-  process.env.ORDER_CREATE_URL || "https://grab.newedge.bt/orders/orders"; // set to http://localhost:1001/orders in local
+const ORDER_CREATE_URL = process.env.ORDER_CREATE_URL; // set to http://localhost:1001/orders in local
 
 const POLL_INTERVAL_MS = 5000;
 const BATCH_SIZE = 20;

@@ -7,14 +7,9 @@ const ADMIN_WALLET_ID = "NET000001";
 const PLATFORM_USER_SHARE = 0.5;
 const PLATFORM_MERCHANT_SHARE = 0.5;
 
-const IDS_BOTH_URL =
-  process.env.WALLET_IDS_BOTH_URL || "https://grab.newedge.bt/wallet/ids/both";
-const IDS_TXN_URL =
-  process.env.WALLET_IDS_TXN_URL ||
-  "https://grab.newedge.bt/wallets/ids/transaction";
-const IDS_JRN_URL =
-  process.env.WALLET_IDS_JRN_URL ||
-  "https://grab.newedge.bt/wallets/ids/journal";
+const IDS_BOTH_URL = process.env.WALLET_IDS_BOTH_URL;
+const IDS_TXN_URL = process.env.WALLET_IDS_TXN_URL;
+const IDS_JRN_URL = process.env.WALLET_IDS_JRN_URL;
 
 /* ======================= UTILS ======================= */
 function generateOrderId() {
