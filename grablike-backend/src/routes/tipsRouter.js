@@ -9,9 +9,7 @@ const RIDES_TBL = "rides";
 const RBOOK_TBL = "ride_bookings";
 
 /* External ID service used in your driver.js */
-const WALLET_IDS_ENDPOINT = (
-  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
-).trim();
+const WALLET_IDS_ENDPOINT = process.env.WALLET_IDS_ENDPOINT.trim();
 
 /* ========= Socket room helpers (match your driver.js) ========= */
 const driverRoom = (driverId) => `driver:${driverId}`;
@@ -209,12 +207,10 @@ export default function tipsRouter(mysqlPool, io) {
       !(Number(amount_nu) > 0) ||
       !passenger_user_id
     ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "ride_id, passenger_user_id, amount_nu required",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "ride_id, passenger_user_id, amount_nu required",
+      });
     }
     const booking_id = rawBk != null ? Number(rawBk) : null;
 
@@ -290,12 +286,10 @@ export default function tipsRouter(mysqlPool, io) {
         );
         if (!bk) {
           await conn.rollback();
-          return res
-            .status(404)
-            .json({
-              success: false,
-              message: "Booking not found for this ride",
-            });
+          return res.status(404).json({
+            success: false,
+            message: "Booking not found for this ride",
+          });
         }
       }
 
@@ -310,12 +304,10 @@ export default function tipsRouter(mysqlPool, io) {
       );
       if (!driver_wallet || !passenger_wallet) {
         await conn.rollback();
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Missing wallet(s) for driver or passenger",
-          });
+        return res.status(400).json({
+          success: false,
+          message: "Missing wallet(s) for driver or passenger",
+        });
       }
 
       // Transfer
@@ -327,13 +319,11 @@ export default function tipsRouter(mysqlPool, io) {
       });
       if (!transfer.ok) {
         await conn.rollback();
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: transfer.reason || "transfer_failed",
-            transfer,
-          });
+        return res.status(400).json({
+          success: false,
+          message: transfer.reason || "transfer_failed",
+          transfer,
+        });
       }
 
       // Accrue in earnings (cents)

@@ -19,16 +19,12 @@ const RATINGS_TABLE = "ride_ratings";
 const RATING_COLUMN = "rating";
 
 /* ---------------------- Wallet config ---------------------- */
-const PLATFORM_WALLET_ID = (
-  process.env.PLATFORM_WALLET_ID || "NET000001"
-).trim(); // may be used elsewhere
+const PLATFORM_WALLET_ID = process.env.PLATFORM_WALLET_ID.trim(); // may be used elsewhere
 const WALLET_TBL = "wallet_transactions";
 const WALLETS_TBL = "wallets";
 
 /* ---------------------- External IDs service ---------------------- */
-const WALLET_IDS_ENDPOINT = (
-  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
-).trim();
+const WALLET_IDS_ENDPOINT = process.env.WALLET_IDS_ENDPOINT.trim();
 const WALLET_IDS_API_KEY = (process.env.WALLET_IDS_API_KEY || "").trim();
 
 /* ---------------------- Small helpers ---------------------- */
@@ -449,7 +445,14 @@ async function getWalletBalance(conn, wallet_id) {
 /* ---------------- Atomic passenger→driver wallet transfer ------------------ */
 async function walletTransfer(
   conn,
-  { from_wallet, to_wallet, amount_nu,baseFare, reason = "RIDE_PAYOUT", meta = {} }
+  {
+    from_wallet,
+    to_wallet,
+    amount_nu,
+    baseFare,
+    reason = "RIDE_PAYOUT",
+    meta = {},
+  }
 ) {
   if (!(amount_nu > 0)) return { ok: false, reason: "zero_amount" };
   if (!from_wallet || !to_wallet) return { ok: false, reason: "bad_wallet" };
@@ -510,8 +513,8 @@ async function walletTransfer(
         tx_for_passenger_dr = String(ids[1]);
         journal_code = String(jr);
       }
-      console.log("tx_for_passenger_dr: ",tx_for_passenger_dr)
-      console.log("tx_for_driver_cr: ",tx_for_driver_cr)
+      console.log("tx_for_passenger_dr: ", tx_for_passenger_dr);
+      console.log("tx_for_driver_cr: ", tx_for_driver_cr);
     }
   } catch (e) {
     // ignore; will fallback
@@ -1302,7 +1305,7 @@ export function initDriverSocket(io, mysqlPool) {
               from_wallet: passenger_wallet,
               to_wallet: driver_wallet,
               amount_nu: takeHome,
-              baseFare:baseFare,
+              baseFare: baseFare,
               reason: "RIDE_PAYOUT",
               meta: { Pickup: pickup_place, Dropoff: dropoff_place },
             });
