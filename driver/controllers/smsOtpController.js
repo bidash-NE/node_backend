@@ -1,10 +1,9 @@
 const redis = require("../models/redisClient");
 const db = require("../config/db");
 
-const SMS_URL =
-  process.env.SMS_URL || "https://grab.newedge.bt/sms/api/sms/send";
+const SMS_URL = process.env.SMS_URL;
 const SMS_MASTER_KEY = (process.env.SMS_MASTER_KEY || "").trim();
-const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
+const SMS_FROM = process.env.SMS_FROM.trim();
 
 function normalizePhone(input) {
   const raw = String(input || "").trim();
