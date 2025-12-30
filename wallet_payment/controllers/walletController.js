@@ -18,9 +18,7 @@ const redis = require("../utils/redisClient");
 const { sendOtpEmail } = require("../utils/mailer");
 
 /* ---------------- SMS ENV ---------------- */
-const SMS_API_URL =
-  (process.env.SMS_API_URL && process.env.SMS_API_URL.trim()) ||
-  "https://grab.newedge.bt/sms/api/sms/send";
+const SMS_API_URL = process.env.SMS_API_URL && process.env.SMS_API_URL.trim();
 const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
 const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
 

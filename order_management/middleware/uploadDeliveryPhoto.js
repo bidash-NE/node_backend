@@ -1,4 +1,3 @@
-// middleware/uploadDeliveryPhoto.js
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
@@ -6,10 +5,14 @@ const crypto = require("crypto");
 
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+
 const SUBFOLDER = "order_delivery_photos";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
-const MAX_PHOTOS = 6;
+const MAX_PHOTOS = Number(process.env.DELIVERY_PHOTO_MAX || 6);
+const MAX_BYTES = Number(
+  process.env.DELIVERY_PHOTO_MAX_BYTES || 5 * 1024 * 1024
+); // 5MB
 
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -52,24 +55,26 @@ const fileFilter = (_req, file, cb) => {
 };
 
 /**
- * ✅ Accept up to 6 images.
- * Supports any of these field names from frontend:
- * - delivery_photo (single or multiple)
- * - delivery_photos (multiple)
- * - image (single or multiple)
- * - images (multiple)
+ * Accept up to MAX_PHOTOS images.
+ * Supports field names from frontend:
+ * - delivery_photo (single/multi)
+ * - delivery_photos (multi)
+ * - delivery_photo[] (some frontends append like this)
+ * - image (single/multi)
+ * - images (multi)
  */
 function uploadDeliveryPhotos() {
   const uploader = multer({
     storage,
     fileFilter,
     limits: {
-      fileSize: 5 * 1024 * 1024, // 5MB per image
-      files: MAX_PHOTOS, // ✅ hard limit at multer level
+      fileSize: MAX_BYTES,
+      files: MAX_PHOTOS,
     },
   }).fields([
     { name: "delivery_photo", maxCount: MAX_PHOTOS },
     { name: "delivery_photos", maxCount: MAX_PHOTOS },
+    { name: "delivery_photo[]", maxCount: MAX_PHOTOS },
     { name: "image", maxCount: MAX_PHOTOS },
     { name: "images", maxCount: MAX_PHOTOS },
   ]);
@@ -78,28 +83,34 @@ function uploadDeliveryPhotos() {
     uploader(req, res, (err) => {
       if (err) {
         console.error("[uploadDeliveryPhotos] multer error:", err);
-        err.statusCode = 400;
-        return next(err);
+        return res.status(400).json({
+          ok: false,
+          message: err.message || "Upload failed",
+          code: err.code,
+          field: err.field,
+        });
       }
 
       const any = req.files || {};
 
-      // flatten all accepted fields to one list
+      // flatten all accepted fields into one list
       const list = []
         .concat(any.delivery_photo || [])
         .concat(any.delivery_photos || [])
+        .concat(any["delivery_photo[]"] || [])
         .concat(any.image || [])
         .concat(any.images || []);
 
       if (list.length > MAX_PHOTOS) {
         console.error("[uploadDeliveryPhotos] Too many files:", list.length);
         return res.status(400).json({
-          success: false,
+          ok: false,
           message: `You can upload up to ${MAX_PHOTOS} photos only.`,
+          received: list.length,
         });
       }
 
-      // ✅ normalized array
+      // normalized array for controller
       req.deliveryPhotos = list;
 
       console.log(

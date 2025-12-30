@@ -14,9 +14,7 @@ const axios = require("axios");
  * }
  */
 async function fetchTxIdsAndJournalCode() {
-  const url =
-    process.env.WALLET_IDS_BOTH_URL ||
-    "https://grab.newedge.bt/wallet/ids/both";
+  const url = process.env.WALLET_IDS_BOTH_URL;
 
   const resp = await axios.post(url, {}, { timeout: 5000 });
 

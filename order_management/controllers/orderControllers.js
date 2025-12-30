@@ -5,6 +5,7 @@ const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
 } = require("../realtime");
+const { toWebPaths, MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
 
 /* ===================== NEW: uploads support ===================== */
 const path = require("path");
@@ -364,13 +365,87 @@ function mapUploadedFilesToPayload(req, order_id, items) {
   return { order_images: orderImages, item_images: itemImages };
 }
 
+// ---------- helpers for multipart + JSON ----------
+function parseMaybeJSON(v) {
+  if (v == null) return v;
+  if (typeof v !== "string") return v;
+
+  const s = v.trim();
+  if (!s) return v;
+
+  // only attempt JSON if it looks like JSON
+  if (!(s.startsWith("{") || s.startsWith("["))) return v;
+
+  try {
+    return JSON.parse(s);
+  } catch {
+    return v;
+  }
+}
+
+/**
+ * Supports:
+ *  - application/json body
+ *  - multipart/form-data where:
+ *      req.body.payload = JSON string
+ *      or nested fields are JSON strings
+ */
+function getOrderInput(req) {
+  let body = req.body || {};
+
+  // Prefer `payload` JSON if present
+  if (typeof body.payload === "string") {
+    const p = parseMaybeJSON(body.payload);
+    if (p && typeof p === "object") body = p;
+  }
+
+  // Parse nested JSON strings if any
+  body.items = parseMaybeJSON(body.items);
+  body.delivery_address = parseMaybeJSON(body.delivery_address);
+
+  // Normalize numeric/bool types (multipart sends strings)
+  const numFields = [
+    "user_id",
+    "total_amount",
+    "discount_amount",
+    "platform_fee",
+    "delivery_fee",
+    "merchant_delivery_fee",
+  ];
+  for (const k of numFields) {
+    if (body[k] != null && body[k] !== "") body[k] = Number(body[k]);
+  }
+
+  if (body.priority != null) {
+    body.priority = String(body.priority).toLowerCase() === "true";
+  }
+
+  return body;
+}
+
+function dedupeStrings(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr) {
+    const s = (x == null ? "" : String(x)).trim();
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 /**
  * POST /orders
  * router.post("/orders", uploadOrderImages, createOrder)
  */
 
+// IMPORTANT: import these at top of file (near other requires)
+// const { toWebPaths, MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
+
 async function createOrder(req, res) {
-  // small helper: delete orphan uploads on validation fail
+  // small helper: delete orphan uploads on validation fail/crash
   const safeUnlink = (p) => {
     try {
       if (p && fs.existsSync(p)) fs.unlinkSync(p);
@@ -378,62 +453,50 @@ async function createOrder(req, res) {
   };
 
   try {
-    // ✅ support JSON and multipart(payload)
-    let payload = req.body || {};
-    if (typeof payload.payload === "string") {
-      payload = safeJsonParse(payload.payload) || payload;
+    const payload = getOrderInput(req);
+
+    // items may be missing/invalid
+    const itemsRaw = Array.isArray(payload.items) ? payload.items : [];
+    if (!itemsRaw.length) {
+      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      return res.status(400).json({ ok: false, message: "Missing items" });
     }
 
-    // items may be stringified
-    let itemsRaw = payload.items;
-    if (typeof itemsRaw === "string") itemsRaw = safeJsonParse(itemsRaw);
-    const items = Array.isArray(itemsRaw) ? itemsRaw : [];
-
     // basic validation
-    if (!payload.user_id) {
-      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-        safeUnlink(f?.path)
-      );
-      return res.status(400).json({ message: "Missing user_id" });
+    if (!payload.user_id || !Number.isFinite(Number(payload.user_id))) {
+      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      return res.status(400).json({ ok: false, message: "Missing user_id" });
     }
 
     const serviceType = normalizeServiceType(payload.service_type);
     if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
-      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-        safeUnlink(f?.path)
-      );
+      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
       return res.status(400).json({
+        ok: false,
         message: "Invalid or missing service_type. Allowed: FOOD, MART",
       });
     }
 
     const payMethod = normalizePaymentMethod(payload.payment_method);
     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
-      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-        safeUnlink(f?.path)
-      );
+      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
       return res
         .status(400)
-        .json({ message: "Invalid or missing payment_method" });
+        .json({ ok: false, message: "Invalid or missing payment_method" });
     }
 
-    if (!items.length) {
-      (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-        safeUnlink(f?.path)
-      );
-      return res.status(400).json({ message: "Missing items" });
-    }
+    // ✅ normalize item shapes
+    const normalizedItems = itemsRaw.map((it, idx) =>
+      normalizeItemShape(it, idx)
+    );
 
-    // ✅ normalize item shapes (so item_image mapping works)
-    const normalizedItems = items.map((it, idx) => normalizeItemShape(it, idx));
-
-    // ✅ stable order_id (IMPORTANT)
+    // ✅ stable order_id
     const order_id = String(payload.order_id || Order.peekNewOrderId())
       .trim()
       .toUpperCase();
     payload.order_id = order_id;
 
-    // ✅ map AddressDetails fields
+    // ✅ AddressDetails mapping (your frontend fields)
     payload.delivery_floor_unit =
       payload.delivery_floor_unit ??
       payload.floor_unit ??
@@ -460,6 +523,7 @@ async function createOrder(req, res) {
     // delivery_address required for Delivery
     if (fulfillment === "Delivery") {
       const addrObj = payload.delivery_address;
+
       const addrStr =
         addrObj && typeof addrObj === "object"
           ? String(
@@ -468,16 +532,15 @@ async function createOrder(req, res) {
           : String(addrObj || "").trim();
 
       if (!addrStr) {
-        (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-          safeUnlink(f?.path)
-        );
-        return res
-          .status(400)
-          .json({ message: "delivery_address is required for Delivery" });
+        (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+        return res.status(400).json({
+          ok: false,
+          message: "delivery_address is required for Delivery",
+        });
       }
     }
 
-    // ✅ stringify delivery_address object for DB
+    // ✅ stringify delivery_address object for DB storage
     if (
       payload.delivery_address &&
       typeof payload.delivery_address === "object"
@@ -486,74 +549,57 @@ async function createOrder(req, res) {
     }
 
     /* =========================================================
-       ✅ UPLOADS + BODY PHOTOS (IMPORTANT FIX)
-       - DO NOT overwrite body delivery_photo_url when no uploads
-       - Always build a LIST: delivery_photo_urls
+       ✅ DELIVERY PHOTOS (from middleware + optional body urls)
        ========================================================= */
+    const uploadedPhotoUrls = toWebPaths(req.deliveryPhotos || []);
 
-    // 1) uploaded files -> urls
-    const { order_images } = mapUploadedFilesToPayload(
-      req,
-      order_id,
-      normalizedItems
-    );
-
-    // also accept delivery_photo/image as "photos"
-    const files = Array.isArray(req.files) ? req.files : [];
-    const extraPhotoFields = new Set([
-      "delivery_photo",
-      "delivery_photos",
-      "image",
-    ]);
-    const extraPhotos = [];
-
-    for (const f of files) {
-      if (!f?.path) continue;
-      if (!extraPhotoFields.has(String(f.fieldname || ""))) continue;
-      extraPhotos.push(toPublicUploadUrl(f.path));
-    }
-
-    const uploadedPhotos = Array.from(
-      new Set([...(order_images || []), ...(extraPhotos || [])])
-    );
-
-    // 2) body photos (JSON direct order / scheduled order)
-    const bodyPhotosRaw = Array.isArray(payload.delivery_photo_urls)
+    const bodyList = Array.isArray(payload.delivery_photo_urls)
       ? payload.delivery_photo_urls
       : Array.isArray(payload.special_photos)
       ? payload.special_photos
-      : null;
-
-    const bodyPhotos = Array.isArray(bodyPhotosRaw)
-      ? bodyPhotosRaw
-          .map((x) => (x == null ? "" : String(x).trim()))
-          .filter(Boolean)
       : [];
 
     const bodySingle = payload.delivery_photo_url
-      ? [String(payload.delivery_photo_url).trim()].filter(Boolean)
+      ? [payload.delivery_photo_url]
       : [];
 
-    // 3) merge + dedupe
-    const allPhotos = Array.from(
-      new Set([...bodyPhotos, ...bodySingle, ...uploadedPhotos])
-    );
+    const allPhotos = dedupeStrings([
+      ...bodyList,
+      ...bodySingle,
+      ...uploadedPhotoUrls,
+    ]);
 
-    // ✅ enforce max 6
-    if (allPhotos.length > 6) {
-      files.forEach((f) => safeUnlink(f?.path));
+    if (allPhotos.length > MAX_PHOTOS) {
+      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
       return res.status(400).json({
         ok: false,
-        message: "Maximum 6 photos are allowed.",
+        message: `Maximum ${MAX_PHOTOS} photos are allowed.`,
         received: allPhotos.length,
       });
     }
 
-    // ✅ store both
-    payload.delivery_photo_urls = allPhotos; // list (even if 1)
+    payload.delivery_photo_urls = allPhotos;
     payload.delivery_photo_url = allPhotos.length
       ? allPhotos[0]
-      : payload.delivery_photo_url || null; // keep body value if no uploads
+      : payload.delivery_photo_url || null;
+
+    // ✅ status
+    const status = String(payload.status || "PENDING")
+      .trim()
+      .toUpperCase();
+
+    // helpful debug log
+    console.log("[createOrder] order_id:", order_id);
+    console.log(
+      "[createOrder] photos:",
+      payload.delivery_photo_urls?.length || 0
+    );
+    console.log(
+      "[createOrder] service_type:",
+      serviceType,
+      "payment:",
+      payMethod
+    );
 
     /* ===================== CREATE ORDER ===================== */
     const created_id = await Order.create({
@@ -561,11 +607,11 @@ async function createOrder(req, res) {
       service_type: serviceType,
       payment_method: payMethod,
       fulfillment_type: fulfillment,
-      status: String(payload.status || "PENDING").toUpperCase(),
+      status,
       items: normalizedItems,
     });
 
-    // Notifications (same idea)
+    // Notifications grouped by business
     const byBiz = new Map();
     for (const it of normalizedItems) {
       const bid = Number(it.business_id);
@@ -602,28 +648,29 @@ async function createOrder(req, res) {
       order_id: created_id,
       user_id: payload.user_id,
       business_ids: businessIds,
-      status: String(payload.status || "PENDING").toUpperCase(),
+      status,
     });
 
     return res.status(201).json({
       ok: true,
       order_id: created_id,
-
-      // ✅ return photos to app
       delivery_photo_urls: payload.delivery_photo_urls || [],
       delivery_photo_url: payload.delivery_photo_url || null,
-
       delivery_floor_unit: payload.delivery_floor_unit || null,
       delivery_instruction_note: payload.delivery_instruction_note || null,
       delivery_special_mode: payload.delivery_special_mode || null,
     });
   } catch (err) {
     console.error("[createOrder ERROR]", err);
+
     // cleanup uploads on crash
-    (Array.isArray(req.files) ? req.files : []).forEach((f) =>
-      safeUnlink(f?.path)
-    );
-    return res.status(500).json({ ok: false, error: err.message });
+    (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+
+    return res.status(500).json({
+      ok: false,
+      message: "Unable to place order",
+      error: err?.message || "Unknown error",
+    });
   }
 }
 
