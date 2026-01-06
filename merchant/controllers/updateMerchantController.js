@@ -29,6 +29,12 @@ async function updateMerchantBusiness(req, res) {
   }
 
   try {
+    // Ensure the special_celebration field is handled
+    if (updateFields.special_celebration !== undefined) {
+      updateFields.special_celebration =
+        updateFields.special_celebration || null;
+    }
+
     const updated = await updateMerchantBusinessDetails(
       business_id,
       updateFields

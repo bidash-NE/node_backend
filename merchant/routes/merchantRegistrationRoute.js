@@ -1,7 +1,5 @@
-// routes/merchantRegistrationRoutes.js
 const express = require("express");
 const router = express.Router();
-// const { upload } = require("../middlewares/upload");
 const upload = require("../middlewares/upload");
 
 const {
@@ -10,6 +8,8 @@ const {
   updateMerchant,
   listFoodOwners,
   listMartOwners,
+  listFoodOwnersWithCelebration,
+  listMartOwnersWithCelebration,
 } = require("../controllers/merchantRegistrationController");
 
 // Middleware to detect multipart/form-data
@@ -37,5 +37,11 @@ router.post("/login-email", loginByEmail);
 // List business owners
 router.get("/owners/food", listFoodOwners);
 router.get("/owners/mart", listMartOwners);
+
+// List food businesses with special celebrations
+router.get("/owners/food/celebration", listFoodOwnersWithCelebration);
+
+// List mart businesses with special celebrations
+router.get("/owners/mart/celebration", listMartOwnersWithCelebration);
 
 module.exports = router;

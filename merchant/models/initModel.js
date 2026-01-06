@@ -167,12 +167,22 @@ async function ensureMerchantBusinessDetailsTable() {
         opening_time TIME,
         closing_time TIME,
         holidays JSON,
+        special_celebration VARCHAR(255) DEFAULT NULL,  -- NEW COLUMN ADDED
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (business_id),
         FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
+  } else {
+    // Add the new column if it doesn't exist already
+    const columnExistsCheck = await columnExists(table, "special_celebration");
+    if (!columnExistsCheck) {
+      await db.query(`
+        ALTER TABLE ${table}
+        ADD COLUMN special_celebration TINYINT(1) DEFAULT 0;
+      `);
+    }
   }
 }
 

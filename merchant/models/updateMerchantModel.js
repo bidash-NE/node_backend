@@ -13,6 +13,7 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "opening_time",
     "closing_time",
     "holidays",
+    "special_celebration", // Include special_celebration in allowed fields
   ];
 
   const setClause = [];
@@ -20,10 +21,10 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
 
   for (const field of allowedFields) {
     if (updateFields[field] !== undefined) {
-      // For holidays, ensure it's stored as JSON
-      if (field === "holidays" && typeof updateFields[field] !== "string") {
-        setClause.push(`\`${field}\` = CAST(? AS JSON)`);
-        values.push(JSON.stringify(updateFields[field]));
+      // For holidays, ensure it's stored as JSON if it's an array
+      if (field === "holidays" && Array.isArray(updateFields[field])) {
+        setClause.push(`\`${field}\` = ?`);
+        values.push(JSON.stringify(updateFields[field])); // Convert to JSON string
       } else {
         setClause.push(`\`${field}\` = ?`);
         values.push(updateFields[field]);

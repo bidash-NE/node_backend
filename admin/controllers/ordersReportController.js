@@ -67,6 +67,7 @@ exports.getMartOrdersReport = async (req, res) => {
 
 exports.getFoodMartRevenueReport = async (req, res) => {
   try {
+    console.log("Food & Mart revenue report API called");
     const args = parseQuery(req);
     const rows = await Reports.fetchFoodMartRevenueReport(args);
     res.json({ count: rows.length, data: rows });

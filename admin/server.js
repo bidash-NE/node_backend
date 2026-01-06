@@ -19,6 +19,10 @@ app.use(
   })
 );
 app.use(express.json());
+app.use((req, _res, next) => {
+  console.log("➡️ HIT", req.method, req.originalUrl);
+  next();
+});
 
 // ───────────────────────── Routes ─────────────────────────
 const adminRoutes = require("./routes/adminRoute");

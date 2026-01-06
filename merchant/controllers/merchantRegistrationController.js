@@ -490,6 +490,131 @@ async function listMartOwners(req, res) {
       .json({ success: false, message: "Failed to fetch mart owners." });
   }
 }
+async function listFoodOwnersWithCelebration(req, res) {
+  try {
+    const { q, limit, offset } = parseOwnersQuery(req);
+
+    const params = [];
+    let whereSearch = "AND mbd.special_celebration IS NOT NULL";
+    if (q) {
+      whereSearch += ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    params.push(limit, offset);
+
+    const [rows] = await db.query(
+      `
+      SELECT
+        mbd.business_id,
+        MAX(mbd.business_name) AS business_name,
+        MAX(mbd.owner_type) AS owner_type,
+        MAX(mbd.business_logo) AS business_logo,
+        MAX(mbd.address) AS address,
+        MAX(mbd.latitude) AS latitude,
+        MAX(mbd.longitude) AS longitude,
+        MAX(mbd.opening_time) AS opening_time,
+        MAX(mbd.closing_time) AS closing_time,
+        MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
+        MAX(u.user_id) AS user_id,
+        MAX(u.user_name) AS user_name,
+        MAX(u.email) AS email,
+        MAX(u.phone) AS phone,
+        MAX(u.profile_image) AS profile_image,
+        MAX(mbd.complementary) AS complement,
+        MAX(mbd.complementary_details) AS complement_details,
+        COALESCE(ROUND(AVG(fr.rating), 2), 0) AS avg_rating,
+        SUM(CASE WHEN fr.comment IS NOT NULL AND fr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
+        GROUP_CONCAT(DISTINCT bt.name) AS tags
+      FROM merchant_business_details mbd
+      JOIN users u ON u.user_id = mbd.user_id
+      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
+      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
+      LEFT JOIN food_ratings fr ON fr.business_id = mbd.business_id
+      WHERE TRIM(LOWER(mbd.owner_type)) = 'food'
+      ${whereSearch}
+      GROUP BY mbd.business_id
+      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
+      LIMIT ? OFFSET ?
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      kind: "food",
+      count: rows.length,
+      data: rows,
+    });
+  } catch (err) {
+    console.error("listFoodOwnersWithCelebration error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch food owners." });
+  }
+}
+
+async function listMartOwnersWithCelebration(req, res) {
+  try {
+    const { q, limit, offset } = parseOwnersQuery(req);
+
+    const params = [];
+    let whereSearch = "AND mbd.special_celebration IS NOT NULL";
+    if (q) {
+      whereSearch += ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    params.push(limit, offset);
+
+    const [rows] = await db.query(
+      `
+      SELECT
+        mbd.business_id,
+        MAX(mbd.business_name) AS business_name,
+        MAX(mbd.owner_type) AS owner_type,
+        MAX(mbd.business_logo) AS business_logo,
+        MAX(mbd.address) AS address,
+        MAX(mbd.latitude) AS latitude,
+        MAX(mbd.longitude) AS longitude,
+        MAX(mbd.opening_time) AS opening_time,
+        MAX(mbd.closing_time) AS closing_time,
+        MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
+        MAX(u.user_id) AS user_id,
+        MAX(u.user_name) AS user_name,
+        MAX(u.email) AS email,
+        MAX(u.phone) AS phone,
+        MAX(u.profile_image) AS profile_image,
+        MAX(mbd.complementary) AS complement,
+        MAX(mbd.complementary_details) AS complement_details,
+        COALESCE(ROUND(AVG(mr.rating), 2), 0) AS avg_rating,
+        SUM(CASE WHEN mr.comment IS NOT NULL AND mr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
+        GROUP_CONCAT(DISTINCT bt.name) AS tags
+      FROM merchant_business_details mbd
+      JOIN users u ON u.user_id = mbd.user_id
+      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
+      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
+      LEFT JOIN mart_ratings mr ON mr.business_id = mbd.business_id
+      WHERE TRIM(LOWER(mbd.owner_type)) = 'mart'
+      ${whereSearch}
+      GROUP BY mbd.business_id
+      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
+      LIMIT ? OFFSET ?
+      `,
+      params
+    );
+
+    return res.status(200).json({
+      success: true,
+      kind: "mart",
+      count: rows.length,
+      data: rows,
+    });
+  } catch (err) {
+    console.error("listMartOwnersWithCelebration error:", err);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch mart owners." });
+  }
+}
 
 module.exports = {
   registerMerchant,
@@ -497,4 +622,6 @@ module.exports = {
   loginByEmail,
   listFoodOwners,
   listMartOwners,
+  listFoodOwnersWithCelebration,
+  listMartOwnersWithCelebration,
 };
