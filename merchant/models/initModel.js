@@ -168,6 +168,7 @@ async function ensureMerchantBusinessDetailsTable() {
         closing_time TIME,
         holidays JSON,
         special_celebration VARCHAR(255) DEFAULT NULL,  -- NEW COLUMN ADDED
+        special_celebration_discount_percentage DECIMAL(5,2) DEFAULT 0,  -- NEW COLUMN ADDED
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (business_id),
@@ -175,12 +176,24 @@ async function ensureMerchantBusinessDetailsTable() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
   } else {
-    // Add the new column if it doesn't exist already
-    const columnExistsCheck = await columnExists(table, "special_celebration");
-    if (!columnExistsCheck) {
+    // Add the new columns if they don't exist already
+    const columnExistsCheck1 = await columnExists(table, "special_celebration");
+    const columnExistsCheck2 = await columnExists(
+      table,
+      "special_celebration_discount_percentage"
+    );
+
+    if (!columnExistsCheck1) {
       await db.query(`
         ALTER TABLE ${table}
-        ADD COLUMN special_celebration TINYINT(1) DEFAULT 0;
+        ADD COLUMN special_celebration VARCHAR(255) DEFAULT NULL;
+      `);
+    }
+
+    if (!columnExistsCheck2) {
+      await db.query(`
+        ALTER TABLE ${table}
+        ADD COLUMN special_celebration_discount_percentage DECIMAL(5,2) DEFAULT 0;
       `);
     }
   }

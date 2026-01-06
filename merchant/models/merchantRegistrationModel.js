@@ -1,4 +1,3 @@
-// models/merchantRegistrationModel.js
 const db = require("../config/db");
 const bcrypt = require("bcryptjs");
 
@@ -68,6 +67,8 @@ async function registerMerchantModel(data) {
       account_holder_name,
       account_number,
       bank_qr_code_image,
+      special_celebration, // New field for special celebration
+      special_celebration_discount_percentage, // New field for special celebration discount
     } = data;
 
     const role = (data.role || "merchant").toLowerCase();
@@ -160,8 +161,8 @@ async function registerMerchantModel(data) {
       `INSERT INTO merchant_business_details
         (user_id, business_name, business_license_number, license_image,
          latitude, longitude, address, business_logo, delivery_option, owner_type,
-         min_amount_for_fd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         min_amount_for_fd, special_celebration, special_celebration_discount_percentage)  -- Added special_celebration and special_celebration_discount_percentage
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         user_id,
         business_name,
@@ -174,6 +175,8 @@ async function registerMerchantModel(data) {
         delivery_option || "SELF",
         ownerType || null,
         minFD,
+        special_celebration || null, // Ensure to include special_celebration
+        special_celebration_discount_percentage || null, // Ensure to include special_celebration_discount_percentage
       ]
     );
     const business_id = mbdRes.insertId;
@@ -238,6 +241,7 @@ async function updateMerchantDetailsModel(business_id, data) {
       }
     };
 
+    // Handle existing fields
     setIfProvided("business_name", data.business_name);
     setIfProvided("business_license_number", data.business_license_number);
     setIfProvided("license_image", data.license_image);
@@ -256,6 +260,13 @@ async function updateMerchantDetailsModel(business_id, data) {
     );
     setIfProvided("opening_time", data.opening_time);
     setIfProvided("closing_time", data.closing_time);
+
+    // Handle new special_celebration and special_celebration_discount_percentage fields
+    setIfProvided("special_celebration", data.special_celebration);
+    setIfProvided(
+      "special_celebration_discount_percentage",
+      data.special_celebration_discount_percentage
+    );
 
     // 🔹 update free-delivery threshold (0 = disabled)
     setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (v) => {
@@ -367,7 +378,7 @@ async function getOwnersByKind(kind) {
         mbd.business_license_number, mbd.license_image,
         mbd.latitude, mbd.longitude, mbd.address,
         mbd.business_logo, mbd.delivery_option,
-        mbd.min_amount_for_fd,
+        mbd.min_amount_for_fd, mbd.special_celebration, mbd.special_celebration_discount_percentage,  -- Added special_celebration and special_celebration_discount_percentage
         mbd.opening_time, mbd.closing_time, mbd.holidays,
         mbd.complementary AS complement, mbd.complementary_details AS complement_details,
         mbd.created_at, mbd.updated_at,
@@ -443,6 +454,9 @@ async function getOwnersByKind(kind) {
     business_logo: b.business_logo,
     delivery_option: b.delivery_option,
     min_amount_for_fd: b.min_amount_for_fd, // 🔹 expose in API
+    special_celebration: b.special_celebration, // Added field
+    special_celebration_discount_percentage:
+      b.special_celebration_discount_percentage, // Added field
     opening_time: b.opening_time,
     closing_time: b.closing_time,
     holidays: b.holidays,

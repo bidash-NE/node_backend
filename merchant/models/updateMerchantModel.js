@@ -14,6 +14,7 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "closing_time",
     "holidays",
     "special_celebration", // Include special_celebration in allowed fields
+    "special_celebration_discount_percentage", // Include special_celebration_discount_percentage in allowed fields
   ];
 
   const setClause = [];

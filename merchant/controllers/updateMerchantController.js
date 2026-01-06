@@ -33,6 +33,17 @@ async function updateMerchantBusiness(req, res) {
     if (updateFields.special_celebration !== undefined) {
       updateFields.special_celebration =
         updateFields.special_celebration || null;
+
+      // If special_celebration is updated, ensure special_celebration_discount_percentage is provided
+      if (
+        updateFields.special_celebration &&
+        !updateFields.special_celebration_discount_percentage
+      ) {
+        return res.status(400).json({
+          error:
+            "special_celebration_discount_percentage is required when special_celebration is provided.",
+        });
+      }
     }
 
     const updated = await updateMerchantBusinessDetails(
