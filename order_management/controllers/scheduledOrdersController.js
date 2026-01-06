@@ -244,33 +244,103 @@ exports.listScheduledOrders = async (req, res) => {
         .json({ success: false, message: "Invalid user_id parameter." });
     }
 
+    // Fetch the scheduled orders by user
     const list = await getScheduledOrdersByUser(userId);
 
-    // Latest first
-    const sorted = [...list].sort(
-      (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0)
+    if (!list.length) return res.json({ success: true, data: [] });
+
+    // Extract unique business_ids from the orders
+    const businessIds = [
+      ...new Set(
+        list
+          .map((job) => job.business_id)
+          .filter((bid) => bid != null && Number.isFinite(Number(bid)))
+          .map((x) => Number(x))
+      ),
+    ];
+
+    // Fetch business details (logo and address) for each business_id
+    let businessData = new Map();
+    if (businessIds.length) {
+      const placeholders = businessIds.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT business_id, business_logo, address
+         FROM merchant_business_details
+         WHERE business_id IN (${placeholders})`,
+        businessIds
+      );
+      businessData = new Map(rows.map((r) => [r.business_id, r]));
+    }
+
+    // Add item images to each item in the order based on menu_id
+    const enrichedList = await Promise.all(
+      list.map(async (job) => {
+        const business = businessData.get(job.business_id) || {};
+        const businessLogo = business.business_logo || null;
+        const businessAddress = business.address || null;
+
+        // Extract item images from the order_payload.items array
+        const itemImagesPromises = job.order_payload.items.map(async (item) => {
+          let itemImage = null;
+
+          if (job.order_payload.service_type === "FOOD") {
+            // Fetch item_image from food_menu table
+            console.log(
+              "Fetching item_image for food item menu_id:",
+              item.menu_id
+            );
+            const [foodMenuRow] = await db.query(
+              `SELECT item_image FROM food_menu WHERE id = ? LIMIT 1`,
+              [Number(item.menu_id)] // Ensure that menu_id is converted to a number
+            );
+            itemImage = foodMenuRow[0]?.item_image || null;
+          } else if (job.order_payload.service_type === "MART") {
+            // Fetch item_image from mart_menu table using LEFT JOIN for better data handling
+            console.log(
+              "Fetching item_image for mart item menu_id:",
+              item.menu_id
+            );
+            const [martMenuRow] = await db.query(
+              `SELECT item_image FROM mart_menu WHERE id = ? LIMIT 1`,
+              [Number(item.menu_id)] // Ensure that menu_id is converted to a number
+            );
+            console.log("Mart menu row:", martMenuRow);
+            itemImage = martMenuRow[0]?.item_image || null;
+          }
+
+          item.item_image = itemImage; // Add item_image to the item object
+          return item;
+        });
+
+        const enrichedItems = await Promise.all(itemImagesPromises);
+
+        // console.log("Enriched Items After Update:", enrichedItems);
+
+        return {
+          job_id: job.job_id,
+          user_id: job.user_id,
+          business_id: job.business_id ?? null,
+          business_logo: businessLogo,
+          business_address: businessAddress,
+          scheduled_at_utc: job.scheduled_at ?? null,
+          scheduled_at_local:
+            job.scheduled_at_local ??
+            (Number.isFinite(job.scheduled_epoch_ms)
+              ? epochToBhutanIso(job.scheduled_epoch_ms)
+              : null),
+          created_at_utc: job.created_at ?? null,
+          order_payload: {
+            ...job.order_payload,
+            items: enrichedItems, // Updated items with item_image
+          },
+        };
+      })
     );
 
-    const mapped = sorted.map((job) => ({
-      job_id: job.job_id,
-      user_id: job.user_id,
-      business_id: job.business_id ?? null,
-
-      scheduled_at_utc: job.scheduled_at ?? null,
-      scheduled_at_local:
-        job.scheduled_at_local ??
-        (Number.isFinite(job.scheduled_epoch_ms)
-          ? epochToBhutanIso(job.scheduled_epoch_ms)
-          : null),
-
-      created_at_utc: job.created_at ?? null,
-
-      order_payload: job.order_payload,
-    }));
-
-    return res.json({ success: true, data: mapped });
+    // console.log("Enriched List Before Response:", enrichedList);
+    return res.json({ success: true, data: enrichedList });
   } catch (err) {
-    console.error("listScheduledOrders error:", err);
+    console.error("getScheduledOrdersByUser error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
