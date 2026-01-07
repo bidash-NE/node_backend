@@ -1,3 +1,4 @@
+// models/foodRatingsModel.js
 const db = require("../config/db");
 
 /* ---------- helpers ---------- */
@@ -6,30 +7,53 @@ function toIntOrThrow(v, msg) {
   if (!Number.isInteger(n) || n <= 0) throw new Error(msg);
   return n;
 }
+
 function toRatingOrThrow(v) {
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1 || n > 5)
+  if (!Number.isInteger(n) || n < 1 || n > 5) {
     throw new Error("rating must be an integer 1..5");
+  }
   return n;
 }
+
 const normStr = (s) => (s == null ? null : String(s).trim());
+
+function makeError(message, statusCode = 400) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
 
 async function assertUserExists(user_id) {
   const [r] = await db.query(
     `SELECT user_id FROM users WHERE user_id = ? LIMIT 1`,
     [user_id]
   );
-  if (!r.length) throw new Error("user not found");
+  if (!r.length) throw makeError("user not found", 404);
 }
+
 async function assertBusinessExists(business_id) {
   const [r] = await db.query(
     `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
     [business_id]
   );
-  if (!r.length) throw new Error("business not found");
+  if (!r.length) throw makeError("business not found", 404);
 }
 
-/* ---------- CREATE (always insert new row) ---------- */
+async function assertUserHasNotRated(business_id, user_id) {
+  const [r] = await db.query(
+    `SELECT id FROM food_ratings WHERE business_id = ? AND user_id = ? LIMIT 1`,
+    [business_id, user_id]
+  );
+  if (r.length) {
+    throw makeError(
+      "Thanks! You’ve already rated this restaurant. You can only rate once per restaurant.",
+      409
+    );
+  }
+}
+
+/* ---------- CREATE (only once per user per business) ---------- */
 async function insertFoodRating({ business_id, user_id, rating, comment }) {
   const bid = toIntOrThrow(
     business_id,
@@ -42,11 +66,25 @@ async function insertFoodRating({ business_id, user_id, rating, comment }) {
   await assertUserExists(uid);
   await assertBusinessExists(bid);
 
-  await db.query(
-    `INSERT INTO food_ratings (business_id, user_id, rating, comment)
-     VALUES (?, ?, ?, ?)`,
-    [bid, uid, r, c]
-  );
+  // ✅ enforce one rating per user per business
+  await assertUserHasNotRated(bid, uid);
+
+  try {
+    await db.query(
+      `INSERT INTO food_ratings (business_id, user_id, rating, comment)
+       VALUES (?, ?, ?, ?)`,
+      [bid, uid, r, c]
+    );
+  } catch (e) {
+    // If you add a UNIQUE key later, this will gracefully handle duplicates too.
+    if (e && (e.code === "ER_DUP_ENTRY" || e.errno === 1062)) {
+      throw makeError(
+        "Thanks! You’ve already rated this restaurant. You can only rate once per restaurant.",
+        409
+      );
+    }
+    throw e;
+  }
 
   return { success: true, message: "Feedback saved." };
 }
