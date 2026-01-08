@@ -2161,7 +2161,7 @@ const Order = {
         if_unavailable: o.if_unavailable || null,
         estimated_arrivial_time: o.estimated_arrivial_time || null,
 
-        restaurant: primaryBiz
+        business_details: primaryBiz
           ? {
               business_id: primaryBiz.business_id,
               name: primaryBiz.business_name,
