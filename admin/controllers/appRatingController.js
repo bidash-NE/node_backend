@@ -1,5 +1,7 @@
-// controllers/appRatingController.js  ✅ FULL (ADMIN SIDE)
+// controllers/appRatingController.js ✅ ADMIN SIDE (FULL)
 const db = require("../config/db");
+const { addLog } = require("../models/adminlogModel");
+
 const {
   createAppRating,
   getAppRatingById,
@@ -8,41 +10,30 @@ const {
   deleteAppRating,
   getAppRatingSummary,
 
-  // ✅ REPORTS (Redis + DB)
+  // ✅ NEW reports functions (Redis + DB)
   listMerchantReports,
   ignoreMerchantReport,
   deleteReportedMerchantCommentByReport,
   deleteReportedMerchantReplyByReport,
 } = require("../models/appRatingModel");
 
-/* ---------------- helpers ---------------- */
-
-async function verifyAdminOrSuperAdminFromToken(req) {
-  const admin_user_id = Number(req.user?.user_id);
-  if (!admin_user_id || Number.isNaN(admin_user_id)) {
-    const err = new Error("Unauthorized");
-    err.statusCode = 401;
+/**
+ * Helper: load admin user and verify role is admin/super-admin
+ * Returns { admin_user_id, admin_name, role } or throws
+ */
+async function verifyAdminOrSuperAdmin(admin_user_id) {
+  const idNum = Number(admin_user_id);
+  if (!idNum || Number.isNaN(idNum)) {
+    const err = new Error("Invalid admin_user_id");
+    err.statusCode = 400;
     throw err;
   }
 
-  // role from token (fast path)
-  const tokenRole = String(req.user?.role || "").toLowerCase();
-  const allowed = new Set(["admin", "super admin", "superadmin"]);
-
-  // If token has role and it's allowed, accept.
-  if (allowed.has(tokenRole)) {
-    return {
-      admin_user_id,
-      admin_name: req.user?.user_name || "ADMIN",
-      role: tokenRole,
-    };
-  }
-
-  // Otherwise, confirm from DB
   const [rows] = await db.query(
     "SELECT user_id, user_name, role FROM users WHERE user_id = ? LIMIT 1",
-    [admin_user_id]
+    [idNum]
   );
+
   if (!rows.length) {
     const err = new Error("Admin user not found");
     err.statusCode = 404;
@@ -51,15 +42,20 @@ async function verifyAdminOrSuperAdminFromToken(req) {
 
   const admin = rows[0];
   const role = String(admin.role || "").toLowerCase();
-  if (!allowed.has(role)) {
-    const err = new Error("Forbidden");
+
+  const allowedRoles = new Set(["admin", "super admin", "superadmin"]);
+
+  if (!allowedRoles.has(role)) {
+    const err = new Error(
+      "Not authorized. Only admin/super admin can perform this action."
+    );
     err.statusCode = 403;
     throw err;
   }
 
   return {
     admin_user_id: admin.user_id,
-    admin_name: admin.user_name || "ADMIN",
+    admin_name: admin.user_name || "UNKNOWN_ADMIN",
     role,
   };
 }
@@ -69,6 +65,7 @@ async function verifyAdminOrSuperAdminFromToken(req) {
 async function createAppRatingController(req, res) {
   try {
     const body = req.body || {};
+
     const user_id = body.user_id ? Number(body.user_id) : null;
     const rating = Number(body.rating);
 
@@ -78,6 +75,7 @@ async function createAppRatingController(req, res) {
         message: "user_id is required and must be a valid number.",
       });
     }
+
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({
         success: false,
@@ -92,6 +90,7 @@ async function createAppRatingController(req, res) {
     const os_version = deviceInfo.os_version || body.os_version || null;
     const app_version = deviceInfo.app_version || body.app_version || null;
     const device_model = deviceInfo.device_model || body.device_model || null;
+
     const network_type = body.network_type || null;
 
     let role = null;
@@ -234,9 +233,13 @@ async function updateAppRatingController(req, res) {
 
 async function deleteAppRatingController(req, res) {
   try {
-    const admin = await verifyAdminOrSuperAdminFromToken(req);
-
     const { id } = req.params;
+
+    // ✅ prefer Bearer token (admin)
+    const admin_user_id = req.user?.user_id;
+    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
+    const { admin_user_id: adminId, admin_name, role } = adminInfo;
+
     const existing = await getAppRatingById(id);
     if (!existing) {
       return res.status(404).json({
@@ -257,18 +260,15 @@ async function deleteAppRatingController(req, res) {
       });
     }
 
+    // ✅ log
     try {
       const activity =
-        `Admin ${admin.admin_name} (id=${admin.admin_user_id}, role=${admin.role}) ` +
-        `deleted app rating #${id} ` +
+        `Admin ${admin_name} (id=${adminId}, role=${role}) deleted app rating #${id} ` +
         `(rating=${existing.rating}, comment="${userComment}", given_by_user=${existing.user_id})`;
 
-      await db.query(
-        `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
-        [admin.admin_user_id, admin.admin_name, activity]
-      );
-    } catch (logErr) {
-      console.error("Error writing admin log for app rating delete:", logErr);
+      await addLog({ user_id: adminId, admin_name, activity });
+    } catch (e) {
+      console.error("admin log failed:", e?.message || e);
     }
 
     return res.json({
@@ -304,7 +304,9 @@ async function getAppRatingSummaryController(req, res) {
  */
 async function listReportedCommentsController(req, res) {
   try {
-    await verifyAdminOrSuperAdminFromToken(req);
+    // ✅ only admin/superadmin can view
+    const admin_user_id = req.user?.user_id;
+    await verifyAdminOrSuperAdmin(admin_user_id);
 
     const { type = "food", page = "1", limit = "20" } = req.query;
 
@@ -330,7 +332,8 @@ async function listReportedCommentsController(req, res) {
  */
 async function listReportedRepliesController(req, res) {
   try {
-    await verifyAdminOrSuperAdminFromToken(req);
+    const admin_user_id = req.user?.user_id;
+    await verifyAdminOrSuperAdmin(admin_user_id);
 
     const { type = "food", page = "1", limit = "20" } = req.query;
 
@@ -353,35 +356,79 @@ async function listReportedRepliesController(req, res) {
 
 /**
  * POST /api/app-ratings/reports/:report_id/ignore
+ * ✅ Uses Bearer token admin id
  */
 async function ignoreReportController(req, res) {
   try {
-    const admin = await verifyAdminOrSuperAdminFromToken(req);
-    const report_id = Number(req.params.report_id);
+    const admin_user_id = req.user?.user_id;
+    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
 
-    const out = await ignoreMerchantReport({ report_id, admin });
+    const report_id = Number(req.params.report_id);
+    const out = await ignoreMerchantReport({ report_id, admin: adminInfo });
+
+    // ✅ LOG
+    try {
+      const activity =
+        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
+        `ignored report_id=${report_id} (type=${
+          out?.data?.type || "?"
+        }, target=${out?.data?.target || "?"}, ` +
+        `rating_id=${out?.data?.rating_id || 0}, reply_id=${
+          out?.data?.reply_id || 0
+        })`;
+
+      await addLog({
+        user_id: adminInfo.admin_user_id,
+        admin_name: adminInfo.admin_name,
+        activity,
+      });
+    } catch (e) {
+      console.error("admin log ignore failed:", e?.message || e);
+    }
+
     return res.status(200).json(out);
-  } catch (err) {
-    console.error("ignoreReportController error:", err);
-    return res.status(err.statusCode || 400).json({
+  } catch (e) {
+    return res.status(e.statusCode || 400).json({
       success: false,
-      message: err.message || "Failed to ignore report",
+      message: e.message || "Failed to ignore report",
     });
   }
 }
 
 /**
  * DELETE /api/app-ratings/reports/:report_id/comment
+ * ✅ Uses Bearer token admin id
  */
 async function deleteReportedCommentController(req, res) {
   try {
-    const admin = await verifyAdminOrSuperAdminFromToken(req);
+    const admin_user_id = req.user?.user_id;
+    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
+
     const report_id = Number(req.params.report_id);
 
     const out = await deleteReportedMerchantCommentByReport({
       report_id,
-      admin,
+      admin: adminInfo,
     });
+
+    // ✅ LOG
+    try {
+      const d = out?.data || {};
+      const activity =
+        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
+        `deleted REPORTED COMMENT via report_id=${report_id} ` +
+        `(type=${d.type || "?"}, rating_id=${
+          d.rating_id || 0
+        }, deleted_replies=${d.deleted_replies || 0})`;
+
+      await addLog({
+        user_id: adminInfo.admin_user_id,
+        admin_name: adminInfo.admin_name,
+        activity,
+      });
+    } catch (e) {
+      console.error("admin log delete comment failed:", e?.message || e);
+    }
 
     return res.status(200).json(out);
   } catch (err) {
@@ -395,16 +442,36 @@ async function deleteReportedCommentController(req, res) {
 
 /**
  * DELETE /api/app-ratings/reports/:report_id/reply
+ * ✅ Uses Bearer token admin id
  */
 async function deleteReportedReplyController(req, res) {
   try {
-    const admin = await verifyAdminOrSuperAdminFromToken(req);
+    const admin_user_id = req.user?.user_id;
+    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
+
     const report_id = Number(req.params.report_id);
 
     const out = await deleteReportedMerchantReplyByReport({
       report_id,
-      admin,
+      admin: adminInfo,
     });
+
+    // ✅ LOG
+    try {
+      const d = out?.data || {};
+      const activity =
+        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
+        `deleted REPORTED REPLY via report_id=${report_id} ` +
+        `(type=${d.type || "?"}, reply_id=${d.reply_id || 0})`;
+
+      await addLog({
+        user_id: adminInfo.admin_user_id,
+        admin_name: adminInfo.admin_name,
+        activity,
+      });
+    } catch (e) {
+      console.error("admin log delete reply failed:", e?.message || e);
+    }
 
     return res.status(200).json(out);
   } catch (err) {
@@ -424,7 +491,7 @@ module.exports = {
   deleteAppRatingController,
   getAppRatingSummaryController,
 
-  // ✅ NEW
+  // ✅ reports
   listReportedCommentsController,
   listReportedRepliesController,
   ignoreReportController,

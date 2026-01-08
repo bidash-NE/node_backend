@@ -1,8 +1,50 @@
-// models/appRatingModel.js  ✅ FULL (ADMIN SIDE)
+// models/appRatingModel.js ✅ ADMIN SIDE (FULL)
 const db = require("../config/db");
-const { getRedis } = require("../config/redis"); // must return ioredis client
+const { getRedis } = require("../config/redis");
 
 const redis = getRedis();
+
+/* ---------------- Redis compatibility helpers ---------------- */
+
+async function rCall(obj, candidates, ...args) {
+  for (const name of candidates) {
+    if (obj && typeof obj[name] === "function") {
+      return obj[name](...args);
+    }
+  }
+  throw new Error(`Redis client missing method: ${candidates[0]}`);
+}
+
+// node-redis v4 uses camelCase, ioredis uses lowercase
+const R = {
+  zrevrange: (key, start, stop) =>
+    rCall(redis, ["zrevrange", "zRevRange"], key, start, stop),
+  zrange: (key, start, stop) =>
+    rCall(redis, ["zrange", "zRange"], key, start, stop),
+  zcard: (key) => rCall(redis, ["zcard", "zCard"], key),
+  zrem: (key, member) => rCall(redis, ["zrem", "zRem"], key, member),
+  hgetall: (key) => rCall(redis, ["hgetall", "hGetAll"], key),
+  hset: (key, ...kv) => rCall(redis, ["hset", "hSet"], key, ...kv),
+  del: (key) => rCall(redis, ["del"], key),
+  multi: () => {
+    if (redis && typeof redis.multi === "function") return redis.multi();
+    if (redis && typeof redis.multi === "function") return redis.multi();
+    throw new Error("Redis client missing multi()");
+  },
+};
+
+// exec() differs:
+// - ioredis: returns [[err,val], ...]
+// - node-redis v4: returns [val, val, ...]
+function normalizeExecResult(execRes) {
+  if (!Array.isArray(execRes)) return [];
+  if (execRes.length && Array.isArray(execRes[0]) && execRes[0].length === 2) {
+    // ioredis style
+    return execRes;
+  }
+  // node-redis style: wrap as [null,val]
+  return execRes.map((v) => [null, v]);
+}
 
 /* ---------------- existing app rating model ---------------- */
 
@@ -50,7 +92,6 @@ async function createAppRating({
   const [rows] = await db.query(`SELECT * FROM app_ratings WHERE id = ?`, [
     insertId,
   ]);
-
   return rows[0] || null;
 }
 
@@ -159,12 +200,12 @@ async function getAppRatingSummary() {
   };
 }
 
-/* ---------------- ✅ REPORTS (ADMIN) ---------------- */
+/* ---------------- ✅ NEW: MERCHANT REPORTS (ADMIN) ---------------- */
 
 const FOOD_TBL = "food_ratings";
 const MART_TBL = "mart_ratings";
 
-/* reply keys (same as merchant service) */
+// reply keys (merchant side)
 function replyKey(replyId) {
   return `rating:reply:${replyId}`;
 }
@@ -172,7 +213,7 @@ function replyIndexKey(rating_type, rating_id) {
   return `rating:replies:idx:${rating_type}:${rating_id}`;
 }
 
-/* report keys (same as merchant service) */
+// report keys (merchant side)
 function reportKey(id) {
   return `rating:report:${id}`;
 }
@@ -212,9 +253,7 @@ async function hydrateUsers(ids) {
 }
 
 /**
- * List reports for type+target.
- * ✅ Returns only OPEN reports (ignored/deleted are hidden).
- * ✅ Includes reason + reported_text + reporter + reported_user.
+ * List reports (ONLY status=open)
  */
 async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
   const t = String(type || "").toLowerCase();
@@ -232,10 +271,9 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
 
   const idxKey = reportIndexKey(t, trg);
 
-  // ioredis: zrevrange exists
   const [ids, total] = await Promise.all([
-    redis.zrevrange(idxKey, start, stop),
-    redis.zcard(idxKey),
+    R.zrevrange(idxKey, start, stop),
+    R.zcard(idxKey),
   ]);
 
   if (!ids || !ids.length) {
@@ -252,20 +290,25 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
     };
   }
 
-  const pipe = redis.multi();
-  ids.forEach((id) => pipe.hgetall(reportKey(id)));
-  const results = await pipe.exec();
+  const pipe = R.multi();
+  ids.forEach((id) => {
+    if (typeof pipe.hgetall === "function") pipe.hgetall(reportKey(id));
+    else if (typeof pipe.hGetAll === "function") pipe.hGetAll(reportKey(id));
+    else pipe.hgetall?.(reportKey(id));
+  });
+
+  const execRes = await pipe.exec();
+  const results = normalizeExecResult(execRes);
 
   const rows = [];
   const userIds = new Set();
 
   for (let i = 0; i < ids.length; i++) {
-    const [err, h] = results[i] || [];
-    if (err) continue;
+    const [, h] = results[i] || [];
     if (!h || !h.id) continue;
 
     const status = String(h.status || "open").toLowerCase();
-    if (status !== "open") continue;
+    if (status !== "open") continue; // ✅ hide ignored/deleted
 
     const reporter = toInt(h.reporter_user_id);
     const reported = toInt(h.reported_user_id);
@@ -290,13 +333,15 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
 
   const userMap = await hydrateUsers(Array.from(userIds));
 
+  const data = rows.map((r) => ({
+    ...r,
+    reporter: userMap[r.reporter_user_id] || null,
+    reported_user: userMap[r.reported_user_id] || null,
+  }));
+
   return {
     success: true,
-    data: rows.map((r) => ({
-      ...r,
-      reporter: userMap[r.reporter_user_id] || null,
-      reported_user: userMap[r.reported_user_id] || null,
-    })),
+    data,
     meta: {
       type: t,
       target: trg,
@@ -308,7 +353,8 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
 }
 
 /**
- * Ignore: mark status=ignored and remove from open index so it won't show.
+ * Ignore report
+ * Returns enough info for controller logs
  */
 async function ignoreMerchantReport({ report_id, admin }) {
   const rid = Number(report_id);
@@ -317,14 +363,9 @@ async function ignoreMerchantReport({ report_id, admin }) {
     err.statusCode = 400;
     throw err;
   }
-  if (!admin?.admin_user_id) {
-    const err = new Error("Unauthorized");
-    err.statusCode = 401;
-    throw err;
-  }
 
   const key = reportKey(rid);
-  const h = await redis.hgetall(key);
+  const h = await R.hgetall(key);
   if (!h || !h.id) {
     const err = new Error("Report not found");
     err.statusCode = 404;
@@ -333,41 +374,37 @@ async function ignoreMerchantReport({ report_id, admin }) {
 
   const type = String(h.type || "").toLowerCase();
   const target = String(h.target || "").toLowerCase();
-  if (
-    (type !== "food" && type !== "mart") ||
-    (target !== "comment" && target !== "reply")
-  ) {
-    const err = new Error("Report data is invalid");
-    err.statusCode = 400;
-    throw err;
-  }
 
-  await redis
-    .multi()
-    .hset(
-      key,
-      "status",
-      "ignored",
-      "reviewed_by",
-      String(admin.admin_user_id),
-      "reviewed_at",
-      String(Date.now())
-    )
-    .zrem(reportIndexKey(type, target), String(rid))
-    .exec();
+  const idxKey = reportIndexKey(type, target);
+
+  // multi-compatible: just do sequential calls (safe, simple)
+  await R.hset(
+    key,
+    "status",
+    "ignored",
+    "reviewed_by",
+    String(admin.admin_user_id),
+    "reviewed_at",
+    String(Date.now())
+  );
+  await R.zrem(idxKey, String(rid));
 
   return {
     success: true,
     message: "Report ignored",
-    data: { report_id: rid, status: "ignored" },
+    data: {
+      report_id: rid,
+      status: "ignored",
+      type,
+      target,
+      rating_id: toInt(h.rating_id),
+      reply_id: toInt(h.reply_id),
+    },
   };
 }
 
 /**
- * Delete reported COMMENT (rating row) using report_id:
- * - delete row from DB (food_ratings/mart_ratings)
- * - delete all replies for that rating (Redis)
- * - mark report deleted + remove from open index
+ * Delete reported COMMENT (rating row) by report_id
  */
 async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
   const rid = Number(report_id);
@@ -376,14 +413,9 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
     err.statusCode = 400;
     throw err;
   }
-  if (!admin?.admin_user_id) {
-    const err = new Error("Unauthorized");
-    err.statusCode = 401;
-    throw err;
-  }
 
   const key = reportKey(rid);
-  const h = await redis.hgetall(key);
+  const h = await R.hgetall(key);
   if (!h || !h.id) {
     const err = new Error("Report not found");
     err.statusCode = 404;
@@ -407,22 +439,12 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
 
   const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
 
-  // delete comment row if exists
-  await db.query(`DELETE FROM ${tbl} WHERE id = ?`, [rating_id]);
-
-  // delete replies for rating
-  const idxReplies = replyIndexKey(type, rating_id);
-  const replyIds = await redis.zrange(idxReplies, 0, -1);
-
-  const multi = redis.multi();
-  if (replyIds && replyIds.length) {
-    replyIds.forEach((repId) => multi.del(replyKey(repId)));
-  }
-  multi.del(idxReplies);
-
-  // close report
-  multi
-    .hset(
+  const [rows] = await db.query(`SELECT id FROM ${tbl} WHERE id = ? LIMIT 1`, [
+    rating_id,
+  ]);
+  if (!rows.length) {
+    // mark report closed anyway
+    await R.hset(
       key,
       "status",
       "deleted",
@@ -430,10 +452,48 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
       String(admin.admin_user_id),
       "reviewed_at",
       String(Date.now())
-    )
-    .zrem(reportIndexKey(type, "comment"), String(rid));
+    );
+    await R.zrem(reportIndexKey(type, "comment"), String(rid));
 
-  await multi.exec();
+    return {
+      success: true,
+      message: "Comment already deleted. Report closed.",
+      data: {
+        report_id: rid,
+        type,
+        target: "comment",
+        rating_id,
+        deleted_replies: 0,
+        status: "deleted",
+      },
+    };
+  }
+
+  // delete comment row
+  await db.query(`DELETE FROM ${tbl} WHERE id = ? LIMIT 1`, [rating_id]);
+
+  // delete replies for this rating
+  const idxReplies = replyIndexKey(type, rating_id);
+  const replyIds = await R.zrange(idxReplies, 0, -1);
+
+  if (replyIds && replyIds.length) {
+    for (const repId of replyIds) {
+      await R.del(replyKey(repId));
+    }
+  }
+  await R.del(idxReplies);
+
+  // close report
+  await R.hset(
+    key,
+    "status",
+    "deleted",
+    "reviewed_by",
+    String(admin.admin_user_id),
+    "reviewed_at",
+    String(Date.now())
+  );
+  await R.zrem(reportIndexKey(type, "comment"), String(rid));
 
   return {
     success: true,
@@ -450,10 +510,7 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
 }
 
 /**
- * Delete reported REPLY (Redis) using report_id:
- * - delete reply hash
- * - remove reply id from rating replies index
- * - mark report deleted + remove from open index
+ * Delete reported REPLY by report_id
  */
 async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
   const rid = Number(report_id);
@@ -462,14 +519,9 @@ async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
     err.statusCode = 400;
     throw err;
   }
-  if (!admin?.admin_user_id) {
-    const err = new Error("Unauthorized");
-    err.statusCode = 401;
-    throw err;
-  }
 
   const key = reportKey(rid);
-  const h = await redis.hgetall(key);
+  const h = await R.hgetall(key);
   if (!h || !h.id) {
     const err = new Error("Report not found");
     err.statusCode = 404;
@@ -491,34 +543,32 @@ async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
     throw err;
   }
 
+  // remove reply hash + from rating index
   const repKey = replyKey(reply_id);
-  const rep = await redis.hgetall(repKey);
-
-  const multi = redis.multi();
+  const rep = await R.hgetall(repKey);
 
   if (rep && rep.id) {
     const rating_id = Number(rep.rating_id || 0);
     const rating_type = String(rep.rating_type || type).toLowerCase();
     if (rating_id > 0 && (rating_type === "food" || rating_type === "mart")) {
-      multi.zrem(replyIndexKey(rating_type, rating_id), String(reply_id));
+      await R.zrem(replyIndexKey(rating_type, rating_id), String(reply_id));
     }
-    multi.del(repKey);
+    await R.del(repKey);
+  } else {
+    // reply already missing → still close report
   }
 
   // close report
-  multi
-    .hset(
-      key,
-      "status",
-      "deleted",
-      "reviewed_by",
-      String(admin.admin_user_id),
-      "reviewed_at",
-      String(Date.now())
-    )
-    .zrem(reportIndexKey(type, "reply"), String(rid));
-
-  await multi.exec();
+  await R.hset(
+    key,
+    "status",
+    "deleted",
+    "reviewed_by",
+    String(admin.admin_user_id),
+    "reviewed_at",
+    String(Date.now())
+  );
+  await R.zrem(reportIndexKey(type, "reply"), String(rid));
 
   return {
     success: true,
@@ -541,7 +591,7 @@ module.exports = {
   deleteAppRating,
   getAppRatingSummary,
 
-  // ✅ REPORTS
+  // ✅ reports
   listMerchantReports,
   ignoreMerchantReport,
   deleteReportedMerchantCommentByReport,
