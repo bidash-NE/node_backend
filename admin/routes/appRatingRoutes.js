@@ -1,6 +1,7 @@
-// routes/appRatingRoutes.js
+// routes/appRatingRoutes.js  ✅ EDITED (ADMIN SIDE)
 const express = require("express");
 const router = express.Router();
+const authUser = require("../middleware/auth");
 
 const {
   createAppRatingController,
@@ -9,11 +10,14 @@ const {
   updateAppRatingController,
   deleteAppRatingController,
   getAppRatingSummaryController,
-} = require("../controllers/appRatingController");
 
-// Base path to mount in app.js/server.js:
-// const appRatingRoutes = require("./routes/appRatingRoutes");
-// app.use("/api/app-ratings", appRatingRoutes);
+  // ✅ NEW: reports (merchant ratings comments/replies)
+  listReportedCommentsController,
+  listReportedRepliesController,
+  ignoreReportController,
+  deleteReportedCommentController,
+  deleteReportedReplyController,
+} = require("../controllers/appRatingController");
 
 /**
  * POST   /api/app-ratings          → create new rating
@@ -32,6 +36,20 @@ router.get("/", listAppRatingsController);
 
 // Summary stats
 router.get("/summary", getAppRatingSummaryController);
+
+router.get("/reports/comments", authUser, listReportedCommentsController);
+router.get("/reports/replies", authUser, listReportedRepliesController);
+router.post("/reports/:report_id/ignore", authUser, ignoreReportController);
+router.delete(
+  "/reports/:report_id/comment",
+  authUser,
+  deleteReportedCommentController
+);
+router.delete(
+  "/reports/:report_id/reply",
+  authUser,
+  deleteReportedReplyController
+);
 
 // Get single rating
 router.get("/:id", getAppRatingByIdController);

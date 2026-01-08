@@ -1,4 +1,4 @@
-// routes/merchantRatingsRoutes.js
+// routes/merchantRatingsRoutes.js ✅ FULL + WORKING (MERCHANT SIDE)
 const express = require("express");
 const router = express.Router();
 
@@ -6,16 +6,18 @@ const authUser = require("../middlewares/authUser");
 
 const {
   getBusinessRatingsAutoCtrl,
+
   likeFoodRatingCtrl,
   unlikeFoodRatingCtrl,
   likeMartRatingCtrl,
   unlikeMartRatingCtrl,
+
   createRatingReplyCtrl,
   listRatingRepliesCtrl,
   deleteRatingReplyCtrl,
   deleteRatingWithRepliesCtrl,
 
-  // ✅ NEW: reports
+  // ✅ reports
   reportRatingCtrl,
   reportReplyCtrl,
 } = require("../controllers/merchantRatingsController");
@@ -54,12 +56,9 @@ const validateRatingTypeParam = (req, res, next) => {
   });
 };
 
-/* ---------- existing ratings & likes ---------- */
-
+/* ---------- ratings list ---------- */
 /**
  * GET /api/merchant/ratings/:business_id?page=1&limit=20
- * Automatically picks food_ratings or mart_ratings based on merchant_business_details.owner_type
- * If owner_type='both' (or missing/unknown), merges both tables.
  */
 router.get(
   "/ratings/:business_id",
@@ -67,17 +66,17 @@ router.get(
   getBusinessRatingsAutoCtrl
 );
 
+/* ---------- likes ---------- */
 /**
- * FOOD rating like / unlike
- *  - POST /api/merchant/ratings/food/:rating_id/like
- *  - POST /api/merchant/ratings/food/:rating_id/unlike
+ * FOOD:
+ *  POST /api/merchant/ratings/food/:rating_id/like
+ *  POST /api/merchant/ratings/food/:rating_id/unlike
  */
 router.post(
   "/ratings/food/:rating_id/like",
   validateRatingIdParam,
   likeFoodRatingCtrl
 );
-
 router.post(
   "/ratings/food/:rating_id/unlike",
   validateRatingIdParam,
@@ -85,22 +84,26 @@ router.post(
 );
 
 /**
- * MART rating like / unlike
- *  - POST /api/merchant/ratings/mart/:rating_id/like
- *  - POST /api/merchant/ratings/mart/:rating_id/unlike
+ * MART:
+ *  POST /api/merchant/ratings/mart/:rating_id/like
+ *  POST /api/merchant/ratings/mart/:rating_id/unlike
  */
 router.post(
   "/ratings/mart/:rating_id/like",
   validateRatingIdParam,
   likeMartRatingCtrl
 );
-
 router.post(
   "/ratings/mart/:rating_id/unlike",
   validateRatingIdParam,
   unlikeMartRatingCtrl
 );
 
+/* ---------- delete rating + replies ---------- */
+/**
+ * DELETE /api/merchant/ratings/:type/:rating_id
+ * Auth required
+ */
 router.delete(
   "/ratings/:type/:rating_id",
   authUser,
@@ -110,12 +113,10 @@ router.delete(
 );
 
 /* ---------- replies (Redis-backed) ---------- */
-
 /**
- * Create a reply for a rating (food or mart).
  * POST /api/merchant/ratings/:type/:rating_id/replies
- *  Body: { text: "..." }
- *  Auth: user token (Bearer)
+ * Body: { text }
+ * Auth required
  */
 router.post(
   "/ratings/:type/:rating_id/replies",
@@ -126,7 +127,6 @@ router.post(
 );
 
 /**
- * List replies for a rating.
  * GET /api/merchant/ratings/:type/:rating_id/replies?page=1&limit=20
  */
 router.get(
@@ -137,9 +137,8 @@ router.get(
 );
 
 /**
- * Delete a reply by id (only creator can delete).
  * DELETE /api/merchant/ratings/replies/:reply_id
- *  Auth: user token (Bearer)
+ * Auth required
  */
 router.delete(
   "/ratings/replies/:reply_id",
@@ -148,13 +147,12 @@ router.delete(
   deleteRatingReplyCtrl
 );
 
-/* ---------- ✅ NEW: reports (Redis-backed) ---------- */
-
+/* ---------- ✅ REPORTS ---------- */
 /**
- * Report a rating comment
+ * Report a COMMENT (rating) (food or mart)
  * POST /api/merchant/ratings/:type/:rating_id/report
  * Body: { reason: "..." }
- * Auth: user token (Bearer)
+ * Auth required
  */
 router.post(
   "/ratings/:type/:rating_id/report",
@@ -165,10 +163,12 @@ router.post(
 );
 
 /**
- * Report a reply
- * POST /api/merchant/ratings/replies/:reply_id/report
+ * Report a REPLY (food or mart)
+ * POST /api/merchant/ratings/:type/replies/:reply_id/report
  * Body: { reason: "..." }
- * Auth: user token (Bearer)
+ * Auth required
+ *
+ * ✅ Fixes: Cannot POST /api/merchant/ratings/food/replies/11/report
  */
 router.post(
   "/ratings/:type/replies/:reply_id/report",

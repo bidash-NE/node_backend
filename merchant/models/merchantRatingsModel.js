@@ -41,7 +41,7 @@ function hoursAgoFromMillis(ms) {
   return diff >= 0 ? diff : 0;
 }
 
-/* table names */
+/* We also reuse the table names in replies logic */
 const FOOD_TBL = "food_ratings";
 const MART_TBL = "mart_ratings";
 
@@ -56,33 +56,20 @@ function replyIndexKey(rating_type, rating_id) {
 
 /* ---------- ✅ Redis keys (reports) ---------- */
 const REPORT_SEQ_KEY = "rating:report:seq";
-
-function reportKey(reportId) {
-  return `rating:report:${reportId}`;
+function reportKey(id) {
+  return `rating:report:${id}`;
 }
-function reportIndexAllKey() {
-  return `rating:reports:idx:all`;
+function reportIndexKey(type, target) {
+  // target = comment | reply
+  return `rating:reports:idx:${type}:${target}`;
 }
-function reportIndexUserKey(user_id) {
-  return `rating:reports:idx:user:${user_id}`;
+function reportDedupKey(type, target, targetId, reporterUserId) {
+  // ✅ dedupe includes: food/mart + comment/reply + id + reporter
+  return `rating:reports:dedup:${type}:${target}:${targetId}:${reporterUserId}`;
 }
-
-// ✅ include rating_type for rating index to avoid food/mart id collisions
-function reportIndexTargetKey(target_type, target_id, rating_type = "") {
-  if (target_type === "rating") {
-    const rt = String(rating_type || "").toLowerCase();
-    return `rating:reports:idx:rating:${rt}:${target_id}`;
-  }
-  return `rating:reports:idx:${target_type}:${target_id}`; // reply
-}
-
-// ✅ include rating_type for rating dedupe to avoid food/mart id collisions
-function reportDedupeKey(target_type, target_id, rating_type = "") {
-  if (target_type === "rating") {
-    const rt = String(rating_type || "").toLowerCase();
-    return `rating:reports:dedupe:rating:${rt}:${target_id}`;
-  }
-  return `rating:reports:dedupe:${target_type}:${target_id}`; // reply
+function reportByTargetKey(type, target, targetId) {
+  // to quickly mark/cleanup reports for a specific comment/reply later
+  return `rating:reports:by_target:${type}:${target}:${targetId}`;
 }
 
 /**
@@ -141,7 +128,11 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
   if (allUserIds.size > 0) {
     const ids = Array.from(allUserIds);
     const [userRows] = await db.query(
-      `SELECT user_id, user_name, profile_image FROM users WHERE user_id IN (?)`,
+      `
+      SELECT user_id, user_name, profile_image
+      FROM users
+      WHERE user_id IN (?)
+    `,
       [ids]
     );
 
@@ -167,7 +158,9 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
 
 async function getOwnerTypeForBusiness(business_id) {
   const [r] = await db.query(
-    `SELECT owner_type FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+    `SELECT owner_type
+       FROM merchant_business_details
+      WHERE business_id = ? LIMIT 1`,
     [business_id]
   );
   if (!r.length) return "unknown";
@@ -179,7 +172,7 @@ async function getOwnerTypeForBusiness(business_id) {
   return "unknown";
 }
 
-/* ---------- main: chooses table by owner_type, returns likes_count too ---------- */
+/* ---------- main ratings fetch ---------- */
 async function fetchBusinessRatingsAuto(
   business_id,
   { page = 1, limit = 20 } = {}
@@ -348,19 +341,25 @@ async function fetchBusinessRatingsAuto(
   };
 }
 
-/* ---------- simple like / unlike, NO user tracking ---------- */
+/* ---------- like / unlike ---------- */
 
 async function likeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
   const [res] = await db.query(
-    `UPDATE ${FOOD_TBL} SET likes_count = likes_count + 1 WHERE id = ?`,
+    `UPDATE ${FOOD_TBL}
+       SET likes_count = likes_count + 1
+     WHERE id = ?`,
     [rid]
   );
+
   if (res.affectedRows === 0) throw new Error("food rating not found");
 
   const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count FROM ${FOOD_TBL} WHERE id = ? LIMIT 1`,
+    `SELECT id, business_id, likes_count
+       FROM ${FOOD_TBL}
+      WHERE id = ?
+      LIMIT 1`,
     [rid]
   );
 
@@ -378,13 +377,19 @@ async function unlikeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
   const [res] = await db.query(
-    `UPDATE ${FOOD_TBL} SET likes_count = GREATEST(likes_count - 1, 0) WHERE id = ?`,
+    `UPDATE ${FOOD_TBL}
+       SET likes_count = GREATEST(likes_count - 1, 0)
+     WHERE id = ?`,
     [rid]
   );
+
   if (res.affectedRows === 0) throw new Error("food rating not found");
 
   const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count FROM ${FOOD_TBL} WHERE id = ? LIMIT 1`,
+    `SELECT id, business_id, likes_count
+       FROM ${FOOD_TBL}
+      WHERE id = ?
+      LIMIT 1`,
     [rid]
   );
 
@@ -402,13 +407,19 @@ async function likeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
   const [res] = await db.query(
-    `UPDATE ${MART_TBL} SET likes_count = likes_count + 1 WHERE id = ?`,
+    `UPDATE ${MART_TBL}
+       SET likes_count = likes_count + 1
+     WHERE id = ?`,
     [rid]
   );
+
   if (res.affectedRows === 0) throw new Error("mart rating not found");
 
   const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count FROM ${MART_TBL} WHERE id = ? LIMIT 1`,
+    `SELECT id, business_id, likes_count
+       FROM ${MART_TBL}
+      WHERE id = ?
+      LIMIT 1`,
     [rid]
   );
 
@@ -426,13 +437,19 @@ async function unlikeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
   const [res] = await db.query(
-    `UPDATE ${MART_TBL} SET likes_count = GREATEST(likes_count - 1, 0) WHERE id = ?`,
+    `UPDATE ${MART_TBL}
+       SET likes_count = GREATEST(likes_count - 1, 0)
+     WHERE id = ?`,
     [rid]
   );
+
   if (res.affectedRows === 0) throw new Error("mart rating not found");
 
   const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count FROM ${MART_TBL} WHERE id = ? LIMIT 1`,
+    `SELECT id, business_id, likes_count
+       FROM ${MART_TBL}
+      WHERE id = ?
+      LIMIT 1`,
     [rid]
   );
 
@@ -446,7 +463,7 @@ async function unlikeMartRating(rating_id) {
   };
 }
 
-/* ---------- replies (Redis-backed) ---------- */
+/* ---------- replies ---------- */
 
 async function assertRatingExistsAndGetBusiness(rating_type, rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
@@ -461,10 +478,7 @@ async function assertRatingExistsAndGetBusiness(rating_type, rating_id) {
     err.code = "RATING_NOT_FOUND";
     throw err;
   }
-  return {
-    rating_id: rid,
-    business_id: rows[0].business_id,
-  };
+  return { rating_id: rid, business_id: rows[0].business_id };
 }
 
 async function createRatingReply({ rating_type, rating_id, user_id, text }) {
@@ -524,7 +538,6 @@ async function listRatingReplies({
   }
 
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
-
   await assertRatingExistsAndGetBusiness(type, rid);
 
   const p = clamp(Number(page) || 1, 1, 1e9);
@@ -582,7 +595,11 @@ async function listRatingReplies({
   if (userIds.size > 0) {
     const idsArr = Array.from(userIds);
     const [userRows] = await db.query(
-      `SELECT user_id, user_name, profile_image FROM users WHERE user_id IN (?)`,
+      `
+      SELECT user_id, user_name, profile_image
+      FROM users
+      WHERE user_id IN (?)
+    `,
       [idsArr]
     );
 
@@ -684,6 +701,7 @@ async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
     for (const replId of replyIds) multi.del(replyKey(replId));
   }
   multi.del(idxKey);
+
   await multi.exec();
 
   return {
@@ -697,283 +715,176 @@ async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
   };
 }
 
-/* -------------------- ✅ NEW: REPORTING (Redis-backed) -------------------- */
+/* ---------- ✅ NEW: REPORTS (comment + reply) ---------- */
 
-/**
- * Snapshot rating (comment) from DB so admin can review later even if user edits/deletes.
- */
-async function assertRatingExistsAndGetSnapshot(rating_type, rating_id) {
-  const type = String(rating_type || "").toLowerCase();
-  if (type !== "food" && type !== "mart") {
-    const err = new Error("rating_type must be 'food' or 'mart'");
-    err.code = "BAD_TYPE";
-    throw err;
-  }
-
-  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+async function loadRatingRow(type, rating_id) {
   const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
-
   const [rows] = await db.query(
-    `SELECT id, business_id, user_id, comment, rating, created_at
-       FROM ${tbl}
-      WHERE id = ?
-      LIMIT 1`,
-    [rid]
+    `SELECT id, business_id, user_id, comment, created_at FROM ${tbl} WHERE id = ? LIMIT 1`,
+    [rating_id]
   );
-
   if (!rows.length) {
     const err = new Error(`${type} rating not found`);
-    err.code = "RATING_NOT_FOUND";
+    err.code = "NOT_FOUND";
     throw err;
   }
-
-  const r = rows[0];
-  return {
-    rating_type: type,
-    rating_id: Number(r.id),
-    business_id: Number(r.business_id),
-    rating_user_id: Number(r.user_id),
-    comment: r.comment || "",
-    rating: Number(r.rating ?? 0),
-    created_at: r.created_at,
-  };
+  return rows[0];
 }
 
-/**
- * Snapshot reply from Redis (reply store)
- */
-async function assertReplyExistsAndGetSnapshot(reply_id) {
+async function loadReplyRow(reply_id) {
   const rid = toIntOrThrow(reply_id, "reply_id must be a positive integer");
-  const key = replyKey(rid);
-  const row = await redis.hgetall(key);
-
+  const row = await redis.hgetall(replyKey(rid));
   if (!row || !row.id) {
     const err = new Error("Reply not found");
     err.code = "NOT_FOUND";
     throw err;
   }
-
   return {
-    reply_id: Number(row.id),
+    id: Number(row.id),
     rating_type: String(row.rating_type || "").toLowerCase(),
     rating_id: Number(row.rating_id || 0),
     business_id: Number(row.business_id || 0),
-    reply_user_id: Number(row.user_id || 0),
+    user_id: Number(row.user_id || 0),
     text: row.text || "",
     created_at: Number(row.created_at || 0),
   };
 }
 
-/**
- * Report a rating (food/mart) with proper duplicate protection.
- * ✅ duplicate = same user reporting same (rating_type + rating_id)
- */
-async function reportRating({ rating_type, rating_id, user_id, reason }) {
-  const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
-  const rsn = String(reason || "").trim();
-  if (!rsn) throw new Error("reason is required");
+async function reportRating({
+  rating_type,
+  rating_id,
+  reporter_user_id,
+  reason,
+}) {
+  const type = String(rating_type || "").toLowerCase();
+  if (type !== "food" && type !== "mart") {
+    throw new Error("rating_type must be 'food' or 'mart'");
+  }
 
-  const snap = await assertRatingExistsAndGetSnapshot(rating_type, rating_id);
-  const rt = String(snap.rating_type || "").toLowerCase();
+  const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
+  const uid = toIntOrThrow(
+    reporter_user_id,
+    "reporter_user_id must be a positive integer"
+  );
 
-  // ✅ dedupe per (rating_type + rating_id + reported_by)
-  const dedupe = reportDedupeKey("rating", snap.rating_id, rt);
-  const already = await redis.sismember(dedupe, String(uid));
+  const dedup = reportDedupKey(type, "comment", rid, uid);
+  const already = await redis.get(dedup);
   if (already) {
     const err = new Error("You already reported this rating");
     err.code = "DUPLICATE";
     throw err;
   }
 
-  const now = Date.now();
-  const reportId = await redis.incr(REPORT_SEQ_KEY);
+  const row = await loadRatingRow(type, rid);
 
-  const key = reportKey(reportId);
-  const idxAll = reportIndexAllKey();
-  const idxTarget = reportIndexTargetKey("rating", snap.rating_id, rt);
-  const idxUser = reportIndexUserKey(uid);
+  const now = Date.now();
+  const newId = await redis.incr(REPORT_SEQ_KEY);
+
+  const key = reportKey(newId);
+  const idxKey = reportIndexKey(type, "comment");
+  const byTarget = reportByTargetKey(type, "comment", rid);
 
   await redis
     .multi()
+    .set(dedup, "1", "EX", 60 * 60 * 24 * 30) // 30d
     .hmset(key, {
-      id: String(reportId),
-      target_type: "rating",
-
-      rating_type: rt,
-      rating_id: String(snap.rating_id),
+      id: String(newId),
+      type, // food/mart
+      target: "comment",
+      rating_id: String(rid),
       reply_id: "",
-
-      business_id: String(snap.business_id),
-      reported_by: String(uid),
-      target_user_id: String(snap.rating_user_id || 0),
-
-      snapshot_text: String(snap.comment || ""),
-      snapshot_meta: JSON.stringify({
-        rating: snap.rating,
-        created_at: snap.created_at || null,
-      }),
-
-      reason: String(rsn),
-
-      status: "pending",
+      business_id: String(row.business_id || ""),
+      reported_user_id: String(row.user_id || ""),
+      reporter_user_id: String(uid),
+      reason: String(reason),
+      reported_text: String(row.comment || ""), // ✅ store actual comment
       created_at: String(now),
-      updated_at: String(now),
+      status: "open", // open | ignored | deleted
     })
-    .zadd(idxAll, now, String(reportId))
-    .zadd(idxTarget, now, String(reportId))
-    .zadd(idxUser, now, String(reportId))
-    .sadd(dedupe, String(uid))
+    .zadd(idxKey, now, String(newId))
+    .sadd(byTarget, String(newId))
     .exec();
 
   return {
     success: true,
-    message: "Rating reported successfully",
+    message: "Reported successfully",
     data: {
-      report_id: reportId,
-      target_type: "rating",
-      rating_type: rt,
-      rating_id: snap.rating_id,
-      business_id: snap.business_id,
-      snapshot_text: snap.comment || "",
-      reason: rsn,
-      status: "pending",
-      created_at: now,
+      report_id: newId,
+      type,
+      target: "comment",
+      rating_id: rid,
+      reason,
+      reported_text: row.comment || "",
     },
   };
 }
 
-/**
- * Report a reply with duplicate protection.
- * ✅ duplicate = same user reporting same reply_id
- */
-async function reportReply({ reply_id, user_id, reason }) {
-  const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
-  const rsn = String(reason || "").trim();
-  if (!rsn) throw new Error("reason is required");
+async function reportReply({
+  rating_type,
+  reply_id,
+  reporter_user_id,
+  reason,
+}) {
+  const type = String(rating_type || "").toLowerCase();
+  if (type !== "food" && type !== "mart") {
+    throw new Error("rating_type must be 'food' or 'mart'");
+  }
 
-  const snap = await assertReplyExistsAndGetSnapshot(reply_id);
+  const repId = toIntOrThrow(reply_id, "reply_id must be a positive integer");
+  const uid = toIntOrThrow(
+    reporter_user_id,
+    "reporter_user_id must be a positive integer"
+  );
 
-  const dedupe = reportDedupeKey("reply", snap.reply_id);
-  const already = await redis.sismember(dedupe, String(uid));
+  const dedup = reportDedupKey(type, "reply", repId, uid);
+  const already = await redis.get(dedup);
   if (already) {
     const err = new Error("You already reported this reply");
     err.code = "DUPLICATE";
     throw err;
   }
 
-  const now = Date.now();
-  const reportId = await redis.incr(REPORT_SEQ_KEY);
+  const replyRow = await loadReplyRow(repId);
 
-  const key = reportKey(reportId);
-  const idxAll = reportIndexAllKey();
-  const idxTarget = reportIndexTargetKey("reply", snap.reply_id);
-  const idxUser = reportIndexUserKey(uid);
+  const now = Date.now();
+  const newId = await redis.incr(REPORT_SEQ_KEY);
+
+  const key = reportKey(newId);
+  const idxKey = reportIndexKey(type, "reply");
+  const byTarget = reportByTargetKey(type, "reply", repId);
 
   await redis
     .multi()
+    .set(dedup, "1", "EX", 60 * 60 * 24 * 30) // 30d
     .hmset(key, {
-      id: String(reportId),
-      target_type: "reply",
-
-      rating_type: String(snap.rating_type || ""),
-      rating_id: String(snap.rating_id || ""),
-      reply_id: String(snap.reply_id),
-
-      business_id: String(snap.business_id || 0),
-      reported_by: String(uid),
-      target_user_id: String(snap.reply_user_id || 0),
-
-      snapshot_text: String(snap.text || ""),
-      snapshot_meta: JSON.stringify({
-        created_at: snap.created_at || null,
-      }),
-
-      reason: String(rsn),
-
-      status: "pending",
+      id: String(newId),
+      type, // food/mart
+      target: "reply",
+      rating_id: String(replyRow.rating_id || ""),
+      reply_id: String(repId),
+      business_id: String(replyRow.business_id || ""),
+      reported_user_id: String(replyRow.user_id || ""),
+      reporter_user_id: String(uid),
+      reason: String(reason),
+      reported_text: String(replyRow.text || ""), // ✅ store actual reply
       created_at: String(now),
-      updated_at: String(now),
+      status: "open", // open | ignored | deleted
     })
-    .zadd(idxAll, now, String(reportId))
-    .zadd(idxTarget, now, String(reportId))
-    .zadd(idxUser, now, String(reportId))
-    .sadd(dedupe, String(uid))
+    .zadd(idxKey, now, String(newId))
+    .sadd(byTarget, String(newId))
     .exec();
 
   return {
     success: true,
-    message: "Reply reported successfully",
+    message: "Reported successfully",
     data: {
-      report_id: reportId,
-      target_type: "reply",
-      reply_id: snap.reply_id,
-      rating_type: snap.rating_type,
-      rating_id: snap.rating_id,
-      business_id: snap.business_id,
-      snapshot_text: snap.text || "",
-      reason: rsn,
-      status: "pending",
-      created_at: now,
+      report_id: newId,
+      type,
+      target: "reply",
+      reply_id: repId,
+      reason,
+      reported_text: replyRow.text || "",
     },
-  };
-}
-
-/**
- * List reports created by a user (for user history)
- */
-async function listReportsByUser({ user_id, page = 1, limit = 20 }) {
-  const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
-
-  const p = clamp(Number(page) || 1, 1, 1e9);
-  const l = clamp(Number(limit) || 20, 1, 100);
-  const start = (p - 1) * l;
-  const stop = start + l - 1;
-
-  const idxUser = reportIndexUserKey(uid);
-
-  const [ids, totalStr] = await Promise.all([
-    redis.zrevrange(idxUser, start, stop),
-    redis.zcard(idxUser),
-  ]);
-
-  const total = Number(totalStr || 0);
-
-  if (!ids.length) {
-    return {
-      success: true,
-      data: [],
-      meta: { page: p, limit: l, total },
-    };
-  }
-
-  const pipe = redis.multi();
-  ids.forEach((id) => pipe.hgetall(reportKey(id)));
-  const rowsArr = await pipe.exec();
-
-  const data = [];
-  for (const [err, row] of rowsArr) {
-    if (err) continue;
-    if (!row || !row.id) continue;
-
-    data.push({
-      report_id: Number(row.id),
-      target_type: row.target_type,
-      rating_type: row.rating_type || null,
-      rating_id: row.rating_id ? Number(row.rating_id) : null,
-      reply_id: row.reply_id ? Number(row.reply_id) : null,
-      business_id: row.business_id ? Number(row.business_id) : null,
-      snapshot_text: row.snapshot_text || "",
-      reason: row.reason || "",
-      status: row.status || "pending",
-      created_at: row.created_at ? Number(row.created_at) : null,
-      updated_at: row.updated_at ? Number(row.updated_at) : null,
-    });
-  }
-
-  return {
-    success: true,
-    data,
-    meta: { page: p, limit: l, total },
   };
 }
 
@@ -983,13 +894,13 @@ module.exports = {
   unlikeFoodRating,
   likeMartRating,
   unlikeMartRating,
+
   createRatingReply,
   listRatingReplies,
   deleteRatingReply,
   deleteRatingWithReplies,
 
-  // ✅ reporting exports
+  // ✅ NEW reports
   reportRating,
   reportReply,
-  listReportsByUser,
 };

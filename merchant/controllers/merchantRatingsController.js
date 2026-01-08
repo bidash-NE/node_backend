@@ -12,10 +12,9 @@ const {
   deleteRatingReply,
   deleteRatingWithReplies,
 
-  // ✅ NEW: reporting
+  // ✅ NEW reports
   reportRating,
   reportReply,
-  listReportsByUser,
 } = require("../models/merchantRatingsModel");
 
 /* ---------- existing ratings / likes ---------- */
@@ -97,10 +96,6 @@ exports.unlikeMartRatingCtrl = async (req, res) => {
 
 /* ---------- replies (Redis-backed) ---------- */
 
-/**
- * POST /api/merchant/ratings/:type/:rating_id/replies
- * Body: { text }
- */
 exports.createRatingReplyCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
@@ -140,9 +135,6 @@ exports.createRatingReplyCtrl = async (req, res) => {
   }
 };
 
-/**
- * GET /api/merchant/ratings/:type/:rating_id/replies?page=&limit=
- */
 exports.listRatingRepliesCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
@@ -165,10 +157,6 @@ exports.listRatingRepliesCtrl = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/merchant/ratings/replies/:reply_id
- * Only creator can delete.
- */
 exports.deleteRatingReplyCtrl = async (req, res) => {
   try {
     const { reply_id } = req.params;
@@ -206,10 +194,7 @@ exports.deleteRatingReplyCtrl = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/merchant/ratings/:type/:rating_id
- * Deletes the rating (comment) AND all its replies.
- */
+/* ---------- delete rating with replies ---------- */
 
 // helper: decode user_id directly from access token
 function getUserIdFromAccessToken(req) {
@@ -231,7 +216,7 @@ function getUserIdFromAccessToken(req) {
       throw err;
     }
     return uid;
-  } catch {
+  } catch (e) {
     const err = new Error("Invalid or expired access token");
     err.code = "UNAUTHORIZED";
     throw err;
@@ -241,7 +226,6 @@ function getUserIdFromAccessToken(req) {
 exports.deleteRatingWithRepliesCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
-
     const user_id = getUserIdFromAccessToken(req);
 
     const out = await deleteRatingWithReplies({
@@ -279,12 +263,8 @@ exports.deleteRatingWithRepliesCtrl = async (req, res) => {
   }
 };
 
-/* ---------- ✅ NEW: reporting ---------- */
+/* ---------- ✅ NEW: REPORT comment/reply ---------- */
 
-/**
- * POST /api/merchant/ratings/:type/:rating_id/report
- * Body: { reason }
- */
 exports.reportRatingCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
@@ -299,25 +279,27 @@ exports.reportRatingCtrl = async (req, res) => {
         .status(400)
         .json({ success: false, message: "reason is required" });
     }
+    if (reason.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "reason too long (max 500 chars)",
+      });
+    }
 
     const out = await reportRating({
-      rating_type: type, // ✅ food or mart
+      rating_type: type, // food/mart
       rating_id: Number(rating_id),
-      user_id: Number(user_id),
+      reporter_user_id: Number(user_id),
       reason,
     });
 
     return res.status(201).json(out);
   } catch (e) {
     if (e?.code === "DUPLICATE") {
-      return res
-        .status(400)
-        .json({ success: false, message: e.message || "Duplicate report" });
+      return res.status(400).json({ success: false, message: e.message });
     }
-    if (e?.code === "RATING_NOT_FOUND" || e?.code === "NOT_FOUND") {
-      return res
-        .status(404)
-        .json({ success: false, message: e.message || "Not found" });
+    if (e?.code === "NOT_FOUND") {
+      return res.status(404).json({ success: false, message: e.message });
     }
     return res.status(400).json({
       success: false,
@@ -326,13 +308,9 @@ exports.reportRatingCtrl = async (req, res) => {
   }
 };
 
-/**
- * POST /api/merchant/ratings/replies/:reply_id/report
- * Body: { reason }
- */
 exports.reportReplyCtrl = async (req, res) => {
   try {
-    const { reply_id } = req.params;
+    const { type, reply_id } = req.params;
     const user_id = req.user?.user_id;
     const reason = String(req.body?.reason || "").trim();
 
@@ -344,55 +322,31 @@ exports.reportReplyCtrl = async (req, res) => {
         .status(400)
         .json({ success: false, message: "reason is required" });
     }
+    if (reason.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "reason too long (max 500 chars)",
+      });
+    }
 
     const out = await reportReply({
+      rating_type: type, // food/mart
       reply_id: Number(reply_id),
-      user_id: Number(user_id),
+      reporter_user_id: Number(user_id),
       reason,
     });
 
     return res.status(201).json(out);
   } catch (e) {
     if (e?.code === "DUPLICATE") {
-      return res
-        .status(400)
-        .json({ success: false, message: e.message || "Duplicate report" });
+      return res.status(400).json({ success: false, message: e.message });
     }
     if (e?.code === "NOT_FOUND") {
-      return res
-        .status(404)
-        .json({ success: false, message: e.message || "Not found" });
+      return res.status(404).json({ success: false, message: e.message });
     }
     return res.status(400).json({
       success: false,
       message: e.message || "Failed to report reply.",
-    });
-  }
-};
-
-/**
- * GET /api/merchant/ratings/reports/mine?page=&limit=
- */
-exports.listMyReportsCtrl = async (req, res) => {
-  try {
-    const user_id = req.user?.user_id;
-    const { page, limit } = req.query;
-
-    if (!user_id) {
-      return res.status(401).json({ success: false, message: "Unauthorized" });
-    }
-
-    const out = await listReportsByUser({
-      user_id: Number(user_id),
-      page,
-      limit,
-    });
-
-    return res.status(200).json(out);
-  } catch (e) {
-    return res.status(400).json({
-      success: false,
-      message: e.message || "Failed to list reports.",
     });
   }
 };

@@ -1,4 +1,4 @@
-// controllers/appRatingController.js
+// controllers/appRatingController.js  ✅ FULL (ADMIN SIDE)
 const db = require("../config/db");
 const {
   createAppRating,
@@ -7,25 +7,42 @@ const {
   updateAppRating,
   deleteAppRating,
   getAppRatingSummary,
+
+  // ✅ REPORTS (Redis + DB)
+  listMerchantReports,
+  ignoreMerchantReport,
+  deleteReportedMerchantCommentByReport,
+  deleteReportedMerchantReplyByReport,
 } = require("../models/appRatingModel");
 
-/**
- * Helper: load admin user and verify role is admin/super-admin
- * Returns { admin_user_id, admin_name, role } or throws 403 error
- */
-async function verifyAdminOrSuperAdmin(admin_user_id) {
-  const idNum = Number(admin_user_id);
-  if (!idNum || Number.isNaN(idNum)) {
-    const err = new Error("Invalid admin_user_id");
-    err.statusCode = 400;
+/* ---------------- helpers ---------------- */
+
+async function verifyAdminOrSuperAdminFromToken(req) {
+  const admin_user_id = Number(req.user?.user_id);
+  if (!admin_user_id || Number.isNaN(admin_user_id)) {
+    const err = new Error("Unauthorized");
+    err.statusCode = 401;
     throw err;
   }
 
+  // role from token (fast path)
+  const tokenRole = String(req.user?.role || "").toLowerCase();
+  const allowed = new Set(["admin", "super admin", "superadmin"]);
+
+  // If token has role and it's allowed, accept.
+  if (allowed.has(tokenRole)) {
+    return {
+      admin_user_id,
+      admin_name: req.user?.user_name || "ADMIN",
+      role: tokenRole,
+    };
+  }
+
+  // Otherwise, confirm from DB
   const [rows] = await db.query(
     "SELECT user_id, user_name, role FROM users WHERE user_id = ? LIMIT 1",
-    [idNum]
+    [admin_user_id]
   );
-
   if (!rows.length) {
     const err = new Error("Admin user not found");
     err.statusCode = 404;
@@ -34,43 +51,24 @@ async function verifyAdminOrSuperAdmin(admin_user_id) {
 
   const admin = rows[0];
   const role = String(admin.role || "").toLowerCase();
-
-  const allowedRoles = new Set(["admin", "super admin", "superadmin"]); // adjust if needed
-
-  if (!allowedRoles.has(role)) {
-    const err = new Error(
-      "Not authorized. Only admin/super admin can perform this action."
-    );
+  if (!allowed.has(role)) {
+    const err = new Error("Forbidden");
     err.statusCode = 403;
     throw err;
   }
 
   return {
     admin_user_id: admin.user_id,
-    admin_name: admin.user_name || "UNKNOWN_ADMIN",
+    admin_name: admin.user_name || "ADMIN",
     role,
   };
 }
 
-/**
- * POST /api/app-ratings
- * Body: {
- *   user_id: number (required),
- *   rating: number (1–5),
- *   comment?: string,
- *   device_info?: {
- *     platform?: string,
- *     os_version?: string,
- *     app_version?: string,
- *     device_model?: string
- *   },
- *   network_type?: string
- * }
- */
+/* ---------------- existing app rating controllers ---------------- */
+
 async function createAppRatingController(req, res) {
   try {
     const body = req.body || {};
-
     const user_id = body.user_id ? Number(body.user_id) : null;
     const rating = Number(body.rating);
 
@@ -80,7 +78,6 @@ async function createAppRatingController(req, res) {
         message: "user_id is required and must be a valid number.",
       });
     }
-
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({
         success: false,
@@ -95,18 +92,14 @@ async function createAppRatingController(req, res) {
     const os_version = deviceInfo.os_version || body.os_version || null;
     const app_version = deviceInfo.app_version || body.app_version || null;
     const device_model = deviceInfo.device_model || body.device_model || null;
-
     const network_type = body.network_type || null;
 
-    // Auto-fetch role from users table based on user_id (app user)
     let role = null;
     const [[userRow]] = await db.query(
       "SELECT role FROM users WHERE user_id = ? LIMIT 1",
       [user_id]
     );
-    if (userRow && userRow.role) {
-      role = userRow.role;
-    }
+    if (userRow && userRow.role) role = userRow.role;
 
     const created = await createAppRating({
       user_id,
@@ -134,10 +127,6 @@ async function createAppRatingController(req, res) {
   }
 }
 
-/**
- * GET /api/app-ratings
- * Query: ?page=1&pageSize=20&min_rating=3&max_rating=5&platform=android&app_version=1.0.3
- */
 async function listAppRatingsController(req, res) {
   try {
     const {
@@ -167,10 +156,7 @@ async function listAppRatingsController(req, res) {
     return res.json({
       success: true,
       data: rows,
-      meta: {
-        page: pageNum,
-        pageSize: sizeNum,
-      },
+      meta: { page: pageNum, pageSize: sizeNum },
     });
   } catch (err) {
     console.error("Error listing app ratings:", err);
@@ -181,9 +167,6 @@ async function listAppRatingsController(req, res) {
   }
 }
 
-/**
- * GET /api/app-ratings/:id
- */
 async function getAppRatingByIdController(req, res) {
   try {
     const { id } = req.params;
@@ -196,10 +179,7 @@ async function getAppRatingByIdController(req, res) {
       });
     }
 
-    return res.json({
-      success: true,
-      data: row,
-    });
+    return res.json({ success: true, data: row });
   } catch (err) {
     console.error("Error fetching app rating:", err);
     return res.status(500).json({
@@ -209,10 +189,6 @@ async function getAppRatingByIdController(req, res) {
   }
 }
 
-/**
- * PUT /api/app-ratings/:id
- * Body: { rating?, comment? }
- */
 async function updateAppRatingController(req, res) {
   try {
     const { id } = req.params;
@@ -229,9 +205,7 @@ async function updateAppRatingController(req, res) {
       }
       fields.rating = r;
     }
-    if (comment != null) {
-      fields.comment = comment;
-    }
+    if (comment != null) fields.comment = comment;
 
     const result = await updateAppRating(id, fields);
 
@@ -258,24 +232,11 @@ async function updateAppRatingController(req, res) {
   }
 }
 
-/**
- * DELETE /api/app-ratings/:id
- * Body: {
- *   admin_user_id: number (required)  // admin's user_id
- * }
- * Verifies admin role (admin/super_admin) and logs into admin_logs directly.
- */
-// DELETE /api/app-ratings/:id
 async function deleteAppRatingController(req, res) {
   try {
+    const admin = await verifyAdminOrSuperAdminFromToken(req);
+
     const { id } = req.params;
-    const { admin_user_id } = req.body || {};
-
-    // 1. Verify admin (super_admin or admin)
-    const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
-    const { admin_user_id: adminId, admin_name, role } = adminInfo;
-
-    // 2. Fetch rating before delete
     const existing = await getAppRatingById(id);
     if (!existing) {
       return res.status(404).json({
@@ -284,12 +245,10 @@ async function deleteAppRatingController(req, res) {
       });
     }
 
-    // Extract comment safely
     const userComment = existing.comment
       ? existing.comment.trim()
       : "No comment";
 
-    // 3. Delete rating
     const result = await deleteAppRating(id);
     if (!result || result.affectedRows === 0) {
       return res.status(404).json({
@@ -298,16 +257,15 @@ async function deleteAppRatingController(req, res) {
       });
     }
 
-    // 4. Insert admin log (direct SQL)
     try {
       const activity =
-        `Admin ${admin_name} (id=${adminId}, role=${role}) ` +
+        `Admin ${admin.admin_name} (id=${admin.admin_user_id}, role=${admin.role}) ` +
         `deleted app rating #${id} ` +
         `(rating=${existing.rating}, comment="${userComment}", given_by_user=${existing.user_id})`;
 
       await db.query(
         `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
-        [adminId, admin_name, activity]
+        [admin.admin_user_id, admin.admin_name, activity]
       );
     } catch (logErr) {
       console.error("Error writing admin log for app rating delete:", logErr);
@@ -326,22 +284,134 @@ async function deleteAppRatingController(req, res) {
   }
 }
 
-/**
- * GET /api/app-ratings/summary
- * Returns dashboard summary.
- */
 async function getAppRatingSummaryController(req, res) {
   try {
     const summary = await getAppRatingSummary();
-    return res.json({
-      success: true,
-      data: summary,
-    });
+    return res.json({ success: true, data: summary });
   } catch (err) {
     console.error("Error fetching app rating summary:", err);
     return res.status(500).json({
       success: false,
       message: "Failed to fetch app rating summary.",
+    });
+  }
+}
+
+/* ---------------- ✅ NEW: ADMIN REPORTS API ---------------- */
+
+/**
+ * GET /api/app-ratings/reports/comments?type=food|mart&page&limit
+ */
+async function listReportedCommentsController(req, res) {
+  try {
+    await verifyAdminOrSuperAdminFromToken(req);
+
+    const { type = "food", page = "1", limit = "20" } = req.query;
+
+    const out = await listMerchantReports({
+      type,
+      target: "comment",
+      page: Number(page),
+      limit: Number(limit),
+    });
+
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error("listReportedCommentsController error:", err);
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      message: err.message || "Failed to list reported comments",
+    });
+  }
+}
+
+/**
+ * GET /api/app-ratings/reports/replies?type=food|mart&page&limit
+ */
+async function listReportedRepliesController(req, res) {
+  try {
+    await verifyAdminOrSuperAdminFromToken(req);
+
+    const { type = "food", page = "1", limit = "20" } = req.query;
+
+    const out = await listMerchantReports({
+      type,
+      target: "reply",
+      page: Number(page),
+      limit: Number(limit),
+    });
+
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error("listReportedRepliesController error:", err);
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      message: err.message || "Failed to list reported replies",
+    });
+  }
+}
+
+/**
+ * POST /api/app-ratings/reports/:report_id/ignore
+ */
+async function ignoreReportController(req, res) {
+  try {
+    const admin = await verifyAdminOrSuperAdminFromToken(req);
+    const report_id = Number(req.params.report_id);
+
+    const out = await ignoreMerchantReport({ report_id, admin });
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error("ignoreReportController error:", err);
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      message: err.message || "Failed to ignore report",
+    });
+  }
+}
+
+/**
+ * DELETE /api/app-ratings/reports/:report_id/comment
+ */
+async function deleteReportedCommentController(req, res) {
+  try {
+    const admin = await verifyAdminOrSuperAdminFromToken(req);
+    const report_id = Number(req.params.report_id);
+
+    const out = await deleteReportedMerchantCommentByReport({
+      report_id,
+      admin,
+    });
+
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error("deleteReportedCommentController error:", err);
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      message: err.message || "Failed to delete reported comment",
+    });
+  }
+}
+
+/**
+ * DELETE /api/app-ratings/reports/:report_id/reply
+ */
+async function deleteReportedReplyController(req, res) {
+  try {
+    const admin = await verifyAdminOrSuperAdminFromToken(req);
+    const report_id = Number(req.params.report_id);
+
+    const out = await deleteReportedMerchantReplyByReport({
+      report_id,
+      admin,
+    });
+
+    return res.status(200).json(out);
+  } catch (err) {
+    console.error("deleteReportedReplyController error:", err);
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      message: err.message || "Failed to delete reported reply",
     });
   }
 }
@@ -353,4 +423,11 @@ module.exports = {
   updateAppRatingController,
   deleteAppRatingController,
   getAppRatingSummaryController,
+
+  // ✅ NEW
+  listReportedCommentsController,
+  listReportedRepliesController,
+  ignoreReportController,
+  deleteReportedCommentController,
+  deleteReportedReplyController,
 };
