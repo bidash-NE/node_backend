@@ -11,6 +11,11 @@ const {
   listRatingReplies,
   deleteRatingReply,
   deleteRatingWithReplies,
+
+  // ✅ NEW: reporting
+  reportRating,
+  reportReply,
+  listReportsByUser,
 } = require("../models/merchantRatingsModel");
 
 /* ---------- existing ratings / likes ---------- */
@@ -90,7 +95,7 @@ exports.unlikeMartRatingCtrl = async (req, res) => {
   }
 };
 
-/* ---------- NEW: replies (Redis-backed) ---------- */
+/* ---------- replies (Redis-backed) ---------- */
 
 /**
  * POST /api/merchant/ratings/:type/:rating_id/replies
@@ -205,6 +210,7 @@ exports.deleteRatingReplyCtrl = async (req, res) => {
  * DELETE /api/merchant/ratings/:type/:rating_id
  * Deletes the rating (comment) AND all its replies.
  */
+
 // helper: decode user_id directly from access token
 function getUserIdFromAccessToken(req) {
   const auth = String(req.headers.authorization || "");
@@ -217,20 +223,15 @@ function getUserIdFromAccessToken(req) {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET); // ✅ MATCH login
+    const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
     const uid = Number(decoded?.user_id);
-    console.log("Decoded user_id from token:", uid);
     if (!Number.isFinite(uid) || uid <= 0) {
       const err = new Error("Invalid token payload: user_id missing");
       err.code = "UNAUTHORIZED";
       throw err;
     }
-
     return uid;
-  } catch (e) {
-    // optional: keep real reason for debugging
-    // console.log(e.name, e.message);
-
+  } catch {
     const err = new Error("Invalid or expired access token");
     err.code = "UNAUTHORIZED";
     throw err;
@@ -241,7 +242,7 @@ exports.deleteRatingWithRepliesCtrl = async (req, res) => {
   try {
     const { type, rating_id } = req.params;
 
-    const user_id = getUserIdFromAccessToken(req); // ✅ decode here
+    const user_id = getUserIdFromAccessToken(req);
 
     const out = await deleteRatingWithReplies({
       rating_type: type,
@@ -274,6 +275,124 @@ exports.deleteRatingWithRepliesCtrl = async (req, res) => {
     return res.status(400).json({
       success: false,
       message: e.message || "Failed to delete rating.",
+    });
+  }
+};
+
+/* ---------- ✅ NEW: reporting ---------- */
+
+/**
+ * POST /api/merchant/ratings/:type/:rating_id/report
+ * Body: { reason }
+ */
+exports.reportRatingCtrl = async (req, res) => {
+  try {
+    const { type, rating_id } = req.params;
+    const user_id = req.user?.user_id;
+    const reason = String(req.body?.reason || "").trim();
+
+    if (!user_id) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    if (!reason) {
+      return res
+        .status(400)
+        .json({ success: false, message: "reason is required" });
+    }
+
+    const out = await reportRating({
+      rating_type: type, // ✅ food or mart
+      rating_id: Number(rating_id),
+      user_id: Number(user_id),
+      reason,
+    });
+
+    return res.status(201).json(out);
+  } catch (e) {
+    if (e?.code === "DUPLICATE") {
+      return res
+        .status(400)
+        .json({ success: false, message: e.message || "Duplicate report" });
+    }
+    if (e?.code === "RATING_NOT_FOUND" || e?.code === "NOT_FOUND") {
+      return res
+        .status(404)
+        .json({ success: false, message: e.message || "Not found" });
+    }
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to report rating.",
+    });
+  }
+};
+
+/**
+ * POST /api/merchant/ratings/replies/:reply_id/report
+ * Body: { reason }
+ */
+exports.reportReplyCtrl = async (req, res) => {
+  try {
+    const { reply_id } = req.params;
+    const user_id = req.user?.user_id;
+    const reason = String(req.body?.reason || "").trim();
+
+    if (!user_id) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    if (!reason) {
+      return res
+        .status(400)
+        .json({ success: false, message: "reason is required" });
+    }
+
+    const out = await reportReply({
+      reply_id: Number(reply_id),
+      user_id: Number(user_id),
+      reason,
+    });
+
+    return res.status(201).json(out);
+  } catch (e) {
+    if (e?.code === "DUPLICATE") {
+      return res
+        .status(400)
+        .json({ success: false, message: e.message || "Duplicate report" });
+    }
+    if (e?.code === "NOT_FOUND") {
+      return res
+        .status(404)
+        .json({ success: false, message: e.message || "Not found" });
+    }
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to report reply.",
+    });
+  }
+};
+
+/**
+ * GET /api/merchant/ratings/reports/mine?page=&limit=
+ */
+exports.listMyReportsCtrl = async (req, res) => {
+  try {
+    const user_id = req.user?.user_id;
+    const { page, limit } = req.query;
+
+    if (!user_id) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const out = await listReportsByUser({
+      user_id: Number(user_id),
+      page,
+      limit,
+    });
+
+    return res.status(200).json(out);
+  } catch (e) {
+    return res.status(400).json({
+      success: false,
+      message: e.message || "Failed to list reports.",
     });
   }
 };

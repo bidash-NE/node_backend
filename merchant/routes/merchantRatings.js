@@ -14,6 +14,10 @@ const {
   listRatingRepliesCtrl,
   deleteRatingReplyCtrl,
   deleteRatingWithRepliesCtrl,
+
+  // ✅ NEW: reports
+  reportRatingCtrl,
+  reportReplyCtrl,
 } = require("../controllers/merchantRatingsController");
 
 /* ---------- validators ---------- */
@@ -104,7 +108,8 @@ router.delete(
   validateRatingIdParam,
   deleteRatingWithRepliesCtrl
 );
-/* ---------- NEW: replies (Redis-backed) ---------- */
+
+/* ---------- replies (Redis-backed) ---------- */
 
 /**
  * Create a reply for a rating (food or mart).
@@ -141,6 +146,35 @@ router.delete(
   authUser,
   validateReplyIdParam,
   deleteRatingReplyCtrl
+);
+
+/* ---------- ✅ NEW: reports (Redis-backed) ---------- */
+
+/**
+ * Report a rating comment
+ * POST /api/merchant/ratings/:type/:rating_id/report
+ * Body: { reason: "..." }
+ * Auth: user token (Bearer)
+ */
+router.post(
+  "/ratings/:type/:rating_id/report",
+  authUser,
+  validateRatingTypeParam,
+  validateRatingIdParam,
+  reportRatingCtrl
+);
+
+/**
+ * Report a reply
+ * POST /api/merchant/ratings/replies/:reply_id/report
+ * Body: { reason: "..." }
+ * Auth: user token (Bearer)
+ */
+router.post(
+  "/ratings/replies/:reply_id/report",
+  authUser,
+  validateReplyIdParam,
+  reportReplyCtrl
 );
 
 module.exports = router;
