@@ -2089,9 +2089,104 @@ const Order = {
     );
 
     const itemsByOrder = new Map();
+    const businessIdsSet = new Set();
+
     for (const it of items) {
       if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
       itemsByOrder.get(it.order_id).push(it);
+
+      const bid = Number(it.business_id);
+      if (Number.isFinite(bid) && bid > 0) businessIdsSet.add(bid);
+    }
+
+    /* ===================== ✅ NEW: fetch business/merchant address ===================== */
+    const businessMap = new Map(); // business_id -> { address, lat, lng }
+
+    const bizIds = Array.from(businessIdsSet);
+    if (bizIds.length) {
+      try {
+        // merchant_business_details usually holds address (schema varies)
+        const [colsRows] = await db.query(
+          `
+        SELECT COLUMN_NAME
+          FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'merchant_business_details'
+        `
+        );
+
+        const cols = new Set(colsRows.map((r) => String(r.COLUMN_NAME)));
+
+        const addrCandidates = [
+          "business_address",
+          "address",
+          "full_address",
+          "location",
+          "business_location",
+          "business_addr",
+        ].filter((c) => cols.has(c));
+
+        const latCandidates = [
+          "lat",
+          "latitude",
+          "business_lat",
+          "delivery_lat",
+        ].filter((c) => cols.has(c));
+
+        const lngCandidates = [
+          "lng",
+          "longitude",
+          "business_lng",
+          "delivery_lng",
+        ].filter((c) => cols.has(c));
+
+        const addrExpr = addrCandidates.length
+          ? `COALESCE(${addrCandidates.map((c) => `m.\`${c}\``).join(", ")})`
+          : "NULL";
+
+        const latExpr = latCandidates.length
+          ? `m.\`${latCandidates[0]}\``
+          : "NULL";
+        const lngExpr = lngCandidates.length
+          ? `m.\`${lngCandidates[0]}\``
+          : "NULL";
+
+        const [bizRows] = await db.query(
+          `
+        SELECT
+          m.business_id,
+          ${addrExpr} AS address,
+          ${latExpr}  AS lat,
+          ${lngExpr}  AS lng
+        FROM merchant_business_details m
+        WHERE m.business_id IN (?)
+        `,
+          [bizIds]
+        );
+
+        for (const r of bizRows) {
+          const bid = Number(r.business_id);
+          if (!Number.isFinite(bid) || bid <= 0) continue;
+
+          businessMap.set(bid, {
+            address: r.address != null ? String(r.address).trim() : null,
+            lat:
+              r.lat != null && r.lat !== "" && !Number.isNaN(Number(r.lat))
+                ? Number(r.lat)
+                : null,
+            lng:
+              r.lng != null && r.lng !== "" && !Number.isNaN(Number(r.lng))
+                ? Number(r.lng)
+                : null,
+          });
+        }
+      } catch (e) {
+        console.error(
+          "[findByUserIdForApp] business address lookup failed:",
+          e?.message
+        );
+        // don't fail response
+      }
     }
 
     // helper: parse JSON list stored in TEXT
@@ -2149,6 +2244,9 @@ const Order = {
       deliverTo.delivery_photo_urls = merged; // always array
       deliverTo.delivery_photo_url = merged[0] || null; // thumbnail/back-compat
 
+      const bid = primaryBiz ? Number(primaryBiz.business_id) : null;
+      const bizInfo = bid && businessMap.has(bid) ? businessMap.get(bid) : null;
+
       result.push({
         order_id: o.order_id,
         service_type: st || null,
@@ -2161,10 +2259,14 @@ const Order = {
         if_unavailable: o.if_unavailable || null,
         estimated_arrivial_time: o.estimated_arrivial_time || null,
 
+        // ✅ UPDATED: include business address (and optional lat/lng)
         business_details: primaryBiz
           ? {
               business_id: primaryBiz.business_id,
               name: primaryBiz.business_name,
+              address: bizInfo?.address ?? null,
+              lat: bizInfo?.lat ?? null,
+              lng: bizInfo?.lng ?? null,
             }
           : null,
 
