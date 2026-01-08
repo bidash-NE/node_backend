@@ -171,8 +171,9 @@ router.post(
  * Auth: user token (Bearer)
  */
 router.post(
-  "/ratings/replies/:reply_id/report",
+  "/ratings/:type/replies/:reply_id/report",
   authUser,
+  validateRatingTypeParam,
   validateReplyIdParam,
   reportReplyCtrl
 );
