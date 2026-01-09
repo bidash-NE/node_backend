@@ -5,7 +5,7 @@ const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
 } = require("../realtime");
-const { toWebPaths, MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
+const { MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
 
 /* ===================== NEW: uploads support ===================== */
 const path = require("path");
@@ -110,13 +110,6 @@ const ALLOWED_STATUSES = new Set([
   "DELIVERED", // ✅ FINAL
   "CANCELLED",
 ]);
-function safeJsonParse(val) {
-  try {
-    return JSON.parse(val);
-  } catch {
-    return null;
-  }
-}
 
 function normalizeServiceType(v) {
   const s = String(v || "")
@@ -160,32 +153,6 @@ function buildPreview(items = [], total_amount) {
 }
 
 /* ===================== NEW: json normalization helpers ===================== */
-function safeJsonParse(val) {
-  try {
-    return JSON.parse(val);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeServiceType(v) {
-  const s = String(v || "")
-    .trim()
-    .toUpperCase();
-  return s || null;
-}
-
-function normalizePaymentMethod(v) {
-  const s = String(v || "")
-    .trim()
-    .toUpperCase();
-  return s || null;
-}
-
-function normalizeFulfillment(v) {
-  const s = String(v || "Delivery").trim();
-  return s || "Delivery";
-}
 
 // Accept BOTH old and new item shapes
 function normalizeItemShape(raw = {}, idx = 0) {
@@ -264,34 +231,6 @@ function normalizeItemShape(raw = {}, idx = 0) {
     subtotal,
     _index: idx, // keep for mapping uploads
   };
-}
-
-function isDataUrlImage(str) {
-  return (
-    typeof str === "string" &&
-    /^data:image\/(png|jpeg|jpg|webp);base64,/.test(str)
-  );
-}
-
-function writeBase64ImageToOrderDir(order_id, dataUrl, prefix = "img") {
-  const m = String(dataUrl).match(
-    /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/
-  );
-  if (!m) return null;
-  const ext = m[1] === "jpeg" ? ".jpg" : m[1] === "jpg" ? ".jpg" : `.${m[1]}`;
-  const base64 = m[2];
-  const buf = Buffer.from(base64, "base64");
-  if (!buf?.length) return null;
-
-  const dir = path.join(ORDERS_UPLOAD_DIR, order_id);
-  ensureDir(dir);
-
-  const name = `${prefix}_${Date.now()}_${crypto
-    .randomBytes(6)
-    .toString("hex")}${ext}`;
-  const abs = path.join(dir, name);
-  fs.writeFileSync(abs, buf);
-  return toPublicUploadUrl(abs);
 }
 
 function mapUploadedFilesToPayload(req, order_id, items) {
@@ -445,32 +384,55 @@ function dedupeStrings(arr) {
 // const { toWebPaths, MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
 
 async function createOrder(req, res) {
-  // small helper: delete orphan uploads on validation fail/crash
   const safeUnlink = (p) => {
     try {
       if (p && fs.existsSync(p)) fs.unlinkSync(p);
     } catch {}
   };
 
+  // ✅ cleanup helper: removes original TMP path + moved path (if moved)
+  const cleanupUploadedFiles = (order_id = null) => {
+    try {
+      const files = Array.isArray(req.files) ? req.files : [];
+      const tmpPrefix = path.join(ORDERS_UPLOAD_DIR, "TMP") + path.sep;
+
+      for (const f of files) {
+        const p = String(f?.path || "");
+        if (!p) continue;
+
+        // If file was originally uploaded into TMP, it was moved to /orders/<order_id>/
+        if (order_id && p.startsWith(tmpPrefix)) {
+          const moved = path.join(
+            ORDERS_UPLOAD_DIR,
+            String(order_id),
+            path.basename(p)
+          );
+          safeUnlink(moved);
+        } else {
+          // Otherwise it already lives in correct place -> delete directly
+          safeUnlink(p);
+        }
+      }
+    } catch {}
+  };
+
   try {
     const payload = getOrderInput(req);
 
-    // items may be missing/invalid
     const itemsRaw = Array.isArray(payload.items) ? payload.items : [];
     if (!itemsRaw.length) {
-      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      cleanupUploadedFiles();
       return res.status(400).json({ ok: false, message: "Missing items" });
     }
 
-    // basic validation
     if (!payload.user_id || !Number.isFinite(Number(payload.user_id))) {
-      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      cleanupUploadedFiles();
       return res.status(400).json({ ok: false, message: "Missing user_id" });
     }
 
     const serviceType = normalizeServiceType(payload.service_type);
     if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
-      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      cleanupUploadedFiles();
       return res.status(400).json({
         ok: false,
         message: "Invalid or missing service_type. Allowed: FOOD, MART",
@@ -479,7 +441,7 @@ async function createOrder(req, res) {
 
     const payMethod = normalizePaymentMethod(payload.payment_method);
     if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
-      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      cleanupUploadedFiles();
       return res
         .status(400)
         .json({ ok: false, message: "Invalid or missing payment_method" });
@@ -496,7 +458,14 @@ async function createOrder(req, res) {
       .toUpperCase();
     payload.order_id = order_id;
 
-    // ✅ AddressDetails mapping (your frontend fields)
+    // ✅ IMPORTANT: move multer TMP uploads into /orders/<order_id>/ and get urls
+    // (uses your existing helper)
+    const moved = mapUploadedFilesToPayload(req, order_id, normalizedItems);
+    const uploadedPhotoUrls = Array.isArray(moved.order_images)
+      ? moved.order_images
+      : [];
+
+    // ✅ AddressDetails mapping
     payload.delivery_floor_unit =
       payload.delivery_floor_unit ??
       payload.floor_unit ??
@@ -520,7 +489,6 @@ async function createOrder(req, res) {
 
     const fulfillment = normalizeFulfillment(payload.fulfillment_type);
 
-    // delivery_address required for Delivery
     if (fulfillment === "Delivery") {
       const addrObj = payload.delivery_address;
 
@@ -532,7 +500,7 @@ async function createOrder(req, res) {
           : String(addrObj || "").trim();
 
       if (!addrStr) {
-        (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+        cleanupUploadedFiles(order_id);
         return res.status(400).json({
           ok: false,
           message: "delivery_address is required for Delivery",
@@ -540,7 +508,6 @@ async function createOrder(req, res) {
       }
     }
 
-    // ✅ stringify delivery_address object for DB storage
     if (
       payload.delivery_address &&
       typeof payload.delivery_address === "object"
@@ -548,11 +515,9 @@ async function createOrder(req, res) {
       payload.delivery_address = JSON.stringify(payload.delivery_address);
     }
 
-    /* =========================================================
-       ✅ DELIVERY PHOTOS (from middleware + optional body urls)
-       ========================================================= */
-    const uploadedPhotoUrls = toWebPaths(req.deliveryPhotos || []);
-
+    /* =========================
+       ✅ DELIVERY PHOTOS MERGE
+       ========================= */
     const bodyList = Array.isArray(payload.delivery_photo_urls)
       ? payload.delivery_photo_urls
       : Array.isArray(payload.special_photos)
@@ -570,7 +535,7 @@ async function createOrder(req, res) {
     ]);
 
     if (allPhotos.length > MAX_PHOTOS) {
-      (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
+      cleanupUploadedFiles(order_id);
       return res.status(400).json({
         ok: false,
         message: `Maximum ${MAX_PHOTOS} photos are allowed.`,
@@ -579,29 +544,12 @@ async function createOrder(req, res) {
     }
 
     payload.delivery_photo_urls = allPhotos;
-    payload.delivery_photo_url = allPhotos.length
-      ? allPhotos[0]
-      : payload.delivery_photo_url || null;
+    payload.delivery_photo_url = allPhotos.length ? allPhotos[0] : null;
 
-    // ✅ status
     const status = String(payload.status || "PENDING")
       .trim()
       .toUpperCase();
 
-    // helpful debug log
-    console.log("[createOrder] order_id:", order_id);
-    console.log(
-      "[createOrder] photos:",
-      payload.delivery_photo_urls?.length || 0
-    );
-    console.log(
-      "[createOrder] service_type:",
-      serviceType,
-      "payment:",
-      payMethod
-    );
-
-    /* ===================== CREATE ORDER ===================== */
     const created_id = await Order.create({
       ...payload,
       service_type: serviceType,
@@ -662,10 +610,7 @@ async function createOrder(req, res) {
     });
   } catch (err) {
     console.error("[createOrder ERROR]", err);
-
-    // cleanup uploads on crash
-    (req.deliveryPhotos || []).forEach((f) => safeUnlink(f?.path));
-
+    cleanupUploadedFiles();
     return res.status(500).json({
       ok: false,
       message: "Unable to place order",
@@ -820,7 +765,9 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 
 /**
  * PATCH/PUT /orders/:order_id/status
- * ✅ FINAL FIX: If status=DELIVERED => archive+delete via completeAndArchiveDeliveredOrder()
+ * ✅ FIXED: For CONFIRMED => do wallet capture BEFORE setting status=CONFIRMED
+ * ✅ FINAL: For DELIVERED => archive+delete via completeAndArchiveDeliveredOrder()
+ * ✅ FINAL: For CANCELLED => archive+delete
  * ✅ Backward compatible: if status=COMPLETED, treat as DELIVERED
  */
 async function updateOrderStatus(req, res) {
@@ -843,7 +790,7 @@ async function updateOrderStatus(req, res) {
       delivered_by, // optional
     } = body;
 
-    // ✅ STRICT: status must be provided and must match the allowed set (after normalization)
+    // ✅ STRICT: status must be provided
     if (typeof status !== "string" || !status.trim()) {
       return res.status(400).json({ message: "Status is required" });
     }
@@ -852,7 +799,7 @@ async function updateOrderStatus(req, res) {
     const normalized =
       normalizedRaw === "COMPLETED" ? "DELIVERED" : normalizedRaw;
 
-    // ✅ STRICT: DO NOT allow anything outside ALLOWED_STATUSES
+    // ✅ STRICT: only allow from whitelist
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
         message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
@@ -882,7 +829,7 @@ async function updateOrderStatus(req, res) {
     const finalReason = String(reason || "").trim();
 
     /* =========================================================
-       ✅ DELIVERED => archive to delivered_* and delete main rows
+       ✅ DELIVERED => archive+delete
        ========================================================= */
     if (normalized === "DELIVERED") {
       const by =
@@ -1079,8 +1026,13 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    /* ================= CONFIRMED logic ================= */
+    /* =========================================================
+       ✅ CONFIRMED logic (FIXED ORDER: apply changes → update totals → capture → set status)
+       ========================================================= */
+    let captureInfo = null;
+
     if (normalized === "CONFIRMED") {
+      // apply unavailable items if provided
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
@@ -1095,6 +1047,7 @@ async function updateOrderStatus(req, res) {
         }
       }
 
+      // update final amounts first
       const updatePayload = {};
       if (final_total_amount != null)
         updatePayload.total_amount = Number(final_total_amount);
@@ -1113,11 +1066,27 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
+      // ETA window
       if (
         estimated_minutes != null &&
         Number.isFinite(Number(estimated_minutes))
       ) {
         await updateEstimatedArrivalTime(order_id, estimated_minutes);
+      }
+
+      // ✅ CAPTURE FIRST (prevents CONFIRMED when capture fails)
+      try {
+        if (payMethod === "WALLET") {
+          captureInfo = await Order.captureOrderFunds(order_id);
+        } else if (payMethod === "COD") {
+          captureInfo = await Order.captureOrderCODFee(order_id);
+        }
+      } catch (e) {
+        return res.status(500).json({
+          success: false,
+          message: "Unable to accept order. Wallet capture failed.",
+          error: e?.message || "Capture error",
+        });
       }
     }
 
@@ -1134,22 +1103,6 @@ async function updateOrderStatus(req, res) {
       [order_id]
     );
     const business_ids = bizRows.map((r) => r.business_id);
-
-    let captureInfo = null;
-    if (normalized === "CONFIRMED") {
-      try {
-        if (payMethod === "WALLET") {
-          captureInfo = await Order.captureOrderFunds(order_id);
-        } else if (payMethod === "COD") {
-          captureInfo = await Order.captureOrderCODFee(order_id);
-        }
-      } catch (e) {
-        return res.status(500).json({
-          message: "Order accepted, but wallet capture failed.",
-          error: e?.message || "Capture error",
-        });
-      }
-    }
 
     broadcastOrderStatusToMany({
       order_id,
@@ -1194,6 +1147,7 @@ async function updateOrderStatus(req, res) {
       }
     }
 
+    // wallet debit notify only when capture actually captured in this request
     if (
       captureInfo &&
       captureInfo.captured &&

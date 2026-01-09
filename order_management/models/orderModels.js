@@ -1359,7 +1359,7 @@ async function archiveDeliveredOrderInternal(
 
   const finalReason = String(reason || "").trim();
 
-  // ✅ NEW: resolve service type for delivered archive too
+  // ✅ Resolve service_type even if orders.service_type is missing
   let resolvedServiceType = null;
   try {
     resolvedServiceType = await resolveOrderServiceType(order_id, conn);
@@ -1369,6 +1369,7 @@ async function archiveDeliveredOrderInternal(
       "FOOD";
   }
 
+  /* ====================== delivered_orders ====================== */
   if (hasDeliveredOrders) {
     const cols = await getTableColumns("delivered_orders", conn);
 
@@ -1380,6 +1381,7 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("service_type"))
       row.service_type = resolvedServiceType || "FOOD";
 
+    // status in delivered table (you set DEFAULT COMPLETED but you want DELIVERED)
     if (cols.has("status")) row.status = "DELIVERED";
 
     if (cols.has("status_reason")) {
@@ -1387,6 +1389,7 @@ async function archiveDeliveredOrderInternal(
       row.status_reason = r;
     }
 
+    // amounts
     if (cols.has("total_amount")) row.total_amount = order.total_amount;
     if (cols.has("discount_amount"))
       row.discount_amount = order.discount_amount;
@@ -1395,23 +1398,51 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("merchant_delivery_fee"))
       row.merchant_delivery_fee = order.merchant_delivery_fee;
 
-    const pm = String(order.payment_method || "").trim();
-    const pmUpper = pm.toUpperCase();
-    if (cols.has("payment_method")) row.payment_method = pmUpper || pm || "COD";
+    // payment
+    if (cols.has("payment_method")) {
+      const pm = String(order.payment_method || "").trim();
+      row.payment_method = pm.toUpperCase() || pm || "COD";
+    }
 
+    // address + notes
     if (cols.has("delivery_address"))
       row.delivery_address = order.delivery_address;
     if (cols.has("note_for_restaurant"))
       row.note_for_restaurant = order.note_for_restaurant;
     if (cols.has("if_unavailable")) row.if_unavailable = order.if_unavailable;
 
+    // ✅ FIX: copy delivery extras
+    if (cols.has("delivery_floor_unit"))
+      row.delivery_floor_unit = order.delivery_floor_unit ?? null;
+
+    if (cols.has("delivery_instruction_note"))
+      row.delivery_instruction_note = order.delivery_instruction_note ?? null;
+
+    if (cols.has("delivery_special_mode"))
+      row.delivery_special_mode =
+        order.delivery_special_mode ?? order.special_mode ?? null;
+
+    // ✅ FIX: store photo thumbnail (or tolerate list JSON if thumbnail missing)
+    if (cols.has("delivery_photo_url")) {
+      let photo = order.delivery_photo_url ?? null;
+      if (!photo && order.delivery_photo_urls)
+        photo = order.delivery_photo_urls;
+      row.delivery_photo_url = photo ? String(photo) : null;
+    }
+
+    // fulfillment + priority + ETA
     if (cols.has("fulfillment_type"))
       row.fulfillment_type = order.fulfillment_type || "Delivery";
     if (cols.has("priority")) row.priority = !!order.priority;
     if (cols.has("estimated_arrivial_time"))
       row.estimated_arrivial_time = order.estimated_arrivial_time;
 
-    if (cols.has("delivered_by")) row.delivered_by = delivered_by;
+    // delivery metadata
+    if (cols.has("delivered_by"))
+      row.delivered_by =
+        String(delivered_by || "SYSTEM")
+          .trim()
+          .toUpperCase() || "SYSTEM";
     if (cols.has("delivered_at")) row.delivered_at = new Date();
 
     if (cols.has("delivery_batch_id"))
@@ -1422,65 +1453,77 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("delivery_ride_id"))
       row.delivery_ride_id = order.delivery_ride_id ?? null;
 
+    // original timestamps
     if (cols.has("original_created_at"))
       row.original_created_at = order.created_at ?? null;
     if (cols.has("original_updated_at"))
       row.original_updated_at = order.updated_at ?? null;
 
+    // fallback timestamps if the delivered table has these columns
     if (cols.has("created_at") && pick(row, "created_at") === undefined)
       row.created_at = new Date();
     if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
       row.updated_at = new Date();
 
+    // ✅ FIX: UPSERT (avoid silent skip from INSERT IGNORE)
     const fields = Object.keys(row);
     if (fields.length) {
+      const colSql = fields.map((f) => `\`${f}\``).join(", ");
       const placeholders = fields.map(() => "?").join(", ");
       const values = fields.map((k) => row[k]);
 
+      const updateFields = fields.filter((f) => f !== "order_id");
+      const updateSql = updateFields.length
+        ? updateFields.map((f) => `\`${f}\`=VALUES(\`${f}\`)`).join(", ")
+        : "`order_id`=`order_id`";
+
       await conn.query(
-        `INSERT IGNORE INTO delivered_orders (${fields.join(
-          ", "
-        )}) VALUES (${placeholders})`,
+        `INSERT INTO delivered_orders (${colSql})
+         VALUES (${placeholders})
+         ON DUPLICATE KEY UPDATE ${updateSql}`,
         values
       );
     }
   }
 
-  if (hasDeliveredItems && items.length) {
+  /* =================== delivered_order_items =================== */
+  if (hasDeliveredItems) {
     const cols = await getTableColumns("delivered_order_items", conn);
 
-    for (const it of items) {
-      const row = {};
-      if (cols.has("order_id")) row.order_id = it.order_id;
+    // ✅ FIX: prevent duplicates if job/controller re-runs for same order_id
+    await conn.query(`DELETE FROM delivered_order_items WHERE order_id = ?`, [
+      order_id,
+    ]);
 
-      if (cols.has("business_id")) row.business_id = it.business_id;
-      if (cols.has("business_name")) row.business_name = it.business_name;
+    if (items.length) {
+      for (const it of items) {
+        const row = {};
 
-      if (cols.has("menu_id")) row.menu_id = it.menu_id;
-      if (cols.has("item_name")) row.item_name = it.item_name;
-      if (cols.has("item_image")) row.item_image = it.item_image;
+        if (cols.has("order_id")) row.order_id = it.order_id;
 
-      if (cols.has("quantity")) row.quantity = it.quantity;
-      if (cols.has("price")) row.price = it.price;
-      if (cols.has("subtotal")) row.subtotal = it.subtotal;
+        if (cols.has("business_id")) row.business_id = it.business_id;
+        if (cols.has("business_name")) row.business_name = it.business_name;
 
-      if (cols.has("platform_fee")) row.platform_fee = it.platform_fee ?? 0;
-      if (cols.has("delivery_fee")) row.delivery_fee = it.delivery_fee ?? 0;
+        if (cols.has("menu_id")) row.menu_id = it.menu_id;
+        if (cols.has("item_name")) row.item_name = it.item_name;
+        if (cols.has("item_image")) row.item_image = it.item_image ?? null;
 
-      if (cols.has("created_at") && pick(row, "created_at") === undefined)
-        row.created_at = new Date();
-      if (cols.has("updated_at") && pick(row, "updated_at") === undefined)
-        row.updated_at = new Date();
+        if (cols.has("quantity")) row.quantity = it.quantity ?? 1;
+        if (cols.has("price")) row.price = it.price ?? 0;
+        if (cols.has("subtotal")) row.subtotal = it.subtotal ?? 0;
 
-      const fields = Object.keys(row);
-      if (fields.length) {
+        if (cols.has("platform_fee")) row.platform_fee = it.platform_fee ?? 0;
+        if (cols.has("delivery_fee")) row.delivery_fee = it.delivery_fee ?? 0;
+
+        const fields = Object.keys(row);
+        if (!fields.length) continue;
+
+        const colSql = fields.map((f) => `\`${f}\``).join(", ");
         const placeholders = fields.map(() => "?").join(", ");
         const values = fields.map((k) => row[k]);
 
         await conn.query(
-          `INSERT IGNORE INTO delivered_order_items (${fields.join(
-            ", "
-          )}) VALUES (${placeholders})`,
+          `INSERT INTO delivered_order_items (${colSql}) VALUES (${placeholders})`,
           values
         );
       }
