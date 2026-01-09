@@ -1,37 +1,35 @@
-// config/redis.js  ✅ (ADMIN SIDE) ioredis setup
-const IORedis = require("ioredis");
+// config/redis.js
+const Redis = require("ioredis");
 
 let redis;
 
 /**
- * Env supported:
- *  - REDIS_URL=redis://:password@host:6379/0
- *  - or REDIS_HOST, REDIS_PORT, REDIS_PASSWORD, REDIS_DB
+ * Singleton Redis client.
+ * Uses REDIS_URL=redis://:password@host:6379[/db]
  */
 function getRedis() {
-  if (redis) return redis;
+  if (!redis) {
+    const url = process.env.REDIS_URL;
+    if (!url) {
+      throw new Error("REDIS_URL missing in environment");
+    }
 
-  const url = process.env.REDIS_URL && String(process.env.REDIS_URL).trim();
-
-  if (url) {
-    redis = new IORedis(url, {
+    redis = new Redis(url, {
       maxRetriesPerRequest: null,
-      enableReadyCheck: true,
     });
-  } else {
-    redis = new IORedis({
-      host: process.env.REDIS_HOST || "127.0.0.1",
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASSWORD || undefined,
-      db: Number(process.env.REDIS_DB || 0),
-      maxRetriesPerRequest: null,
-      enableReadyCheck: true,
+
+    redis.on("connect", () => {
+      console.log(
+        "✅ Redis connected:",
+        redis.options.host,
+        redis.options.port
+      );
+    });
+
+    redis.on("error", (err) => {
+      console.error("❌ Redis error:", err?.message || err);
     });
   }
-
-  redis.on("connect", () => console.log("[redis] connected"));
-  redis.on("error", (e) => console.error("[redis] error", e?.message || e));
-
   return redis;
 }
 
