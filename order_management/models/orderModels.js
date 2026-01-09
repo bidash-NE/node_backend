@@ -1340,6 +1340,7 @@ async function cancelIfStillPending(order_id, reason) {
 // models/orderModels.js
 // ✅ REPLACE this entire function
 
+// models/orderModels.js
 async function archiveDeliveredOrderInternal(
   conn,
   order_id,
@@ -1349,46 +1350,11 @@ async function archiveDeliveredOrderInternal(
   const hasDeliveredItems = await tableExists("delivered_order_items", conn);
   if (!hasDeliveredOrders && !hasDeliveredItems) return { archived: false };
 
-  // ✅ Fetch ONLY the columns we care about (prevents weird defaults/shape issues)
+  // ✅ SAFE: SELECT * avoids "unknown column" crashes (special_mode / delivery_photo_urls etc.)
   const [[order]] = await conn.query(
-    `
-    SELECT
-      order_id,
-      user_id,
-      service_type,
-      status,
-      status_reason,
-      total_amount,
-      discount_amount,
-      delivery_fee,
-      platform_fee,
-      merchant_delivery_fee,
-      payment_method,
-      delivery_address,
-      note_for_restaurant,
-      if_unavailable,
-      fulfillment_type,
-      priority,
-      estimated_arrivial_time,
-      delivery_batch_id,
-      delivery_driver_id,
-      delivery_ride_id,
-      delivery_status,
-      delivery_floor_unit,
-      delivery_instruction_note,
-      delivery_special_mode,
-      special_mode,
-      delivery_photo_url,
-      delivery_photo_urls,
-      created_at,
-      updated_at
-    FROM orders
-    WHERE order_id = ?
-    LIMIT 1
-    `,
+    `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
     [order_id]
   );
-
   if (!order) return { archived: false };
 
   const [items] = await conn.query(
@@ -1411,13 +1377,12 @@ async function archiveDeliveredOrderInternal(
     resolvedServiceType = "FOOD";
   }
 
-  // ✅ normalize delivered_by to allowed enum values
+  // ✅ normalize delivered_by to allowed enum
   const deliveredBy =
     String(delivered_by || "SYSTEM")
       .trim()
       .toUpperCase() || "SYSTEM";
 
-  // helper to safely parse photo list and pick first
   const firstPhotoFromList = (v) => {
     if (v == null) return null;
     if (Array.isArray(v)) return v.map(String).filter(Boolean)[0] || null;
@@ -1435,64 +1400,58 @@ async function archiveDeliveredOrderInternal(
   /* ====================== delivered_orders ====================== */
   if (hasDeliveredOrders) {
     const cols = await getTableColumns("delivered_orders", conn);
-
     const row = {};
 
     if (cols.has("order_id")) row.order_id = order.order_id;
     if (cols.has("user_id")) row.user_id = order.user_id;
 
-    // NOTE: your delivered table uses "service_type"
     if (cols.has("service_type")) row.service_type = resolvedServiceType;
 
-    // your delivered table default is COMPLETED, but you want DELIVERED
     if (cols.has("status")) row.status = "DELIVERED";
 
     if (cols.has("status_reason")) {
-      const r = finalReason || String(order.status_reason || "").trim() || null;
-      row.status_reason = r;
+      row.status_reason =
+        finalReason || String(order.status_reason || "").trim() || null;
     }
 
-    // ✅ force numeric values (prevents string/empty -> 0 surprises)
-    const total_amount = Number(order.total_amount || 0);
-    const discount_amount = Number(order.discount_amount || 0);
+    // numbers
     const delivery_fee = Number(order.delivery_fee || 0);
+    const discount_amount = Number(order.discount_amount || 0);
     const platform_fee = Number(order.platform_fee || 0);
-    const merchant_delivery_fee =
-      order.merchant_delivery_fee != null
-        ? Number(order.merchant_delivery_fee)
-        : null;
 
-    if (cols.has("total_amount")) row.total_amount = total_amount;
-    if (cols.has("discount_amount")) row.discount_amount = discount_amount;
+    const total_amount = Number(order.total_amount || 0);
     if (cols.has("delivery_fee")) row.delivery_fee = delivery_fee;
+    if (cols.has("discount_amount")) row.discount_amount = discount_amount;
     if (cols.has("platform_fee")) row.platform_fee = platform_fee;
     if (cols.has("merchant_delivery_fee"))
-      row.merchant_delivery_fee = merchant_delivery_fee;
+      row.merchant_delivery_fee =
+        order.merchant_delivery_fee != null
+          ? Number(order.merchant_delivery_fee)
+          : null;
 
-    // ✅ safety fallback: if total_amount is 0 but items exist, compute like your SQL
+    if (cols.has("total_amount")) row.total_amount = total_amount;
+
+    // ✅ fallback: if total_amount is 0 but items exist, compute it
     if (cols.has("total_amount") && Number(row.total_amount || 0) === 0) {
       const items_total = (items || []).reduce(
         (s, it) => s + Number(it.subtotal || 0),
         0
       );
       if (items_total > 0) {
-        const computed = Number(
+        row.total_amount = Number(
           (items_total + delivery_fee - discount_amount + platform_fee).toFixed(
             2
           )
         );
-        if (computed > 0) row.total_amount = computed;
       }
     }
 
     if (cols.has("payment_method")) {
-      const pm = String(order.payment_method || "")
+      row.payment_method = String(order.payment_method || "")
         .trim()
         .toUpperCase();
-      row.payment_method = pm || "COD";
     }
 
-    // delivered_orders.delivery_address is NOT NULL in your schema
     if (cols.has("delivery_address")) {
       row.delivery_address =
         order.delivery_address != null ? String(order.delivery_address) : "";
@@ -1512,31 +1471,27 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("estimated_arrivial_time"))
       row.estimated_arrivial_time = order.estimated_arrivial_time ?? null;
 
-    // ✅ delivery extras (your delivered table has these)
+    // ✅ correct column name: delivery_special_mode (NOT special_mode)
+    if (cols.has("delivery_special_mode")) {
+      row.delivery_special_mode = order.delivery_special_mode
+        ? String(order.delivery_special_mode).trim().toUpperCase()
+        : null;
+    }
+
     if (cols.has("delivery_floor_unit"))
       row.delivery_floor_unit = order.delivery_floor_unit ?? null;
 
     if (cols.has("delivery_instruction_note"))
       row.delivery_instruction_note = order.delivery_instruction_note ?? null;
 
-    if (cols.has("delivery_special_mode")) {
-      const mode = order.delivery_special_mode ?? order.special_mode ?? null;
-      row.delivery_special_mode = mode
-        ? String(mode).trim().toUpperCase()
-        : null;
-    }
-
     if (cols.has("delivery_photo_url")) {
-      // prefer delivery_photo_url, fallback to first from delivery_photo_urls
       const photo =
-        order.delivery_photo_url != null &&
-        String(order.delivery_photo_url).trim()
+        order.delivery_photo_url && String(order.delivery_photo_url).trim()
           ? String(order.delivery_photo_url).trim()
-          : firstPhotoFromList(order.delivery_photo_urls);
+          : firstPhotoFromList(order.delivery_photo_urls); // only works if column exists
       row.delivery_photo_url = photo || null;
     }
 
-    // delivery metadata
     if (cols.has("delivered_by")) row.delivered_by = deliveredBy;
     if (cols.has("delivered_at")) row.delivered_at = new Date();
 
@@ -1554,7 +1509,7 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("original_updated_at"))
       row.original_updated_at = order.updated_at ?? null;
 
-    // ✅ UPSERT so we never keep old zeros when the same order_id already exists
+    // ✅ UPSERT (prevents old zero values staying forever)
     const fields = Object.keys(row);
     if (fields.length) {
       const colSql = fields.map((f) => `\`${f}\``).join(", ");
@@ -1579,7 +1534,6 @@ async function archiveDeliveredOrderInternal(
   if (hasDeliveredItems) {
     const cols = await getTableColumns("delivered_order_items", conn);
 
-    // prevent duplicates if re-run
     await conn.query(`DELETE FROM delivered_order_items WHERE order_id = ?`, [
       order_id,
     ]);
@@ -1601,7 +1555,6 @@ async function archiveDeliveredOrderInternal(
       if (cols.has("price")) row.price = Number(it.price ?? 0);
       if (cols.has("subtotal")) row.subtotal = Number(it.subtotal ?? 0);
 
-      // only if these columns exist in delivered_order_items
       if (cols.has("platform_fee"))
         row.platform_fee = Number(it.platform_fee ?? 0);
       if (cols.has("delivery_fee"))
