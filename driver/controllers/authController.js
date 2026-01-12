@@ -1,4 +1,4 @@
-// controllers/authController.js ✅ (returns proper success/error always)
+// controllers/authController.js
 const redis = require("../models/redisClient");
 const { transporter, from, isConfigured } = require("../config/mailer");
 const db = require("../config/db");
@@ -13,6 +13,7 @@ const isValidEmail = (email) =>
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
+
     if (!emailRaw) {
       return res
         .status(400)
@@ -35,11 +36,12 @@ exports.sendOtp = async (req, res) => {
     const cleanEmail = normalizeEmail(emailRaw);
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
-    // block if already registered
+    // Block if already registered (registration OTP)
     const [rows] = await db.execute(
       "SELECT user_id FROM users WHERE email = ?",
       [cleanEmail]
     );
+
     if (rows.length > 0) {
       return res.status(400).json({
         success: false,
@@ -47,7 +49,7 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // store OTP 5 min
+    // Store OTP 5 min
     await redis.set(`otp:${cleanEmail}`, otp, { ex: 300 });
 
     const info = await transporter.sendMail({
@@ -56,7 +58,6 @@ exports.sendOtp = async (req, res) => {
       subject: "Registration OTP",
       text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
       html: `<p>Your OTP is:</p><h2>${otp}</h2><p>Expires in 5 minutes.</p>`,
-      // keep simple — envelope not needed here
     });
 
     if (!info?.accepted || info.accepted.length === 0) {

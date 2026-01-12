@@ -1,29 +1,39 @@
-// config/mailer.js  ✅ (same behavior, no logs)
+// config/mailer.js
 const nodemailer = require("nodemailer");
 
-const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
+const {
+  SMTP_HOST = "",
+  SMTP_PORT = "587",
+  SMTP_USER = "",
+  SMTP_PASS = "",
+  SMTP_FROM = "",
+  SMTP_INSECURE_TLS = "false", // set true ONLY if your server has TLS cert-chain issues
+} = process.env;
 
-const host = (SMTP_HOST || "").trim();
-const port = Number((SMTP_PORT || "587").trim());
-const user = (SMTP_USER || "").trim();
-const pass = (SMTP_PASS || "").trim();
+const host = String(SMTP_HOST).trim();
+const port = Number(String(SMTP_PORT).trim() || 587);
+const user = String(SMTP_USER).trim();
+const pass = String(SMTP_PASS).trim();
 const from =
-  (SMTP_FROM && SMTP_FROM.trim()) || (user ? `No-Reply <${user}>` : null);
+  (SMTP_FROM && String(SMTP_FROM).trim()) ||
+  (user ? `No-Reply <${user}>` : null);
 
 const isConfigured = Boolean(host && user && pass);
+
+const insecureTls = ["true", "1", "yes", "y"].includes(
+  String(SMTP_INSECURE_TLS).toLowerCase()
+);
 
 const transporter = isConfigured
   ? nodemailer.createTransport({
       host,
       port,
-      secure: port === 465,
+      secure: port === 465, // 465 SSL, 587 STARTTLS
       auth: { user, pass },
-      // ✅ keep your earlier TLS behavior so it continues working
-      tls: { rejectUnauthorized: false, servername: host },
       requireTLS: port === 587,
-      // ✅ remove logs
       logger: false,
       debug: false,
+      ...(insecureTls ? { tls: { rejectUnauthorized: false } } : {}),
     })
   : null;
 
