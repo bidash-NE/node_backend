@@ -10,6 +10,7 @@ const normalizeEmail = (email) =>
 const isValidEmail = (email) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
+// ✅ Registration (Email) - TabDhey format
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
@@ -38,7 +39,7 @@ exports.sendOtp = async (req, res) => {
 
     // Block if already registered (registration OTP)
     const [rows] = await db.execute(
-      "SELECT user_id FROM users WHERE email = ?",
+      "SELECT user_id, user_name FROM users WHERE email = ? LIMIT 1",
       [cleanEmail]
     );
 
@@ -49,15 +50,42 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // Store OTP 5 min
     await redis.set(`otp:${cleanEmail}`, otp, { ex: 300 });
+
+    const userName = "Valued User";
+    const disclaimer =
+      "Disclaimer: Please do NOT share this OTP or your password with anyone. " +
+      "TabDhey will never ask for your OTP, password, or T-PIN. " +
+      "If you did not request this OTP, please ignore this email.";
+
+    const subject = "Your OTP for Registration";
+
+    const text =
+      `Dear ${userName},\n\n` +
+      `Welcome to TabDhey!\n\n` +
+      `Your OTP is:\n\n` +
+      `${otp}\n\n` +
+      `This OTP is valid for 5 minutes and can only be used once.\n\n` +
+      `${disclaimer}\n\n` +
+      `Everything at your door step!\n` +
+      `TabDhey`;
+
+    const html =
+      `<p>Dear ${userName},</p>` +
+      `<p>Welcome to <b>TabDhey</b>!</p>` +
+      `<p>Your OTP is:</p>` +
+      `<h2 style="letter-spacing:4px;">${otp}</h2>` +
+      `<p>This OTP is valid for <b>5 minutes</b> and can only be used once.</p>` +
+      `<hr />` +
+      `<p style="font-size:12px;color:#777;">${disclaimer}</p>` +
+      `<p><b>Everything at your door step!</b><br/>TabDhey</p>`;
 
     const info = await transporter.sendMail({
       from,
       to: cleanEmail,
-      subject: "Registration OTP",
-      text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
-      html: `<p>Your OTP is:</p><h2>${otp}</h2><p>Expires in 5 minutes.</p>`,
+      subject,
+      text,
+      html,
     });
 
     if (!info?.accepted || info.accepted.length === 0) {

@@ -312,6 +312,7 @@ const isValidEmail = (email) =>
    - OTP valid: 5 mins
    - resend cooldown: 30s
    ============================================================ */
+// ✅ Forgot Password (Email) - TabDhey format
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
@@ -330,7 +331,7 @@ exports.sendOtp = async (req, res) => {
     const email = normalizeEmail(emailRaw);
 
     const [rows] = await db.query(
-      "SELECT user_id, role, email FROM users WHERE email = ? LIMIT 1",
+      "SELECT user_id, role, email, user_name FROM users WHERE email = ? LIMIT 1",
       [email]
     );
 
@@ -356,18 +357,46 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    const otp = makeOtp();
+    const otp = makeOtp(); // 6 digits string
 
     const otpKey = `fp_email_otp:${email}`;
     await redisClient.set(otpKey, otp, { ex: 300 });
     await redisClient.set(rlKey, "1", { ex: 30 });
 
+    const userName = rows[0].user_name || "Valued User";
+    const disclaimer =
+      "Disclaimer: Please do NOT share this OTP or your password with anyone. " +
+      "TabDhey will never ask for your OTP, password, or T-PIN. " +
+      "If you did not request a password reset, please ignore this email.";
+
+    const subject = "Your OTP for Password Reset";
+
+    const text =
+      `Dear ${userName},\n\n` +
+      `We received a request to reset your TabDhey account password.\n\n` +
+      `Your OTP is:\n\n` +
+      `${otp}\n\n` +
+      `This OTP is valid for 5 minutes and can only be used once.\n\n` +
+      `${disclaimer}\n\n` +
+      `Everything at your door step!\n` +
+      `TabDhey`;
+
+    const html =
+      `<p>Dear ${userName},</p>` +
+      `<p>We received a request to reset your <b>TabDhey</b> account password.</p>` +
+      `<p>Your OTP is:</p>` +
+      `<h2 style="letter-spacing:4px;">${otp}</h2>` +
+      `<p>This OTP is valid for <b>5 minutes</b> and can only be used once.</p>` +
+      `<hr />` +
+      `<p style="font-size:12px;color:#777;">${disclaimer}</p>` +
+      `<p><b>Everything at your door step!</b><br/>TabDhey</p>`;
+
     const info = await transporter.sendMail({
       from,
       to: email,
-      subject: "Reset Your Password OTP",
-      text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
-      html: `<p>Your OTP is <b>${otp}</b>. It will expire in 5 minutes.</p>`,
+      subject,
+      text,
+      html,
     });
 
     if (!info?.accepted || info.accepted.length === 0) {

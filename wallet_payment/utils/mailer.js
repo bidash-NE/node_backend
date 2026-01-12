@@ -55,7 +55,7 @@ async function sendOtpEmail({ to, otp, userName, walletId, ttlMinutes = 5 }) {
 
   const disclaimer =
     "Disclaimer: Please do NOT share this OTP or your T-PIN with anyone. " +
-    "New Edge Technology Pvt. Ltd. will never ask for your OTP, T-PIN, or password. " +
+    "Tab Dhey will never ask for your OTP, T-PIN, or password. " +
     "If you did not request a T-PIN reset, please ignore this email immediately.";
 
   const subject = "Your OTP for Wallet T-PIN Reset";
@@ -72,7 +72,7 @@ This OTP is valid for ${ttlMinutes} minutes and can only be used once.
 ${disclaimer}
 
 Best Regards,
-New Edge Technology Pvt. Ltd.
+TabDhey
 `.trim();
 
   const html = `
@@ -83,7 +83,7 @@ New Edge Technology Pvt. Ltd.
 <p>This OTP is valid for <b>${ttlMinutes} minutes</b> and can only be used once.</p>
 <hr />
 <p style="font-size:12px;color:#777;">${disclaimer}</p>
-<p>Best Regards,<br />New Edge Technology Pvt. Ltd.</p>
+<p>Best Regards,<br />TabDhey "Everything at your door step!"</p>
 `.trim();
 
   const info = await transporter.sendMail({
