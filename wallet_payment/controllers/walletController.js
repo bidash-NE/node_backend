@@ -499,7 +499,7 @@ async function forgotTPinRequest(req, res) {
     }
 
     const [rows] = await db.query(
-      "SELECT user_id, email, user_name FROM users WHERE user_id = ?",
+      "SELECT user_id, email, user_name FROM users WHERE user_id = ? LIMIT 1",
       [wallet.user_id]
     );
 
@@ -511,13 +511,35 @@ async function forgotTPinRequest(req, res) {
     }
 
     const user = rows[0];
-    const email = user.email;
+    const email = String(user.email || "")
+      .trim()
+      .toLowerCase();
     const userName = user.user_name || null;
+
+    // optional: basic email format check
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (!isValidEmail) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email address for this user.",
+      });
+    }
+
+    // optional: resend cooldown 30s
+    const rlKey = `tpin_reset_email_rl:${wallet.user_id}:${wallet.wallet_id}`;
+    if (await redis.get(rlKey)) {
+      return res.status(429).json({
+        success: false,
+        message: "Please wait before requesting another OTP.",
+      });
+    }
 
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
 
+    // ✅ store OTP 5 mins (your message says 10 mins but your code uses 300)
     await redis.set(redisKey, otp, "EX", 300);
+    await redis.set(rlKey, "1", "EX", 30);
 
     await sendOtpEmail({
       to: email,
@@ -529,11 +551,15 @@ async function forgotTPinRequest(req, res) {
     return res.json({
       success: true,
       message:
-        "OTP has been sent to your registered email address. It is valid for 10 minutes.",
+        "OTP has been sent to your registered email address. It is valid for 5 minutes.",
     });
   } catch (e) {
     console.error("Error in forgotTPinRequest:", e);
-    res.status(500).json({ success: false, message: e.message });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send OTP.",
+      error: e?.message || String(e),
+    });
   }
 }
 
