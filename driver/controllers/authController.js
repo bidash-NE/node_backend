@@ -1,103 +1,133 @@
+// controllers/authController.js ✅ (returns proper success/error always)
 const redis = require("../models/redisClient");
-const { transporter, from } = require("../config/mailer");
+const { transporter, from, isConfigured } = require("../config/mailer");
 const db = require("../config/db");
 
-// ✅ Send OTP
-// exports.sendOtp = async (req, res) => {
-//   const { email } = req.body;
-//   const otp = Math.floor(100000 + Math.random() * 900000).toString();
+const normalizeEmail = (email) =>
+  String(email || "")
+    .trim()
+    .toLowerCase();
+const isValidEmail = (email) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
-//   try {
-//     // ✅ Correct usage with Upstash Redis
-//     await redis.set(`otp:${email}`, otp, { ex: 300 });
-
-//     await transporter.sendMail({
-//       from: `"Ride App" <${process.env.EMAIL_USER}>`,
-//       to: email,
-//       subject: "Your OTP Code",
-//       text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
-//     });
-
-//     res.status(200).json({ message: "OTP sent to email" });
-//     // console.log("otp send successfully");
-//   } catch (err) {
-//     console.error("Error sending OTP:", err.message);
-//     res.status(500).json({ error: "Failed to send OTP" });
-//   }
-// };
 exports.sendOtp = async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email is required" });
-
-  const cleanEmail = String(email).trim().toLowerCase();
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
   try {
+    const emailRaw = req.body?.email;
+    if (!emailRaw) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Email is required" });
+    }
+
+    if (!isValidEmail(emailRaw)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address" });
+    }
+
+    if (!isConfigured || !transporter || !from) {
+      return res.status(500).json({
+        success: false,
+        message: "SMTP not configured. Check SMTP_HOST/SMTP_USER/SMTP_PASS",
+      });
+    }
+
+    const cleanEmail = normalizeEmail(emailRaw);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // block if already registered
     const [rows] = await db.execute(
       "SELECT user_id FROM users WHERE email = ?",
       [cleanEmail]
     );
-
     if (rows.length > 0) {
-      return res
-        .status(400)
-        .json({ error: "Email already registered. OTP not sent." });
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered. OTP not sent.",
+      });
     }
 
+    // store OTP 5 min
     await redis.set(`otp:${cleanEmail}`, otp, { ex: 300 });
-    console.log("[OTP] sending to:", cleanEmail);
 
     const info = await transporter.sendMail({
       from,
       to: cleanEmail,
-      subject: "Your OTP Code",
+      subject: "Registration OTP",
       text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
       html: `<p>Your OTP is:</p><h2>${otp}</h2><p>Expires in 5 minutes.</p>`,
-      envelope: { from, to: [cleanEmail] },
+      // keep simple — envelope not needed here
     });
 
-    console.log("[OTP] messageId:", info.messageId);
-    console.log("[OTP] accepted:", info.accepted);
-    console.log("[OTP] rejected:", info.rejected);
-    console.log("[OTP] response:", info.response);
-
-    // If server didn't accept any recipient, treat as failure:
-    if (!info.accepted || info.accepted.length === 0) {
-      return res.status(500).json({ error: "SMTP did not accept recipient" });
+    if (!info?.accepted || info.accepted.length === 0) {
+      return res.status(500).json({
+        success: false,
+        message: "SMTP did not accept recipient",
+      });
     }
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent to email",
+    });
   } catch (err) {
-    console.error("Error sending OTP:", err.message);
-    return res.status(500).json({ error: "Failed to send OTP" });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send OTP",
+      error: err?.message || String(err),
+    });
   }
 };
-// ✅ Verify OTP
+
 exports.verifyOtp = async (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!email || !otp)
-    return res.status(400).json({ error: "Email and OTP are required" });
-
   try {
-    const storedOtp = await redis.get(`otp:${email}`);
+    const emailRaw = req.body?.email;
+    const otpRaw = req.body?.otp;
 
-    // console.log("Redis stored OTP:", storedOtp);
-    // console.log("User input OTP:", otp);
+    if (!emailRaw || !otpRaw) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and OTP are required",
+      });
+    }
+
+    if (!isValidEmail(emailRaw)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address" });
+    }
+
+    const cleanEmail = normalizeEmail(emailRaw);
+    const otp = String(otpRaw).trim();
+
+    const storedOtp = await redis.get(`otp:${cleanEmail}`);
 
     if (!storedOtp) {
-      return res.status(410).json({ error: "OTP expired" });
+      return res.status(410).json({
+        success: false,
+        message: "OTP expired",
+      });
     }
 
-    if (storedOtp?.toString().trim() !== otp?.toString().trim()) {
-      return res.status(401).json({ error: "Invalid OTP" });
+    if (String(storedOtp).trim() !== otp) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid OTP",
+      });
     }
 
-    // ✅ Mark email as verified
-    await redis.set(`verified:${email}`, "true", { ex: 900 }); // 15 mins
-    await redis.del(`otp:${email}`); // clear OTP
+    await redis.set(`verified:${cleanEmail}`, "true", { ex: 900 }); // 15 mins
+    await redis.del(`otp:${cleanEmail}`);
 
-    return res.status(200).json({ message: "OTP verified successfully" });
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully",
+    });
   } catch (err) {
-    console.error("OTP verification error:", err);
-    return res.status(500).json({ error: "OTP verification failed" });
+    return res.status(500).json({
+      success: false,
+      message: "OTP verification failed",
+      error: err?.message || String(err),
+    });
   }
 };

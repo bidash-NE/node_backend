@@ -3,7 +3,9 @@ const db = require("../config/db"); // MySQL pool
 const redisClient = require("../models/redisClient");
 const Driver = require("../models/driverModel");
 const bcrypt = require("bcrypt");
-const nodemailer = require("nodemailer");
+
+// ✅ use your existing mailer config (same as we did now)
+const { transporter, from, isConfigured } = require("../config/mailer");
 
 /* ---------------- fetch (Node 18+ has global fetch) ---------------- */
 let fetchFn = global.fetch;
@@ -289,94 +291,224 @@ exports.resetPasswordSms = async (req, res) => {
 };
 
 /* ===========================
-   EXISTING EMAIL OTP FLOW
-   (UNCHANGED)
+   ✅ EMAIL OTP FLOW (EDITED)
+   - uses config/mailer.js transporter/from
+   - normalizes email for redis keys
+   - proper success/error responses
+   - adds verified flag (15 mins) like SMS flow
 =========================== */
 
-// Send OTP to email
+const normalizeEmail = (email) =>
+  String(email || "")
+    .trim()
+    .toLowerCase();
+const isValidEmail = (email) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+
+/* ============================================================
+   ✅ SEND OTP TO EMAIL (Forgot password)
+   Body: { email }
+   - only sends if email exists in DB
+   - OTP valid: 5 mins
+   - resend cooldown: 30s
+   ============================================================ */
 exports.sendOtp = async (req, res) => {
-  const { email } = req.body;
   try {
-    const [rows] = await db.query("SELECT * FROM users WHERE email = ?", [
-      email,
-    ]);
-    if (rows.length === 0)
-      return res.status(404).json({ error: "Email not found." });
+    const emailRaw = req.body?.email;
 
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    await redisClient.set(`otp:${email}`, otp.toString(), { ex: 300 });
+    if (!emailRaw) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Email is required." });
+    }
+    if (!isValidEmail(emailRaw)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address." });
+    }
 
-    // Send OTP via nodemailer
-    const transporter = nodemailer.createTransport({
-      service: "Gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
+    const email = normalizeEmail(emailRaw);
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
+    const [rows] = await db.query(
+      "SELECT user_id, role, email FROM users WHERE email = ? LIMIT 1",
+      [email]
+    );
+
+    if (rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Email not found." });
+    }
+
+    if (!isConfigured || !transporter || !from) {
+      return res.status(500).json({
+        success: false,
+        message: "Email service not configured on server.",
+      });
+    }
+
+    // resend cooldown 30s
+    const rlKey = `fp_email_rl:${email}`;
+    if (await redisClient.get(rlKey)) {
+      return res.status(429).json({
+        success: false,
+        message: "Please wait before requesting another OTP.",
+      });
+    }
+
+    const otp = makeOtp();
+
+    const otpKey = `fp_email_otp:${email}`;
+    await redisClient.set(otpKey, otp, { ex: 300 });
+    await redisClient.set(rlKey, "1", { ex: 30 });
+
+    const info = await transporter.sendMail({
+      from,
       to: email,
-      subject: "Reset Your Password OTP ",
+      subject: "Reset Your Password OTP",
+      text: `Your OTP is: ${otp}. It will expire in 5 minutes.`,
       html: `<p>Your OTP is <b>${otp}</b>. It will expire in 5 minutes.</p>`,
     });
 
-    res.json({ message: "OTP sent to email." });
+    if (!info?.accepted || info.accepted.length === 0) {
+      return res.status(500).json({
+        success: false,
+        message: "SMTP did not accept recipient.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent to email.",
+    });
   } catch (err) {
-    console.error("Send OTP Error:", err);
-    res.status(500).json({ error: "Internal server error." });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to send OTP.",
+      error: err?.message || String(err),
+    });
   }
 };
 
-// Verify OTP
+/* ============================================================
+   ✅ VERIFY EMAIL OTP
+   Body: { email, otp }
+   - verified flag valid: 15 mins
+   ============================================================ */
 exports.verifyOtp = async (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!email || !otp) {
-    return res.status(400).json({ error: "Email and OTP are required" });
-  }
-
   try {
-    const redisKey = `otp:${email.trim().toLowerCase()}`;
-    const storedOtp = await redisClient.get(redisKey);
+    const emailRaw = req.body?.email;
+    const otpRaw = req.body?.otp;
+
+    if (!emailRaw || !otpRaw) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and OTP are required.",
+      });
+    }
+    if (!isValidEmail(emailRaw)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address." });
+    }
+
+    const email = normalizeEmail(emailRaw);
+    const otp = String(otpRaw).trim();
+
+    // ensure email exists in DB (same behavior as before: only verify for real users)
+    const [rows] = await db.query(
+      "SELECT user_id FROM users WHERE email = ? LIMIT 1",
+      [email]
+    );
+    if (rows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Email not found." });
+    }
+
+    const otpKey = `fp_email_otp:${email}`;
+    const storedOtp = await redisClient.get(otpKey);
 
     if (!storedOtp) {
-      return res.status(400).json({ error: "OTP expired or not found" });
+      return res.status(410).json({
+        success: false,
+        message: "OTP expired or not found.",
+      });
     }
 
-    if (storedOtp.toString().trim() !== otp.toString().trim()) {
-      return res.status(400).json({ error: "Invalid OTP" });
+    if (String(storedOtp).trim() !== otp) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid OTP.",
+      });
     }
 
-    await redisClient.del(redisKey);
+    // mark verified for 15 mins, clear OTP
+    const verifiedKey = `fp_email_verified:${email}`;
+    await redisClient.set(verifiedKey, "true", { ex: 900 });
+    await redisClient.del(otpKey);
 
-    return res.status(200).json({ message: "OTP verified successfully" });
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully.",
+    });
   } catch (err) {
-    console.error("OTP Verification Error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      success: false,
+      message: "OTP verification failed.",
+      error: err?.message || String(err),
+    });
   }
 };
 
-// Reset Password (email)
+/* ============================================================
+   ✅ RESET PASSWORD (email)
+   Body: { email, newPassword }
+   - requires verifyOtp first (verified flag)
+   ============================================================ */
 exports.resetPassword = async (req, res) => {
-  const { email, newPassword } = req.body;
-
-  if (!email || !newPassword) {
-    return res
-      .status(400)
-      .json({ error: "Email and new password are required." });
-  }
-
   try {
-    const [userRows] = await db.query("SELECT * FROM users WHERE email = ?", [
-      email,
-    ]);
+    const emailRaw = req.body?.email;
+    const newPassword = String(req.body?.newPassword || "");
+
+    if (!emailRaw || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and new password are required.",
+      });
+    }
+    if (!isValidEmail(emailRaw)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address." });
+    }
+    if (newPassword.trim().length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters.",
+      });
+    }
+
+    const email = normalizeEmail(emailRaw);
+
+    const [userRows] = await db.query(
+      "SELECT user_id, role FROM users WHERE email = ? LIMIT 1",
+      [email]
+    );
     if (userRows.length === 0) {
-      return res.status(404).json({ error: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found." });
+    }
+
+    // must be verified
+    const verifiedKey = `fp_email_verified:${email}`;
+    const verified = await redisClient.get(verifiedKey);
+    if (!verified) {
+      return res.status(403).json({
+        success: false,
+        message: "OTP not verified. Please verify OTP first.",
+      });
     }
 
     const user = userRows[0];
@@ -387,16 +519,25 @@ exports.resetPassword = async (req, res) => {
       email,
     ]);
 
-    if (user.role === "driver") {
+    if (String(user.role || "").toLowerCase() === "driver") {
       await Driver.updateOne(
         { user_id: user.user_id },
         { $set: { password: hashedPassword } }
       );
     }
 
-    return res.status(200).json({ message: "Password reset successfully." });
+    // cleanup verification flag
+    await redisClient.del(verifiedKey);
+
+    return res.status(200).json({
+      success: true,
+      message: "Password reset successfully.",
+    });
   } catch (err) {
-    console.error("Reset Password Error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
   }
 };
