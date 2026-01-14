@@ -13,17 +13,6 @@ const {
   sendNotificationSmsBulk,
 } = require("../services/smsNotificationService");
 
-/* ---------------------------------------------------
-   POST /api/system-notifications
-   Behaviour:
-   - If "in_app" is in delivery_channels:
-       -> Save in system_notifications
-   - If "email" is in delivery_channels:
-       -> Do NOT save in system_notifications,
-          just send emails + log in admin_logs
-   - If "sms" is in delivery_channels:
-       -> Send bulk SMS using SMS gateway bulk endpoint
---------------------------------------------------- */
 async function createSystemNotification(req, res) {
   try {
     const {
@@ -38,27 +27,41 @@ async function createSystemNotification(req, res) {
     const createdBy = user_id || null;
     const adminName = user_name || "System";
 
-    if (!title || !message) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Title and message are required." });
+    if (
+      !title ||
+      !String(title).trim() ||
+      !message ||
+      !String(message).trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Title and message are required.",
+      });
     }
 
-    if (!Array.isArray(delivery_channels) || !delivery_channels.length) {
+    if (!Array.isArray(delivery_channels) || delivery_channels.length === 0) {
       return res.status(400).json({
         success: false,
         message: "At least one delivery channel is required.",
       });
     }
 
-    if (!Array.isArray(target_audience) || !target_audience.length) {
+    if (!Array.isArray(target_audience) || target_audience.length === 0) {
       return res.status(400).json({
         success: false,
         message: "At least one target audience is required.",
       });
     }
 
-    const lowerChannels = delivery_channels.map((c) => String(c).toLowerCase());
+    const norm = (s) =>
+      String(s || "")
+        .trim()
+        .toLowerCase();
+    const lowerChannels = delivery_channels.map(norm);
+    const roles = target_audience
+      .map((r) => String(r || "").trim())
+      .filter(Boolean);
+
     const wantsInApp = lowerChannels.includes("in_app");
     const wantsEmail = lowerChannels.includes("email");
     const wantsSms = lowerChannels.includes("sms");
@@ -67,39 +70,43 @@ async function createSystemNotification(req, res) {
     let emailSummary = null;
     let smsSummary = null;
 
-    // 1️⃣ IN_APP: save into system_notifications
     if (wantsInApp) {
       notificationId = await insertSystemNotification({
-        title,
-        message,
+        title: String(title).trim(),
+        message: String(message).trim(),
         deliveryChannels: ["in_app"],
-        targetAudience: target_audience,
+        targetAudience: roles,
         createdBy,
       });
 
       await adminLogModel.addLog({
         user_id: createdBy,
         admin_name: adminName,
-        activity: `Created IN_APP notification #${notificationId} - "${title}" for roles [${target_audience.join(
-          ", "
-        )}]`,
+        activity: `Created IN_APP notification #${notificationId} - "${String(
+          title
+        ).trim()}" for roles [${roles.join(", ")}]`,
       });
     }
 
-    // 2️⃣ EMAIL: send but do NOT save in system_notifications
     if (wantsEmail) {
       emailSummary = await sendNotificationEmails({
         notificationId,
-        title,
-        message,
-        roles: target_audience,
+        title: String(title).trim(),
+        message: String(message).trim(),
+        roles,
       });
 
-      let logMessage = `Sent EMAIL notification to roles [${target_audience.join(
-        ", "
-      )}]`;
+      const sent = Number(emailSummary?.sent || 0);
+      const failed = Number(emailSummary?.failed || 0);
+      const skipped = Number(emailSummary?.skipped || 0);
+      const total =
+        emailSummary?.total != null
+          ? Number(emailSummary.total)
+          : sent + failed + skipped;
+
+      let logMessage = `Sent EMAIL notification to roles [${roles.join(", ")}]`;
       if (notificationId) logMessage += ` (Notification #${notificationId})`;
-      logMessage += ` — sent: ${emailSummary.sent}, failed: ${emailSummary.failed}`;
+      logMessage += ` — total: ${total}, sent: ${sent}, failed: ${failed}, skipped: ${skipped}`;
 
       await adminLogModel.addLog({
         user_id: createdBy,
@@ -108,19 +115,21 @@ async function createSystemNotification(req, res) {
       });
     }
 
-    // 3️⃣ SMS: send bulk SMS using gateway
     if (wantsSms) {
       smsSummary = await sendNotificationSmsBulk({
-        title,
-        message,
-        roles: target_audience,
+        title: String(title).trim(),
+        message: String(message).trim(),
+        roles,
       });
 
-      let logMessage = `Sent SMS notification to roles [${target_audience.join(
-        ", "
-      )}]`;
+      const total = Number(smsSummary?.total || 0);
+      const sent = Number(smsSummary?.sent || 0);
+      const failed = Number(smsSummary?.failed || 0);
+      const batches = Number(smsSummary?.batches || 0);
+
+      let logMessage = `Sent SMS notification to roles [${roles.join(", ")}]`;
       if (notificationId) logMessage += ` (Notification #${notificationId})`;
-      logMessage += ` — total: ${smsSummary.total}, sent: ${smsSummary.sent}, failed: ${smsSummary.failed}, batches: ${smsSummary.batches}`;
+      logMessage += ` — total: ${total}, sent: ${sent}, failed: ${failed}, batches: ${batches}`;
 
       await adminLogModel.addLog({
         user_id: createdBy,
@@ -137,33 +146,31 @@ async function createSystemNotification(req, res) {
       sms_summary: smsSummary,
     });
   } catch (err) {
-    console.error("❌ Error creating notification:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal server error." });
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
   }
 }
 
-/* ---------------------------------------------------
-   GET /api/system-notifications/all  (Admin)
---------------------------------------------------- */
 async function getAllSystemNotificationsController(req, res) {
   try {
     const notifications = await getAllSystemNotifications();
-    res.json({
+    return res.json({
       success: true,
       count: notifications.length,
       notifications,
     });
   } catch (err) {
-    console.error("❌ Error fetching all notifications:", err);
-    res.status(500).json({ success: false, message: "Internal server error." });
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
   }
 }
 
-/* ---------------------------------------------------
-   GET /api/system-notifications/user/:userId  (App)
---------------------------------------------------- */
 async function getSystemNotificationsByUser(req, res) {
   try {
     const { userId } = req.params;
@@ -176,15 +183,19 @@ async function getSystemNotificationsByUser(req, res) {
     }
 
     const notifications = await getNotificationsForUserRole(userId);
-    res.json({
+
+    return res.json({
       success: true,
       user_id: userId,
       count: notifications.length,
       notifications,
     });
   } catch (err) {
-    console.error("❌ Error fetching user notifications:", err);
-    res.status(500).json({ success: false, message: "Internal server error." });
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
   }
 }
 

@@ -1,25 +1,64 @@
+// services/emailNotificationService.js
 const nodemailer = require("nodemailer");
 const db = require("../config/db");
 
-const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
+const {
+  SMTP_HOST = "",
+  SMTP_PORT = "587",
+  SMTP_USER = "",
+  SMTP_PASS = "",
+  SMTP_FROM = "",
+  SMTP_INSECURE_TLS = "false",
+  EMAIL_CONCURRENCY = "10", // ✅ tune this (10–20 recommended for Gmail)
+} = process.env;
 
-const FROM_ADDRESS =
-  (SMTP_FROM && SMTP_FROM.trim()) || (SMTP_USER && SMTP_USER.trim()) || null;
+const host = String(SMTP_HOST).trim();
+const port = Number(String(SMTP_PORT).trim() || 587);
+const user = String(SMTP_USER).trim();
+const pass = String(SMTP_PASS).trim();
+const from =
+  (SMTP_FROM && String(SMTP_FROM).trim()) || (user ? `TabDhey <${user}>` : "");
 
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: Number(SMTP_PORT || 587),
-  secure: Number(SMTP_PORT) === 465,
-  auth: { user: SMTP_USER, pass: SMTP_PASS },
-  tls: { rejectUnauthorized: false }, // allow self-signed certs
-});
+const insecureTls = ["true", "1", "yes", "y"].includes(
+  String(SMTP_INSECURE_TLS).trim().toLowerCase()
+);
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+const isConfigured = Boolean(host && user && pass);
+
+const transporter = isConfigured
+  ? nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+      requireTLS: port === 587,
+      pool: true, // ✅ reuse connections
+      maxConnections: 5, // ✅ keep small for Gmail
+      maxMessages: Infinity,
+      ...(insecureTls ? { tls: { rejectUnauthorized: false } } : {}),
+      logger: false,
+      debug: false,
+    })
+  : null;
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 /**
- * Send notification emails grouped by 5, one-by-one per group.
+ * Fast email sending:
+ * - Uses nodemailer pooled transporter (reuses SMTP connections)
+ * - Sends in parallel with concurrency limit (EMAIL_CONCURRENCY)
+ * - Returns detailed summary including failures (first few)
  */
 async function sendNotificationEmails({
   notificationId,
@@ -27,7 +66,15 @@ async function sendNotificationEmails({
   message,
   roles,
 }) {
-  if (!roles || !roles.length) return { sent: 0, failed: 0 };
+  if (!Array.isArray(roles) || roles.length === 0) {
+    return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
+  }
+
+  if (!isConfigured || !transporter) {
+    throw new Error(
+      "SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing)"
+    );
+  }
 
   const placeholders = roles.map(() => "?").join(",");
   const sql = `
@@ -35,100 +82,124 @@ async function sendNotificationEmails({
     FROM users
     WHERE role IN (${placeholders})
       AND email IS NOT NULL
-      AND email <> ""
+      AND TRIM(email) <> ""
   `;
-  const [users] = await db.query(sql, roles);
 
+  const [users] = await db.query(
+    sql,
+    roles.map((r) => String(r).trim())
+  );
   if (!users.length) {
-    console.log(`[email] No users found for roles [${roles.join(", ")}]`);
-    return { sent: 0, failed: 0 };
+    return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
   }
 
-  console.log(
-    `[email] Sending notification #${notificationId} to ${users.length} recipients (5 per batch)`
+  const safeTitle = String(title || "System Notification").trim();
+  const safeMessage = String(message || "").trim();
+  const subject = `TabDhey Notification: ${safeTitle}`;
+
+  const concurrency = Math.max(
+    1,
+    Math.min(30, Number(EMAIL_CONCURRENCY) || 10)
   );
 
-  const chunkSize = 5;
-  const perEmailDelay = 1000; // 1s between individual sends
-  const perChunkDelay = 30000; // 30s pause between chunks
+  // build jobs
+  const jobs = users.map((u) => async () => {
+    const to = String(u.email || "")
+      .trim()
+      .toLowerCase();
+    const name = String(u.user_name || "Valued User").trim();
 
-  const from = FROM_ADDRESS || SMTP_USER;
-  let sent = 0;
-  let failed = 0;
+    if (!isValidEmail(to)) {
+      return {
+        status: "skipped",
+        user_id: u.user_id,
+        email: to,
+        reason: "Invalid email",
+      };
+    }
 
-  for (let i = 0; i < users.length; i += chunkSize) {
-    const chunk = users.slice(i, i + chunkSize);
-    console.log(`[email] Processing batch ${Math.floor(i / chunkSize) + 1}`);
+    const text = `
+Dear ${name},
 
-    for (const user of chunk) {
-      const to = user.email;
-      const name = user.user_name || "User";
+${safeTitle}
 
-      const mailOptions = {
+${safeMessage}
+
+This is an automated message from TabDhey Admin.
+Everything at your door step!
+TabDhey
+`.trim();
+
+    const html = `
+<div style="font-family: Arial, sans-serif; line-height: 1.6;">
+  <p>Dear ${escapeHtml(name)},</p>
+  <h3 style="margin:0 0 8px 0;">${escapeHtml(safeTitle)}</h3>
+  <p style="white-space: pre-line;">${escapeHtml(safeMessage)}</p>
+  <hr />
+  <p style="font-size:12px;color:#777;">This is an automated message from TabDhey Admin.</p>
+  <p><b>Everything at your door step!</b><br/>TabDhey</p>
+</div>
+`.trim();
+
+    try {
+      const info = await transporter.sendMail({
         from,
         to,
-        subject: title,
-        text: message,
-        html: `
-          <p>Dear ${name},</p>
-          <p>${message}</p>
-          <p style="margin-top:16px;">Best regards,<br/>SuperApp Team</p>
-        `,
+        subject,
+        text,
+        html,
         envelope: { from, to: [to] },
-      };
+        headers: notificationId
+          ? { "X-Notification-Id": String(notificationId) }
+          : undefined,
+      });
 
-      try {
-        const info = await transporter.sendMail(mailOptions);
-        sent++;
-        console.log(`[email] ✅ Sent to ${to} (${info.response})`);
-      } catch (err) {
-        failed++;
-        console.error(`[email] ❌ Failed to ${to}: ${err.message}`);
-
-        // if the SMTP server says "too much mail", stop this run
-        if (err.message && err.message.includes("too much mail")) {
-          console.error("[email] 🚫 Rate limit hit. Stopping further sends.");
-          return { sent, failed };
-        }
+      if (!info?.accepted || info.accepted.length === 0) {
+        return {
+          status: "failed",
+          user_id: u.user_id,
+          email: to,
+          reason: "SMTP did not accept recipient",
+        };
       }
 
-      await sleep(perEmailDelay);
+      return { status: "sent", user_id: u.user_id, email: to };
+    } catch (e) {
+      return {
+        status: "failed",
+        user_id: u.user_id,
+        email: to,
+        reason: e?.message || String(e),
+      };
     }
+  });
 
-    // pause between batches
-    if (i + chunkSize < users.length) {
-      console.log(
-        `[email] Batch ${Math.floor(i / chunkSize) + 1} done. Waiting ${
-          perChunkDelay / 1000
-        }s before next...`
-      );
-      await sleep(perChunkDelay);
+  // concurrency runner
+  let idx = 0;
+  const results = [];
+
+  const workers = Array.from({
+    length: Math.min(concurrency, jobs.length),
+  }).map(async () => {
+    while (idx < jobs.length) {
+      const cur = idx++;
+      results.push(await jobs[cur]());
     }
-  }
+  });
 
-  console.log(
-    `[email] Notification #${notificationId} finished: sent=${sent}, failed=${failed}`
-  );
+  await Promise.all(workers);
 
-  return { sent, failed };
+  const sent = results.filter((r) => r.status === "sent").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+  const skipped = results.filter((r) => r.status === "skipped").length;
+
+  // keep only first 20 failures (response stays small)
+  const failures = results
+    .filter((r) => r.status === "failed")
+    .slice(0, 20)
+    .map(({ user_id, email, reason }) => ({ user_id, email, reason }));
+
+  return { sent, failed, skipped, total: users.length, failures };
 }
 
-/** Simple single test email (optional) */
-async function sendTestEmail({ to, subject, message }) {
-  const from = FROM_ADDRESS || SMTP_USER;
-
-  const mailOptions = {
-    from,
-    to,
-    subject,
-    text: message,
-    html: `<p>${message}</p><p>– SuperApp Team</p>`,
-    envelope: { from, to: [to] },
-  };
-
-  const info = await transporter.sendMail(mailOptions);
-  console.log(`[email-test] Sent to ${to}: ${info.response}`);
-  return info;
-}
-
-module.exports = { sendNotificationEmails, sendTestEmail };
+module.exports = { sendNotificationEmails };
