@@ -141,7 +141,7 @@ router.get(
  * Auth required
  */
 router.delete(
-  "/ratings/replies/:reply_id",
+  "/ratings/:type/replies/:reply_id",
   authUser,
   validateReplyIdParam,
   deleteRatingReplyCtrl
