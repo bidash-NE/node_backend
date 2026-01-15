@@ -1,10 +1,9 @@
 // services/smsNotificationService.js
 const db = require("../config/db");
 
-const SMS_BULK_URL =
-  process.env.SMS_BULK_URL || "https://grab.newedge.bt/sms/api/sms/bulk";
+const SMS_BULK_URL = process.env.SMS_BULK_URL;
 const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
-const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
+const SMS_FROM = process.env.SMS_FROM.trim();
 
 const MAX_BULK = Number(process.env.SMS_BULK_MAX || 50); // gateway default cap
 
@@ -37,7 +36,7 @@ function normalizeBhutanNumberForSms(input) {
 
 /**
  * Fetch phones for roles from users table.
- * Uses ONLY users.phone (as you confirmed).
+ * Uses ONLY users.phone.
  */
 async function getPhonesForRoles(roles = []) {
   if (!roles.length) return [];
@@ -59,30 +58,42 @@ async function getPhonesForRoles(roles = []) {
     if (normalized) phones.push(normalized);
   }
 
-  // remove duplicates
   return Array.from(new Set(phones));
 }
 
 /**
- * Send bulk SMS notifications to roles using gateway bulk endpoint.
- * Returns summary { sent, failed, total, batches, rawResponses[] }
+ * Send SMS notifications:
+ * - Role-based: pass roles: [...]
+ * - Single/Custom recipients: pass recipients: ["97517xxxxxx", "17xxxxxx"]
  */
-async function sendNotificationSmsBulk({ title, message, roles }) {
-  if (!Array.isArray(roles) || !roles.length) {
+async function sendNotificationSmsBulk({ title, message, roles, recipients }) {
+  const text = `${String(title || "").trim()}\n${String(
+    message || ""
+  ).trim()}`.trim();
+
+  // ✅ Build phone list either from explicit recipients OR roles lookup
+  let phones = [];
+
+  if (Array.isArray(recipients) && recipients.length > 0) {
+    phones = Array.from(
+      new Set(
+        recipients.map((p) => normalizeBhutanNumberForSms(p)).filter(Boolean)
+      )
+    );
+  } else {
+    if (!Array.isArray(roles) || !roles.length) {
+      return { sent: 0, failed: 0, total: 0, batches: 0, rawResponses: [] };
+    }
+    phones = await getPhonesForRoles(roles);
+  }
+
+  if (!phones.length) {
     return { sent: 0, failed: 0, total: 0, batches: 0, rawResponses: [] };
   }
 
   if (!SMS_API_KEY) {
     throw new Error("SMS_API_KEY is missing in env");
   }
-
-  const phones = await getPhonesForRoles(roles);
-  if (!phones.length) {
-    return { sent: 0, failed: 0, total: 0, batches: 0, rawResponses: [] };
-  }
-
-  // One SMS text
-  const text = `${title}\n${message}`;
 
   let sent = 0;
   let failed = 0;

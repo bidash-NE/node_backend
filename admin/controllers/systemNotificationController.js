@@ -3,6 +3,9 @@ const {
   insertSystemNotification,
   getAllSystemNotifications,
   getNotificationsForUserRole,
+
+  // ✅ NEW
+  getUserContactById,
 } = require("../models/systemNotificationModel");
 
 const adminLogModel = require("../models/adminlogModel");
@@ -13,6 +16,158 @@ const {
   sendNotificationSmsBulk,
 } = require("../services/smsNotificationService");
 
+/* -------------------- helpers -------------------- */
+function validateTitleMessage(title, message) {
+  if (!title || !String(title).trim() || !message || !String(message).trim()) {
+    return "Title and message are required.";
+  }
+  return null;
+}
+function pickActor(body = {}) {
+  return {
+    createdBy: body.user_id || null,
+    adminName: body.user_name || "System",
+  };
+}
+
+/* ======================================================
+   ✅ NEW: Send EMAIL to SINGLE user (fetch email by user_id)
+   POST /api/system-notifications/user/email
+   body: { user_id?, user_name?, target_user_id, title, message }
+====================================================== */
+async function sendEmailToSingleUser(req, res) {
+  try {
+    const { target_user_id, title, message } = req.body || {};
+    const { createdBy, adminName } = pickActor(req.body || {});
+
+    if (!target_user_id) {
+      return res.status(400).json({
+        success: false,
+        message: "target_user_id is required.",
+      });
+    }
+
+    const err = validateTitleMessage(title, message);
+    if (err) return res.status(400).json({ success: false, message: err });
+
+    const user = await getUserContactById(target_user_id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Target user not found." });
+    }
+
+    const email = String(user.email || "").trim();
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Target user email not found.",
+      });
+    }
+
+    // ✅ reuse existing group-email function but pass direct list
+    const emailSummary = await sendNotificationEmails({
+      notificationId: null,
+      title: String(title).trim(),
+      message: String(message).trim(),
+      roles: [], // not used
+      recipients: [email], // ✅ NEW support needed in service OR it will be ignored
+    });
+
+    await adminLogModel.addLog({
+      user_id: createdBy,
+      admin_name: adminName,
+      activity: `Sent EMAIL (single user) to user_id=${target_user_id} (${email}) — "${String(
+        title
+      ).trim()}"`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Email sent successfully.",
+      target_user_id: Number(target_user_id),
+      email,
+      email_summary: emailSummary,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
+  }
+}
+
+/* ======================================================
+   ✅ NEW: Send SMS to SINGLE user (fetch phone by user_id)
+   POST /api/system-notifications/user/sms
+   body: { user_id?, user_name?, target_user_id, title, message }
+====================================================== */
+async function sendSmsToSingleUser(req, res) {
+  try {
+    const { target_user_id, title, message } = req.body || {};
+    const { createdBy, adminName } = pickActor(req.body || {});
+
+    if (!target_user_id) {
+      return res.status(400).json({
+        success: false,
+        message: "target_user_id is required.",
+      });
+    }
+
+    const err = validateTitleMessage(title, message);
+    if (err) return res.status(400).json({ success: false, message: err });
+
+    const user = await getUserContactById(target_user_id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Target user not found." });
+    }
+
+    const phone = String(user.phone || "").trim();
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Target user phone number not found.",
+      });
+    }
+
+    // ✅ reuse existing bulk sms function but pass direct list
+    const smsSummary = await sendNotificationSmsBulk({
+      title: String(title).trim(),
+      message: String(message).trim(),
+      roles: [], // not used
+      recipients: [phone], // ✅ NEW support needed in service OR it will be ignored
+    });
+
+    await adminLogModel.addLog({
+      user_id: createdBy,
+      admin_name: adminName,
+      activity: `Sent SMS (single user) to user_id=${target_user_id} (${phone}) — "${String(
+        title
+      ).trim()}"`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "SMS sent successfully.",
+      target_user_id: Number(target_user_id),
+      phone,
+      sms_summary: smsSummary,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error.",
+      error: err?.message || String(err),
+    });
+  }
+}
+
+/* ======================================================
+   EXISTING: Create notification to roles (in_app/email/sms)
+====================================================== */
 async function createSystemNotification(req, res) {
   try {
     const {
@@ -154,6 +309,9 @@ async function createSystemNotification(req, res) {
   }
 }
 
+/* ======================================================
+   EXISTING: Fetch all notifications (admin)
+====================================================== */
 async function getAllSystemNotificationsController(req, res) {
   try {
     const notifications = await getAllSystemNotifications();
@@ -171,6 +329,9 @@ async function getAllSystemNotificationsController(req, res) {
   }
 }
 
+/* ======================================================
+   EXISTING: Fetch notifications visible to user by role
+====================================================== */
 async function getSystemNotificationsByUser(req, res) {
   try {
     const { userId } = req.params;
@@ -203,4 +364,8 @@ module.exports = {
   createSystemNotification,
   getAllSystemNotificationsController,
   getSystemNotificationsByUser,
+
+  // ✅ NEW exports
+  sendSmsToSingleUser,
+  sendEmailToSingleUser,
 };

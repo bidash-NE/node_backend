@@ -88,8 +88,27 @@ async function getNotificationsForUserRole(userId) {
   return rows;
 }
 
+/* ======================================================
+   ✅ NEW: Fetch email + phone for a user_id (single user send)
+====================================================== */
+async function getUserContactById(userId) {
+  if (!userId) return null;
+
+  const sql = `
+    SELECT user_id, user_name, email, phone, role
+    FROM users
+    WHERE user_id = ?
+    LIMIT 1
+  `;
+  const [rows] = await db.query(sql, [Number(userId)]);
+  return rows.length ? rows[0] : null;
+}
+
 module.exports = {
   insertSystemNotification,
   getAllSystemNotifications,
   getNotificationsForUserRole,
+
+  // ✅ NEW export
+  getUserContactById,
 };

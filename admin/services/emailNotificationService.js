@@ -56,19 +56,19 @@ function escapeHtml(s) {
 
 /**
  * Fast email sending:
- * - Uses nodemailer pooled transporter (reuses SMTP connections)
- * - Sends in parallel with concurrency limit (EMAIL_CONCURRENCY)
- * - Returns detailed summary including failures (first few)
+ * - Role-based: pass roles: [...]
+ * - Single/Custom recipients: pass recipients: ["a@b.com", "c@d.com"]
  */
 async function sendNotificationEmails({
   notificationId,
   title,
   message,
   roles,
+  recipients, // ✅ NEW (optional)
 }) {
-  if (!Array.isArray(roles) || roles.length === 0) {
-    return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
-  }
+  const safeTitle = String(title || "System Notification").trim();
+  const safeMessage = String(message || "").trim();
+  const subject = `TabDhey Notification: ${safeTitle}`;
 
   if (!isConfigured || !transporter) {
     throw new Error(
@@ -76,26 +76,54 @@ async function sendNotificationEmails({
     );
   }
 
-  const placeholders = roles.map(() => "?").join(",");
-  const sql = `
-    SELECT user_id, user_name, email
-    FROM users
-    WHERE role IN (${placeholders})
-      AND email IS NOT NULL
-      AND TRIM(email) <> ""
-  `;
+  // ✅ Build recipient list either from explicit recipients OR roles lookup
+  let users = [];
 
-  const [users] = await db.query(
-    sql,
-    roles.map((r) => String(r).trim())
-  );
-  if (!users.length) {
-    return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
+  if (Array.isArray(recipients) && recipients.length > 0) {
+    // normalize + unique
+    const uniq = Array.from(
+      new Set(
+        recipients
+          .map((e) =>
+            String(e || "")
+              .trim()
+              .toLowerCase()
+          )
+          .filter(Boolean)
+      )
+    );
+
+    users = uniq.map((email, i) => ({
+      user_id: null,
+      user_name: "Valued User",
+      email,
+      _idx: i,
+    }));
+  } else {
+    if (!Array.isArray(roles) || roles.length === 0) {
+      return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
+    }
+
+    const placeholders = roles.map(() => "?").join(",");
+    const sql = `
+      SELECT user_id, user_name, email
+      FROM users
+      WHERE role IN (${placeholders})
+        AND email IS NOT NULL
+        AND TRIM(email) <> ""
+    `;
+
+    const [dbUsers] = await db.query(
+      sql,
+      roles.map((r) => String(r).trim())
+    );
+
+    if (!dbUsers.length) {
+      return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
+    }
+
+    users = dbUsers;
   }
-
-  const safeTitle = String(title || "System Notification").trim();
-  const safeMessage = String(message || "").trim();
-  const subject = `TabDhey Notification: ${safeTitle}`;
 
   const concurrency = Math.max(
     1,
@@ -112,7 +140,7 @@ async function sendNotificationEmails({
     if (!isValidEmail(to)) {
       return {
         status: "skipped",
-        user_id: u.user_id,
+        user_id: u.user_id ?? null,
         email: to,
         reason: "Invalid email",
       };
@@ -157,17 +185,17 @@ TabDhey
       if (!info?.accepted || info.accepted.length === 0) {
         return {
           status: "failed",
-          user_id: u.user_id,
+          user_id: u.user_id ?? null,
           email: to,
           reason: "SMTP did not accept recipient",
         };
       }
 
-      return { status: "sent", user_id: u.user_id, email: to };
+      return { status: "sent", user_id: u.user_id ?? null, email: to };
     } catch (e) {
       return {
         status: "failed",
-        user_id: u.user_id,
+        user_id: u.user_id ?? null,
         email: to,
         reason: e?.message || String(e),
       };
@@ -193,7 +221,6 @@ TabDhey
   const failed = results.filter((r) => r.status === "failed").length;
   const skipped = results.filter((r) => r.status === "skipped").length;
 
-  // keep only first 20 failures (response stays small)
   const failures = results
     .filter((r) => r.status === "failed")
     .slice(0, 20)

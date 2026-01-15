@@ -6,15 +6,21 @@ const {
   createSystemNotification,
   getAllSystemNotificationsController,
   getSystemNotificationsByUser,
+
+  // ✅ NEW: single user (by target_user_id)
+  sendSmsToSingleUser,
+  sendEmailToSingleUser,
 } = require("../controllers/systemNotificationController");
 
-// Create new notification (in_app, email, sms – behaviour handled in controller)
+// Existing
 router.post("/", createSystemNotification);
-
-// Admin: fetch all IN_APP notifications from DB
 router.get("/all", getAllSystemNotificationsController);
 
-// User: fetch in_app notifications by role
+// ✅ NEW: send to ONE user (fetch email/phone from DB using target_user_id)
+router.post("/user/sms", sendSmsToSingleUser);
+router.post("/user/email", sendEmailToSingleUser);
+
+// Existing: keep this LAST so it doesn’t catch "/user/sms" or "/user/email"
 router.get("/:userId", getSystemNotificationsByUser);
 
 module.exports = router;
