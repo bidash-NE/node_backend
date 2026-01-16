@@ -89,7 +89,7 @@ async function getNotificationsForUserRole(userId) {
 }
 
 /* ======================================================
-   ✅ NEW: Fetch email + phone for a user_id (single user send)
+   ✅ Fetch email + phone for a user_id (single user send)
 ====================================================== */
 async function getUserContactById(userId) {
   if (!userId) return null;
@@ -108,7 +108,5 @@ module.exports = {
   insertSystemNotification,
   getAllSystemNotifications,
   getNotificationsForUserRole,
-
-  // ✅ NEW export
   getUserContactById,
 };

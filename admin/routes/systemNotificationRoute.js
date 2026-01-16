@@ -7,20 +7,30 @@ const {
   getAllSystemNotificationsController,
   getSystemNotificationsByUser,
 
-  // ✅ NEW: single user (by target_user_id)
+  // ✅ single user send
   sendSmsToSingleUser,
   sendEmailToSingleUser,
+
+  // ✅ NEW: fetch ONLY single-user logs by target_user_id
+  getSingleUserDeliveryLogsByUserIdController,
 } = require("../controllers/systemNotificationController");
 
 // Existing
 router.post("/", createSystemNotification);
 router.get("/all", getAllSystemNotificationsController);
 
-// ✅ NEW: send to ONE user (fetch email/phone from DB using target_user_id)
+// ✅ send to ONE user
 router.post("/user/sms", sendSmsToSingleUser);
 router.post("/user/email", sendEmailToSingleUser);
 
-// Existing: keep this LAST so it doesn’t catch "/user/sms" or "/user/email"
+// ✅ NEW: fetch single-user send logs by target_user_id
+// GET /api/system-notifications/user/logs/:target_user_id?page=1&limit=20
+router.get(
+  "/user/logs/:target_user_id",
+  getSingleUserDeliveryLogsByUserIdController
+);
+
+// keep this LAST
 router.get("/:userId", getSystemNotificationsByUser);
 
 module.exports = router;

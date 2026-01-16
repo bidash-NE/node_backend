@@ -3,8 +3,6 @@ const {
   insertSystemNotification,
   getAllSystemNotifications,
   getNotificationsForUserRole,
-
-  // ✅ NEW
   getUserContactById,
 } = require("../models/systemNotificationModel");
 
@@ -15,6 +13,12 @@ const {
 const {
   sendNotificationSmsBulk,
 } = require("../services/smsNotificationService");
+
+// ✅ Redis log model
+const {
+  createDeliveryLog,
+  listSingleUserLogsByTargetUserId,
+} = require("../models/notificationDeliveryLogModel");
 
 /* -------------------- helpers -------------------- */
 function validateTitleMessage(title, message) {
@@ -31,9 +35,7 @@ function pickActor(body = {}) {
 }
 
 /* ======================================================
-   ✅ NEW: Send EMAIL to SINGLE user (fetch email by user_id)
-   POST /api/system-notifications/user/email
-   body: { user_id?, user_name?, target_user_id, title, message }
+   ✅ Send EMAIL to SINGLE user
 ====================================================== */
 async function sendEmailToSingleUser(req, res) {
   try {
@@ -41,10 +43,9 @@ async function sendEmailToSingleUser(req, res) {
     const { createdBy, adminName } = pickActor(req.body || {});
 
     if (!target_user_id) {
-      return res.status(400).json({
-        success: false,
-        message: "target_user_id is required.",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "target_user_id is required." });
     }
 
     const err = validateTitleMessage(title, message);
@@ -59,27 +60,51 @@ async function sendEmailToSingleUser(req, res) {
 
     const email = String(user.email || "").trim();
     if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "Target user email not found.",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Target user email not found." });
     }
 
-    // ✅ reuse existing group-email function but pass direct list
+    const safeTitle = String(title).trim();
+    const safeMessage = String(message).trim();
+
     const emailSummary = await sendNotificationEmails({
       notificationId: null,
-      title: String(title).trim(),
-      message: String(message).trim(),
-      roles: [], // not used
-      recipients: [email], // ✅ NEW support needed in service OR it will be ignored
+      title: safeTitle,
+      message: safeMessage,
+      roles: [],
+      recipients: [email],
+    });
+
+    const sent = Number(emailSummary?.sent || 0);
+    const skipped = Number(emailSummary?.skipped || 0);
+
+    const status = sent > 0 ? "sent" : skipped > 0 ? "skipped" : "failed";
+    const reason =
+      (Array.isArray(emailSummary?.failures) &&
+        emailSummary.failures[0]?.reason) ||
+      "";
+
+    // ✅ store ONLY as context="single"
+    await createDeliveryLog({
+      channel: "email",
+      target_user_id: Number(target_user_id),
+      target: email,
+      title: safeTitle,
+      message: safeMessage,
+      status,
+      reason,
+      created_by: createdBy,
+      admin_name: adminName,
+      notification_id: null,
+      context: "single",
+      roles: [],
     });
 
     await adminLogModel.addLog({
       user_id: createdBy,
       admin_name: adminName,
-      activity: `Sent EMAIL (single user) to user_id=${target_user_id} (${email}) — "${String(
-        title
-      ).trim()}"`,
+      activity: `Sent EMAIL (single user) to user_id=${target_user_id} (${email}) — "${safeTitle}"`,
     });
 
     return res.status(200).json({
@@ -99,9 +124,7 @@ async function sendEmailToSingleUser(req, res) {
 }
 
 /* ======================================================
-   ✅ NEW: Send SMS to SINGLE user (fetch phone by user_id)
-   POST /api/system-notifications/user/sms
-   body: { user_id?, user_name?, target_user_id, title, message }
+   ✅ Send SMS to SINGLE user
 ====================================================== */
 async function sendSmsToSingleUser(req, res) {
   try {
@@ -109,10 +132,9 @@ async function sendSmsToSingleUser(req, res) {
     const { createdBy, adminName } = pickActor(req.body || {});
 
     if (!target_user_id) {
-      return res.status(400).json({
-        success: false,
-        message: "target_user_id is required.",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "target_user_id is required." });
     }
 
     const err = validateTitleMessage(title, message);
@@ -133,20 +155,39 @@ async function sendSmsToSingleUser(req, res) {
       });
     }
 
-    // ✅ reuse existing bulk sms function but pass direct list
+    const safeTitle = String(title).trim();
+    const safeMessage = String(message).trim();
+
     const smsSummary = await sendNotificationSmsBulk({
-      title: String(title).trim(),
-      message: String(message).trim(),
-      roles: [], // not used
-      recipients: [phone], // ✅ NEW support needed in service OR it will be ignored
+      title: safeTitle,
+      message: safeMessage,
+      roles: [],
+      recipients: [phone],
+    });
+
+    const sent = Number(smsSummary?.sent || 0);
+    const failed = Number(smsSummary?.failed || 0);
+    const status = sent > 0 ? "sent" : failed > 0 ? "failed" : "sent";
+
+    await createDeliveryLog({
+      channel: "sms",
+      target_user_id: Number(target_user_id),
+      target: phone,
+      title: safeTitle,
+      message: safeMessage,
+      status,
+      reason: failed > 0 ? "SMS gateway returned failure" : "",
+      created_by: createdBy,
+      admin_name: adminName,
+      notification_id: null,
+      context: "single",
+      roles: [],
     });
 
     await adminLogModel.addLog({
       user_id: createdBy,
       admin_name: adminName,
-      activity: `Sent SMS (single user) to user_id=${target_user_id} (${phone}) — "${String(
-        title
-      ).trim()}"`,
+      activity: `Sent SMS (single user) to user_id=${target_user_id} (${phone}) — "${safeTitle}"`,
     });
 
     return res.status(200).json({
@@ -166,7 +207,36 @@ async function sendSmsToSingleUser(req, res) {
 }
 
 /* ======================================================
+   ✅ NEW: Fetch ONLY single-user logs by target_user_id
+   GET /api/system-notifications/user/logs/:target_user_id?page=1&limit=20
+====================================================== */
+async function getSingleUserDeliveryLogsByUserIdController(req, res) {
+  try {
+    const { target_user_id } = req.params;
+    const { page, limit } = req.query || {};
+
+    const out = await listSingleUserLogsByTargetUserId({
+      target_user_id: Number(target_user_id),
+      page,
+      limit,
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: out.data,
+      meta: out.meta,
+    });
+  } catch (err) {
+    return res.status(400).json({
+      success: false,
+      message: err?.message || "Failed to fetch single-user delivery logs.",
+    });
+  }
+}
+
+/* ======================================================
    EXISTING: Create notification to roles (in_app/email/sms)
+   (no change needed; your choice whether to log bulk)
 ====================================================== */
 async function createSystemNotification(req, res) {
   try {
@@ -268,6 +338,8 @@ async function createSystemNotification(req, res) {
         admin_name: adminName,
         activity: logMessage,
       });
+
+      // (optional) if you don't want bulk stored in redis, REMOVE any bulk createDeliveryLog calls elsewhere
     }
 
     if (wantsSms) {
@@ -291,6 +363,8 @@ async function createSystemNotification(req, res) {
         admin_name: adminName,
         activity: logMessage,
       });
+
+      // (optional) if you don't want bulk stored in redis, REMOVE any bulk createDeliveryLog calls elsewhere
     }
 
     return res.status(201).json({
@@ -310,7 +384,7 @@ async function createSystemNotification(req, res) {
 }
 
 /* ======================================================
-   EXISTING: Fetch all notifications (admin)
+   EXISTING: Fetch all IN_APP notifications (admin)
 ====================================================== */
 async function getAllSystemNotificationsController(req, res) {
   try {
@@ -364,8 +438,9 @@ module.exports = {
   createSystemNotification,
   getAllSystemNotificationsController,
   getSystemNotificationsByUser,
-
-  // ✅ NEW exports
   sendSmsToSingleUser,
   sendEmailToSingleUser,
+
+  // ✅ NEW
+  getSingleUserDeliveryLogsByUserIdController,
 };
