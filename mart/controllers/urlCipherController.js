@@ -51,7 +51,7 @@ exports.createEncryptedUrlController = async (req, res) => {
 
     // shareable short link (no raw URL inside)
     const base = `${req.protocol}://${req.get("host")}`;
-    const encrypted_url = `${base}/api/url-cipher/${encodeURIComponent(token)}`;
+    const encrypted_url = `${base}/mart/api/url-cipher/${encodeURIComponent(token)}`;
 
     return res.json({
       success: true,
