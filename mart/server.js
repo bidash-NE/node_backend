@@ -25,7 +25,10 @@ app.use("/api/mart/browse", martMenuBrowseRoutes);
 app.use("/api/mart/discovery", martDiscoveryRoutes);
 app.use("/api/mart/ratings", martRatingsRoutes);
 app.use("/api/mart/cart", cartRoutes);
-app.use("/mart/api/url-cipher", urlCipherRoutes);
+// server.js
+const BASE_PATH = (process.env.PUBLIC_PATH_PREFIX || "").replace(/\/+$/, "");
+console.log("Using BASE_PATH:", BASE_PATH);
+app.use(`${BASE_PATH}/url-cipher`, urlCipherRoutes);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
