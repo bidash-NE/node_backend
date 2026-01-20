@@ -25,7 +25,7 @@ app.use("/api/mart/browse", martMenuBrowseRoutes);
 app.use("/api/mart/discovery", martDiscoveryRoutes);
 app.use("/api/mart/ratings", martRatingsRoutes);
 app.use("/api/mart/cart", cartRoutes);
-app.use("/mart/api/url-cipher", urlCipherRoutes);
+app.use("/api/url-cipher", urlCipherRoutes);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

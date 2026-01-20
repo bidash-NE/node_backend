@@ -57,7 +57,7 @@ exports.createEncryptedUrlController = async (req, res) => {
 
     const prefix = (process.env.PUBLIC_PATH_PREFIX || "").replace(/\/+$/, "");
 
-    const encrypted_url = `${base}${prefix}/${encodeURIComponent(token)}`;
+    const encrypted_url = `${base}${prefix}/url-cipher/${encodeURIComponent(token)}`;
 
     return res.json({
       success: true,
