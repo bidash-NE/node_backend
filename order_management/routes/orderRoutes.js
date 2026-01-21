@@ -1,7 +1,7 @@
 // routes/orderRoutes.js
 const express = require("express");
 const router = express.Router();
-
+const rateLimit = require("express-rate-limit");
 const orderCtrl = require("../controllers/orderControllers");
 const { uploadDeliveryPhotos } = require("../middleware/uploadDeliveryPhoto");
 
@@ -34,7 +34,27 @@ const validUserId = (req, res, next) => {
  * - image (single/multi)
  * - images (multi)
  */
-router.post("/orders", uploadDeliveryPhotos, orderCtrl.createOrder);
+
+let rateLimiterOrder = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return res.status(429).json({
+      success: false,
+      message:
+        "You can only make 10 order requests in an hour. Please try again later.",
+    });
+  },
+});
+
+router.post(
+  "/orders",
+  rateLimiterOrder,
+  uploadDeliveryPhotos,
+  orderCtrl.createOrder,
+);
 
 router.get("/orders/:order_id", validOrderId, orderCtrl.getOrderById);
 router.put("/orders/:order_id", validOrderId, orderCtrl.updateOrder);
@@ -43,24 +63,24 @@ router.delete("/orders/:order_id", validOrderId, orderCtrl.deleteOrder);
 router.put(
   "/orders/:order_id/status",
   validOrderId,
-  orderCtrl.updateOrderStatus
+  orderCtrl.updateOrderStatus,
 );
 
 /* Business-scoped */
 router.get(
   "/orders/business/:business_id",
   validBizId,
-  orderCtrl.getOrdersByBusinessId
+  orderCtrl.getOrdersByBusinessId,
 );
 router.get(
   "/orders/business/:business_id/grouped",
   validBizId,
-  orderCtrl.getBusinessOrdersGroupedByUser
+  orderCtrl.getBusinessOrdersGroupedByUser,
 );
 router.get(
   "/orders/business/:business_id/status-counts",
   validBizId,
-  orderCtrl.getOrderStatusCountsByBusiness
+  orderCtrl.getOrderStatusCountsByBusiness,
 );
 
 /* User-facing */
@@ -71,7 +91,7 @@ router.patch(
   "/users/:user_id/orders/:order_id/cancel",
   validUserId,
   validOrderId,
-  orderCtrl.cancelOrderByUser
+  orderCtrl.cancelOrderByUser,
 );
 
 module.exports = router;

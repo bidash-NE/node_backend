@@ -9,6 +9,7 @@ const { initAdminLogsTable } = require("./models/initModel.js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.set("trust proxy", 1); // if behind 1 proxy (common with k8s ingress)
 
 // ───────────────────────── Middlewares ─────────────────────────
 app.use(
@@ -16,7 +17,7 @@ app.use(
     origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }),
 );
 app.use(express.json());
 app.use((req, _res, next) => {
@@ -50,7 +51,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // 404 for unknown API routes
 app.use("/api", (_req, res) =>
-  res.status(404).json({ success: false, error: "Not found" })
+  res.status(404).json({ success: false, error: "Not found" }),
 );
 
 // ───────────────────────── Startup ─────────────────────────

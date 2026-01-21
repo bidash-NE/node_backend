@@ -1,6 +1,7 @@
-// routes/appRatingRoutes.js  ✅ EDITED (ADMIN SIDE)
+// routes/appRatingRoutes.js
 const express = require("express");
 const router = express.Router();
+const rateLimit = require("express-rate-limit");
 const authUser = require("../middleware/auth");
 
 const {
@@ -11,7 +12,6 @@ const {
   deleteAppRatingController,
   getAppRatingSummaryController,
 
-  // ✅ NEW: reports (merchant ratings comments/replies)
   listReportedCommentsController,
   listReportedRepliesController,
   ignoreReportController,
@@ -19,45 +19,99 @@ const {
   deleteReportedReplyController,
 } = require("../controllers/appRatingController");
 
-/**
- * POST   /api/app-ratings          → create new rating
- * GET    /api/app-ratings          → list ratings (admin)
- * GET    /api/app-ratings/summary  → stats (admin)
- * GET    /api/app-ratings/:id      → get one
- * PUT    /api/app-ratings/:id      → update
- * DELETE /api/app-ratings/:id      → delete
- */
+const makeLimiter = ({ windowMs, max, message }) =>
+  rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => res.status(429).json({ success: false, message }),
+  });
+
+const readLimiter = makeLimiter({
+  windowMs: 60 * 1000,
+  max: 180,
+  message: "Too many requests. Please slow down.",
+});
+
+const writeLimiter = makeLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  message: "Too many requests. Please try again later.",
+});
+
+const reportLimiter = makeLimiter({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 200, // admin actions; tune down if needed
+  message: "Too many report actions. Please try again later.",
+});
+
+const validateIdParam = (req, res, next) => {
+  const id = Number(req.params.id);
+  if (Number.isFinite(id) && id > 0) return next();
+  return res.status(400).json({ success: false, message: "Invalid id" });
+};
+
+const validateReportIdParam = (req, res, next) => {
+  const id = Number(req.params.report_id);
+  if (Number.isFinite(id) && id > 0) return next();
+  return res.status(400).json({ success: false, message: "Invalid report_id" });
+};
 
 // Create new app rating
-router.post("/", createAppRatingController);
+router.post("/", writeLimiter, createAppRatingController);
 
 // List ratings
-router.get("/", listAppRatingsController);
+router.get("/", readLimiter, listAppRatingsController);
 
 // Summary stats
-router.get("/summary", getAppRatingSummaryController);
+router.get("/summary", readLimiter, getAppRatingSummaryController);
 
-router.get("/reports/comments", authUser, listReportedCommentsController);
-router.get("/reports/replies", authUser, listReportedRepliesController);
-router.post("/reports/:report_id/ignore", authUser, ignoreReportController);
+// Reports (admin)
+router.get(
+  "/reports/comments",
+  authUser,
+  readLimiter,
+  listReportedCommentsController,
+);
+router.get(
+  "/reports/replies",
+  authUser,
+  readLimiter,
+  listReportedRepliesController,
+);
+
+router.post(
+  "/reports/:report_id/ignore",
+  authUser,
+  reportLimiter,
+  validateReportIdParam,
+  ignoreReportController,
+);
+
 router.delete(
   "/reports/:report_id/comment",
   authUser,
-  deleteReportedCommentController
+  reportLimiter,
+  validateReportIdParam,
+  deleteReportedCommentController,
 );
+
 router.delete(
   "/reports/:report_id/reply",
   authUser,
-  deleteReportedReplyController
+  reportLimiter,
+  validateReportIdParam,
+  deleteReportedReplyController,
 );
 
 // Get single rating
-router.get("/:id", getAppRatingByIdController);
+router.get("/:id", readLimiter, validateIdParam, getAppRatingByIdController);
 
 // Update rating
-router.put("/:id", updateAppRatingController);
+router.put("/:id", writeLimiter, validateIdParam, updateAppRatingController);
 
 // Delete rating
-router.delete("/:id", deleteAppRatingController);
+router.delete("/:id", writeLimiter, validateIdParam, deleteAppRatingController);
 
 module.exports = router;

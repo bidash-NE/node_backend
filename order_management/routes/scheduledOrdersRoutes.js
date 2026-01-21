@@ -1,6 +1,7 @@
 // routes/scheduledOrdersRoutes.js
 const express = require("express");
 const router = express.Router();
+const rateLimit = require("express-rate-limit");
 
 const {
   scheduleOrder,
@@ -11,7 +12,26 @@ const {
 
 const { uploadDeliveryPhotos } = require("../middleware/uploadDeliveryPhoto");
 
-router.post("/scheduled-orders", uploadDeliveryPhotos, scheduleOrder);
+const rateLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return res.status(429).json({
+      success: false,
+      message:
+        "Too many scheduled order requests from this IP, please try again after some time.",
+    });
+  },
+});
+
+router.post(
+  "/scheduled-orders",
+  rateLimiter,
+  uploadDeliveryPhotos,
+  scheduleOrder,
+);
 
 // FETCH all scheduled orders for a user
 router.get("/scheduled-orders/:user_id", listScheduledOrders);
@@ -20,7 +40,7 @@ router.get("/scheduled-orders/:user_id", listScheduledOrders);
 // e.g. /api/scheduled-orders/business/123
 router.get(
   "/scheduled-orders/business/:businessId",
-  listScheduledOrdersByBusiness
+  listScheduledOrdersByBusiness,
 );
 
 // CANCEL one scheduled order

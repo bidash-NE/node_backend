@@ -18,6 +18,7 @@ app.use(helmet()); // Security headers
 app.use(cors({ origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] }));
 app.use(express.json());
 app.use(morgan("dev"));
+app.set("trust proxy", 1);
 
 /* ─────────────────── Startup Async Init ─────────────────── */
 (async () => {
@@ -59,7 +60,7 @@ app.use(morgan("dev"));
     // 5) Start server
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () =>
-      console.log(`💰 wallet_payment listening on :${PORT}`)
+      console.log(`💰 wallet_payment listening on :${PORT}`),
     );
   } catch (err) {
     console.error("❌ Startup failed:", err.message);

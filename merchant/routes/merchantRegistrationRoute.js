@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const upload = require("../middlewares/upload");
-
+const rateLimit = require("express-rate-limit");
 const {
   registerMerchant,
   loginByEmail,
@@ -11,6 +11,20 @@ const {
   listFoodOwnersWithCelebration,
   listMartOwnersWithCelebration,
 } = require("../controllers/merchantRegistrationController");
+
+let rateLimiter = rateLimit({
+  windowMs: 2 * 60 * 1000,
+  max: 7,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    return res.status(429).json({
+      success: false,
+      message:
+        "Too many requests from this IP, please try again after 2 minutes.",
+    });
+  },
+});
 
 // Middleware to detect multipart/form-data
 const maybeMulter = (req, res, next) => {
@@ -26,13 +40,13 @@ const maybeMulter = (req, res, next) => {
 };
 
 // Register merchant
-router.post("/register", maybeMulter, registerMerchant);
+router.post("/register", rateLimiter, maybeMulter, registerMerchant);
 
 // Update business
 router.put("/update/:businessId", maybeMulter, updateMerchant);
 
 // Login by username
-router.post("/login-email", loginByEmail);
+router.post("/login-email", rateLimiter, loginByEmail);
 
 // List business owners
 router.get("/owners/food", listFoodOwners);

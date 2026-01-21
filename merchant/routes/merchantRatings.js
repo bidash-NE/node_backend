@@ -1,9 +1,92 @@
-// routes/merchantRatingsRoutes.js ✅ FULL + WORKING (MERCHANT SIDE)
+// routes/merchantRatingsRoutes.js
 const express = require("express");
 const router = express.Router();
-
+const limit = require("express-rate-limit");
 const authUser = require("../middlewares/authUser");
 
+/* ---------------- rate limit helpers ---------------- */
+const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
+  limit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+
+    // key: "ip" | "user"
+    keyGenerator: (req) => {
+      if (key === "user") {
+        // adjust these to match your authUser payload shape
+        const uid =
+          req.user?.user_id ??
+          req.user?.id ??
+          req.user?.userId ??
+          req.user?.merchant_id;
+
+        return uid ? `user:${uid}` : `ip:${req.ip}`;
+      }
+      return req.ip;
+    },
+
+    handler: (req, res) => {
+      // express-rate-limit attaches req.rateLimit in v6+
+      const retryAfterSeconds = req.rateLimit?.resetTime
+        ? Math.max(
+            0,
+            Math.ceil((req.rateLimit.resetTime.getTime() - Date.now()) / 1000),
+          )
+        : undefined;
+
+      return res.status(429).json({
+        success: false,
+        message,
+        retry_after_seconds: retryAfterSeconds,
+      });
+    },
+  });
+
+/* ---------------- rate limiters (tune as you like) ---------------- */
+// Read/list endpoints (higher)
+const ratingsListLimiter = makeLimiter({
+  windowMs: 60 * 1000, // 1 min
+  max: 15,
+  message: "Too many requests. Please slow down.",
+  key: "ip",
+});
+
+// Likes/unlikes (bursty)
+const likeLimiter = makeLimiter({
+  windowMs: 60 * 1000, // 1 min
+  max: 15,
+  message: "Too many like/unlike actions. Please try again shortly.",
+  key: "user", // per-user is nicer if auth exists; falls back to IP
+});
+
+// Replies create (tighter)
+const replyCreateLimiter = makeLimiter({
+  windowMs: 5 * 60 * 1000, // 5 min
+  max: 15,
+  message: "Too many replies created. Please try again later.",
+  key: "user",
+});
+
+// Delete actions (tight)
+const deleteLimiter = makeLimiter({
+  windowMs: 10 * 60 * 1000, // 10 min
+  max: 15,
+  message: "Too many delete actions. Please try again later.",
+  key: "user",
+});
+
+// Reports (very tight)
+const reportLimiter = makeLimiter({
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 15,
+  message:
+    "You have reached the report limit for today. Please try again later.",
+  key: "user",
+});
+
+/* ---------- controllers ---------- */
 const {
   getBusinessRatingsAutoCtrl,
 
@@ -17,13 +100,11 @@ const {
   deleteRatingReplyCtrl,
   deleteRatingWithRepliesCtrl,
 
-  // ✅ reports
   reportRatingCtrl,
   reportReplyCtrl,
 } = require("../controllers/merchantRatingsController");
 
 /* ---------- validators ---------- */
-
 const validateBusinessIdParam = (req, res, next) => {
   const bid = Number(req.params.business_id);
   if (Number.isFinite(bid) && bid > 0) return next();
@@ -62,120 +143,92 @@ const validateRatingTypeParam = (req, res, next) => {
  */
 router.get(
   "/ratings/:business_id",
+  ratingsListLimiter,
   validateBusinessIdParam,
-  getBusinessRatingsAutoCtrl
+  getBusinessRatingsAutoCtrl,
 );
 
 /* ---------- likes ---------- */
-/**
- * FOOD:
- *  POST /api/merchant/ratings/food/:rating_id/like
- *  POST /api/merchant/ratings/food/:rating_id/unlike
- */
 router.post(
   "/ratings/food/:rating_id/like",
+  likeLimiter,
   validateRatingIdParam,
-  likeFoodRatingCtrl
+  likeFoodRatingCtrl,
 );
 router.post(
   "/ratings/food/:rating_id/unlike",
+  likeLimiter,
   validateRatingIdParam,
-  unlikeFoodRatingCtrl
+  unlikeFoodRatingCtrl,
 );
 
-/**
- * MART:
- *  POST /api/merchant/ratings/mart/:rating_id/like
- *  POST /api/merchant/ratings/mart/:rating_id/unlike
- */
 router.post(
   "/ratings/mart/:rating_id/like",
+  likeLimiter,
   validateRatingIdParam,
-  likeMartRatingCtrl
+  likeMartRatingCtrl,
 );
 router.post(
   "/ratings/mart/:rating_id/unlike",
+  likeLimiter,
   validateRatingIdParam,
-  unlikeMartRatingCtrl
+  unlikeMartRatingCtrl,
 );
 
 /* ---------- delete rating + replies ---------- */
-/**
- * DELETE /api/merchant/ratings/:type/:rating_id
- * Auth required
- */
 router.delete(
   "/ratings/:type/:rating_id",
   authUser,
+  deleteLimiter,
   validateRatingTypeParam,
   validateRatingIdParam,
-  deleteRatingWithRepliesCtrl
+  deleteRatingWithRepliesCtrl,
 );
 
-/* ---------- replies (Redis-backed) ---------- */
-/**
- * POST /api/merchant/ratings/:type/:rating_id/replies
- * Body: { text }
- * Auth required
- */
+/* ---------- replies ---------- */
 router.post(
   "/ratings/:type/:rating_id/replies",
   authUser,
+  replyCreateLimiter,
   validateRatingTypeParam,
   validateRatingIdParam,
-  createRatingReplyCtrl
+  createRatingReplyCtrl,
 );
 
-/**
- * GET /api/merchant/ratings/:type/:rating_id/replies?page=1&limit=20
- */
 router.get(
   "/ratings/:type/:rating_id/replies",
+  ratingsListLimiter,
   validateRatingTypeParam,
   validateRatingIdParam,
-  listRatingRepliesCtrl
+  listRatingRepliesCtrl,
 );
 
-/**
- * DELETE /api/merchant/ratings/replies/:reply_id
- * Auth required
- */
 router.delete(
   "/ratings/:type/replies/:reply_id",
   authUser,
+  deleteLimiter,
+  validateRatingTypeParam, // ✅ strongly recommended since :type exists
   validateReplyIdParam,
-  deleteRatingReplyCtrl
+  deleteRatingReplyCtrl,
 );
 
-/* ---------- ✅ REPORTS ---------- */
-/**
- * Report a COMMENT (rating) (food or mart)
- * POST /api/merchant/ratings/:type/:rating_id/report
- * Body: { reason: "..." }
- * Auth required
- */
+/* ---------- reports ---------- */
 router.post(
   "/ratings/:type/:rating_id/report",
   authUser,
+  reportLimiter,
   validateRatingTypeParam,
   validateRatingIdParam,
-  reportRatingCtrl
+  reportRatingCtrl,
 );
 
-/**
- * Report a REPLY (food or mart)
- * POST /api/merchant/ratings/:type/replies/:reply_id/report
- * Body: { reason: "..." }
- * Auth required
- *
- * ✅ Fixes: Cannot POST /api/merchant/ratings/food/replies/11/report
- */
 router.post(
   "/ratings/:type/replies/:reply_id/report",
   authUser,
+  reportLimiter,
   validateRatingTypeParam,
   validateReplyIdParam,
-  reportReplyCtrl
+  reportReplyCtrl,
 );
 
 module.exports = router;

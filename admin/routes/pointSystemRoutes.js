@@ -1,83 +1,95 @@
 // routes/pointSystemRoutes.js
 const express = require("express");
 const router = express.Router();
+const rateLimit = require("express-rate-limit");
 
 const pointSystemController = require("../controllers/pointSystemController");
 const adminOnly = require("../middleware/adminAuth");
 
-/* =======================================================
-   POINT EARNING RULES (existing)
-   /api/admin/point-system...
-======================================================= */
+const makeLimiter = ({ windowMs, max, message }) =>
+  rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => res.status(429).json({ success: false, message }),
+  });
 
-// List all rules (optionally only active)
-// GET /api/admin/point-system?onlyActive=true
-router.get("/point-system", adminOnly, pointSystemController.getAllPointRules);
+const adminReadLimiter = makeLimiter({
+  windowMs: 60 * 1000,
+  max: 120,
+  message: "Too many requests. Please slow down.",
+});
 
-// Get single rule by id
-// GET /api/admin/point-system/:id
+const adminWriteLimiter = makeLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  message: "Too many admin changes. Please try again later.",
+});
+
+/* POINT EARNING RULES */
+router.get(
+  "/point-system",
+  adminOnly,
+  adminReadLimiter,
+  pointSystemController.getAllPointRules,
+);
+
 router.get(
   "/point-system/:id",
   adminOnly,
-  pointSystemController.getPointRuleById
+  adminReadLimiter,
+  pointSystemController.getPointRuleById,
 );
 
-// Create new rule
-// POST /api/admin/point-system
-// headers: Authorization: Bearer <access_token>
-router.post("/point-system", adminOnly, pointSystemController.createPointRule);
+router.post(
+  "/point-system",
+  adminOnly,
+  adminWriteLimiter,
+  pointSystemController.createPointRule,
+);
 
-// Update rule
-// PUT /api/admin/point-system/:id
 router.put(
   "/point-system/:id",
   adminOnly,
-  pointSystemController.updatePointRule
+  adminWriteLimiter,
+  pointSystemController.updatePointRule,
 );
 
-// Delete rule
-// DELETE /api/admin/point-system/:id
 router.delete(
   "/point-system/:id",
   adminOnly,
-  pointSystemController.deletePointRule
+  adminWriteLimiter,
+  pointSystemController.deletePointRule,
 );
 
-/* =======================================================
-   POINT CONVERSION RULE (single-row config)
-   /api/admin/point-conversion-rule...
-======================================================= */
-
-// Get current conversion rule
-// GET /api/admin/point-conversion-rule
+/* POINT CONVERSION RULE */
 router.get(
   "/point-conversion-rule",
   adminOnly,
-  pointSystemController.getPointConversionRule
+  adminReadLimiter,
+  pointSystemController.getPointConversionRule,
 );
 
-// Create or replace conversion rule
-// POST /api/admin/point-conversion-rule
 router.post(
   "/point-conversion-rule",
   adminOnly,
-  pointSystemController.createPointConversionRule
+  adminWriteLimiter,
+  pointSystemController.createPointConversionRule,
 );
 
-// Update conversion rule (partial)
-// PUT /api/admin/point-conversion-rule
 router.put(
   "/point-conversion-rule",
   adminOnly,
-  pointSystemController.updatePointConversionRule
+  adminWriteLimiter,
+  pointSystemController.updatePointConversionRule,
 );
 
-// Delete conversion rule
-// DELETE /api/admin/point-conversion-rule
 router.delete(
   "/point-conversion-rule",
   adminOnly,
-  pointSystemController.deletePointConversionRule
+  adminWriteLimiter,
+  pointSystemController.deletePointConversionRule,
 );
 
 module.exports = router;

@@ -28,6 +28,7 @@ const {
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1);
 
 /* ===================== CORS ===================== */
 /**
@@ -39,7 +40,7 @@ app.use(
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: false,
-  })
+  }),
 );
 
 /* ===================== Body parsing ===================== */
@@ -131,7 +132,7 @@ const server = http.createServer(app);
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () => {
       console.log(
-        `🚀 Order service + Realtime listening on port number :${PORT}`
+        `🚀 Order service + Realtime listening on port number :${PORT}`,
       );
       console.log(`📦 Uploads served at: http://localhost:${PORT}/uploads/...`);
     });

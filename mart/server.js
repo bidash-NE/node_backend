@@ -12,6 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.set("trust proxy", 1); // if behind 1 proxy (common with k8s ingress)
 
 // ✅ Load upload root from .env (default to ./uploads for local dev)
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");

@@ -14,6 +14,7 @@ const salesRoutes = require("./routes/salesRoutes");
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.set("trust proxy", 1);
 
 app.use(cors());
 app.use(express.json());
@@ -40,5 +41,5 @@ app.use("/api/sales", salesRoutes);
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 Server running at port NO: ${PORT}`)
+  console.log(`🚀 Server running at port NO: ${PORT}`),
 );
