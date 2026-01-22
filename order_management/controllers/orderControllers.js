@@ -1058,6 +1058,20 @@ async function updateOrderStatus(req, res) {
           });
         }
       }
+      console.log(
+        "[CONFIRM] final_delivery_fee received:",
+        final_delivery_fee,
+        typeof final_delivery_fee,
+      );
+
+      // ✅ update final amounts ONLY if they are real numbers
+      // ✅ helper that prevents "" -> 0
+      const numOrUndef = (v) => {
+        if (v === undefined || v === null) return undefined;
+        if (typeof v === "string" && v.trim() === "") return undefined; // blocks "" => 0
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
 
       // ✅ update final amounts ONLY if they are real numbers
       const updatePayload = {};
