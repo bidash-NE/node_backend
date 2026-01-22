@@ -13,6 +13,7 @@ on:
       - "admin/**"
       - "Map_and_location_services/**"
       - "wallet_payment/**"
+      - "bfs-wallet-backend/**"
       - "grablike-backend/**"
       - "sms-gateway-backend/**"
       - "k8s/**"
@@ -33,6 +34,7 @@ jobs:
       admin: ${{ steps.filter.outputs.admin }}
       map_location: ${{ steps.filter.outputs.map_location }}
       wallet_payment: ${{ steps.filter.outputs.wallet_payment }}
+      bfs_wallet_backend: ${{ steps.filter.outputs.bfs_wallet_backend }}
       grablike_backend: ${{ steps.filter.outputs.grablike_backend }}
       sms_gateway: ${{ steps.filter.outputs.sms_gateway }}
       k8s: ${{ steps.filter.outputs.k8s }}
@@ -52,6 +54,7 @@ jobs:
             admin:                'admin/**'
             map_location:         'Map_and_location_services/**'
             wallet_payment:       'wallet_payment/**'
+            bfs_wallet_backend:   'bfs-wallet-backend/**'
             grablike_backend:     'grablike-backend/**'
             sms_gateway:          'sms-gateway-backend/**'
             k8s:                  'k8s/**'
@@ -65,6 +68,7 @@ jobs:
               - 'admin/**'
               - 'Map_and_location_services/**'
               - 'wallet_payment/**'
+              - 'bfs-wallet-backend/**'
               - 'grablike-backend/**'
               - 'sms-gateway-backend/**'
               - 'k8s/**'
@@ -173,6 +177,16 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:${{ github.sha }}
 
+      - name: Build & push BFS Wallet Backend
+        if: needs.changes.outputs.bfs_wallet_backend == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./bfs-wallet-backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/superapp-bfs-wallet-backend:latest
+            ${{ secrets.DOCKER_USERNAME }}/superapp-bfs-wallet-backend:${{ github.sha }}
+
       - name: Build & push Grablike Backend
         if: needs.changes.outputs.grablike_backend == 'true'
         uses: docker/build-push-action@v6
@@ -212,6 +226,7 @@ jobs:
       ADMIN_CHANGED: ${{ needs.changes.outputs.admin }}
       MAP_CHANGED: ${{ needs.changes.outputs.map_location }}
       WALLET_CHANGED: ${{ needs.changes.outputs.wallet_payment }}
+      BFS_WALLET_CHANGED: ${{ needs.changes.outputs.bfs_wallet_backend }}
       GRABLIKE_CHANGED: ${{ needs.changes.outputs.grablike_backend }}
       SMS_GATEWAY_CHANGED: ${{ needs.changes.outputs.sms_gateway }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
@@ -273,6 +288,9 @@ jobs:
           fi
           if [ "${WALLET_CHANGED:-}" = "true" ]; then
             deploy_if_exists wallet-payment wallet-payment "${DOCKER_USER}/superapp-wallet-payment:${SHA}"
+          fi
+          if [ "${BFS_WALLET_CHANGED:-}" = "true" ]; then
+            deploy_if_exists bfs-wallet-backend bfs-wallet-backend "${DOCKER_USER}/superapp-bfs-wallet-backend:${SHA}"
           fi
           if [ "${GRABLIKE_CHANGED:-}" = "true" ]; then
             deploy_if_exists grablike-backend grablike-backend "${DOCKER_USER}/superapp-grablike-backend:${SHA}"
