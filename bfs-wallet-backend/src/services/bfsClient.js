@@ -13,7 +13,7 @@ const {
   buildSourceString,
   signChecksum,
   // verifyChecksum,
-} = require("../utils/bfsCheckSum");
+} = require("../utils/bfsChecksum");
 const { toFormUrlEncoded, parseBfsResponse } = require("../utils/nvp");
 const { logRmaPg } = require("./rmaLogService");
 
@@ -60,11 +60,7 @@ const RC_FIELDS = [
 ];
 
 // EC (response to AE)
-const EC_FIELDS = [
-  "bfs_msgType",
-  "bfs_responseCode",
-  "bfs_responseDesc",
-];
+const EC_FIELDS = ["bfs_msgType", "bfs_responseCode", "bfs_responseDesc"];
 
 // AC (response to DR / AS)
 const AC_FIELDS = [
@@ -106,19 +102,11 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
 
   // 🔐 Log raw BFS response directly into DB
   try {
-    const tag =
-      logCtx.tag ||
-      `${(params.bfs_msgType || "").toUpperCase()}-RES`; // e.g. AR-RES, AE-RES, ...
+    const tag = logCtx.tag || `${(params.bfs_msgType || "").toUpperCase()}-RES`; // e.g. AR-RES, AE-RES, ...
     const orderNo =
-      logCtx.orderNo ||
-      params.bfs_orderNo ||
-      respObj.bfs_orderNo ||
-      null;
+      logCtx.orderNo || params.bfs_orderNo || respObj.bfs_orderNo || null;
     const bfsTxnId =
-      logCtx.bfsTxnId ||
-      respObj.bfs_bfsTxnId ||
-      params.bfs_bfsTxnId ||
-      null;
+      logCtx.bfsTxnId || respObj.bfs_bfsTxnId || params.bfs_bfsTxnId || null;
 
     await logRmaPg({
       orderNo,
@@ -147,7 +135,13 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
 // ===== High-level helpers =====
 
 // AR – Authorization Request (init topup)
-async function sendAR({ orderNo, benfTxnTime, amount, remitterEmail, paymentDesc }) {
+async function sendAR({
+  orderNo,
+  benfTxnTime,
+  amount,
+  remitterEmail,
+  paymentDesc,
+}) {
   const params = {
     bfs_msgType: "AR",
     bfs_benfTxnTime: benfTxnTime,
@@ -203,7 +197,13 @@ async function sendDR({ bfsTxnId, otp, orderNo }) {
 }
 
 // AS – Status Check
-async function sendAS({ orderNo, benfTxnTime, amount, remitterEmail, paymentDesc }) {
+async function sendAS({
+  orderNo,
+  benfTxnTime,
+  amount,
+  remitterEmail,
+  paymentDesc,
+}) {
   const params = {
     bfs_msgType: "AS",
     bfs_benfTxnTime: benfTxnTime,
