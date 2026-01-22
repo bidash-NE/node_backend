@@ -8,8 +8,6 @@ const PLATFORM_USER_SHARE = 0.5;
 const PLATFORM_MERCHANT_SHARE = 0.5;
 
 const IDS_BOTH_URL = process.env.WALLET_IDS_BOTH_URL;
-const IDS_TXN_URL = process.env.WALLET_IDS_TXN_URL;
-const IDS_JRN_URL = process.env.WALLET_IDS_JRN_URL;
 
 /* ======================= UTILS ======================= */
 function generateOrderId() {
@@ -47,12 +45,32 @@ const fmtNu = (n) => Number(n || 0).toFixed(2);
 
 /* ================= HTTP & ID SERVICE HELPERS ================= */
 async function postJson(url, body = {}, timeout = 8000) {
-  const { data } = await axios.post(url, body, {
-    timeout,
-    headers: { "Content-Type": "application/json" },
-  });
-  return data;
+  if (!url) throw new Error("Wallet ID service URL is missing in env.");
+
+  try {
+    const { data } = await axios.post(url, body, {
+      timeout,
+      headers: { "Content-Type": "application/json" },
+      // optional: helps if you have weird proxy issues
+      // validateStatus: () => true,
+    });
+    return data;
+  } catch (e) {
+    const status = e?.response?.status;
+    const resp = e?.response?.data;
+    const respText =
+      resp == null
+        ? ""
+        : typeof resp === "string"
+          ? resp.slice(0, 300)
+          : JSON.stringify(resp).slice(0, 300);
+
+    throw new Error(
+      `Wallet ID service POST failed: ${url} ${status ? `(HTTP ${status})` : ""} ${e?.message || ""} ${respText}`,
+    );
+  }
 }
+
 async function ensureDeliveryExtrasSupport() {
   const [rows] = await db.query(
     `
@@ -66,7 +84,7 @@ async function ensureDeliveryExtrasSupport() {
         'delivery_special_mode','delivery_photo_url',
         'delivery_photo_urls'
       )
-    `
+    `,
   );
 
   const set = new Set(rows.map((r) => r.COLUMN_NAME));
@@ -101,38 +119,17 @@ function extractIdsShape(payload) {
 }
 
 async function fetchTxnAndJournalIds() {
-  try {
-    const data = await postJson(IDS_BOTH_URL, {});
-    const { txn_ids, journal_id, single_txn } = extractIdsShape(data);
-    if (txn_ids && txn_ids.length >= 2) {
-      return { dr_id: txn_ids[0], cr_id: txn_ids[1], journal_id };
-    }
-    if (single_txn) {
-      const d2 = await postJson(IDS_TXN_URL, {});
-      const { single_txn: single2 } = extractIdsShape(d2);
-      return { dr_id: single_txn, cr_id: single2 || single_txn, journal_id };
-    }
-  } catch (_) {}
+  const data = await postJson(IDS_BOTH_URL, {});
 
-  let dr_id = null,
-    cr_id = null,
-    journal_id = null;
-  try {
-    journal_id = extractIdsShape(await postJson(IDS_JRN_URL, {})).journal_id;
-  } catch (_) {}
-  try {
-    dr_id = extractIdsShape(await postJson(IDS_TXN_URL, {})).single_txn;
-  } catch (_) {}
-  try {
-    cr_id = extractIdsShape(await postJson(IDS_TXN_URL, {})).single_txn;
-  } catch (_) {}
+  const { txn_ids, journal_id } = extractIdsShape(data);
 
-  if (!dr_id || !cr_id) {
-    throw new Error(
-      "Unable to fetch transaction IDs from wallet ID service (POST)."
-    );
+  if (txn_ids && txn_ids.length >= 2) {
+    return { dr_id: txn_ids[0], cr_id: txn_ids[1], journal_id };
   }
-  return { dr_id, cr_id, journal_id };
+
+  throw new Error(
+    `Wallet ID service returned unexpected payload: ${JSON.stringify(data).slice(0, 500)}`,
+  );
 }
 
 /* ================= WALLET LOOKUPS ================= */
@@ -143,7 +140,7 @@ async function getBuyerWalletByUserId(user_id, conn = null) {
        FROM wallets
       WHERE user_id = ?
       LIMIT 1`,
-    [user_id]
+    [user_id],
   );
   return rows[0] || null;
 }
@@ -155,7 +152,7 @@ async function getAdminWallet(conn = null) {
        FROM wallets
       WHERE wallet_id = ?
       LIMIT 1`,
-    [ADMIN_WALLET_ID]
+    [ADMIN_WALLET_ID],
   );
   return rows[0] || null;
 }
@@ -170,7 +167,7 @@ async function getMerchantWalletByBusinessId(business_id, conn = null) {
      WHERE m.business_id = ?
      LIMIT 1
     `,
-    [business_id]
+    [business_id],
   );
   return rows[0] || null;
 }
@@ -187,7 +184,7 @@ async function getOwnerTypeByBusinessId(business_id, conn = null) {
        FROM merchant_business_details
       WHERE business_id = ?
       LIMIT 1`,
-    [bid]
+    [bid],
   );
 
   const ot = rows[0]?.owner_type;
@@ -212,7 +209,7 @@ async function resolveOrderServiceType(order_id, conn = null) {
     if (hasService) {
       const [[row]] = await dbh.query(
         `SELECT service_type FROM orders WHERE order_id = ? LIMIT 1`,
-        [order_id]
+        [order_id],
       );
       const st = row?.service_type
         ? String(row.service_type).trim().toUpperCase()
@@ -228,7 +225,7 @@ async function resolveOrderServiceType(order_id, conn = null) {
       WHERE order_id = ?
       ORDER BY menu_id ASC
       LIMIT 1`,
-    [order_id]
+    [order_id],
   );
 
   const derived = primary?.business_id
@@ -241,7 +238,7 @@ async function resolveOrderServiceType(order_id, conn = null) {
 /* ================= USER NOTIFICATIONS ================= */
 async function insertUserNotification(
   conn,
-  { user_id, title, message, type = "wallet", data = null, status = "unread" }
+  { user_id, title, message, type = "wallet", data = null, status = "unread" },
 ) {
   await conn.query(
     `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
@@ -253,7 +250,7 @@ async function insertUserNotification(
       message,
       data ? JSON.stringify(data) : null,
       status === "read" ? "read" : "unread",
-    ]
+    ],
   );
 }
 
@@ -288,7 +285,7 @@ async function addUserOrderStatusNotificationInternal(
   order_id,
   status,
   reason = "",
-  conn = null
+  conn = null,
 ) {
   const dbh = conn || db;
   let normalized = String(status || "").toUpperCase();
@@ -325,7 +322,7 @@ async function addUserUnavailableItemNotificationInternal(
   order_id,
   changes,
   final_total_amount = null,
-  conn = null
+  conn = null,
 ) {
   const dbh = conn || db;
   const removed = Array.isArray(changes?.removed) ? changes.removed : [];
@@ -341,7 +338,7 @@ async function addUserUnavailableItemNotificationInternal(
     lines.push(
       names
         ? `Removed items: ${names}.`
-        : `Some unavailable items were removed from your order.`
+        : `Some unavailable items were removed from your order.`,
     );
   }
 
@@ -353,7 +350,7 @@ async function addUserUnavailableItemNotificationInternal(
     lines.push(
       names
         ? `Replaced items: ${names}.`
-        : `Some unavailable items were replaced with alternatives.`
+        : `Some unavailable items were replaced with alternatives.`,
     );
   }
 
@@ -362,8 +359,8 @@ async function addUserUnavailableItemNotificationInternal(
   if (final_total_amount != null) {
     lines.push(
       `Your final payable amount for this order is Nu. ${fmtNu(
-        final_total_amount
-      )}.`
+        final_total_amount,
+      )}.`,
     );
   }
 
@@ -390,7 +387,7 @@ async function addUserWalletDebitNotificationInternal(
   order_amount,
   platform_fee,
   method,
-  conn = null
+  conn = null,
 ) {
   const dbh = conn || db;
   const payMethod = String(method || "").toUpperCase();
@@ -404,12 +401,12 @@ async function addUserWalletDebitNotificationInternal(
     message =
       `Your order ${order_id} is accepted successfully. ` +
       `Nu. ${fmtNu(
-        orderAmt
+        orderAmt,
       )} has been deducted from your wallet for the order and ` +
       `Nu. ${fmtNu(feeAmt)} as platform fee (your share).`;
   } else {
     message = `Order ${order_id}: Nu. ${fmtNu(
-      feeAmt
+      feeAmt,
     )} was deducted from your wallet as platform fee (your share).`;
   }
 
@@ -438,7 +435,7 @@ async function getActivePointRule(conn = null) {
      WHERE is_active = 1
      ORDER BY created_at DESC
      LIMIT 1
-  `
+  `,
   );
   return rows[0] || null;
 }
@@ -453,7 +450,7 @@ async function hasPointsAwardNotification(order_id, conn = null) {
        AND JSON_EXTRACT(data, '$.order_id') = ?
      LIMIT 1
   `,
-    [order_id]
+    [order_id],
   );
   return rows.length > 0;
 }
@@ -470,7 +467,7 @@ async function awardPointsForCompletedOrder(order_id) {
        WHERE order_id = ?
        LIMIT 1
     `,
-      [order_id]
+      [order_id],
     );
 
     if (!order) {
@@ -521,7 +518,7 @@ async function awardPointsForCompletedOrder(order_id) {
     ]);
 
     const msg = `You earned ${points} points for order ${order_id} (Nu. ${fmtNu(
-      totalAmount
+      totalAmount,
     )} spent).`;
 
     await insertUserNotification(conn, {
@@ -586,7 +583,7 @@ async function captureExists(order_id, capture_type, conn = null) {
        FROM order_wallet_captures
       WHERE order_id = ? AND capture_type = ?
       LIMIT 1`,
-    [order_id, capture_type]
+    [order_id, capture_type],
   );
   return !!row;
 }
@@ -599,7 +596,7 @@ async function computeBusinessSplit(order_id, conn = null) {
        FROM orders
       WHERE order_id = ?
       LIMIT 1`,
-    [order_id]
+    [order_id],
   );
   if (!order) throw new Error("Order not found while computing split");
 
@@ -608,7 +605,7 @@ async function computeBusinessSplit(order_id, conn = null) {
        FROM order_items
       WHERE order_id = ?
       ORDER BY menu_id ASC`,
-    [order_id]
+    [order_id],
   );
   if (!items.length) throw new Error("Order has no items");
 
@@ -655,7 +652,7 @@ async function computeBusinessSplit(order_id, conn = null) {
 
 async function recordWalletTransfer(
   conn,
-  { fromId, toId, amount, order_id, note = null }
+  { fromId, toId, amount, order_id, note = null },
 ) {
   const amt = Number(amount || 0);
   if (!(amt > 0)) return null;
@@ -664,7 +661,7 @@ async function recordWalletTransfer(
     `UPDATE wallets
         SET amount = amount - ?
       WHERE wallet_id = ? AND amount >= ?`,
-    [amt, fromId, amt]
+    [amt, fromId, amt],
   );
   if (!dr.affectedRows)
     throw new Error(`Insufficient funds or missing wallet: ${fromId}`);
@@ -673,7 +670,7 @@ async function recordWalletTransfer(
     `UPDATE wallets
         SET amount = amount + ?
       WHERE wallet_id = ?`,
-    [amt, toId]
+    [amt, toId],
   );
 
   const { dr_id, cr_id, journal_id } = await fetchTxnAndJournalIds();
@@ -682,14 +679,14 @@ async function recordWalletTransfer(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
-    [dr_id, journal_id || null, fromId, toId, amt, note]
+    [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
-    [cr_id, journal_id || null, fromId, toId, amt, note]
+    [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   return { dr_txn_id: dr_id, cr_txn_id: cr_id, journal_id };
@@ -711,7 +708,7 @@ async function captureOrderFunds(order_id) {
          FROM orders
         WHERE order_id = ?
         LIMIT 1`,
-      [order_id]
+      [order_id],
     );
     if (!order) throw new Error("Order not found for capture");
 
@@ -745,7 +742,7 @@ async function captureOrderFunds(order_id) {
 
     const [[freshBuyer]] = await conn.query(
       `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
-      [buyer.id]
+      [buyer.id],
     );
     if (!freshBuyer || Number(freshBuyer.amount) < needFromBuyer) {
       throw new Error("Insufficient wallet balance during capture");
@@ -754,11 +751,11 @@ async function captureOrderFunds(order_id) {
     if (merchFee > 0) {
       const [[freshMerch]] = await conn.query(
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
-        [merch.id]
+        [merch.id],
       );
       if (!freshMerch || Number(freshMerch.amount) < merchFee) {
         throw new Error(
-          "Insufficient merchant wallet balance for platform fee share."
+          "Insufficient merchant wallet balance for platform fee share.",
         );
       }
     }
@@ -802,7 +799,7 @@ async function captureOrderFunds(order_id) {
         tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
         tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
         tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
-      ]
+      ],
     );
 
     await conn.commit();
@@ -839,7 +836,7 @@ async function captureOrderCODFee(order_id) {
          FROM orders
         WHERE order_id = ?
         LIMIT 1`,
-      [order_id]
+      [order_id],
     );
     if (!order) throw new Error("Order not found for COD fee capture");
 
@@ -869,21 +866,21 @@ async function captureOrderCODFee(order_id) {
     if (feeForPrimary > 0) {
       const [[freshBuyer]] = await conn.query(
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
-        [buyer.id]
+        [buyer.id],
       );
       if (!freshBuyer || Number(freshBuyer.amount) < userFee) {
         throw new Error(
-          "Insufficient user wallet balance for COD platform fee share."
+          "Insufficient user wallet balance for COD platform fee share.",
         );
       }
 
       const [[freshMerchant]] = await conn.query(
         `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
-        [merch.id]
+        [merch.id],
       );
       if (!freshMerchant || Number(freshMerchant.amount) < merchantFee) {
         throw new Error(
-          "Insufficient merchant wallet balance for COD platform fee share."
+          "Insufficient merchant wallet balance for COD platform fee share.",
         );
       }
 
@@ -910,23 +907,35 @@ async function captureOrderCODFee(order_id) {
         });
       }
 
-      const adminTxnSummary = [
-        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : "",
-        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : "",
-      ]
-        .filter(Boolean)
-        .join(";");
+      const buyerPair = tUserFee
+        ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
+        : null;
+
+      const merchPair = tMerchFee
+        ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
+        : null;
+
+      // keep admin_txn_id short (journal code) or null
+      const adminRef =
+        (tUserFee && tUserFee.journal_id
+          ? String(tUserFee.journal_id)
+          : null) ||
+        (tMerchFee && tMerchFee.journal_id
+          ? String(tMerchFee.journal_id)
+          : null) ||
+        null;
 
       await conn.query(
-        `INSERT INTO order_wallet_captures (order_id, capture_type, admin_txn_id)
-         VALUES (?, 'COD_FEE', ?)`,
-        [order_id, adminTxnSummary || null]
+        `INSERT INTO order_wallet_captures
+     (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
+   VALUES (?, 'COD_FEE', ?, ?, ?)`,
+        [order_id, buyerPair, merchPair, adminRef],
       );
     } else {
       await conn.query(
         `INSERT INTO order_wallet_captures (order_id, capture_type, admin_txn_id)
          VALUES (?, 'COD_FEE', NULL)`,
-        [order_id]
+        [order_id],
       );
     }
 
@@ -967,7 +976,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
         `DELETE FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bid, mid]
+        [order_id, bid, mid],
       );
     }
 
@@ -982,7 +991,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
         `SELECT * FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bidOld, midOld]
+        [order_id, bidOld, midOld],
       );
       if (!rows.length) continue;
 
@@ -1021,7 +1030,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
           price,
           subtotal,
           row.item_id,
-        ]
+        ],
       );
     }
 
@@ -1047,7 +1056,7 @@ async function tableExists(table, conn = null) {
        AND TABLE_NAME = ?
      LIMIT 1
     `,
-    [table]
+    [table],
   );
   return rows.length > 0;
 }
@@ -1061,7 +1070,7 @@ async function getTableColumns(table, conn = null) {
      WHERE TABLE_SCHEMA = DATABASE()
        AND TABLE_NAME = ?
     `,
-    [table]
+    [table],
   );
   return new Set(rows.map((r) => String(r.COLUMN_NAME)));
 }
@@ -1073,7 +1082,7 @@ function pick(obj, key) {
 async function archiveCancelledOrderInternal(
   conn,
   order_id,
-  { cancelled_by = "SYSTEM", reason = "" } = {}
+  { cancelled_by = "SYSTEM", reason = "" } = {},
 ) {
   const hasCancelledOrders = await tableExists("cancelled_orders", conn);
   const hasCancelledItems = await tableExists("cancelled_order_items", conn);
@@ -1081,13 +1090,13 @@ async function archiveCancelledOrderInternal(
 
   const [[order]] = await conn.query(
     `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
-    [order_id]
+    [order_id],
   );
   if (!order) return { archived: false };
 
   const [items] = await conn.query(
     `SELECT * FROM order_items WHERE order_id = ?`,
-    [order_id]
+    [order_id],
   );
 
   // ✅ NEW: always resolve service type (FOOD/MART) even if orders.service_type is missing
@@ -1151,9 +1160,9 @@ async function archiveCancelledOrderInternal(
 
       await conn.query(
         `INSERT IGNORE INTO cancelled_orders (${fields.join(
-          ", "
+          ", ",
         )}) VALUES (${placeholders})`,
-        values
+        values,
       );
     }
   }
@@ -1189,9 +1198,9 @@ async function archiveCancelledOrderInternal(
 
         await conn.query(
           `INSERT IGNORE INTO cancelled_order_items (${fields.join(
-            ", "
+            ", ",
           )}) VALUES (${placeholders})`,
-          values
+          values,
         );
       }
     }
@@ -1215,7 +1224,7 @@ async function trimDeliveredOrdersForUser(conn, userId, keep = 10) {
      LIMIT ?, 100000
      FOR UPDATE
     `,
-    [userId, keep]
+    [userId, keep],
   );
 
   if (!oldRows.length) return { trimmed: 0 };
@@ -1224,7 +1233,7 @@ async function trimDeliveredOrdersForUser(conn, userId, keep = 10) {
 
   const [del] = await conn.query(
     `DELETE FROM delivered_orders WHERE user_id = ? AND order_id IN (?)`,
-    [userId, oldIds]
+    [userId, oldIds],
   );
 
   return { trimmed: del.affectedRows || 0 };
@@ -1241,7 +1250,7 @@ async function cancelAndArchiveOrder(
     cancel_reason = "",
     onlyIfStatus = null,
     expectedUserId = null,
-  } = {}
+  } = {},
 ) {
   const conn = await db.getConnection();
   try {
@@ -1249,7 +1258,7 @@ async function cancelAndArchiveOrder(
 
     const [[row]] = await conn.query(
       `SELECT order_id, user_id, status FROM orders WHERE order_id = ? FOR UPDATE`,
-      [order_id]
+      [order_id],
     );
 
     if (!row) {
@@ -1272,7 +1281,7 @@ async function cancelAndArchiveOrder(
 
     const [bizRows] = await conn.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
-      [order_id]
+      [order_id],
     );
     const business_ids = bizRows.map((x) => x.business_id);
 
@@ -1285,7 +1294,7 @@ async function cancelAndArchiveOrder(
          AND TABLE_NAME='orders'
          AND COLUMN_NAME='status_reason'
        LIMIT 1
-      `
+      `,
     );
     const hasReason = rr.length > 0;
 
@@ -1296,7 +1305,7 @@ async function cancelAndArchiveOrder(
                 status_reason=?,
                 updated_at=NOW()
           WHERE order_id=?`,
-        [finalReason, order_id]
+        [finalReason, order_id],
       );
     } else {
       await conn.query(
@@ -1304,7 +1313,7 @@ async function cancelAndArchiveOrder(
             SET status='CANCELLED',
                 updated_at=NOW()
           WHERE order_id=?`,
-        [order_id]
+        [order_id],
       );
     }
 
@@ -1344,7 +1353,7 @@ async function cancelIfStillPending(order_id, reason) {
 async function archiveDeliveredOrderInternal(
   conn,
   order_id,
-  { delivered_by = "SYSTEM", reason = "" } = {}
+  { delivered_by = "SYSTEM", reason = "" } = {},
 ) {
   const hasDeliveredOrders = await tableExists("delivered_orders", conn);
   const hasDeliveredItems = await tableExists("delivered_order_items", conn);
@@ -1353,13 +1362,13 @@ async function archiveDeliveredOrderInternal(
   // ✅ SAFE: SELECT * avoids "unknown column" crashes (special_mode / delivery_photo_urls etc.)
   const [[order]] = await conn.query(
     `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
-    [order_id]
+    [order_id],
   );
   if (!order) return { archived: false };
 
   const [items] = await conn.query(
     `SELECT * FROM order_items WHERE order_id = ?`,
-    [order_id]
+    [order_id],
   );
 
   const finalReason = String(reason || "").trim();
@@ -1435,13 +1444,13 @@ async function archiveDeliveredOrderInternal(
     if (cols.has("total_amount") && Number(row.total_amount || 0) === 0) {
       const items_total = (items || []).reduce(
         (s, it) => s + Number(it.subtotal || 0),
-        0
+        0,
       );
       if (items_total > 0) {
         row.total_amount = Number(
           (items_total + delivery_fee - discount_amount + platform_fee).toFixed(
-            2
-          )
+            2,
+          ),
         );
       }
     }
@@ -1525,7 +1534,7 @@ async function archiveDeliveredOrderInternal(
         `INSERT INTO delivered_orders (${colSql})
          VALUES (${placeholders})
          ON DUPLICATE KEY UPDATE ${updateSql}`,
-        values
+        values,
       );
     }
   }
@@ -1569,7 +1578,7 @@ async function archiveDeliveredOrderInternal(
 
       await conn.query(
         `INSERT INTO delivered_order_items (${colSql}) VALUES (${placeholders})`,
-        values
+        values,
       );
     }
   }
@@ -1580,7 +1589,7 @@ async function archiveDeliveredOrderInternal(
 async function awardPointsForCompletedOrderWithConn(conn, order_id) {
   const [[order]] = await conn.query(
     `SELECT user_id, total_amount, status FROM orders WHERE order_id = ? LIMIT 1`,
-    [order_id]
+    [order_id],
   );
   if (!order) return { awarded: false, reason: "order_not_found" };
 
@@ -1613,7 +1622,7 @@ async function awardPointsForCompletedOrderWithConn(conn, order_id) {
   ]);
 
   const msg = `You earned ${points} points for order ${order_id} (Nu. ${fmtNu(
-    totalAmount
+    totalAmount,
   )} spent).`;
 
   await insertUserNotification(conn, {
@@ -1646,7 +1655,7 @@ async function awardPointsForCompletedOrderWithConn(conn, order_id) {
  */
 async function completeAndArchiveDeliveredOrder(
   order_id,
-  { delivered_by = "SYSTEM", reason = "" } = {}
+  { delivered_by = "SYSTEM", reason = "" } = {},
 ) {
   const conn = await db.getConnection();
   try {
@@ -1654,7 +1663,7 @@ async function completeAndArchiveDeliveredOrder(
 
     const [[row]] = await conn.query(
       `SELECT order_id, user_id, status FROM orders WHERE order_id = ? FOR UPDATE`,
-      [order_id]
+      [order_id],
     );
     if (!row) {
       await conn.rollback();
@@ -1671,7 +1680,7 @@ async function completeAndArchiveDeliveredOrder(
 
     const [bizRows] = await conn.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
-      [order_id]
+      [order_id],
     );
     const business_ids = bizRows.map((x) => x.business_id);
 
@@ -1684,7 +1693,7 @@ async function completeAndArchiveDeliveredOrder(
          AND TABLE_NAME='orders'
          AND COLUMN_NAME='status_reason'
        LIMIT 1
-      `
+      `,
     );
     const hasReason = rr.length > 0;
 
@@ -1695,7 +1704,7 @@ async function completeAndArchiveDeliveredOrder(
                 status_reason=?,
                 updated_at=NOW()
           WHERE order_id=?`,
-        [finalReason, order_id]
+        [finalReason, order_id],
       );
     } else {
       await conn.query(
@@ -1703,7 +1712,7 @@ async function completeAndArchiveDeliveredOrder(
             SET status='DELIVERED',
                 updated_at=NOW()
           WHERE order_id=?`,
-        [order_id]
+        [order_id],
       );
     }
 
@@ -1754,7 +1763,7 @@ async function captureOnAccept(order_id, conn = null) {
        FROM orders
       WHERE order_id = ?
       LIMIT 1`,
-    [order_id]
+    [order_id],
   );
   if (!order) return { ok: false, code: "NOT_FOUND" };
 
@@ -1836,7 +1845,7 @@ const Order = {
       `SELECT COLUMN_NAME
        FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'orders'`
+        AND TABLE_NAME = 'orders'`,
     );
     const cols = new Set(colsRows.map((r) => r.COLUMN_NAME));
 
@@ -1924,7 +1933,7 @@ const Order = {
     // ✅ IMPORTANT: if delivery_status exists and is NOT NULL, set default
     if (cols.has("delivery_status")) {
       payload.delivery_status = String(
-        orderData.delivery_status || "PENDING"
+        orderData.delivery_status || "PENDING",
       ).toUpperCase();
     }
 
@@ -1963,14 +1972,14 @@ const Order = {
         ${hasService ? "o.service_type" : "NULL AS service_type"}
       FROM orders o
       ORDER BY o.created_at DESC
-      `
+      `,
     );
     if (!orders.length) return [];
 
     const ids = orders.map((o) => o.order_id);
     const [items] = await db.query(
       `SELECT * FROM order_items WHERE order_id IN (?) ORDER BY order_id, business_id, menu_id`,
-      [ids]
+      [ids],
     );
 
     const byOrder = new Map();
@@ -1987,7 +1996,7 @@ const Order = {
   findByBusinessId: async (business_id) => {
     const [items] = await db.query(
       `SELECT * FROM order_items WHERE business_id = ? ORDER BY order_id DESC, menu_id ASC`,
-      [business_id]
+      [business_id],
     );
     return items;
   },
@@ -2026,13 +2035,13 @@ const Order = {
       WHERE o.order_id = ?
       LIMIT 1
       `,
-      [order_id]
+      [order_id],
     );
     if (!orders.length) return [];
 
     const [items] = await db.query(
       `SELECT * FROM order_items WHERE order_id = ? ORDER BY order_id, business_id, menu_id`,
-      [order_id]
+      [order_id],
     );
 
     const o = orders[0];
@@ -2147,7 +2156,7 @@ const Order = {
     ${serviceWhere}
     ORDER BY o.created_at DESC
     `,
-      params
+      params,
     );
 
     if (!orders.length) return [];
@@ -2172,7 +2181,7 @@ const Order = {
     WHERE order_id IN (?)
     ORDER BY order_id, business_id, menu_id
     `,
-      [orderIds]
+      [orderIds],
     );
 
     const itemsByOrder = new Map();
@@ -2199,7 +2208,7 @@ const Order = {
           FROM INFORMATION_SCHEMA.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME = 'merchant_business_details'
-        `
+        `,
         );
 
         const cols = new Set(colsRows.map((r) => String(r.COLUMN_NAME)));
@@ -2248,7 +2257,7 @@ const Order = {
         FROM merchant_business_details m
         WHERE m.business_id IN (?)
         `,
-          [bizIds]
+          [bizIds],
         );
 
         for (const r of bizRows) {
@@ -2270,7 +2279,7 @@ const Order = {
       } catch (e) {
         console.error(
           "[findByUserIdForApp] business address lookup failed:",
-          e?.message
+          e?.message,
         );
         // don't fail response
       }
@@ -2325,7 +2334,7 @@ const Order = {
         : "";
 
       const merged = Array.from(
-        new Set([...listFromCol, ...(legacy ? [legacy] : [])])
+        new Set([...listFromCol, ...(legacy ? [legacy] : [])]),
       ).filter(Boolean);
 
       deliverTo.delivery_photo_urls = merged; // always array
@@ -2362,7 +2371,7 @@ const Order = {
         totals: {
           items_subtotal: its.reduce(
             (s, it) => s + Number(it.subtotal || 0),
-            0
+            0,
           ),
           delivery_fee: Number(o.delivery_fee || 0),
           merchant_delivery_fee:
@@ -2426,7 +2435,7 @@ const Order = {
 
     const [result] = await db.query(
       `UPDATE orders SET ${setClause}, updated_at = NOW() WHERE order_id = ?`,
-      [...values, order_id]
+      [...values, order_id],
     );
     return result.affectedRows;
   },
@@ -2440,13 +2449,13 @@ const Order = {
     if (hasReason) {
       const [r] = await db.query(
         `UPDATE orders SET status = ?, status_reason = ?, updated_at = NOW() WHERE order_id = ?`,
-        [st, String(reason || "").trim(), order_id]
+        [st, String(reason || "").trim(), order_id],
       );
       return r.affectedRows;
     } else {
       const [r] = await db.query(
         `UPDATE orders SET status = ?, updated_at = NOW() WHERE order_id = ?`,
-        [st, order_id]
+        [st, order_id],
       );
       return r.affectedRows;
     }
@@ -2471,7 +2480,7 @@ const Order = {
       order_id,
       status,
       reason,
-      conn
+      conn,
     );
   },
 
@@ -2487,7 +2496,7 @@ const Order = {
       order_id,
       changes,
       final_total_amount,
-      conn
+      conn,
     );
   },
 
@@ -2505,7 +2514,7 @@ const Order = {
       order_amount,
       platform_fee,
       method,
-      conn
+      conn,
     );
   },
 
@@ -2522,7 +2531,7 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
      WHERE oi.business_id = ?
      GROUP BY o.status
     `,
-    [business_id]
+    [business_id],
   );
 
   const allStatuses = [
@@ -2555,7 +2564,7 @@ Order.getOrderStatusCountsByBusiness = async (business_id) => {
        AND o.status = 'DECLINED'
        AND DATE(o.created_at) = CURDATE()
     `,
-    [business_id]
+    [business_id],
   );
 
   result.order_declined_today = Number(todayRows[0]?.declined_today || 0);
@@ -2645,7 +2654,7 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
     WHERE oi.business_id = ?
     ORDER BY o.created_at DESC, o.order_id DESC, oi.menu_id ASC
     `,
-    [bid]
+    [bid],
   );
 
   if (!rows.length) return [];

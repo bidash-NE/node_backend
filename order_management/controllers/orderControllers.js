@@ -790,8 +790,8 @@ async function updateOrderStatus(req, res) {
 
       estimated_minutes,
 
-      cancelled_by, // optional
-      delivered_by, // optional
+      cancelled_by,
+      delivered_by,
     } = body;
 
     // ✅ STRICT: status must be provided
@@ -803,7 +803,6 @@ async function updateOrderStatus(req, res) {
     const normalized =
       normalizedRaw === "COMPLETED" ? "DELIVERED" : normalizedRaw;
 
-    // ✅ STRICT: only allow from whitelist
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
         message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
@@ -813,6 +812,14 @@ async function updateOrderStatus(req, res) {
         normalized,
       });
     }
+
+    // ✅ helper that prevents "" -> 0 and NaN writes
+    const numOrUndef = (v) => {
+      if (v === undefined || v === null) return undefined;
+      if (typeof v === "string" && v.trim() === "") return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
 
     // lock current order row first
     const [[row]] = await db.query(
@@ -1031,20 +1038,15 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       ✅ CONFIRMED logic (FIXED: ignore "" so it doesn't become 0)
+       ✅ CONFIRMED (accept) logic
+       - apply changes (optional)
+       - update totals ONLY if numbers were provided (prevents "" => 0)
+       - ETA (estimated_minutes)
+       - CAPTURE (WALLET / COD)
        ========================================================= */
     let captureInfo = null;
 
-    // helper that prevents "" -> 0
-    const numOrUndef = (v) => {
-      if (v === undefined || v === null) return undefined;
-      if (typeof v === "string" && v.trim() === "") return undefined; // ✅ blocks "" -> 0
-      const n = Number(v);
-      return Number.isFinite(n) ? n : undefined;
-    };
-
     if (normalized === "CONFIRMED") {
-      // apply unavailable items if provided
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
@@ -1058,22 +1060,19 @@ async function updateOrderStatus(req, res) {
           });
         }
       }
-      console.log(
-        "[CONFIRM] final_delivery_fee received:",
+
+      // debug (keep for now, remove later)
+      console.log("[CONFIRM] incoming finals", {
+        order_id,
+        payMethod,
+        final_total_amount,
+        final_platform_fee,
         final_delivery_fee,
-        typeof final_delivery_fee,
-      );
+        final_discount_amount,
+        final_merchant_delivery_fee,
+        estimated_minutes,
+      });
 
-      // ✅ update final amounts ONLY if they are real numbers
-      // ✅ helper that prevents "" -> 0
-      const numOrUndef = (v) => {
-        if (v === undefined || v === null) return undefined;
-        if (typeof v === "string" && v.trim() === "") return undefined; // blocks "" => 0
-        const n = Number(v);
-        return Number.isFinite(n) ? n : undefined;
-      };
-
-      // ✅ update final amounts ONLY if they are real numbers
       const updatePayload = {};
 
       const nTotal = numOrUndef(final_total_amount);
@@ -1096,13 +1095,12 @@ async function updateOrderStatus(req, res) {
         await Order.update(order_id, updatePayload);
       }
 
-      // ETA window
       const etaMins = numOrUndef(estimated_minutes);
       if (etaMins !== undefined && etaMins > 0) {
         await updateEstimatedArrivalTime(order_id, etaMins);
       }
 
-      // ✅ CAPTURE FIRST (prevents CONFIRMED when capture fails)
+      // ✅ CAPTURE FIRST
       try {
         if (payMethod === "WALLET") {
           captureInfo = await Order.captureOrderFunds(order_id);
@@ -1110,10 +1108,17 @@ async function updateOrderStatus(req, res) {
           captureInfo = await Order.captureOrderCODFee(order_id);
         }
       } catch (e) {
+        console.error("[CAPTURE FAILED]", {
+          order_id,
+          payMethod,
+          err: e?.message,
+        });
         return res.status(500).json({
           success: false,
           message: "Unable to accept order. Capture failed.",
           error: e?.message || "Capture error",
+          order_id,
+          payment_method: payMethod,
         });
       }
     }
@@ -1160,14 +1165,12 @@ async function updateOrderStatus(req, res) {
       (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
     ) {
       try {
+        const nFinalTotal = numOrUndef(final_total_amount);
         await Order.addUserUnavailableItemNotification({
           user_id,
           order_id,
           changes,
-          final_total_amount:
-            numOrUndef(final_total_amount) !== undefined
-              ? Number(final_total_amount)
-              : null,
+          final_total_amount: nFinalTotal !== undefined ? nFinalTotal : null,
         });
       } catch (e) {
         console.error(
@@ -1177,7 +1180,6 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // wallet debit notify only when capture actually captured in this request
     if (
       captureInfo &&
       captureInfo.captured &&
