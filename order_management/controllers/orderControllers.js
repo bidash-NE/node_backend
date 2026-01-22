@@ -405,7 +405,7 @@ async function createOrder(req, res) {
           const moved = path.join(
             ORDERS_UPLOAD_DIR,
             String(order_id),
-            path.basename(p)
+            path.basename(p),
           );
           safeUnlink(moved);
         } else {
@@ -449,7 +449,7 @@ async function createOrder(req, res) {
 
     // ✅ normalize item shapes
     const normalizedItems = itemsRaw.map((it, idx) =>
-      normalizeItemShape(it, idx)
+      normalizeItemShape(it, idx),
     );
 
     // ✅ stable order_id
@@ -484,7 +484,7 @@ async function createOrder(req, res) {
       payload.delivery_special_mode ??
         payload.special_mode ??
         payload.special_instruction_mode ??
-        payload.dropoff_or_meetup
+        payload.dropoff_or_meetup,
     );
 
     const fulfillment = normalizeFulfillment(payload.fulfillment_type);
@@ -495,7 +495,7 @@ async function createOrder(req, res) {
       const addrStr =
         addrObj && typeof addrObj === "object"
           ? String(
-              addrObj.address || addrObj.addr || addrObj.full_address || ""
+              addrObj.address || addrObj.addr || addrObj.full_address || "",
             ).trim()
           : String(addrObj || "").trim();
 
@@ -521,8 +521,8 @@ async function createOrder(req, res) {
     const bodyList = Array.isArray(payload.delivery_photo_urls)
       ? payload.delivery_photo_urls
       : Array.isArray(payload.special_photos)
-      ? payload.special_photos
-      : [];
+        ? payload.special_photos
+        : [];
 
     const bodySingle = payload.delivery_photo_url
       ? [payload.delivery_photo_url]
@@ -663,7 +663,7 @@ async function getOrdersByBusinessId(req, res) {
 async function getBusinessOrdersGroupedByUser(req, res) {
   try {
     const data = await Order.findByBusinessGroupedByUser(
-      req.params.business_id
+      req.params.business_id,
     );
     res.json({ success: true, data });
   } catch (err) {
@@ -756,7 +756,7 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 
     await db.query(
       `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
-      [formattedRange, order_id]
+      [formattedRange, order_id],
     );
   } catch (err) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
@@ -778,14 +778,18 @@ async function updateOrderStatus(req, res) {
     const {
       status,
       reason,
+
       final_total_amount,
       final_platform_fee,
       final_discount_amount,
       final_delivery_fee,
       final_merchant_delivery_fee,
+
       unavailable_changes,
       unavailableChanges,
+
       estimated_minutes,
+
       cancelled_by, // optional
       delivered_by, // optional
     } = body;
@@ -803,7 +807,7 @@ async function updateOrderStatus(req, res) {
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
         message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
-          ", "
+          ", ",
         )}`,
         received: normalizedRaw,
         normalized,
@@ -816,7 +820,7 @@ async function updateOrderStatus(req, res) {
          FROM orders
         WHERE order_id = ?
         LIMIT 1`,
-      [order_id]
+      [order_id],
     );
 
     if (!row) return res.status(404).json({ message: "Order not found" });
@@ -885,7 +889,7 @@ async function updateOrderStatus(req, res) {
               order_id,
               business_id,
               err: e?.message,
-            }
+            },
           );
         }
       }
@@ -989,7 +993,7 @@ async function updateOrderStatus(req, res) {
               order_id,
               business_id,
               err: e?.message,
-            }
+            },
           );
         }
       }
@@ -1027,9 +1031,17 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       ✅ CONFIRMED logic (FIXED ORDER: apply changes → update totals → capture → set status)
+       ✅ CONFIRMED logic (FIXED: ignore "" so it doesn't become 0)
        ========================================================= */
     let captureInfo = null;
+
+    // helper that prevents "" -> 0
+    const numOrUndef = (v) => {
+      if (v === undefined || v === null) return undefined;
+      if (typeof v === "string" && v.trim() === "") return undefined; // ✅ blocks "" -> 0
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
 
     if (normalized === "CONFIRMED") {
       // apply unavailable items if provided
@@ -1047,31 +1059,33 @@ async function updateOrderStatus(req, res) {
         }
       }
 
-      // update final amounts first
+      // ✅ update final amounts ONLY if they are real numbers
       const updatePayload = {};
-      if (final_total_amount != null)
-        updatePayload.total_amount = Number(final_total_amount);
-      if (final_platform_fee != null)
-        updatePayload.platform_fee = Number(final_platform_fee);
-      if (final_delivery_fee != null)
-        updatePayload.delivery_fee = Number(final_delivery_fee);
-      if (final_merchant_delivery_fee != null)
-        updatePayload.merchant_delivery_fee = Number(
-          final_merchant_delivery_fee
-        );
-      if (final_discount_amount != null)
-        updatePayload.discount_amount = Number(final_discount_amount);
+
+      const nTotal = numOrUndef(final_total_amount);
+      if (nTotal !== undefined) updatePayload.total_amount = nTotal;
+
+      const nPlatform = numOrUndef(final_platform_fee);
+      if (nPlatform !== undefined) updatePayload.platform_fee = nPlatform;
+
+      const nDelivery = numOrUndef(final_delivery_fee);
+      if (nDelivery !== undefined) updatePayload.delivery_fee = nDelivery;
+
+      const nMerchDelivery = numOrUndef(final_merchant_delivery_fee);
+      if (nMerchDelivery !== undefined)
+        updatePayload.merchant_delivery_fee = nMerchDelivery;
+
+      const nDiscount = numOrUndef(final_discount_amount);
+      if (nDiscount !== undefined) updatePayload.discount_amount = nDiscount;
 
       if (Object.keys(updatePayload).length) {
         await Order.update(order_id, updatePayload);
       }
 
       // ETA window
-      if (
-        estimated_minutes != null &&
-        Number.isFinite(Number(estimated_minutes))
-      ) {
-        await updateEstimatedArrivalTime(order_id, estimated_minutes);
+      const etaMins = numOrUndef(estimated_minutes);
+      if (etaMins !== undefined && etaMins > 0) {
+        await updateEstimatedArrivalTime(order_id, etaMins);
       }
 
       // ✅ CAPTURE FIRST (prevents CONFIRMED when capture fails)
@@ -1084,7 +1098,7 @@ async function updateOrderStatus(req, res) {
       } catch (e) {
         return res.status(500).json({
           success: false,
-          message: "Unable to accept order. Wallet capture failed.",
+          message: "Unable to accept order. Capture failed.",
           error: e?.message || "Capture error",
         });
       }
@@ -1094,13 +1108,13 @@ async function updateOrderStatus(req, res) {
     const affected = await Order.updateStatus(
       order_id,
       normalized,
-      finalReason
+      finalReason,
     );
     if (!affected) return res.status(404).json({ message: "Order not found" });
 
     const [bizRows] = await db.query(
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
-      [order_id]
+      [order_id],
     );
     const business_ids = bizRows.map((r) => r.business_id);
 
@@ -1137,12 +1151,14 @@ async function updateOrderStatus(req, res) {
           order_id,
           changes,
           final_total_amount:
-            final_total_amount != null ? Number(final_total_amount) : null,
+            numOrUndef(final_total_amount) !== undefined
+              ? Number(final_total_amount)
+              : null,
         });
       } catch (e) {
         console.error(
           "[updateOrderStatus unavailable notify failed]",
-          e?.message
+          e?.message,
         );
       }
     }
@@ -1167,13 +1183,17 @@ async function updateOrderStatus(req, res) {
       }
     }
 
+    const etaApplied =
+      normalized === "CONFIRMED" &&
+      numOrUndef(estimated_minutes) !== undefined &&
+      numOrUndef(estimated_minutes) > 0
+        ? `${Number(estimated_minutes)} min`
+        : null;
+
     return res.json({
       success: true,
       message: "Order status updated successfully",
-      estimated_arrivial_time_applied:
-        normalized === "CONFIRMED" && estimated_minutes
-          ? `${estimated_minutes} min`
-          : null,
+      estimated_arrivial_time_applied: etaApplied,
     });
   } catch (err) {
     console.error("[updateOrderStatus ERROR]", err);
