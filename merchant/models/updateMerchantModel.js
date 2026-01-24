@@ -17,6 +17,7 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "holidays",
     "special_celebration",
     "special_celebration_discount_percentage",
+    "min_amount_for_fd", // ✅ NEW
   ];
 
   const setClause = [];

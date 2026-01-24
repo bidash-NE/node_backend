@@ -63,6 +63,12 @@ async function updateMerchantBusiness(req, res) {
       updateFields.license_image = toStoredPath(newLicenseImage.path);
     }
 
+    // ✅ NEW: normalize min_amount_for_fd (allow null / empty, keep numeric string)
+    if (updateFields.min_amount_for_fd !== undefined) {
+      const raw = String(updateFields.min_amount_for_fd ?? "").trim();
+      updateFields.min_amount_for_fd = raw === "" ? null : raw;
+    }
+
     // Special celebration validation
     if (updateFields.special_celebration !== undefined) {
       updateFields.special_celebration =
