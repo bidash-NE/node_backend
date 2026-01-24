@@ -4,30 +4,69 @@ const path = require("path");
 const {
   updateMerchantBusinessDetails,
   getMerchantBusinessDetailsById,
-  clearSpecialCelebrationByBusinessId,
 } = require("../models/updateMerchantModel");
 
-async function updateMerchantBusiness(req, res) {
-  const business_id = req.params.business_id;
-  const updateFields = req.body;
+function safeUnlink(absPath) {
+  try {
+    if (absPath && fs.existsSync(absPath)) fs.unlinkSync(absPath);
+  } catch (e) {
+    console.error("Failed to delete file:", absPath, e?.message || e);
+  }
+}
 
-  if (req.file) {
-    const currentBusiness = await getMerchantBusinessDetailsById(business_id);
-    if (currentBusiness && currentBusiness.business_logo) {
-      const oldImagePath = path.resolve(currentBusiness.business_logo);
-      if (
-        fs.existsSync(oldImagePath) &&
-        oldImagePath !== path.resolve(req.file.path)
-      ) {
-        fs.unlink(oldImagePath, (err) => {
-          if (err) console.error("Failed to delete old business_logo:", err);
-        });
-      }
-    }
-    updateFields.business_logo = req.file.path.replace(/\\/g, "/");
+function absFromStored(storedPath) {
+  if (!storedPath) return null;
+
+  // If storedPath is like "/uploads/logos/xxx.jpg", convert to disk path:
+  // UPLOAD_ROOT/logos/xxx.jpg
+  const cleaned = String(storedPath).replace(/\\/g, "/");
+
+  // If you store raw multer disk path like "uploads/logos/xxx.jpg"
+  // path.join(process.cwd(), ...) works too.
+  // We'll support both formats:
+  if (cleaned.startsWith("/uploads/")) {
+    return path.join(process.cwd(), cleaned.replace("/uploads/", "uploads/"));
   }
 
+  return path.isAbsolute(cleaned) ? cleaned : path.join(process.cwd(), cleaned);
+}
+
+function toStoredPath(filePath) {
+  // multer gives disk path; normalize slashes
+  return String(filePath || "").replace(/\\/g, "/");
+}
+
+async function updateMerchantBusiness(req, res) {
+  const business_id = Number(req.params.business_id);
+  const updateFields = { ...req.body };
+
   try {
+    const currentBusiness = await getMerchantBusinessDetailsById(business_id);
+    if (!currentBusiness) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Merchant business not found." });
+    }
+
+    // ✅ with upload.fields(), files are in req.files[fieldname][0]
+    const newBusinessLogo = req.files?.business_logo?.[0];
+    const newLicenseImage = req.files?.license_image?.[0];
+
+    if (newBusinessLogo) {
+      // delete old
+      safeUnlink(absFromStored(currentBusiness.business_logo));
+      // set new
+      updateFields.business_logo = toStoredPath(newBusinessLogo.path);
+    }
+
+    if (newLicenseImage) {
+      // delete old
+      safeUnlink(absFromStored(currentBusiness.license_image));
+      // set new
+      updateFields.license_image = toStoredPath(newLicenseImage.path);
+    }
+
+    // Special celebration validation (your existing logic)
     if (updateFields.special_celebration !== undefined) {
       updateFields.special_celebration =
         updateFields.special_celebration || null;
@@ -37,7 +76,8 @@ async function updateMerchantBusiness(req, res) {
         updateFields.special_celebration_discount_percentage === undefined
       ) {
         return res.status(400).json({
-          error:
+          success: false,
+          message:
             "special_celebration_discount_percentage is required when special_celebration is provided.",
         });
       }
@@ -48,84 +88,26 @@ async function updateMerchantBusiness(req, res) {
       updateFields,
     );
 
-    if (updated) {
-      return res
-        .status(200)
-        .json({ message: "Merchant business details updated successfully." });
-    } else {
-      return res.status(404).json({
-        error: "Merchant business not found or no valid fields provided.",
-      });
-    }
-  } catch (err) {
-    return res.status(500).json({ error: err.message || "Update failed." });
-  }
-}
-
-async function getMerchantBusiness(req, res) {
-  const business_id = req.params.business_id;
-  try {
-    const business = await getMerchantBusinessDetailsById(business_id);
-    if (business) return res.status(200).json(business);
-    return res.status(404).json({ error: "Merchant business not found." });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ error: err.message || "Failed to fetch business details." });
-  }
-}
-
-/**
- * ✅ DELETE special celebration
- * Route: DELETE /merchant-business/:business_id/special-celebration
- * Auth: Bearer token via authUser (req.user populated)
- */
-async function removeSpecialCelebration(req, res) {
-  const business_id = Number(req.params.business_id);
-
-  try {
-    const business = await getMerchantBusinessDetailsById(business_id);
-    if (!business) {
-      return res.status(404).json({
+    if (!updated) {
+      return res.status(400).json({
         success: false,
-        message: "Merchant business not found.",
+        message: "No valid fields provided to update.",
       });
     }
-
-    // OPTIONAL: enforce ownership if your table has user_id/merchant_id column
-    // If you have a column like business.user_id, uncomment and adapt:
-    //
-    // if (business.user_id && Number(business.user_id) !== Number(req.user.user_id)) {
-    //   return res.status(403).json({ success: false, message: "Forbidden" });
-    // }
-
-    // Idempotent: if already null, return success
-    if (
-      business.special_celebration == null &&
-      business.special_celebration_discount_percentage == null
-    ) {
-      return res.status(200).json({
-        success: true,
-        message: "Special celebration already removed.",
-      });
-    }
-
-    await clearSpecialCelebrationByBusinessId(business_id);
 
     return res.status(200).json({
       success: true,
-      message: "Special celebration removed successfully.",
+      message: "Merchant business details updated successfully.",
     });
   } catch (err) {
+    console.error("[updateMerchantBusiness] error:", err);
     return res.status(500).json({
       success: false,
-      message: err.message || "Failed to remove special celebration.",
+      message: err.message || "Update failed.",
     });
   }
 }
 
 module.exports = {
   updateMerchantBusiness,
-  getMerchantBusiness,
-  removeSpecialCelebration,
 };

@@ -39,6 +39,22 @@ app.use("/api/sales", salesRoutes);
 
 // near the other routes:
 app.get("/health", (_req, res) => res.json({ ok: true }));
+// Multer errors -> clean JSON
+app.use((err, req, res, next) => {
+  if (err && err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({
+      success: false,
+      message: "File too large. Max allowed size exceeded.",
+    });
+  }
+  if (err) {
+    return res.status(400).json({
+      success: false,
+      message: err.message || "Upload failed.",
+    });
+  }
+  next();
+});
 
 app.listen(PORT, "0.0.0.0", () =>
   console.log(`🚀 Server running at port NO: ${PORT}`),

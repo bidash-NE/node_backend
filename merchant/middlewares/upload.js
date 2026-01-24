@@ -49,21 +49,27 @@ const storage = multer.diskStorage({
 
 // 🧤 File filter (extensions)
 const fileFilter = (_req, file, cb) => {
-  const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+  const allowedExt = [".jpg", ".jpeg", ".png", ".webp"];
   const ext = (path.extname(file.originalname || "") || "").toLowerCase();
-  if (!allowed.includes(ext)) {
+
+  const allowedMime = ["image/jpeg", "image/png", "image/webp"];
+  if (!allowedExt.includes(ext) || !allowedMime.includes(file.mimetype)) {
     return cb(
-      new Error("Only image files are allowed (jpg, jpeg, png, webp).")
+      new Error("Only image files are allowed (jpg, jpeg, png, webp)."),
     );
   }
   cb(null, true);
 };
 
 // 🚀 Initialize Multer instance
+// 🚀 Initialize Multer instance
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  limits: {
+    fileSize: 10 * 1024 * 1024, // ✅ 15MB per file (adjust)
+    files: 2, // ✅ allow business_logo + license_image together
+  },
 });
 
 // 🌍 Utility to generate public web paths

@@ -8,6 +8,7 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "longitude",
     "address",
     "business_logo",
+    "license_image", // ✅ ADD THIS
     "delivery_option",
     "complementary",
     "complementary_details",

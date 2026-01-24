@@ -95,7 +95,10 @@ router.put(
   authUser,
   validateBusinessIdParam,
   updateLimiter,
-  upload.single("business_logo"),
+  upload.fields([
+    { name: "business_logo", maxCount: 1 },
+    { name: "license_image", maxCount: 1 },
+  ]),
   updateMerchantBusiness,
 );
 
