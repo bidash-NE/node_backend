@@ -1,12 +1,15 @@
 // routes/merchantRatingsRoutes.js
 const express = require("express");
 const router = express.Router();
-const limit = require("express-rate-limit");
+
+const rateLimit = require("express-rate-limit");
+const { ipKeyGenerator } = rateLimit; // ✅ IPv6-safe IP key helper
+
 const authUser = require("../middlewares/authUser");
 
 /* ---------------- rate limit helpers ---------------- */
 const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
-  limit({
+  rateLimit({
     windowMs,
     max,
     standardHeaders: true,
@@ -14,6 +17,8 @@ const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
 
     // key: "ip" | "user"
     keyGenerator: (req) => {
+      const ipKey = ipKeyGenerator(req); // ✅ always use helper, not req.ip
+
       if (key === "user") {
         // adjust these to match your authUser payload shape
         const uid =
@@ -22,9 +27,12 @@ const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
           req.user?.userId ??
           req.user?.merchant_id;
 
-        return uid ? `user:${uid}` : `ip:${req.ip}`;
+        // per-user if available; otherwise per-ip (IPv6-safe)
+        return uid ? `user:${uid}` : `ip:${ipKey}`;
       }
-      return req.ip;
+
+      // per-ip (IPv6-safe)
+      return ipKey;
     },
 
     handler: (req, res) => {
@@ -53,12 +61,12 @@ const ratingsListLimiter = makeLimiter({
   key: "ip",
 });
 
-// Likes/unlikes (bursty)
+// Likes/unlikes (bursty) — per user (requires auth to actually be per-user)
 const likeLimiter = makeLimiter({
   windowMs: 60 * 1000, // 1 min
   max: 15,
   message: "Too many like/unlike actions. Please try again shortly.",
-  key: "user", // per-user is nicer if auth exists; falls back to IP
+  key: "user",
 });
 
 // Replies create (tighter)
@@ -149,14 +157,20 @@ router.get(
 );
 
 /* ---------- likes ---------- */
+/**
+ * If you want per-user limiter to work, authUser MUST run before likeLimiter.
+ * If you want likes to be public, remove authUser (then limiter falls back to IP).
+ */
 router.post(
   "/ratings/food/:rating_id/like",
+  authUser,
   likeLimiter,
   validateRatingIdParam,
   likeFoodRatingCtrl,
 );
 router.post(
   "/ratings/food/:rating_id/unlike",
+  authUser,
   likeLimiter,
   validateRatingIdParam,
   unlikeFoodRatingCtrl,
@@ -164,12 +178,14 @@ router.post(
 
 router.post(
   "/ratings/mart/:rating_id/like",
+  authUser,
   likeLimiter,
   validateRatingIdParam,
   likeMartRatingCtrl,
 );
 router.post(
   "/ratings/mart/:rating_id/unlike",
+  authUser,
   likeLimiter,
   validateRatingIdParam,
   unlikeMartRatingCtrl,
@@ -207,7 +223,7 @@ router.delete(
   "/ratings/:type/replies/:reply_id",
   authUser,
   deleteLimiter,
-  validateRatingTypeParam, // ✅ strongly recommended since :type exists
+  validateRatingTypeParam,
   validateReplyIdParam,
   deleteRatingReplyCtrl,
 );
@@ -232,3 +248,9 @@ router.post(
 );
 
 module.exports = router;
+
+/**
+ * ✅ IMPORTANT (server.js)
+ * If you are behind nginx / cloudflare / load balancer, add once:
+ *   app.set("trust proxy", 1);
+ */
