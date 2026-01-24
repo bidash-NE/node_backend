@@ -1,6 +1,8 @@
 // server.js
 const express = require("express");
 const dotenv = require("dotenv");
+const path = require("path");
+
 const cors = require("cors");
 const { initMerchantTables } = require("./models/initModel");
 const merchantRoutes = require("./routes/merchantRegistrationRoute");

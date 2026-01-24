@@ -69,11 +69,11 @@ async function registerMerchant(req, res) {
       business_types: Array.isArray(b.business_types)
         ? b.business_types
         : typeof b.business_types === "string" && b.business_types.trim()
-        ? b.business_types
-            .split(",")
-            .map((x) => x.trim())
-            .filter(Boolean)
-        : undefined,
+          ? b.business_types
+              .split(",")
+              .map((x) => x.trim())
+              .filter(Boolean)
+          : undefined,
       business_license_number: b.business_license_number,
       license_image,
       latitude:
@@ -122,7 +122,7 @@ async function registerMerchant(req, res) {
   } catch (err) {
     console.error(err.message || err);
     const isClientErr = /exists|required|invalid|username/i.test(
-      err.message || ""
+      err.message || "",
     );
     res
       .status(isClientErr ? 400 : 500)
@@ -141,7 +141,7 @@ async function updateMerchant(req, res) {
 
     const [rows] = await db.query(
       `SELECT license_image, business_logo FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-      [business_id]
+      [business_id],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Business not found" });
@@ -293,7 +293,7 @@ async function loginByEmail(req, res) {
             SET is_verified = 1,
                 last_login = NOW()
           WHERE user_id = ? AND (is_verified IS NULL OR is_verified = 0)`,
-        [user.user_id]
+        [user.user_id],
       );
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
@@ -306,7 +306,7 @@ async function loginByEmail(req, res) {
         WHERE user_id = ?
         ORDER BY created_at DESC, business_id DESC
         LIMIT 1`,
-      [user.user_id]
+      [user.user_id],
     );
 
     const payload = {
@@ -316,7 +316,7 @@ async function loginByEmail(req, res) {
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "1m",
+      expiresIn: "60m",
     });
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
       expiresIn: "10m",
@@ -355,7 +355,7 @@ function parseOwnersQuery(req) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
   const limit = Math.min(
     Math.max(parseInt(req.query.limit || "50", 10), 1),
-    200
+    200,
   );
   const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
   return { q, limit, offset };
@@ -408,7 +408,7 @@ async function listFoodOwners(req, res) {
       GROUP BY mbd.business_id
       ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
       LIMIT ? OFFSET ?`,
-      params
+      params,
     );
 
     return res.status(200).json({
@@ -472,7 +472,7 @@ async function listMartOwners(req, res) {
       GROUP BY mbd.business_id
       ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
       LIMIT ? OFFSET ?`,
-      params
+      params,
     );
 
     return res.status(200).json({
@@ -536,7 +536,7 @@ async function listFoodOwnersWithCelebration(req, res) {
       GROUP BY mbd.business_id
       ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
       LIMIT ? OFFSET ?`,
-      params
+      params,
     );
 
     return res.status(200).json({
@@ -600,7 +600,7 @@ async function listMartOwnersWithCelebration(req, res) {
       GROUP BY mbd.business_id
       ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
       LIMIT ? OFFSET ?`,
-      params
+      params,
     );
 
     return res.status(200).json({
