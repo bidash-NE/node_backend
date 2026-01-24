@@ -8,7 +8,7 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "longitude",
     "address",
     "business_logo",
-    "license_image", // ✅ ADD THIS
+    "license_image",
     "delivery_option",
     "complementary",
     "complementary_details",
@@ -53,7 +53,6 @@ async function getMerchantBusinessDetailsById(business_id) {
   return rows[0] || null;
 }
 
-// ✅ NEW: clear celebration fields
 async function clearSpecialCelebrationByBusinessId(business_id) {
   const sql = `
     UPDATE merchant_business_details

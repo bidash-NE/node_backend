@@ -1,15 +1,17 @@
-// routes/updateMerchantRoutes.js
+// routes/updateMerchantRoute.js  (full route file)
 const express = require("express");
 const router = express.Router();
+
 const rateLimit = require("express-rate-limit");
-const { ipKeyGenerator } = rateLimit; // ✅ IPv6-safe key
+const { ipKeyGenerator } = rateLimit;
+
 const upload = require("../middlewares/upload");
 const authUser = require("../middlewares/authUser");
 
 const {
   updateMerchantBusiness,
   getMerchantBusiness,
-  removeSpecialCelebration, // ✅ NEW
+  removeSpecialCelebration,
 } = require("../controllers/updateMerchantController");
 
 /* ---------------- rate limit helper (IPv6-safe) ---------------- */
@@ -19,8 +21,6 @@ const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
     max,
     standardHeaders: true,
     legacyHeaders: false,
-
-    // key: "ip" | "user"
     keyGenerator: (req) => {
       const ipKey = ipKeyGenerator(req);
 
@@ -36,7 +36,6 @@ const makeLimiter = ({ windowMs, max, message, key = "ip" }) =>
 
       return ipKey;
     },
-
     handler: (req, res) => {
       const retryAfterSeconds = req.rateLimit?.resetTime
         ? Math.max(
@@ -63,7 +62,6 @@ const validateBusinessIdParam = (req, res, next) => {
 };
 
 /* ---------------- limiters ---------------- */
-// Read endpoint (higher)
 const readLimiter = makeLimiter({
   windowMs: 60 * 1000, // 1 min
   max: 120,
@@ -71,7 +69,6 @@ const readLimiter = makeLimiter({
   key: "ip",
 });
 
-// Update with upload (tighter) — per user if token exists
 const updateLimiter = makeLimiter({
   windowMs: 10 * 60 * 1000, // 10 min
   max: 20,
@@ -79,7 +76,6 @@ const updateLimiter = makeLimiter({
   key: "user",
 });
 
-// Delete special celebration — per user
 const deleteLimiter = makeLimiter({
   windowMs: 10 * 60 * 1000, // 10 min
   max: 30,
@@ -89,7 +85,7 @@ const deleteLimiter = makeLimiter({
 
 /* ---------------- routes ---------------- */
 
-// ✅ Update merchant business (upload) — auth first so limiter can be per-user
+// ✅ Update merchant business (multipart: business_logo + license_image)
 router.put(
   "/merchant-business/:business_id",
   authUser,
@@ -102,7 +98,7 @@ router.put(
   updateMerchantBusiness,
 );
 
-// ✅ Get merchant business (public read)
+// ✅ Get merchant business
 router.get(
   "/merchant-business/:business_id",
   readLimiter,
@@ -110,7 +106,7 @@ router.get(
   getMerchantBusiness,
 );
 
-// ✅ Remove special celebration (Bearer token required)
+// ✅ Remove special celebration
 router.delete(
   "/merchant-business/:business_id/special-celebration",
   authUser,
@@ -120,9 +116,3 @@ router.delete(
 );
 
 module.exports = router;
-
-/**
- * ✅ IMPORTANT (server.js)
- * If behind nginx/cloudflare/load balancer, add once:
- *   app.set("trust proxy", 1);
- */

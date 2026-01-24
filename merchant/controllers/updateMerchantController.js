@@ -4,8 +4,10 @@ const path = require("path");
 const {
   updateMerchantBusinessDetails,
   getMerchantBusinessDetailsById,
+  clearSpecialCelebrationByBusinessId,
 } = require("../models/updateMerchantModel");
 
+/* ---------------- helpers ---------------- */
 function safeUnlink(absPath) {
   try {
     if (absPath && fs.existsSync(absPath)) fs.unlinkSync(absPath);
@@ -17,25 +19,24 @@ function safeUnlink(absPath) {
 function absFromStored(storedPath) {
   if (!storedPath) return null;
 
-  // If storedPath is like "/uploads/logos/xxx.jpg", convert to disk path:
-  // UPLOAD_ROOT/logos/xxx.jpg
   const cleaned = String(storedPath).replace(/\\/g, "/");
 
-  // If you store raw multer disk path like "uploads/logos/xxx.jpg"
-  // path.join(process.cwd(), ...) works too.
-  // We'll support both formats:
+  // supports "/uploads/..." style
   if (cleaned.startsWith("/uploads/")) {
     return path.join(process.cwd(), cleaned.replace("/uploads/", "uploads/"));
   }
 
+  // supports "uploads/..." or absolute
   return path.isAbsolute(cleaned) ? cleaned : path.join(process.cwd(), cleaned);
 }
 
 function toStoredPath(filePath) {
-  // multer gives disk path; normalize slashes
   return String(filePath || "").replace(/\\/g, "/");
 }
 
+/* ---------------- controllers ---------------- */
+
+// PUT /merchant-business/:business_id  (multipart: business_logo, license_image)
 async function updateMerchantBusiness(req, res) {
   const business_id = Number(req.params.business_id);
   const updateFields = { ...req.body };
@@ -48,25 +49,21 @@ async function updateMerchantBusiness(req, res) {
         .json({ success: false, message: "Merchant business not found." });
     }
 
-    // ✅ with upload.fields(), files are in req.files[fieldname][0]
+    // upload.fields() => req.files[fieldname][0]
     const newBusinessLogo = req.files?.business_logo?.[0];
     const newLicenseImage = req.files?.license_image?.[0];
 
     if (newBusinessLogo) {
-      // delete old
       safeUnlink(absFromStored(currentBusiness.business_logo));
-      // set new
       updateFields.business_logo = toStoredPath(newBusinessLogo.path);
     }
 
     if (newLicenseImage) {
-      // delete old
       safeUnlink(absFromStored(currentBusiness.license_image));
-      // set new
       updateFields.license_image = toStoredPath(newLicenseImage.path);
     }
 
-    // Special celebration validation (your existing logic)
+    // Special celebration validation
     if (updateFields.special_celebration !== undefined) {
       updateFields.special_celebration =
         updateFields.special_celebration || null;
@@ -95,9 +92,12 @@ async function updateMerchantBusiness(req, res) {
       });
     }
 
+    const latest = await getMerchantBusinessDetailsById(business_id);
+
     return res.status(200).json({
       success: true,
       message: "Merchant business details updated successfully.",
+      data: latest,
     });
   } catch (err) {
     console.error("[updateMerchantBusiness] error:", err);
@@ -108,6 +108,76 @@ async function updateMerchantBusiness(req, res) {
   }
 }
 
+// GET /merchant-business/:business_id
+async function getMerchantBusiness(req, res) {
+  const business_id = Number(req.params.business_id);
+
+  try {
+    const business = await getMerchantBusinessDetailsById(business_id);
+    if (!business) {
+      return res.status(404).json({
+        success: false,
+        message: "Merchant business not found.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: business,
+    });
+  } catch (err) {
+    console.error("[getMerchantBusiness] error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to fetch business details.",
+    });
+  }
+}
+
+// DELETE /merchant-business/:business_id/special-celebration
+async function removeSpecialCelebration(req, res) {
+  const business_id = Number(req.params.business_id);
+
+  try {
+    const business = await getMerchantBusinessDetailsById(business_id);
+    if (!business) {
+      return res.status(404).json({
+        success: false,
+        message: "Merchant business not found.",
+      });
+    }
+
+    // idempotent
+    if (
+      business.special_celebration == null &&
+      business.special_celebration_discount_percentage == null
+    ) {
+      return res.status(200).json({
+        success: true,
+        message: "Special celebration already removed.",
+      });
+    }
+
+    await clearSpecialCelebrationByBusinessId(business_id);
+
+    const latest = await getMerchantBusinessDetailsById(business_id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Special celebration removed successfully.",
+      data: latest,
+    });
+  } catch (err) {
+    console.error("[removeSpecialCelebration] error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to remove special celebration.",
+    });
+  }
+}
+
 module.exports = {
   updateMerchantBusiness,
+  getMerchantBusiness,
+  removeSpecialCelebration,
 };
