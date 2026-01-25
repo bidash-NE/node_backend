@@ -67,7 +67,7 @@ exports.scheduleOrder = async (req, res) => {
     console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
     console.log(
       "[scheduleOrder] req.files keys:",
-      Object.keys(req.files || {})
+      Object.keys(req.files || {}),
     );
 
     // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
@@ -132,7 +132,7 @@ exports.scheduleOrder = async (req, res) => {
     orderPayload.items = safeJsonParse(orderPayload.items);
     orderPayload.totals = safeJsonParse(orderPayload.totals);
     orderPayload.delivery_address = safeJsonParse(
-      orderPayload.delivery_address
+      orderPayload.delivery_address,
     );
     orderPayload.special_photos = safeJsonParse(orderPayload.special_photos);
 
@@ -190,7 +190,7 @@ exports.scheduleOrder = async (req, res) => {
 
     const uploadedUris = files
       .map((f) =>
-        f?.filename ? `/uploads/order_delivery_photos/${f.filename}` : null
+        f?.filename ? `/uploads/order_delivery_photos/${f.filename}` : null,
       )
       .filter(Boolean);
 
@@ -255,7 +255,7 @@ exports.listScheduledOrders = async (req, res) => {
         list
           .map((job) => job.business_id)
           .filter((bid) => bid != null && Number.isFinite(Number(bid)))
-          .map((x) => Number(x))
+          .map((x) => Number(x)),
       ),
     ];
 
@@ -267,7 +267,7 @@ exports.listScheduledOrders = async (req, res) => {
         `SELECT business_id, business_logo, address
          FROM merchant_business_details
          WHERE business_id IN (${placeholders})`,
-        businessIds
+        businessIds,
       );
       businessData = new Map(rows.map((r) => [r.business_id, r]));
     }
@@ -287,22 +287,22 @@ exports.listScheduledOrders = async (req, res) => {
             // Fetch item_image from food_menu table
             console.log(
               "Fetching item_image for food item menu_id:",
-              item.menu_id
+              item.menu_id,
             );
             const [foodMenuRow] = await db.query(
               `SELECT item_image FROM food_menu WHERE id = ? LIMIT 1`,
-              [Number(item.menu_id)] // Ensure that menu_id is converted to a number
+              [Number(item.menu_id)], // Ensure that menu_id is converted to a number
             );
             itemImage = foodMenuRow[0]?.item_image || null;
           } else if (job.order_payload.service_type === "MART") {
             // Fetch item_image from mart_menu table using LEFT JOIN for better data handling
             console.log(
               "Fetching item_image for mart item menu_id:",
-              item.menu_id
+              item.menu_id,
             );
             const [martMenuRow] = await db.query(
               `SELECT item_image FROM mart_menu WHERE id = ? LIMIT 1`,
-              [Number(item.menu_id)] // Ensure that menu_id is converted to a number
+              [Number(item.menu_id)], // Ensure that menu_id is converted to a number
             );
             console.log("Mart menu row:", martMenuRow);
             itemImage = martMenuRow[0]?.item_image || null;
@@ -334,7 +334,7 @@ exports.listScheduledOrders = async (req, res) => {
             items: enrichedItems, // Updated items with item_image
           },
         };
-      })
+      }),
     );
 
     // console.log("Enriched List Before Response:", enrichedList);
@@ -367,7 +367,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
         list
           .map((j) => j.user_id)
           .filter((uid) => uid != null && Number.isFinite(Number(uid)))
-          .map((x) => Number(x))
+          .map((x) => Number(x)),
       ),
     ];
 
@@ -376,13 +376,13 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       const placeholders = userIds.map(() => "?").join(",");
       const [rows] = await db.query(
         `SELECT user_id, user_name FROM users WHERE user_id IN (${placeholders})`,
-        userIds
+        userIds,
       );
       userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
     }
 
     const sorted = [...list].sort(
-      (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0)
+      (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0),
     );
 
     const mapped = sorted.map((job) => {
@@ -416,15 +416,76 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
   }
 };
 
+// controllers/scheduledOrdersController.js
+// ✅ Replace your existing exports.cancelScheduledOrder with this one
+
 exports.cancelScheduledOrder = async (req, res) => {
   try {
     const userId = Number(req.params.user_id);
-    const jobId = req.params.jobId;
+    const jobId = String(req.params.jobId || "").trim();
 
     if (!Number.isFinite(userId) || userId <= 0 || !jobId) {
       return res.status(400).json({
         success: false,
         message: "Invalid user_id or jobId.",
+      });
+    }
+
+    const redis = require("../config/redis");
+    const { buildJobKey } = require("../models/scheduledOrderModel"); // ✅ only this
+
+    const jobKey = buildJobKey(jobId);
+    const raw = await redis.get(jobKey);
+
+    if (!raw) {
+      return res.status(404).json({
+        success: false,
+        message: "Scheduled order not found.",
+      });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        message: "Corrupted scheduled order data.",
+      });
+    }
+
+    if (Number(data.user_id) !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not allowed to cancel this scheduled order.",
+      });
+    }
+
+    let epochMs = Number(data.scheduled_epoch_ms);
+    if (!Number.isFinite(epochMs)) {
+      const fromLocal = data.scheduled_at_local || null;
+      const fromUtc = data.scheduled_at || null;
+      epochMs = parseScheduledToEpochMs(fromLocal || fromUtc); // ✅ uses top import
+    }
+
+    if (!Number.isFinite(epochMs)) {
+      return res.status(500).json({
+        success: false,
+        message: "Unable to determine scheduled time for this order.",
+      });
+    }
+
+    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const diffMs = epochMs - Date.now();
+
+    if (diffMs <= ONE_HOUR_MS) {
+      const minsLeft = Math.max(0, Math.floor(diffMs / (60 * 1000)));
+      return res.status(400).json({
+        success: false,
+        code: "CANCEL_WINDOW_CLOSED",
+        message:
+          "Scheduled order cannot be cancelled within 1 hour of the scheduled time.",
+        minutes_remaining: minsLeft,
       });
     }
 
@@ -439,6 +500,7 @@ exports.cancelScheduledOrder = async (req, res) => {
     return res.json({
       success: true,
       message: "Scheduled order cancelled.",
+      job_id: jobId,
     });
   } catch (err) {
     console.error("cancelScheduledOrder error:", err);

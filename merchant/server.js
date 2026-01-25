@@ -12,6 +12,7 @@ const bannerRoutes = require("./routes/bannerRoutes");
 const updateMerchantRoute = require("./routes/updateMerchantRoute");
 const merchantRatings = require("./routes/merchantRatings");
 const salesRoutes = require("./routes/salesRoutes");
+const merchantEarningsRoutes = require("./routes/merchantEarningsRoutes");
 
 dotenv.config();
 const app = express();
@@ -38,6 +39,7 @@ app.use("/api/banners", bannerRoutes);
 app.use("/api", updateMerchantRoute);
 app.use("/api/merchant", merchantRatings);
 app.use("/api/sales", salesRoutes);
+app.use("/api", merchantEarningsRoutes);
 
 // near the other routes:
 app.get("/health", (_req, res) => res.json({ ok: true }));
