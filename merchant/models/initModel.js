@@ -14,7 +14,7 @@ async function columnExists(tableName, columnName) {
         AND TABLE_NAME = ?
         AND COLUMN_NAME = ?
       LIMIT 1`,
-    [tableName, columnName]
+    [tableName, columnName],
   );
   return rows.length > 0;
 }
@@ -27,7 +27,7 @@ async function indexExists(tableName, indexName) {
         AND TABLE_NAME = ?
         AND INDEX_NAME = ?
       LIMIT 1`,
-    [tableName, indexName]
+    [tableName, indexName],
   );
   return rows.length > 0;
 }
@@ -44,7 +44,7 @@ async function fkConstraintNamesForColumn(tableName, columnName) {
         AND tc.TABLE_NAME = ?
         AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
         AND kcu.COLUMN_NAME = ?`,
-    [tableName, columnName]
+    [tableName, columnName],
   );
   return rows.map((r) => r.name);
 }
@@ -64,7 +64,7 @@ async function getColumnType(table, column) {
         AND TABLE_NAME = ?
         AND COLUMN_NAME = ?
       LIMIT 1`,
-    [table, column]
+    [table, column],
   );
   return r[0]?.COLUMN_TYPE || null;
 }
@@ -81,7 +81,7 @@ async function ensureColumnTypeMatches({
   const refType = desiredType || (await getColumnType(refTable, refColumn));
   if (!refType) {
     throw new Error(
-      `Cannot determine type of ${refTable}.${refColumn}. Create that table first.`
+      `Cannot determine type of ${refTable}.${refColumn}. Create that table first.`,
     );
   }
 
@@ -92,7 +92,7 @@ async function ensureColumnTypeMatches({
         AND TABLE_NAME = ?
         AND COLUMN_NAME = ?
       LIMIT 1`,
-    [table, column]
+    [table, column],
   );
   const curType = r[0]?.COLUMN_TYPE || null;
 
@@ -100,18 +100,18 @@ async function ensureColumnTypeMatches({
   const fks = await fkConstraintNamesForColumn(table, column);
   for (const name of fks) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${table}\` DROP FOREIGN KEY \`${name}\``
+      `ALTER TABLE \`${table}\` DROP FOREIGN KEY \`${name}\``,
     );
   }
 
   // Add/modify column to match referenced type
   if (curType == null) {
     await db.query(
-      `ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${refType} NOT NULL`
+      `ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${refType} NOT NULL`,
     );
   } else if (curType.toUpperCase() !== refType.toUpperCase()) {
     await db.query(
-      `ALTER TABLE \`${table}\` MODIFY \`${column}\` ${refType} NOT NULL`
+      `ALTER TABLE \`${table}\` MODIFY \`${column}\` ${refType} NOT NULL`,
     );
   }
 
@@ -121,7 +121,7 @@ async function ensureColumnTypeMatches({
        ADD CONSTRAINT \`${fkName}\`
        FOREIGN KEY (\`${column}\`)
        REFERENCES \`${refTable}\`(\`${refColumn}\`)
-       ON DELETE CASCADE ON UPDATE CASCADE`
+       ON DELETE CASCADE ON UPDATE CASCADE`,
   );
 }
 
@@ -180,7 +180,7 @@ async function ensureMerchantBusinessDetailsTable() {
     const columnExistsCheck1 = await columnExists(table, "special_celebration");
     const columnExistsCheck2 = await columnExists(
       table,
-      "special_celebration_discount_percentage"
+      "special_celebration_discount_percentage",
     );
 
     if (!columnExistsCheck1) {
@@ -401,7 +401,7 @@ async function ensureFoodRatingsTable() {
   const hasMenuId = await columnExists(newName, "menu_id");
   if (hasMenuId && !(await columnExists(newName, "business_id"))) {
     await db.query(
-      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`
+      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`,
     );
   }
   if (hasMenuId) {
@@ -412,7 +412,7 @@ async function ensureFoodRatingsTable() {
        WHERE fr.business_id IS NULL
     `);
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`
+      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`,
     );
     await executeIgnoreErr(`ALTER TABLE \`${newName}\` DROP COLUMN menu_id`);
   }
@@ -427,7 +427,7 @@ async function ensureFoodRatingsTable() {
   for (const idx of legacyUniques) {
     if (await indexExists(newName, idx)) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``
+        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``,
       );
     }
   }
@@ -435,17 +435,17 @@ async function ensureFoodRatingsTable() {
   // Ensure indexes
   if (!(await indexExists(newName, "idx_fr_business"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_business (business_id)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_business (business_id)`,
     );
   }
   if (!(await indexExists(newName, "idx_fr_user"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_user (user_id)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_user (user_id)`,
     );
   }
   if (!(await indexExists(newName, "idx_fr_rating"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_rating (rating)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_fr_rating (rating)`,
     );
   }
 
@@ -454,7 +454,7 @@ async function ensureFoodRatingsTable() {
     const fks = await fkConstraintNamesForColumn(newName, col);
     for (const name of fks) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``
+        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``,
       );
     }
   }
@@ -473,7 +473,7 @@ async function ensureFoodRatingsTable() {
 
   // Rating guard (safe no-op if already exists on some MySQL versions)
   await executeIgnoreErr(
-    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_fr_rating CHECK (rating BETWEEN 1 AND 5)`
+    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_fr_rating CHECK (rating BETWEEN 1 AND 5)`,
   );
 }
 
@@ -513,7 +513,7 @@ async function ensureMartRatingsTable() {
   const hasMenuId = await columnExists(newName, "menu_id");
   if (hasMenuId && !(await columnExists(newName, "business_id"))) {
     await db.query(
-      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`
+      `ALTER TABLE \`${newName}\` ADD COLUMN business_id BIGINT UNSIGNED NULL AFTER id`,
     );
   }
   if (hasMenuId) {
@@ -524,7 +524,7 @@ async function ensureMartRatingsTable() {
        WHERE mr.business_id IS NULL
     `);
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`
+      `ALTER TABLE \`${newName}\` MODIFY business_id BIGINT UNSIGNED NOT NULL`,
     );
     await executeIgnoreErr(`ALTER TABLE \`${newName}\` DROP COLUMN menu_id`);
   }
@@ -539,7 +539,7 @@ async function ensureMartRatingsTable() {
   for (const idx of legacyUniques) {
     if (await indexExists(newName, idx)) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``
+        `ALTER TABLE \`${newName}\` DROP INDEX \`${idx}\``,
       );
     }
   }
@@ -547,17 +547,17 @@ async function ensureMartRatingsTable() {
   // Ensure indexes
   if (!(await indexExists(newName, "idx_mr_business"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_business (business_id)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_business (business_id)`,
     );
   }
   if (!(await indexExists(newName, "idx_mr_user"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_user (user_id)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_user (user_id)`,
     );
   }
   if (!(await indexExists(newName, "idx_mr_rating"))) {
     await executeIgnoreErr(
-      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_rating (rating)`
+      `ALTER TABLE \`${newName}\` ADD KEY idx_mr_rating (rating)`,
     );
   }
 
@@ -566,7 +566,7 @@ async function ensureMartRatingsTable() {
     const fks = await fkConstraintNamesForColumn(newName, col);
     for (const name of fks) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``
+        `ALTER TABLE \`${newName}\` DROP FOREIGN KEY \`${name}\``,
       );
     }
   }
@@ -585,7 +585,7 @@ async function ensureMartRatingsTable() {
 
   // Rating guard (safe no-op)
   await executeIgnoreErr(
-    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_mr_rating CHECK (rating BETWEEN 1 AND 5)`
+    `ALTER TABLE \`${newName}\` ADD CONSTRAINT chk_mr_rating CHECK (rating BETWEEN 1 AND 5)`,
   );
 }
 
@@ -639,12 +639,82 @@ async function ensureMerchantBankDetailsTable() {
 
     if (!(await indexExists(table, "idx_mbd_business"))) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_business (business_id)`
+        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_business (business_id)`,
       );
     }
     if (!(await indexExists(table, "idx_mbd_user"))) {
       await executeIgnoreErr(
-        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_user (user_id)`
+        `ALTER TABLE \`${table}\` ADD KEY idx_mbd_user (user_id)`,
+      );
+    }
+  }
+}
+
+/* ---------- NEW: MERCHANT EARNINGS ---------- */
+async function ensureMerchantEarningsTable() {
+  const table = "merchant_earnings";
+
+  if (!(await tableExists(table))) {
+    await db.query(`
+      CREATE TABLE \`${table}\` (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_id BIGINT UNSIGNED NOT NULL,
+        \`date\` DATE NOT NULL,
+        total_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        order_id VARCHAR(50) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_me_business_date (business_id, \`date\`),
+        KEY idx_me_order (order_id),
+        CONSTRAINT fk_me_business
+          FOREIGN KEY (business_id)
+          REFERENCES merchant_business_details(business_id)
+          ON DELETE CASCADE ON UPDATE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  } else {
+    // If table already exists, ensure columns (safe adds)
+    if (!(await columnExists(table, "business_id"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD COLUMN business_id BIGINT UNSIGNED NOT NULL`,
+      );
+    }
+    if (!(await columnExists(table, "date"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD COLUMN \`date\` DATE NOT NULL`,
+      );
+    }
+    if (!(await columnExists(table, "total_amount"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD COLUMN total_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00`,
+      );
+    }
+    if (!(await columnExists(table, "order_id"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD COLUMN order_id VARCHAR(50) NOT NULL`,
+      );
+    }
+
+    // Ensure business_id column type matches merchant_business_details.business_id and FK exists
+    await ensureColumnTypeMatches({
+      table,
+      column: "business_id",
+      refTable: "merchant_business_details",
+      refColumn: "business_id",
+      desiredType: null,
+      fkName: "fk_me_business",
+    });
+
+    // Ensure indexes
+    if (!(await indexExists(table, "idx_me_business_date"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD KEY idx_me_business_date (business_id, \`date\`)`,
+      );
+    }
+    if (!(await indexExists(table, "idx_me_order"))) {
+      await executeIgnoreErr(
+        `ALTER TABLE \`${table}\` ADD KEY idx_me_order (order_id)`,
       );
     }
   }
@@ -660,6 +730,7 @@ async function initMerchantTables() {
   await ensureMartCategoryTable();
   await ensureBusinessBannersTable();
   await ensureBannersBasePricesTable(); // <<< NEW call added, everything else unchanged
+  await ensureMerchantEarningsTable(); // <<< NEW: merchant earnings table
   await ensureFoodMenuTable();
   await ensureMartMenuTable();
   await ensureFoodRatingsTable(); // uses business_id; allows multiple feedbacks per user

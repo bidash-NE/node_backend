@@ -839,8 +839,13 @@ async function updateOrderStatus(req, res) {
     const changes = unavailable_changes || unavailableChanges || null;
     const finalReason = String(reason || "").trim();
 
+    // ✅ NEW: capture timing toggle (default DELIVERED)
+    const CAPTURE_AT = String(process.env.CAPTURE_AT || "DELIVERED")
+      .trim()
+      .toUpperCase();
+
     /* =========================================================
-       ✅ DELIVERED => archive+delete
+       ✅ DELIVERED => capture + merchant_earnings + archive+delete (atomic in model)
        ========================================================= */
     if (normalized === "DELIVERED") {
       const by =
@@ -851,6 +856,7 @@ async function updateOrderStatus(req, res) {
       const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
         delivered_by: by,
         reason: finalReason,
+        capture_at: CAPTURE_AT,
       });
 
       if (!out || !out.ok) {
@@ -861,6 +867,13 @@ async function updateOrderStatus(req, res) {
           return res.status(400).json({
             message: "Unable to mark this order as delivered.",
             current_status: out.current_status,
+          });
+        }
+        if (out?.code === "CAPTURE_FAILED") {
+          return res.status(500).json({
+            success: false,
+            message: "Unable to deliver order. Capture failed.",
+            error: out.error || "Capture error",
           });
         }
         return res
@@ -916,6 +929,28 @@ async function updateOrderStatus(req, res) {
         });
       }
 
+      // ✅ NEW: if capture happened on DELIVERED, notify wallet debit now
+      try {
+        const cap = out?.capture || null;
+        if (
+          cap &&
+          cap.captured &&
+          !cap.skipped &&
+          !cap.alreadyCaptured &&
+          (cap.payment_method === "WALLET" || cap.payment_method === "COD")
+        ) {
+          await Order.addUserWalletDebitNotification({
+            user_id: cap.user_id,
+            order_id,
+            order_amount: cap.order_amount || 0,
+            platform_fee: cap.platform_fee_user || 0,
+            method: cap.payment_method,
+          });
+        }
+      } catch (e) {
+        console.error("[DELIVERED wallet debit notify failed]", e?.message);
+      }
+
       return res.json({
         success: true,
         message: "Order delivered and archived successfully.",
@@ -923,6 +958,8 @@ async function updateOrderStatus(req, res) {
         status: "DELIVERED",
         points_awarded:
           out.points && out.points.awarded ? out.points.points_awarded : null,
+        capture: out.capture || null,
+        earnings: out.earnings || null,
       });
     }
 
@@ -1040,9 +1077,9 @@ async function updateOrderStatus(req, res) {
     /* =========================================================
        ✅ CONFIRMED (accept) logic
        - apply changes (optional)
-       - update totals ONLY if numbers were provided (prevents "" => 0)
+       - update totals ONLY if numbers were provided
        - ETA (estimated_minutes)
-       - CAPTURE (WALLET / COD)
+       - ✅ CAPTURE only if CAPTURE_AT != DELIVERED (backward compatible)
        ========================================================= */
     let captureInfo = null;
 
@@ -1061,7 +1098,6 @@ async function updateOrderStatus(req, res) {
         }
       }
 
-      // debug (keep for now, remove later)
       console.log("[CONFIRM] incoming finals", {
         order_id,
         payMethod,
@@ -1100,26 +1136,28 @@ async function updateOrderStatus(req, res) {
         await updateEstimatedArrivalTime(order_id, etaMins);
       }
 
-      // ✅ CAPTURE FIRST
-      try {
-        if (payMethod === "WALLET") {
-          captureInfo = await Order.captureOrderFunds(order_id);
-        } else if (payMethod === "COD") {
-          captureInfo = await Order.captureOrderCODFee(order_id);
+      // ✅ only capture here if you are NOT using delivered-capture mode
+      if (CAPTURE_AT !== "DELIVERED") {
+        try {
+          if (payMethod === "WALLET") {
+            captureInfo = await Order.captureOrderFunds(order_id);
+          } else if (payMethod === "COD") {
+            captureInfo = await Order.captureOrderCODFee(order_id);
+          }
+        } catch (e) {
+          console.error("[CAPTURE FAILED]", {
+            order_id,
+            payMethod,
+            err: e?.message,
+          });
+          return res.status(500).json({
+            success: false,
+            message: "Unable to accept order. Capture failed.",
+            error: e?.message || "Capture error",
+            order_id,
+            payment_method: payMethod,
+          });
         }
-      } catch (e) {
-        console.error("[CAPTURE FAILED]", {
-          order_id,
-          payMethod,
-          err: e?.message,
-        });
-        return res.status(500).json({
-          success: false,
-          message: "Unable to accept order. Capture failed.",
-          error: e?.message || "Capture error",
-          order_id,
-          payment_method: payMethod,
-        });
       }
     }
 

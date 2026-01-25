@@ -1649,20 +1649,396 @@ async function awardPointsForCompletedOrderWithConn(conn, order_id) {
   };
 }
 
+// ✅ Prefetch transaction IDs OUTSIDE the DB transaction (avoids holding locks during HTTP)
+async function prefetchTxnIdsBatch(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const ids = await fetchTxnAndJournalIds(); // { dr_id, cr_id, journal_id }
+    out.push(ids);
+  }
+  return out;
+}
+
+// ✅ Same as recordWalletTransfer, but uses prefetched ids (NO HTTP inside DB transaction)
+async function recordWalletTransferWithIds(
+  conn,
+  { fromId, toId, amount, order_id, note = null, ids },
+) {
+  const amt = Number(amount || 0);
+  if (!(amt > 0)) return null;
+
+  // debit (guard against insufficient funds)
+  const [dr] = await conn.query(
+    `UPDATE wallets
+        SET amount = amount - ?
+      WHERE wallet_id = ? AND amount >= ?`,
+    [amt, fromId, amt],
+  );
+  if (!dr.affectedRows)
+    throw new Error(`Insufficient funds or missing wallet: ${fromId}`);
+
+  // credit
+  await conn.query(
+    `UPDATE wallets
+        SET amount = amount + ?
+      WHERE wallet_id = ?`,
+    [amt, toId],
+  );
+
+  const { dr_id, cr_id, journal_id } = ids;
+
+  await conn.query(
+    `INSERT INTO wallet_transactions
+       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
+    [dr_id, journal_id || null, fromId, toId, amt, note],
+  );
+
+  await conn.query(
+    `INSERT INTO wallet_transactions
+       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
+    [cr_id, journal_id || null, fromId, toId, amt, note],
+  );
+
+  return { dr_txn_id: dr_id, cr_txn_id: cr_id, journal_id };
+}
+
+// ✅ Insert into merchant_earnings once (idempotent)
+async function insertMerchantEarningWithConn(
+  conn,
+  { business_id, order_id, total_amount, dateObj },
+) {
+  // table exists?
+  const [t] = await conn.query(
+    `
+    SELECT 1
+      FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'merchant_earnings'
+     LIMIT 1
+    `,
+  );
+  if (!t.length) return;
+
+  // already inserted?
+  const [[exists]] = await conn.query(
+    `SELECT 1
+       FROM merchant_earnings
+      WHERE order_id = ? AND business_id = ?
+      LIMIT 1`,
+    [order_id, business_id],
+  );
+  if (exists) return;
+
+  const amt = Number(total_amount || 0);
+  const d = dateObj || new Date();
+
+  await conn.query(
+    `INSERT INTO merchant_earnings (business_id, \`date\`, total_amount, order_id)
+     VALUES (?, ?, ?, ?)`,
+    [business_id, d, amt, order_id],
+  );
+}
+
+// ✅ Atomic capture for WALLET inside existing transaction (NO nested transaction)
+async function captureOrderFundsWithConn(conn, order_id, prefetchedIds) {
+  if (await captureExists(order_id, "WALLET_FULL", conn)) {
+    return { captured: false, alreadyCaptured: true, payment_method: "WALLET" };
+  }
+
+  const [[order]] = await conn.query(
+    `SELECT user_id, payment_method
+       FROM orders
+      WHERE order_id = ?
+      LIMIT 1`,
+    [order_id],
+  );
+  if (!order) throw new Error("Order not found for capture");
+
+  if (String(order.payment_method || "").toUpperCase() !== "WALLET") {
+    return { captured: false, skipped: true, payment_method: "WALLET" };
+  }
+
+  // compute split for primary business
+  const split = await computeBusinessSplit(order_id, conn);
+  const baseToMerchant = Number(split.total_amount || 0);
+  const feeForPrimary = Number(split.platform_fee || 0);
+
+  const userFee =
+    feeForPrimary > 0
+      ? Number((feeForPrimary * PLATFORM_USER_SHARE).toFixed(2))
+      : 0;
+  const merchFee = Number((feeForPrimary - userFee).toFixed(2));
+  const needFromBuyer = baseToMerchant + userFee;
+
+  const buyer = await getBuyerWalletByUserId(order.user_id, conn);
+  const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
+  const admin = await getAdminWallet(conn);
+
+  if (!buyer) throw new Error("Buyer wallet missing");
+  if (!merch) throw new Error("Merchant wallet missing");
+  if (!admin) throw new Error("Admin wallet missing");
+
+  // lock balances
+  const [[freshBuyer]] = await conn.query(
+    `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+    [buyer.id],
+  );
+  if (!freshBuyer || Number(freshBuyer.amount) < needFromBuyer) {
+    throw new Error("Insufficient wallet balance during capture");
+  }
+
+  if (merchFee > 0) {
+    const [[freshMerch]] = await conn.query(
+      `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+      [merch.id],
+    );
+    if (!freshMerch || Number(freshMerch.amount) < merchFee) {
+      throw new Error(
+        "Insufficient merchant wallet balance for platform fee share.",
+      );
+    }
+  }
+
+  // transfers (use prefetchedIds in order)
+  const ids0 = prefetchedIds[0];
+  const ids1 = prefetchedIds[1];
+  const ids2 = prefetchedIds[2];
+
+  const tOrder = await recordWalletTransferWithIds(conn, {
+    fromId: buyer.wallet_id,
+    toId: merch.wallet_id,
+    amount: baseToMerchant,
+    order_id,
+    note: `Order base (items+delivery) for ${order_id}`,
+    ids: ids0,
+  });
+
+  let tUserFee = null;
+  if (userFee > 0) {
+    tUserFee = await recordWalletTransferWithIds(conn, {
+      fromId: buyer.wallet_id,
+      toId: admin.wallet_id,
+      amount: userFee,
+      order_id,
+      note: `Platform fee (user 50%) for ${order_id}`,
+      ids: ids1,
+    });
+  }
+
+  let tMerchFee = null;
+  if (merchFee > 0) {
+    tMerchFee = await recordWalletTransferWithIds(conn, {
+      fromId: merch.wallet_id,
+      toId: admin.wallet_id,
+      amount: merchFee,
+      order_id,
+      note: `Platform fee (merchant 50%) for ${order_id}`,
+      ids: ids2,
+    });
+  }
+
+  await conn.query(
+    `INSERT INTO order_wallet_captures
+       (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
+     VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
+    [
+      order_id,
+      tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
+      tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
+      tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
+    ],
+  );
+
+  return {
+    captured: true,
+    payment_method: "WALLET",
+    user_id: order.user_id,
+    business_id: split.business_id,
+    order_amount: baseToMerchant,
+    platform_fee_user: userFee,
+    platform_fee_merchant: merchFee,
+    merchant_net_amount: Number((baseToMerchant - merchFee).toFixed(2)),
+  };
+}
+
+// ✅ Atomic capture for COD fee inside existing transaction
+async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds) {
+  if (await captureExists(order_id, "COD_FEE", conn)) {
+    return { captured: false, alreadyCaptured: true, payment_method: "COD" };
+  }
+
+  const [[order]] = await conn.query(
+    `SELECT user_id, payment_method
+       FROM orders
+      WHERE order_id = ?
+      LIMIT 1`,
+    [order_id],
+  );
+  if (!order) throw new Error("Order not found for COD fee capture");
+
+  if (String(order.payment_method || "").toUpperCase() !== "COD") {
+    return { captured: false, skipped: true, payment_method: "COD" };
+  }
+
+  const split = await computeBusinessSplit(order_id, conn);
+  const baseToMerchant = Number(split.total_amount || 0);
+  const feeForPrimary = Number(split.platform_fee || 0);
+
+  const userFee =
+    feeForPrimary > 0
+      ? Number((feeForPrimary * PLATFORM_USER_SHARE).toFixed(2))
+      : 0;
+  const merchFee = Number((feeForPrimary - userFee).toFixed(2));
+
+  const buyer = await getBuyerWalletByUserId(order.user_id, conn);
+  const merch = await getMerchantWalletByBusinessId(split.business_id, conn);
+  const admin = await getAdminWallet(conn);
+
+  if (!buyer) throw new Error("Buyer wallet missing");
+  if (!merch) throw new Error("Merchant wallet missing");
+  if (!admin) throw new Error("Admin wallet missing");
+
+  // lock balances needed for fee transfers
+  if (userFee > 0) {
+    const [[freshBuyer]] = await conn.query(
+      `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+      [buyer.id],
+    );
+    if (!freshBuyer || Number(freshBuyer.amount) < userFee) {
+      throw new Error(
+        "Insufficient user wallet balance for COD platform fee share.",
+      );
+    }
+  }
+
+  if (merchFee > 0) {
+    const [[freshMerch]] = await conn.query(
+      `SELECT amount FROM wallets WHERE id = ? FOR UPDATE`,
+      [merch.id],
+    );
+    if (!freshMerch || Number(freshMerch.amount) < merchFee) {
+      throw new Error(
+        "Insufficient merchant wallet balance for COD platform fee share.",
+      );
+    }
+  }
+
+  // transfers (only fees) using prefetched ids
+  const ids0 = prefetchedIds[0];
+  const ids1 = prefetchedIds[1];
+
+  let tUserFee = null;
+  if (userFee > 0) {
+    tUserFee = await recordWalletTransferWithIds(conn, {
+      fromId: buyer.wallet_id,
+      toId: admin.wallet_id,
+      amount: userFee,
+      order_id,
+      note: `COD platform fee (user 50%) for ${order_id}`,
+      ids: ids0,
+    });
+  }
+
+  let tMerchFee = null;
+  if (merchFee > 0) {
+    tMerchFee = await recordWalletTransferWithIds(conn, {
+      fromId: merch.wallet_id,
+      toId: admin.wallet_id,
+      amount: merchFee,
+      order_id,
+      note: `COD platform fee (merchant 50%) for ${order_id}`,
+      ids: ids1,
+    });
+  }
+
+  const buyerPair = tUserFee
+    ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
+    : null;
+  const merchPair = tMerchFee
+    ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
+    : null;
+
+  const adminRef =
+    (tUserFee && tUserFee.journal_id ? String(tUserFee.journal_id) : null) ||
+    (tMerchFee && tMerchFee.journal_id ? String(tMerchFee.journal_id) : null) ||
+    null;
+
+  await conn.query(
+    `INSERT INTO order_wallet_captures
+       (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
+     VALUES (?, 'COD_FEE', ?, ?, ?)`,
+    [order_id, buyerPair, merchPair, adminRef],
+  );
+
+  return {
+    captured: true,
+    payment_method: "COD",
+    user_id: order.user_id,
+    business_id: split.business_id,
+    order_amount: 0, // COD total collected in cash
+    platform_fee_user: userFee,
+    platform_fee_merchant: merchFee,
+    merchant_net_amount: Number((baseToMerchant - merchFee).toFixed(2)),
+  };
+}
+
 /**
  * ✅ FINAL: DELIVERED + archive to delivered_* + delete from main tables
  * Name kept for compatibility with your controller.
  */
+// models/orderModels.js
 async function completeAndArchiveDeliveredOrder(
   order_id,
-  { delivered_by = "SYSTEM", reason = "" } = {},
+  { delivered_by = "SYSTEM", reason = "", capture_at = "DELIVERED" } = {},
 ) {
+  // ✅ Decide capture timing (default DELIVERED)
+  const CAPTURE_AT = String(capture_at || process.env.CAPTURE_AT || "DELIVERED")
+    .trim()
+    .toUpperCase();
+
+  // ✅ Prefetch wallet txn ids OUTSIDE transaction (best long-term)
+  // We prefetch worst-case counts based on payment method.
+  let payMethodForPrefetch = null;
+  try {
+    const [[pre]] = await db.query(
+      `SELECT payment_method FROM orders WHERE order_id = ? LIMIT 1`,
+      [order_id],
+    );
+    payMethodForPrefetch = pre?.payment_method
+      ? String(pre.payment_method).trim().toUpperCase()
+      : null;
+  } catch {}
+
+  let prefetchedIds = [];
+  if (CAPTURE_AT === "DELIVERED") {
+    try {
+      if (payMethodForPrefetch === "WALLET") {
+        // WALLET worst-case: base + userFee + merchFee = 3 transfers
+        prefetchedIds = await prefetchTxnIdsBatch(3);
+      } else if (payMethodForPrefetch === "COD") {
+        // COD worst-case: userFee + merchFee = 2 transfers
+        prefetchedIds = await prefetchTxnIdsBatch(2);
+      }
+    } catch (e) {
+      // If we can't prefetch IDs, fail early (no DB locks held)
+      return {
+        ok: false,
+        code: "CAPTURE_FAILED",
+        error: e?.message || "ID prefetch failed",
+      };
+    }
+  }
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
     const [[row]] = await conn.query(
-      `SELECT order_id, user_id, status FROM orders WHERE order_id = ? FOR UPDATE`,
+      `SELECT order_id, user_id, status, payment_method
+         FROM orders
+        WHERE order_id = ? FOR UPDATE`,
       [order_id],
     );
     if (!row) {
@@ -1672,6 +2048,7 @@ async function completeAndArchiveDeliveredOrder(
 
     const user_id = Number(row.user_id);
     const current = String(row.status || "").toUpperCase();
+    const payMethod = String(row.payment_method || "").toUpperCase();
 
     if (current === "CANCELLED") {
       await conn.rollback();
@@ -1686,6 +2063,71 @@ async function completeAndArchiveDeliveredOrder(
 
     const finalReason = String(reason || "").trim();
 
+    // ✅ Compute split (needs the locked live tables)
+    const split = await computeBusinessSplit(order_id, conn);
+    const baseToMerchant = Number(split.total_amount || 0);
+    const feeForPrimary = Number(split.platform_fee || 0);
+    const userFeeShare =
+      feeForPrimary > 0
+        ? Number((feeForPrimary * PLATFORM_USER_SHARE).toFixed(2))
+        : 0;
+    const merchFeeShare = Number((feeForPrimary - userFeeShare).toFixed(2));
+    const merchantNet = Number((baseToMerchant - merchFeeShare).toFixed(2));
+
+    /* =========================================================
+       ✅ CAPTURE ON DELIVERED (atomic) + idempotent
+       ========================================================= */
+    let capture = { captured: false, skipped: true, payment_method: payMethod };
+
+    if (CAPTURE_AT === "DELIVERED") {
+      try {
+        if (payMethod === "WALLET") {
+          capture = await captureOrderFundsWithConn(
+            conn,
+            order_id,
+            prefetchedIds,
+          );
+        } else if (payMethod === "COD") {
+          capture = await captureOrderCODFeeWithConn(
+            conn,
+            order_id,
+            prefetchedIds,
+          );
+        } else {
+          capture = {
+            captured: false,
+            skipped: true,
+            payment_method: payMethod,
+          };
+        }
+      } catch (e) {
+        await conn.rollback();
+        return {
+          ok: false,
+          code: "CAPTURE_FAILED",
+          error: e?.message || "Capture error",
+        };
+      }
+    }
+
+    /* =========================================================
+       ✅ INSERT merchant_earnings (idempotent)
+       - total_amount = merchantNet (base - merchant fee share)
+       ========================================================= */
+    const deliveredAt = new Date();
+    try {
+      await insertMerchantEarningWithConn(conn, {
+        business_id: split.business_id,
+        order_id,
+        total_amount: merchantNet,
+        dateObj: deliveredAt,
+      });
+    } catch (e) {
+      // Don’t fail delivery for earnings insert; log only
+      console.error("[merchant_earnings insert failed]", e?.message);
+    }
+
+    /* ================= update order status to DELIVERED ================= */
     const [rr] = await conn.query(
       `
       SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -1716,6 +2158,7 @@ async function completeAndArchiveDeliveredOrder(
       );
     }
 
+    /* ================= points (unchanged) ================= */
     let pointsInfo = null;
     try {
       pointsInfo = await awardPointsForCompletedOrderWithConn(conn, order_id);
@@ -1727,6 +2170,7 @@ async function completeAndArchiveDeliveredOrder(
       };
     }
 
+    /* ================= archive + delete (unchanged) ================= */
     await archiveDeliveredOrderInternal(conn, order_id, {
       delivered_by,
       reason: finalReason,
@@ -1736,12 +2180,24 @@ async function completeAndArchiveDeliveredOrder(
     await trimDeliveredOrdersForUser(conn, user_id, 10);
 
     await conn.commit();
+
     return {
       ok: true,
       user_id,
       business_ids,
       status: "DELIVERED",
       points: pointsInfo,
+      capture: {
+        ...(capture || {}),
+        user_id,
+        payment_method: payMethod,
+      },
+      earnings: {
+        business_id: split.business_id,
+        order_id,
+        total_amount: merchantNet,
+        date: deliveredAt,
+      },
     };
   } catch (e) {
     try {
