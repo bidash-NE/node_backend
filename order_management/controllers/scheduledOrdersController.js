@@ -484,7 +484,7 @@ exports.cancelScheduledOrder = async (req, res) => {
         success: false,
         code: "CANCEL_WINDOW_CLOSED",
         message:
-          "Scheduled order cannot be cancelled within 1 hour of the scheduled time.",
+          "Scheduled order cannot be cancelled before 1 hour of the scheduled time.",
         minutes_remaining: minsLeft,
       });
     }

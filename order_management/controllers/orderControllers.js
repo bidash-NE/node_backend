@@ -822,7 +822,7 @@ async function updateOrderStatus(req, res) {
       return Number.isFinite(n) ? n : undefined;
     };
 
-    // lock current order row first
+    // fetch current order
     const [[row]] = await db.query(
       `SELECT user_id, status AS current_status, payment_method
          FROM orders
@@ -840,13 +840,12 @@ async function updateOrderStatus(req, res) {
     const changes = unavailable_changes || unavailableChanges || null;
     const finalReason = String(reason || "").trim();
 
-    // ✅ NEW: capture timing toggle (default DELIVERED)
     const CAPTURE_AT = String(process.env.CAPTURE_AT || "DELIVERED")
       .trim()
       .toUpperCase();
 
     /* =========================================================
-       ✅ DELIVERED => capture + merchant_earnings + archive+delete (atomic in model)
+       ✅ DELIVERED (unchanged)
        ========================================================= */
     if (normalized === "DELIVERED") {
       const by =
@@ -906,11 +905,7 @@ async function updateOrderStatus(req, res) {
         } catch (e) {
           console.error(
             "[updateOrderStatus DELIVERED notify merchant failed]",
-            {
-              order_id,
-              business_id,
-              err: e?.message,
-            },
+            { order_id, business_id, err: e?.message },
           );
         }
       }
@@ -930,7 +925,6 @@ async function updateOrderStatus(req, res) {
         });
       }
 
-      // ✅ NEW: if capture happened on DELIVERED, notify wallet debit now
       try {
         const cap = out?.capture || null;
         if (
@@ -965,7 +959,7 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       ✅ CANCELLED => archive+delete
+       ✅ CANCELLED (unchanged)
        ========================================================= */
     if (normalized === "CANCELLED") {
       const locked = new Set([
@@ -996,15 +990,16 @@ async function updateOrderStatus(req, res) {
       });
 
       if (!out || !out.ok) {
-        if (out?.code === "NOT_FOUND") {
+        if (out?.code === "NOT_FOUND")
           return res.status(404).json({ message: "Order not found" });
-        }
+
         if (out?.code === "SKIPPED") {
           return res.status(400).json({
             message: "Unable to cancel this order.",
             current_status: out.current_status,
           });
         }
+
         return res
           .status(400)
           .json({ message: "Unable to cancel this order." });
@@ -1034,11 +1029,7 @@ async function updateOrderStatus(req, res) {
         } catch (e) {
           console.error(
             "[updateOrderStatus CANCELLED notify merchant failed]",
-            {
-              order_id,
-              business_id,
-              err: e?.message,
-            },
+            { order_id, business_id, err: e?.message },
           );
         }
       }
@@ -1076,22 +1067,20 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       ✅ CONFIRMED (accept) logic
-       - apply changes (optional)
-       - update totals ONLY if numbers were provided
-       - ETA (estimated_minutes)
-       - ✅ NEW: If items were REPLACED and payment_method=WALLET, check wallet BEFORE accepting
-       - ✅ CAPTURE only if CAPTURE_AT != DELIVERED (backward compatible)
+       ✅ CONFIRMED (accept) + ✅ WALLET CHECK ON REPLACEMENT
        ========================================================= */
     let captureInfo = null;
 
     if (normalized === "CONFIRMED") {
-      // apply item changes first
-      const hasReplacements =
-        !!changes &&
-        Array.isArray(changes.replaced) &&
-        changes.replaced.length > 0;
+      const replacedList = Array.isArray(changes?.replaced)
+        ? changes.replaced
+        : [];
+      const hasReplacements = replacedList.length > 0;
 
+      // ✅ If replacements are happening & WALLET, we MUST have a final_total_amount to check.
+      const nFinalTotal = numOrUndef(final_total_amount);
+
+      // 1) Apply changes (optional)
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
@@ -1106,10 +1095,10 @@ async function updateOrderStatus(req, res) {
         }
       }
 
+      // 2) Update totals ONLY if provided (same as your current behavior)
       const updatePayload = {};
 
-      const nTotal = numOrUndef(final_total_amount);
-      if (nTotal !== undefined) updatePayload.total_amount = nTotal;
+      if (nFinalTotal !== undefined) updatePayload.total_amount = nFinalTotal;
 
       const nPlatform = numOrUndef(final_platform_fee);
       if (nPlatform !== undefined) updatePayload.platform_fee = nPlatform;
@@ -1124,7 +1113,6 @@ async function updateOrderStatus(req, res) {
       const nDiscount = numOrUndef(final_discount_amount);
       if (nDiscount !== undefined) updatePayload.discount_amount = nDiscount;
 
-      // apply order totals (so wallet check uses updated numbers)
       if (Object.keys(updatePayload).length) {
         await Order.update(order_id, updatePayload);
       }
@@ -1134,93 +1122,37 @@ async function updateOrderStatus(req, res) {
         await updateEstimatedArrivalTime(order_id, etaMins);
       }
 
-      // ✅ NEW: Wallet sufficiency check when replacements happen (WALLET only)
+      // ✅ 3) WALLET SUFFICIENCY CHECK (exactly what you want)
       if (hasReplacements && payMethod === "WALLET") {
-        // compute required deduction exactly like capture logic:
-        // needFromBuyer = (primary items subtotal + allocated delivery) + (allocated platform fee * 50%)
-        const computeNeedFromBuyer = async () => {
-          const [[o]] = await db.query(
-            `SELECT delivery_fee, platform_fee
-               FROM orders
-              WHERE order_id = ?
-              LIMIT 1`,
-            [order_id],
-          );
-
-          const delivery_fee = Number(o?.delivery_fee || 0);
-          const platform_fee = Number(o?.platform_fee || 0);
-
-          const [its] = await db.query(
-            `SELECT business_id, subtotal
-               FROM order_items
-              WHERE order_id = ?
-              ORDER BY menu_id ASC`,
-            [order_id],
-          );
-
-          if (!its.length) return { need: 0, base: 0, userFee: 0 };
-
-          const byBiz = new Map();
-          for (const it of its) {
-            const bid = Number(it.business_id);
-            if (!Number.isFinite(bid) || bid <= 0) continue;
-            byBiz.set(bid, (byBiz.get(bid) || 0) + Number(it.subtotal || 0));
-          }
-
-          const primaryBizId = Number(its[0].business_id);
-          const subtotalTotal = Array.from(byBiz.values()).reduce(
-            (s, v) => s + Number(v || 0),
-            0,
-          );
-          const primarySub = byBiz.get(primaryBizId) || 0;
-
-          const primaryDelivery =
-            subtotalTotal > 0
-              ? delivery_fee * (primarySub / subtotalTotal)
-              : delivery_fee;
-
-          const primaryBase = Number((primarySub + primaryDelivery).toFixed(2));
-
-          const baseTotal = subtotalTotal + delivery_fee;
-
-          const feeForPrimary =
-            byBiz.size === 1
-              ? platform_fee
-              : baseTotal > 0
-                ? platform_fee * (primaryBase / baseTotal)
-                : 0;
-
-          const userFee = Number((feeForPrimary * 0.5).toFixed(2)); // user share 50%
-          const need = Number((primaryBase + userFee).toFixed(2));
-
-          return { need, base: primaryBase, userFee };
-        };
-
-        const needInfo = await computeNeedFromBuyer();
+        if (nFinalTotal === undefined) {
+          return res.status(400).json({
+            success: false,
+            code: "MISSING_FINAL_TOTAL",
+            message:
+              "Unable to accept this order. Please provide final_total_amount after replacing items.",
+          });
+        }
 
         const [[w]] = await db.query(
-          `SELECT amount
-             FROM wallets
-            WHERE user_id = ?
-            LIMIT 1`,
+          `SELECT amount FROM wallets WHERE user_id = ? LIMIT 1`,
           [user_id],
         );
 
         const balance = Number(w?.amount || 0);
 
-        if (!(balance >= needInfo.need)) {
+        if (balance < nFinalTotal) {
           return res.status(400).json({
             success: false,
             code: "INSUFFICIENT_WALLET_BALANCE",
             message:
               "Unable to accept this order because the customer's wallet balance is insufficient for the updated items. Please adjust the replacements or ask the customer to top up their wallet.",
-            required_amount: needInfo.need,
             wallet_balance: Number(balance.toFixed(2)),
+            required_total_amount: Number(nFinalTotal.toFixed(2)),
           });
         }
       }
 
-      // ✅ only capture here if you are NOT using delivered-capture mode
+      // 4) Capture on accept (only if not delivered-capture mode)
       if (CAPTURE_AT !== "DELIVERED") {
         try {
           if (payMethod === "WALLET") {
@@ -1229,11 +1161,23 @@ async function updateOrderStatus(req, res) {
             captureInfo = await Order.captureOrderCODFee(order_id);
           }
         } catch (e) {
+          const msg = String(e?.message || "");
+          // ✅ polite 400 for insufficient
+          if (msg.toLowerCase().includes("insufficient")) {
+            return res.status(400).json({
+              success: false,
+              code: "INSUFFICIENT_WALLET_BALANCE",
+              message:
+                "Unable to accept this order because the customer's wallet balance is insufficient. Please adjust the items or ask the customer to top up their wallet.",
+            });
+          }
+
           console.error("[CAPTURE FAILED]", {
             order_id,
             payMethod,
             err: e?.message,
           });
+
           return res.status(500).json({
             success: false,
             message: "Unable to accept order. Capture failed.",
