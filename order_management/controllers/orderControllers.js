@@ -770,6 +770,7 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
  * ✅ FINAL: For CANCELLED => archive+delete
  * ✅ Backward compatible: if status=COMPLETED, treat as DELIVERED
  */
+// controllers/orderControllers.js
 async function updateOrderStatus(req, res) {
   try {
     const order_id = String(req.params.order_id || "").trim();
@@ -1079,11 +1080,18 @@ async function updateOrderStatus(req, res) {
        - apply changes (optional)
        - update totals ONLY if numbers were provided
        - ETA (estimated_minutes)
+       - ✅ NEW: If items were REPLACED and payment_method=WALLET, check wallet BEFORE accepting
        - ✅ CAPTURE only if CAPTURE_AT != DELIVERED (backward compatible)
        ========================================================= */
     let captureInfo = null;
 
     if (normalized === "CONFIRMED") {
+      // apply item changes first
+      const hasReplacements =
+        !!changes &&
+        Array.isArray(changes.replaced) &&
+        changes.replaced.length > 0;
+
       if (
         changes &&
         (Array.isArray(changes.removed) || Array.isArray(changes.replaced))
@@ -1097,17 +1105,6 @@ async function updateOrderStatus(req, res) {
           });
         }
       }
-
-      console.log("[CONFIRM] incoming finals", {
-        order_id,
-        payMethod,
-        final_total_amount,
-        final_platform_fee,
-        final_delivery_fee,
-        final_discount_amount,
-        final_merchant_delivery_fee,
-        estimated_minutes,
-      });
 
       const updatePayload = {};
 
@@ -1127,6 +1124,7 @@ async function updateOrderStatus(req, res) {
       const nDiscount = numOrUndef(final_discount_amount);
       if (nDiscount !== undefined) updatePayload.discount_amount = nDiscount;
 
+      // apply order totals (so wallet check uses updated numbers)
       if (Object.keys(updatePayload).length) {
         await Order.update(order_id, updatePayload);
       }
@@ -1134,6 +1132,92 @@ async function updateOrderStatus(req, res) {
       const etaMins = numOrUndef(estimated_minutes);
       if (etaMins !== undefined && etaMins > 0) {
         await updateEstimatedArrivalTime(order_id, etaMins);
+      }
+
+      // ✅ NEW: Wallet sufficiency check when replacements happen (WALLET only)
+      if (hasReplacements && payMethod === "WALLET") {
+        // compute required deduction exactly like capture logic:
+        // needFromBuyer = (primary items subtotal + allocated delivery) + (allocated platform fee * 50%)
+        const computeNeedFromBuyer = async () => {
+          const [[o]] = await db.query(
+            `SELECT delivery_fee, platform_fee
+               FROM orders
+              WHERE order_id = ?
+              LIMIT 1`,
+            [order_id],
+          );
+
+          const delivery_fee = Number(o?.delivery_fee || 0);
+          const platform_fee = Number(o?.platform_fee || 0);
+
+          const [its] = await db.query(
+            `SELECT business_id, subtotal
+               FROM order_items
+              WHERE order_id = ?
+              ORDER BY menu_id ASC`,
+            [order_id],
+          );
+
+          if (!its.length) return { need: 0, base: 0, userFee: 0 };
+
+          const byBiz = new Map();
+          for (const it of its) {
+            const bid = Number(it.business_id);
+            if (!Number.isFinite(bid) || bid <= 0) continue;
+            byBiz.set(bid, (byBiz.get(bid) || 0) + Number(it.subtotal || 0));
+          }
+
+          const primaryBizId = Number(its[0].business_id);
+          const subtotalTotal = Array.from(byBiz.values()).reduce(
+            (s, v) => s + Number(v || 0),
+            0,
+          );
+          const primarySub = byBiz.get(primaryBizId) || 0;
+
+          const primaryDelivery =
+            subtotalTotal > 0
+              ? delivery_fee * (primarySub / subtotalTotal)
+              : delivery_fee;
+
+          const primaryBase = Number((primarySub + primaryDelivery).toFixed(2));
+
+          const baseTotal = subtotalTotal + delivery_fee;
+
+          const feeForPrimary =
+            byBiz.size === 1
+              ? platform_fee
+              : baseTotal > 0
+                ? platform_fee * (primaryBase / baseTotal)
+                : 0;
+
+          const userFee = Number((feeForPrimary * 0.5).toFixed(2)); // user share 50%
+          const need = Number((primaryBase + userFee).toFixed(2));
+
+          return { need, base: primaryBase, userFee };
+        };
+
+        const needInfo = await computeNeedFromBuyer();
+
+        const [[w]] = await db.query(
+          `SELECT amount
+             FROM wallets
+            WHERE user_id = ?
+            LIMIT 1`,
+          [user_id],
+        );
+
+        const balance = Number(w?.amount || 0);
+
+        if (!(balance >= needInfo.need)) {
+          return res.status(400).json({
+            success: false,
+            code: "INSUFFICIENT_WALLET_BALANCE",
+            message:
+              "Unable to accept this order because the customer's wallet balance is insufficient for the updated items. Please adjust the replacements or ask the customer to top up their wallet.",
+            required_amount: needInfo.need,
+            wallet_balance: Number(balance.toFixed(2)),
+          });
+        }
       }
 
       // ✅ only capture here if you are NOT using delivered-capture mode
