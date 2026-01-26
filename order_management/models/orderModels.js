@@ -963,51 +963,113 @@ async function applyUnavailableItemChanges(order_id, changes) {
   const replaced = Array.isArray(changes?.replaced) ? changes.replaced : [];
   if (!removed.length && !replaced.length) return;
 
+  const pickFirst = (...vals) => {
+    for (const v of vals) {
+      if (v === undefined) continue;
+      if (v === null) continue;
+      const s = typeof v === "string" ? v.trim() : v;
+      if (s === "") continue;
+      return v;
+    }
+    return undefined;
+  };
+
+  const numOr = (v, fallback) => {
+    if (v === undefined || v === null || v === "") return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const toId = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const normalizeBizId = (o) =>
+    toId(o?.business_id ?? o?.businessId ?? o?.businessID ?? o?.business?.id);
+
+  const normalizeMenuId = (o) =>
+    toId(o?.menu_id ?? o?.menuId ?? o?.product_id ?? o?.productId ?? o?.id);
+
+  const normalizeBizName = (o, fallback) =>
+    pickFirst(o?.business_name, o?.businessName, o?.business?.name, fallback);
+
+  const normalizeItemName = (o, fallback) =>
+    pickFirst(o?.item_name, o?.itemName, o?.name, o?.product?.name, fallback);
+
+  const normalizeItemImage = (o, fallback) =>
+    pickFirst(
+      o?.item_image,
+      o?.itemImage,
+      o?.image,
+      o?.image_url,
+      o?.imageUrl,
+      o?.item_image_url,
+      o?.itemImageUrl,
+      o?.product?.image,
+      o?.product?.image_url,
+      o?.product?.imageUrl,
+      fallback
+    );
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
+    // REMOVED
     for (const r of removed) {
-      const bid = Number(r.business_id);
-      const mid = Number(r.menu_id);
+      const bid = normalizeBizId(r);
+      const mid = normalizeMenuId(r);
       if (!bid || !mid) continue;
 
       await conn.query(
         `DELETE FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bid, mid],
+        [order_id, bid, mid]
       );
     }
 
+    // REPLACED
     for (const ch of replaced) {
-      const old = ch.old || {};
-      const neu = ch.new || {};
-      const bidOld = Number(old.business_id);
-      const midOld = Number(old.menu_id);
+      const old = ch?.old || {};
+      const neu = ch?.new || {};
+
+      const bidOld = normalizeBizId(old);
+      const midOld = normalizeMenuId(old);
       if (!bidOld || !midOld) continue;
 
       const [rows] = await conn.query(
         `SELECT * FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bidOld, midOld],
+        [order_id, bidOld, midOld]
       );
       if (!rows.length) continue;
 
       const row = rows[0];
 
-      const bidNew =
-        neu.business_id != null ? Number(neu.business_id) : row.business_id;
-      const bnameNew = neu.business_name || row.business_name;
-      const menuNew = neu.menu_id != null ? Number(neu.menu_id) : row.menu_id;
-      const itemName = neu.item_name || row.item_name;
-      const image =
-        neu.item_image !== undefined ? neu.item_image : row.item_image;
-      const qty = neu.quantity != null ? Number(neu.quantity) : row.quantity;
-      const price = neu.price != null ? Number(neu.price) : row.price;
+      // ✅ new ids (fallback to existing)
+      const bidNew = normalizeBizId(neu) ?? row.business_id;
+      const menuNew = normalizeMenuId(neu) ?? row.menu_id;
+
+      // ✅ new text fields (fallback to existing)
+      const bnameNew = normalizeBizName(neu, row.business_name);
+      const itemName = normalizeItemName(neu, row.item_name);
+
+      // ✅ FIX: image accepts many key names
+      const image = normalizeItemImage(neu, row.item_image);
+
+      // qty/price/subtotal
+      const qty = numOr(neu?.quantity ?? neu?.qty ?? neu?.count, row.quantity);
+      const price = numOr(neu?.price ?? neu?.unit_price ?? neu?.unitPrice, row.price);
+
+      // if subtotal not provided, recompute
+      const subtotalRaw = neu?.subtotal ?? neu?.line_subtotal ?? neu?.lineSubtotal;
       const subtotal =
-        neu.subtotal != null ? Number(neu.subtotal) : row.subtotal;
+        subtotalRaw !== undefined && subtotalRaw !== null && subtotalRaw !== ""
+          ? numOr(subtotalRaw, row.subtotal)
+          : Number((Number(qty) * Number(price)).toFixed(2));
 
       await conn.query(
         `UPDATE order_items
@@ -1029,21 +1091,20 @@ async function applyUnavailableItemChanges(order_id, changes) {
           qty,
           price,
           subtotal,
-          row.item_id,
-        ],
+          row.item_id
+        ]
       );
     }
 
     await conn.commit();
   } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
+    try { await conn.rollback(); } catch {}
     throw e;
   } finally {
     conn.release();
   }
 }
+
 
 /* ================= CANCELLED ARCHIVE HELPERS ================= */
 async function tableExists(table, conn = null) {
