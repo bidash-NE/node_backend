@@ -14,7 +14,7 @@ const reportLimiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (req, res) =>
+  handler: (_req, res) =>
     res.status(429).json({
       success: false,
       message: "Too many report requests. Please slow down.",
@@ -23,6 +23,8 @@ const reportLimiter = rateLimit({
 
 router.get("/food-orders", reportLimiter, getFoodOrdersReport);
 router.get("/mart-orders", reportLimiter, getMartOrdersReport);
+
+// ✅ NOW reads from food_mart_revenue table
 router.get("/food-mart-revenue", reportLimiter, getFoodMartRevenueReport);
 
 module.exports = router;

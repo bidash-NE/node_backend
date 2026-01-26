@@ -85,6 +85,7 @@ async function tableExists(table) {
  * Initialize (and patch) order management tables in a version-safe way.
  *
  * ✅ Change: delivery_photo_url is now TEXT (stores JSON array string or long URI list)
+ * ✅ NEW: food_mart_revenue table (keeps lifetime revenue rows even if delivered_orders is trimmed)
  */
 async function initOrderManagementTable() {
   /* -------- Orders -------- */
@@ -208,7 +209,6 @@ CREATE TABLE IF NOT EXISTS orders (
       "estimated_arrivial_time",
       `ALTER TABLE orders ADD COLUMN estimated_arrivial_time VARCHAR(40) DEFAULT NULL`,
     ],
-
     [
       "delivery_floor_unit",
       `ALTER TABLE orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`,
@@ -217,13 +217,10 @@ CREATE TABLE IF NOT EXISTS orders (
       "delivery_instruction_note",
       `ALTER TABLE orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`,
     ],
-
-    // ✅ add if missing (new installs)
     [
       "delivery_photo_url",
       `ALTER TABLE orders ADD COLUMN delivery_photo_url TEXT NULL`,
     ],
-
     [
       "delivery_special_mode",
       `ALTER TABLE orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`,
@@ -552,7 +549,6 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
         "delivered_at",
         `ALTER TABLE delivered_orders ADD COLUMN delivered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
       ],
-
       [
         "delivery_batch_id",
         `ALTER TABLE delivered_orders ADD COLUMN delivery_batch_id BIGINT(20) UNSIGNED DEFAULT NULL`,
@@ -569,7 +565,6 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
         "delivery_ride_id",
         `ALTER TABLE delivered_orders ADD COLUMN delivery_ride_id BIGINT(20) DEFAULT NULL`,
       ],
-
       [
         "original_created_at",
         `ALTER TABLE delivered_orders ADD COLUMN original_created_at TIMESTAMP NULL`,
@@ -578,7 +573,6 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
         "original_updated_at",
         `ALTER TABLE delivered_orders ADD COLUMN original_updated_at TIMESTAMP NULL`,
       ],
-
       [
         "delivery_floor_unit",
         `ALTER TABLE delivered_orders ADD COLUMN delivery_floor_unit VARCHAR(80) DEFAULT NULL`,
@@ -684,8 +678,158 @@ CREATE TABLE IF NOT EXISTS delivered_order_items (
     "CREATE INDEX idx_delivered_items_biz ON delivered_order_items(business_id)"
   );
 
+  /* ================= NEW: FOOD/MART REVENUE SNAPSHOT TABLE =================
+     Stores the same fields you are returning in fetchFoodMartRevenueReport
+     so even if delivered_orders is trimmed per user, revenue stays forever.
+  ========================================================================== */
+
+  await db.query(`
+CREATE TABLE IF NOT EXISTS food_mart_revenue (
+  revenue_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+  -- identity
+  order_id VARCHAR(12) NOT NULL,
+  user_id INT NOT NULL,
+  business_id INT NOT NULL,
+
+  -- classification
+  owner_type ENUM('FOOD','MART') NOT NULL,
+  source ENUM('orders','cancelled','delivered') NOT NULL DEFAULT 'delivered',
+
+  -- order fields snapshot
+  status VARCHAR(100) DEFAULT NULL,
+  placed_at TIMESTAMP NULL DEFAULT NULL,
+  payment_method VARCHAR(16) DEFAULT NULL,
+
+  -- money snapshot (what you show in report)
+  total_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  platform_fee DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  revenue_earned DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  tax DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+
+  -- display fields snapshot
+  customer_name VARCHAR(255) DEFAULT NULL,
+  customer_phone VARCHAR(64) DEFAULT NULL,
+  business_name VARCHAR(255) DEFAULT NULL,
+  items_summary TEXT NULL,
+  total_quantity INT NOT NULL DEFAULT 0,
+
+  -- full payload snapshot (same structure as controller returns)
+  details_json LONGTEXT NULL,
+
+  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (revenue_id),
+  UNIQUE KEY uk_food_mart_revenue_order (order_id),
+  KEY idx_fmr_owner_time (owner_type, placed_at),
+  KEY idx_fmr_biz_time (business_id, placed_at),
+  KEY idx_fmr_user_time (user_id, placed_at),
+  KEY idx_fmr_source_time (source, placed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
+
+  // Patches for older installs (safe)
+  if (await tableExists("food_mart_revenue")) {
+    const fmrCols = [
+      [
+        "source",
+        `ALTER TABLE food_mart_revenue ADD COLUMN source ENUM('orders','cancelled','delivered') NOT NULL DEFAULT 'delivered'`,
+      ],
+      [
+        "status",
+        `ALTER TABLE food_mart_revenue ADD COLUMN status VARCHAR(100) DEFAULT NULL`,
+      ],
+      [
+        "placed_at",
+        `ALTER TABLE food_mart_revenue ADD COLUMN placed_at TIMESTAMP NULL DEFAULT NULL`,
+      ],
+      [
+        "payment_method",
+        `ALTER TABLE food_mart_revenue ADD COLUMN payment_method VARCHAR(16) DEFAULT NULL`,
+      ],
+      [
+        "revenue_earned",
+        `ALTER TABLE food_mart_revenue ADD COLUMN revenue_earned DECIMAL(10,2) NOT NULL DEFAULT 0.00`,
+      ],
+      [
+        "tax",
+        `ALTER TABLE food_mart_revenue ADD COLUMN tax DECIMAL(10,2) NOT NULL DEFAULT 0.00`,
+      ],
+      [
+        "customer_name",
+        `ALTER TABLE food_mart_revenue ADD COLUMN customer_name VARCHAR(255) DEFAULT NULL`,
+      ],
+      [
+        "customer_phone",
+        `ALTER TABLE food_mart_revenue ADD COLUMN customer_phone VARCHAR(64) DEFAULT NULL`,
+      ],
+      [
+        "business_name",
+        `ALTER TABLE food_mart_revenue ADD COLUMN business_name VARCHAR(255) DEFAULT NULL`,
+      ],
+      [
+        "items_summary",
+        `ALTER TABLE food_mart_revenue ADD COLUMN items_summary TEXT NULL`,
+      ],
+      [
+        "total_quantity",
+        `ALTER TABLE food_mart_revenue ADD COLUMN total_quantity INT NOT NULL DEFAULT 0`,
+      ],
+      [
+        "details_json",
+        `ALTER TABLE food_mart_revenue ADD COLUMN details_json LONGTEXT NULL`,
+      ],
+      [
+        "created_at",
+        `ALTER TABLE food_mart_revenue ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP`,
+      ],
+    ];
+
+    for (const [col, ddl] of fmrCols) {
+      await ensureColumn("food_mart_revenue", col, ddl);
+    }
+
+    // ensure details_json is LONGTEXT (in case it was TEXT)
+    await ensureColumnType(
+      "food_mart_revenue",
+      "details_json",
+      (info) => {
+        const t = String(info.DATA_TYPE || "").toLowerCase();
+        return t !== "longtext" && t !== "json";
+      },
+      `ALTER TABLE food_mart_revenue MODIFY COLUMN details_json LONGTEXT NULL`
+    );
+
+    // indexes (idempotent)
+    await ensureIndex(
+      "food_mart_revenue",
+      "uk_food_mart_revenue_order",
+      "CREATE UNIQUE INDEX uk_food_mart_revenue_order ON food_mart_revenue(order_id)"
+    );
+    await ensureIndex(
+      "food_mart_revenue",
+      "idx_fmr_owner_time",
+      "CREATE INDEX idx_fmr_owner_time ON food_mart_revenue(owner_type, placed_at)"
+    );
+    await ensureIndex(
+      "food_mart_revenue",
+      "idx_fmr_biz_time",
+      "CREATE INDEX idx_fmr_biz_time ON food_mart_revenue(business_id, placed_at)"
+    );
+    await ensureIndex(
+      "food_mart_revenue",
+      "idx_fmr_user_time",
+      "CREATE INDEX idx_fmr_user_time ON food_mart_revenue(user_id, placed_at)"
+    );
+    await ensureIndex(
+      "food_mart_revenue",
+      "idx_fmr_source_time",
+      "CREATE INDEX idx_fmr_source_time ON food_mart_revenue(source, placed_at)"
+    );
+  }
+
   console.log(
-    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items*, delivered_orders*, delivered_order_items* are ready (version-safe)."
+    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items*, delivered_orders*, delivered_order_items*, food_mart_revenue are ready (version-safe)."
   );
 }
 

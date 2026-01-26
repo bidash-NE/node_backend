@@ -52,7 +52,6 @@ exports.getFoodOrdersReport = async (req, res) => {
 
 exports.getMartOrdersReport = async (req, res) => {
   try {
-    // console.log("Mart orders report API called");
     const args = parseQuery(req);
     const rows = await Reports.fetchOrdersReportByOwnerType({
       ...args,
@@ -65,9 +64,9 @@ exports.getMartOrdersReport = async (req, res) => {
   }
 };
 
+// ✅ NOW reads from food_mart_revenue table
 exports.getFoodMartRevenueReport = async (req, res) => {
   try {
-    console.log("Food & Mart revenue report API called");
     const args = parseQuery(req);
     const rows = await Reports.fetchFoodMartRevenueReport(args);
     res.json({ count: rows.length, data: rows });
