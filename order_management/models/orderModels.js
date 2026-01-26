@@ -1989,17 +1989,148 @@ async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds) {
  * Name kept for compatibility with your controller.
  */
 // models/orderModels.js
+// models/orderModels.js
+// ✅ FULL REPLACEMENT: completeAndArchiveDeliveredOrder()
+// ✅ Keeps all existing behavior:
+//   - capture (optional) on DELIVERED
+//   - insert merchant_earnings
+//   - update orders status
+//   - award points
+//   - archive into delivered_orders + delivered_order_items
+//   - delete from main tables
+//   - trim delivered_orders per user (keep 10)
+// ✅ NEW:
+//   - inserts a lifetime revenue snapshot into food_mart_revenue (idempotent)
+//   - does NOT depend on delivered_orders retention
+
 async function completeAndArchiveDeliveredOrder(
   order_id,
   { delivered_by = "SYSTEM", reason = "", capture_at = "DELIVERED" } = {},
 ) {
-  // ✅ Decide capture timing (default DELIVERED)
   const CAPTURE_AT = String(capture_at || process.env.CAPTURE_AT || "DELIVERED")
     .trim()
     .toUpperCase();
 
-  // ✅ Prefetch wallet txn ids OUTSIDE transaction (best long-term)
-  // We prefetch worst-case counts based on payment method.
+  // -------- helper: check table exists (inside same file) --------
+  async function tableExistsLocal(conn, table) {
+    const [rows] = await conn.query(
+      `
+      SELECT 1
+        FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = ?
+       LIMIT 1
+      `,
+      [table],
+    );
+    return rows.length > 0;
+  }
+
+  // -------- helper: build items summary + totals --------
+  function buildItemsSummary(items = []) {
+    const byName = new Map();
+    let totalQty = 0;
+
+    for (const it of items || []) {
+      const name = String(it.item_name || "").trim() || "Item";
+      const q = Number(it.quantity || 0) || 0;
+      totalQty += q;
+      byName.set(name, (byName.get(name) || 0) + q);
+    }
+
+    const summary = Array.from(byName.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([name, qty]) => `${name} x${qty}`)
+      .join(", ");
+
+    return { summary, totalQty };
+  }
+
+  // -------- helper: insert into food_mart_revenue (idempotent) --------
+async function insertFoodMartRevenueWithConn(conn, row) {
+  const [t] = await conn.query(
+    `
+    SELECT 1
+      FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'food_mart_revenue'
+     LIMIT 1
+    `
+  );
+
+  if (!t.length) {
+    const [[d]] = await conn.query("SELECT DATABASE() AS db");
+    console.log("[FMR] table not found in db:", d?.db);
+    return;
+  }
+
+  const ownerType = String(row.owner_type || "FOOD").trim().toUpperCase();
+  if (!["FOOD", "MART"].includes(ownerType)) {
+    throw new Error(`[FMR] invalid owner_type: ${ownerType}`);
+  }
+
+  const source = String(row.source || "delivered").trim().toLowerCase();
+  if (!["orders", "cancelled", "delivered"].includes(source)) {
+    throw new Error(`[FMR] invalid source: ${source}`);
+  }
+
+  const sql = `
+    INSERT INTO food_mart_revenue
+    (
+      order_id, user_id, business_id, owner_type, source,
+      status, placed_at, payment_method,
+      total_amount, platform_fee, revenue_earned, tax,
+      customer_name, customer_phone, business_name,
+      items_summary, total_quantity, details_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    ON DUPLICATE KEY UPDATE
+      user_id        = VALUES(user_id),
+      business_id    = VALUES(business_id),
+      owner_type     = VALUES(owner_type),
+      source         = VALUES(source),
+      status         = VALUES(status),
+      placed_at      = VALUES(placed_at),
+      payment_method = VALUES(payment_method),
+      total_amount   = VALUES(total_amount),
+      platform_fee   = VALUES(platform_fee),
+      revenue_earned = VALUES(revenue_earned),
+      tax            = VALUES(tax),
+      customer_name  = VALUES(customer_name),
+      customer_phone = VALUES(customer_phone),
+      business_name  = VALUES(business_name),
+      items_summary  = VALUES(items_summary),
+      total_quantity = VALUES(total_quantity),
+      details_json   = VALUES(details_json)
+  `;
+
+  await conn.query(sql, [
+    String(row.order_id).trim(),
+    Number(row.user_id),
+    Number(row.business_id),
+    ownerType,
+    source,
+
+    row.status || null,
+    row.placed_at || null,
+    row.payment_method || null,
+
+    Number(row.total_amount || 0),
+    Number(row.platform_fee || 0),
+    Number(row.revenue_earned || 0),
+    Number(row.tax || 0),
+
+    row.customer_name || null,
+    row.customer_phone || null,
+    row.business_name || null,
+
+    row.items_summary || null,
+    Number(row.total_quantity || 0),
+    row.details_json || null,
+  ]);
+}
+
+  // ✅ Prefetch wallet txn ids OUTSIDE transaction (avoids locks while doing HTTP)
   let payMethodForPrefetch = null;
   try {
     const [[pre]] = await db.query(
@@ -2022,7 +2153,6 @@ async function completeAndArchiveDeliveredOrder(
         prefetchedIds = await prefetchTxnIdsBatch(2);
       }
     } catch (e) {
-      // If we can't prefetch IDs, fail early (no DB locks held)
       return {
         ok: false,
         code: "CAPTURE_FAILED",
@@ -2063,14 +2193,27 @@ async function completeAndArchiveDeliveredOrder(
 
     const finalReason = String(reason || "").trim();
 
-    // ✅ Compute split (needs the locked live tables)
+    // ✅ Get order + items now (we need them before delete)
+    const [[order]] = await conn.query(
+      `SELECT * FROM orders WHERE order_id = ? LIMIT 1`,
+      [order_id],
+    );
+    const [items] = await conn.query(
+      `SELECT * FROM order_items WHERE order_id = ?`,
+      [order_id],
+    );
+
+    // ✅ Compute split
     const split = await computeBusinessSplit(order_id, conn);
+
     const baseToMerchant = Number(split.total_amount || 0);
     const feeForPrimary = Number(split.platform_fee || 0);
+
     const userFeeShare =
       feeForPrimary > 0
         ? Number((feeForPrimary * PLATFORM_USER_SHARE).toFixed(2))
         : 0;
+
     const merchFeeShare = Number((feeForPrimary - userFeeShare).toFixed(2));
     const merchantNet = Number((baseToMerchant - merchFeeShare).toFixed(2));
 
@@ -2082,23 +2225,11 @@ async function completeAndArchiveDeliveredOrder(
     if (CAPTURE_AT === "DELIVERED") {
       try {
         if (payMethod === "WALLET") {
-          capture = await captureOrderFundsWithConn(
-            conn,
-            order_id,
-            prefetchedIds,
-          );
+          capture = await captureOrderFundsWithConn(conn, order_id, prefetchedIds);
         } else if (payMethod === "COD") {
-          capture = await captureOrderCODFeeWithConn(
-            conn,
-            order_id,
-            prefetchedIds,
-          );
+          capture = await captureOrderCODFeeWithConn(conn, order_id, prefetchedIds);
         } else {
-          capture = {
-            captured: false,
-            skipped: true,
-            payment_method: payMethod,
-          };
+          capture = { captured: false, skipped: true, payment_method: payMethod };
         }
       } catch (e) {
         await conn.rollback();
@@ -2112,7 +2243,6 @@ async function completeAndArchiveDeliveredOrder(
 
     /* =========================================================
        ✅ INSERT merchant_earnings (idempotent)
-       - total_amount = merchantNet (base - merchant fee share)
        ========================================================= */
     const deliveredAt = new Date();
     try {
@@ -2123,8 +2253,111 @@ async function completeAndArchiveDeliveredOrder(
         dateObj: deliveredAt,
       });
     } catch (e) {
-      // Don’t fail delivery for earnings insert; log only
       console.error("[merchant_earnings insert failed]", e?.message);
+    }
+
+    /* =========================================================
+       ✅ NEW: INSERT food_mart_revenue (lifetime snapshot)
+       (does NOT replace delivered_orders; it is in addition)
+       ========================================================= */
+    try {
+      // owner_type (FOOD/MART)
+      let ownerType = null;
+      try {
+        ownerType = await resolveOrderServiceType(order_id, conn);
+      } catch {
+        ownerType = null;
+      }
+      ownerType = String(ownerType || "FOOD").toUpperCase();
+      if (ownerType !== "FOOD" && ownerType !== "MART") ownerType = "FOOD";
+
+      // customer info
+      const [[u]] = await conn.query(
+        `SELECT user_name, phone FROM users WHERE user_id = ? LIMIT 1`,
+        [user_id],
+      );
+      const customerName =
+        (u?.user_name && String(u.user_name).trim()) || `User ${user_id}`;
+      const customerPhone = u?.phone ? String(u.phone).trim() : null;
+
+      // business name (use merchant_business_details if exists)
+      const [[mbd]] = await conn.query(
+        `SELECT business_name FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
+        [split.business_id],
+      );
+      const businessName =
+        (mbd?.business_name && String(mbd.business_name).trim()) ||
+        (items?.[0]?.business_name ? String(items[0].business_name).trim() : null) ||
+        `Business ${split.business_id}`;
+
+      // items summary
+      const { summary, totalQty } = buildItemsSummary(items);
+
+      // amounts snapshot
+      const totalAmount = Number(order?.total_amount || 0);
+      const platformFee = Number(order?.platform_fee || 0); // full order platform fee
+      const revenueEarned = platformFee; // admin revenue == platform fee (your report logic)
+      const tax = 0;
+
+      const detailsObj = {
+        order: {
+          id: order_id,
+          status: "DELIVERED",
+          placed_at: deliveredAt,
+          owner_type: ownerType,
+          source: "delivered",
+        },
+        customer: {
+          id: user_id,
+          name: customerName,
+          phone: customerPhone,
+        },
+        business: {
+          id: split.business_id,
+          name: businessName,
+          owner_type: ownerType,
+        },
+        items: {
+          summary: summary || "",
+          total_quantity: Number(totalQty || 0),
+        },
+        amounts: {
+          total_amount: totalAmount,
+          platform_fee: platformFee,
+          revenue_earned: revenueEarned,
+          tax,
+        },
+        payment: {
+          method: payMethod,
+        },
+      };
+
+      await insertFoodMartRevenueWithConn(conn, {
+        order_id,
+        user_id,
+        business_id: Number(split.business_id),
+        owner_type: ownerType,
+        source: "delivered",
+        status: "DELIVERED",
+        placed_at: deliveredAt,
+        payment_method: payMethod,
+
+        total_amount: totalAmount,
+        platform_fee: platformFee,
+        revenue_earned: revenueEarned,
+        tax,
+
+        customer_name: customerName,
+        customer_phone: customerPhone,
+        business_name: businessName,
+        items_summary: summary || "",
+        total_quantity: Number(totalQty || 0),
+
+        details_json: JSON.stringify(detailsObj),
+      });
+    } catch (e) {
+      // Do not fail delivery for revenue insert
+      console.error("[food_mart_revenue insert failed]", e?.message);
     }
 
     /* ================= update order status to DELIVERED ================= */
@@ -2163,19 +2396,16 @@ async function completeAndArchiveDeliveredOrder(
     try {
       pointsInfo = await awardPointsForCompletedOrderWithConn(conn, order_id);
     } catch (e) {
-      pointsInfo = {
-        awarded: false,
-        reason: "points_error",
-        error: e?.message,
-      };
+      pointsInfo = { awarded: false, reason: "points_error", error: e?.message };
     }
 
-    /* ================= archive + delete (unchanged) ================= */
+    /* ================= archive into delivered_* (unchanged) ================= */
     await archiveDeliveredOrderInternal(conn, order_id, {
       delivered_by,
       reason: finalReason,
     });
 
+    /* ================= delete + trim (unchanged) ================= */
     await deleteOrderFromMainTablesInternal(conn, order_id);
     await trimDeliveredOrdersForUser(conn, user_id, 10);
 
@@ -2208,6 +2438,7 @@ async function completeAndArchiveDeliveredOrder(
     conn.release();
   }
 }
+
 
 /* ================= OPTIONAL: CAPTURE ON ACCEPT (✅ NEW helper) ================= */
 // Call this from your "accept/confirm order" controller if you want deduction on accept.
