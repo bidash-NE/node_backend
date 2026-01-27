@@ -321,13 +321,12 @@ async function fetchFoodMartRevenueReport({
   status,
   dateFrom,
   dateTo,
-  limit = 100,
-  offset = 0,
   debug = false,
 }) {
   const dbg = Boolean(debug) || REPORT_DEBUG;
-  const L = Math.min(Math.max(Number(limit), 1), 500);
-  const O = Math.max(Number(offset), 0);
+
+  // Match your example precision (e.g., 0.9975, 0.0525)
+  const round4 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 10000) / 10000;
 
   // If table not created yet, return empty (so API doesn't crash)
   const hasRevenueTable = await tableExists(REVENUE_TABLE);
@@ -338,10 +337,12 @@ async function fetchFoodMartRevenueReport({
 
   const cols = await getTableColumns(REVENUE_TABLE);
 
-  // Column helpers (robust if you rename later)
-  const c = (name, fallbackSql = "NULL") => (cols.has(name) ? `r.\`${name}\`` : fallbackSql);
+  const c = (name, fallbackSql = "NULL") =>
+    cols.has(name) ? `r.\`${name}\`` : fallbackSql;
 
-  // Prefer placed_at for date filtering; fallback to created_at
+  const hasPlatformFeeCol = cols.has("platform_fee");
+  const hasRevenueEarnedCol = cols.has("revenue_earned");
+
   const placedAtExpr = cols.has("placed_at")
     ? "r.`placed_at`"
     : cols.has("created_at")
@@ -351,7 +352,6 @@ async function fetchFoodMartRevenueReport({
   const where = [];
   const params = [];
 
-  // Only FOOD & MART rows
   if (cols.has("owner_type")) {
     where.push(`UPPER(r.\`owner_type\`) IN ('FOOD','MART')`);
   }
@@ -383,7 +383,7 @@ async function fetchFoodMartRevenueReport({
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  // Select a consistent response shape even if columns are missing
+  // ✅ No LIMIT/OFFSET — fetch all
   const sql = `
     SELECT
       ${c("order_id", "r.\`order_id\`")} AS order_id,
@@ -397,28 +397,21 @@ async function fetchFoodMartRevenueReport({
     ${whereSql}
     ORDER BY
       ${placedAtExpr !== "NULL" ? `${placedAtExpr} DESC` : "1"} ${
-        cols.has("created_at") ? ", r.`created_at` DESC" : ""
-      }
-    LIMIT ? OFFSET ?;
+        cols.has("created_at") ? ", r.\`created_at\` DESC" : ""
+      };
   `;
 
-  const paramsWithLimit = [...params, L, O];
-
   dlog(dbg, `\n[REVENUE] SQL:\n${sql}`);
-  dlog(dbg, `[REVENUE] params:`, paramsWithLimit);
+  dlog(dbg, `[REVENUE] params:`, params);
 
-  const [rows] = await db.query(sql, paramsWithLimit);
+  const [rows] = await db.query(sql, params);
 
   return rows.map((r) => {
     const ownerTypeLabel = String(r.owner_type || "").toUpperCase();
     const totalAmount = Number(r.total_amount || 0);
-    const platformFee = Number(r.platform_fee || 0);
-    const revenueEarned = Number(r.revenue_earned || 0);
 
-    // details_json is your canonical payload; parse if possible
     let details = safeParseJson(r.details_json);
 
-    // Fallback minimal details if details_json missing/broken
     if (!details) {
       details = {
         order: {
@@ -430,23 +423,48 @@ async function fetchFoodMartRevenueReport({
         },
         amounts: {
           total_amount: totalAmount,
-          platform_fee: platformFee,
-          revenue_earned: revenueEarned,
+          platform_fee: 0,
+          revenue_earned: 0,
           tax: 0,
         },
       };
     }
 
+    if (!details.amounts || typeof details.amounts !== "object") details.amounts = {};
+
+    // ✅ YOUR REQUIRED FORMAT:
+    // revenue_earned = GROSS (before GST split)
+    // tax = 5% of revenue_earned
+    // platform_fee = NET (revenue_earned - tax)
+    //
+    // Prefer DB revenue_earned as gross, else fall back to DB platform_fee or details
+    const grossRevenueEarned =
+      hasRevenueEarnedCol
+        ? Number(r.revenue_earned || 0)
+        : hasPlatformFeeCol
+          ? Number(r.platform_fee || 0)
+          : Number(details?.amounts?.revenue_earned ?? details?.amounts?.platform_fee ?? 0);
+
+    const gstTax = round4(grossRevenueEarned * 0.05);
+    const netPlatformFee = round4(grossRevenueEarned - gstTax);
+
+    // enforce amounts shape exactly as you want
+    details.amounts.total_amount = Number(details.amounts.total_amount ?? totalAmount) || totalAmount;
+    details.amounts.revenue_earned = round4(grossRevenueEarned);
+    details.amounts.tax = gstTax;
+    details.amounts.platform_fee = netPlatformFee;
+
     return {
       order_id: r.order_id,
       owner_type: ownerTypeLabel,
-      platform_fee: platformFee,
-      revenue_earned: revenueEarned,
+      platform_fee: netPlatformFee,             // NET
+      revenue_earned: round4(grossRevenueEarned), // GROSS
       total_amount: totalAmount,
       details,
     };
   });
 }
+
 
 module.exports = {
   fetchOrdersReportByOwnerType,
