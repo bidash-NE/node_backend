@@ -37,9 +37,8 @@ import guestWaypointsRouter from "./routes/guestWaypoints.routes.js";
 import { makeChatUploadRouter } from "../src/routes/chatUpload.js";
 import { makeChatListRouter } from "../src/routes/chatList.js";
 import driverDeliveryRoutes from "./routes/driverDelivery.js";
-import  {getDeliveryRideId}  from "./routes/getDeliveryRideId.js";
+import { getDeliveryRideId } from "./routes/getDeliveryRideId.js";
 import { getBatchAndRideId } from "./routes/getBatchId&RideId.js";
-
 
 // tax and platform rules
 import taxRulesRoutes from "./routes/taxRules.routes.js";
@@ -58,7 +57,7 @@ app.use(
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: false,
-  })
+  }),
 );
 
 app.use(express.json({ limit: "10mb" })); // ✅ allow bigger payloads (chat/meta)
@@ -85,7 +84,6 @@ app.use("/api/settlements", driverSettlementRoutes);
 app.use("/api", rideGroupRoutes);
 app.use("/api", guestWaypointsRouter(mysqlPool));
 
-
 // tax and platform fee rules routes
 app.use("/tax-rules", taxRulesRoutes);
 app.use("/platform-fee-rules", platformFeeRulesRoutes);
@@ -95,10 +93,7 @@ app.use("/pricing", pricingRoutes);
 app.use("/finance", financeRoutes);
 app.use("/finance", refundRoutes);
 
-
 app.use("/api/batch-ride", getBatchAndRideId());
-
-
 
 // chat upload route
 app.use("/chat", makeChatUploadRouter("/uploads"));
@@ -134,7 +129,10 @@ io.use((socket, next) => {
   const a = socket.handshake.auth || socket.handshake.query || {};
 
   try {
-    if (!socket.data.role && (a.role === "driver" || a.role === "passenger" || a.role === "merchant")) {
+    if (
+      !socket.data.role &&
+      (a.role === "driver" || a.role === "passenger" || a.role === "merchant")
+    ) {
       socket.data.role = a.role;
     }
     if (socket.data.driver_id == null && a.driver_id != null) {
@@ -153,7 +151,7 @@ io.use((socket, next) => {
 
 // matcher setup (unchanged)
 const adapter = {
-  ...makeOfferAdapter(mysqlPool),       // your existing logic (if any)
+  ...makeOfferAdapter(mysqlPool), // your existing logic (if any)
   ...makeDbOfferAdapter({ mysqlPool }), // adds DB offer-state writes
 };
 configureMatcher(adapter);
@@ -169,13 +167,13 @@ app.use("/api/delivery", getDeliveryRideId);
 app.use("/api/scheduled-rides", scheduledRoutes);
 
 /* ============================ Mongo events ============================ */
-mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
-mongoose.connection.on("error", (err) =>
-  console.error("❌ MongoDB connection error:", err)
-);
-mongoose.connection.on("disconnected", () =>
-  console.warn("⚠ MongoDB disconnected")
-);
+// mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
+// mongoose.connection.on("error", (err) =>
+//   console.error("❌ MongoDB connection error:", err)
+// );
+// mongoose.connection.on("disconnected", () =>
+//   console.warn("⚠ MongoDB disconnected")
+// );
 
 startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
 
@@ -195,11 +193,11 @@ async function testMySQLConnection() {
 /* ============================== Startup =============================== */
 async function startServer() {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      // For Mongoose v7+, these options are not required; harmless if left.
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    // await mongoose.connect(process.env.MONGO_URI, {
+    //   // For Mongoose v7+, these options are not required; harmless if left.
+    //   useNewUrlParser: true,
+    //   useUnifiedTopology: true,
+    // });
 
     await testMySQLConnection();
 
