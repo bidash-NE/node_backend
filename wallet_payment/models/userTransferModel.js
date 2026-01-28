@@ -59,7 +59,7 @@ async function userWalletTransfer({
     /* ----------------- LOCK SENDER ----------------- */
     const [senderRows] = await conn.query(
       "SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [sender_wallet_id]
+      [sender_wallet_id],
     );
     if (!senderRows.length) {
       await conn.rollback();
@@ -70,7 +70,7 @@ async function userWalletTransfer({
     /* ----------------- LOCK RECIPIENT ----------------- */
     const [recipientRows] = await conn.query(
       "SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [recipient_wallet_id]
+      [recipient_wallet_id],
     );
     if (!recipientRows.length) {
       await conn.rollback();
@@ -134,7 +134,7 @@ async function userWalletTransfer({
       `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
-      [txIdDr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note]
+      [txIdDr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note],
     );
 
     /* ----------------- INSERT CR (Recipient) ----------------- */
@@ -142,7 +142,7 @@ async function userWalletTransfer({
       `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
-      [txIdCr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note]
+      [txIdCr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note],
     );
 
     await conn.commit();

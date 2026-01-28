@@ -500,7 +500,7 @@ async function forgotTPinRequest(req, res) {
 
     const [rows] = await db.query(
       "SELECT user_id, email, user_name FROM users WHERE user_id = ? LIMIT 1",
-      [wallet.user_id]
+      [wallet.user_id],
     );
 
     if (!rows.length || !rows[0].email) {
@@ -663,7 +663,7 @@ async function forgotTPinRequestSms(req, res) {
 
     const [rows] = await db.query(
       "SELECT user_id, phone, user_name FROM users WHERE user_id = ? LIMIT 1",
-      [wallet.user_id]
+      [wallet.user_id],
     );
 
     if (!rows.length || !rows[0].phone) {
@@ -797,8 +797,10 @@ async function userTransfer(req, res) {
       amount,
       note = "",
       t_pin,
+      biometric = false, // ✅ NEW
     } = req.body || {};
 
+    // basic wallet validations
     if (!sender_wallet_id || !/^NET/i.test(sender_wallet_id)) {
       return res.status(400).json({
         success: false,
@@ -827,14 +829,11 @@ async function userTransfer(req, res) {
       });
     }
 
-    const pinStr = String(t_pin || "").trim();
-    if (!/^\d{4}$/.test(pinStr)) {
-      return res.status(400).json({
-        success: false,
-        message: "t_pin must be a 4-digit numeric code.",
-      });
-    }
+    // ✅ biometric flag normalization
+    const biometricOk =
+      biometric === true || biometric === "true" || biometric === 1;
 
+    // load sender wallet
     const senderWallet = await getWallet({ key: sender_wallet_id });
     if (!senderWallet) {
       return res.status(404).json({
@@ -850,21 +849,36 @@ async function userTransfer(req, res) {
       });
     }
 
-    if (!senderWallet.t_pin) {
-      return res.status(409).json({
-        success: false,
-        message: "T-PIN not set for this wallet.",
-      });
+    // ✅ If biometric is FALSE => verify T-PIN
+    if (!biometricOk) {
+      const pinStr = String(t_pin || "").trim();
+      if (!/^\d{4}$/.test(pinStr)) {
+        return res.status(400).json({
+          success: false,
+          message: "t_pin must be a 4-digit numeric code.",
+        });
+      }
+
+      if (!senderWallet.t_pin) {
+        return res.status(409).json({
+          success: false,
+          message: "T-PIN not set for this wallet.",
+        });
+      }
+
+      const okPin = await bcrypt.compare(pinStr, senderWallet.t_pin);
+      if (!okPin) {
+        return res.status(401).json({
+          success: false,
+          message: "Invalid T-PIN.",
+        });
+      }
+    } else {
+      // ✅ biometric TRUE => skip pin verification (but still block if wallet is missing tpin? NO)
+      // Do nothing here intentionally.
     }
 
-    const okPin = await bcrypt.compare(pinStr, senderWallet.t_pin);
-    if (!okPin) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid T-PIN.",
-      });
-    }
-
+    // load recipient wallet
     const recipientWallet = await getWallet({ key: recipient_wallet_id });
     if (!recipientWallet) {
       return res.status(404).json({
@@ -880,6 +894,7 @@ async function userTransfer(req, res) {
       });
     }
 
+    // perform transfer (db transaction happens in model)
     const result = await userWalletTransfer({
       sender_wallet_id,
       recipient_wallet_id,
@@ -910,6 +925,7 @@ async function userTransfer(req, res) {
       purpose: note || "N/A",
       date: dateStr,
       time: timeStr,
+      biometric: biometricOk, // ✅ optional: return what was used
     };
 
     return res.json({
@@ -943,7 +959,7 @@ async function getUserNameByWalletId(req, res) {
 
     const [rows] = await db.query(
       "SELECT user_id, user_name FROM users WHERE user_id = ?",
-      [wallet.user_id]
+      [wallet.user_id],
     );
 
     if (!rows.length) {
