@@ -9,6 +9,50 @@ import express from "express";
 export default function makeDriverLookupRouter(mysqlPool) {
   const router = express.Router();
 
+  // GET driver details using driverId /api/driver_id?driverId=12
+  router.get("/driver_id", async (req, res) => {
+   try {
+      const raw = req.query.driverId;
+      const driverId = Number(raw);
+      console.log("Driver Id: ", driverId);
+
+      if (!Number.isFinite(driverId) || driverId <= 0) {
+        return res.status(400).json({ ok: false, error: "Valid driverId is required" });
+      }
+      
+      const conn = await mysqlPool.getConnection();
+      try {
+        const [[row]] = await conn.query(
+         "SELECT user_id FROM drivers WHERE driver_id = ? LIMIT 1",
+          [driverId]
+        );
+
+        if (!row) {
+          return res.status(404).json({
+            ok: false,
+            error: `No driver found for driver_id=${driverId}`,
+          });
+        }
+
+        const userId = row.user_id;
+
+        const [[userDetails]] = await conn.query(
+         "SELECT * FROM users WHERE user_id = ? LIMIT 1",
+          [userId]
+        );
+
+        return res.json({
+          ok: true,
+          details: userDetails || null,
+        });
+      } finally {
+        try { conn.release(); } catch {}
+      }
+    } catch (err) {
+      console.error("[GET /api/driver_id] error:", err);
+      return res.status(500).json({ ok: false, error: "Server error" });
+    }
+  });
   // GET /api/driver-id?userId=123
   router.get("/driver-id", async (req, res) => {
     try {

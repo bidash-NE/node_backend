@@ -9,3 +9,5 @@ export const rideCurrent  = (rideId) => `ride:${rideId}:current`;
 export const rideRejected = (rideId) => `ride:${rideId}:rejected`;
 
 export const currentRidesKey = (driverId) => `driver:current:rides:${driverId}`;
+export const currentPassengerRideKey = (passengerId) => `passenger:current:ride:${passengerId}`;
+

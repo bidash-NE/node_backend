@@ -7,9 +7,12 @@ const DE_TBL = "driver_earnings";
 const PBE_TBL = "ride_booking_earnings";
 const RIDES_TBL = "rides";
 const RBOOK_TBL = "ride_bookings";
+const RTIPS_TBL = "ride_tips"; // ✅ NEW: ride_tips table
 
 /* External ID service used in your driver.js */
-const WALLET_IDS_ENDPOINT = process.env.WALLET_IDS_ENDPOINT.trim();
+const WALLET_IDS_ENDPOINT = (
+  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
+).trim();
 
 /* ========= Socket room helpers (match your driver.js) ========= */
 const driverRoom = (driverId) => `driver:${driverId}`;
@@ -198,9 +201,14 @@ export default function tipsRouter(mysqlPool, io) {
       passenger_user_id,
       amount_nu,
       booking_id: rawBk,
-      idem_key,
+      idem_key, // body key
       currency = "BTN",
     } = req.body || {};
+
+    // also support Idempotency-Key header
+    const headerIdem = req.get("Idempotency-Key");
+    const idemKey =
+      (idem_key || headerIdem || "").toString().trim().slice(0, 255) || null;
 
     if (
       !Number.isFinite(ride_id) ||
@@ -218,33 +226,56 @@ export default function tipsRouter(mysqlPool, io) {
     try {
       await conn.beginTransaction();
 
+      const tip_cents = Math.round(Number(amount_nu) * 100);
+
       // Idempotency
       await ensureIdem(conn);
-      if (idem_key) {
+      if (idemKey) {
         try {
           await conn.execute(
             `INSERT INTO idempotency_keys (idem_key, purpose, ride_id, booking_id, passenger_id, amount_cents)
              VALUES (?,?,?,?,?,?)`,
-            [
-              idem_key,
-              "TIP",
-              ride_id,
-              booking_id,
-              passenger_user_id,
-              Math.round(Number(amount_nu) * 100),
-            ]
+            [idemKey, "TIP", ride_id, booking_id, passenger_user_id, tip_cents]
           );
         } catch (e) {
-          // duplicate key -> already processed (fetch journal)
+          // duplicate key -> already processed
           const [[ex]] = await conn.query(
             `SELECT journal_code FROM idempotency_keys WHERE idem_key=? LIMIT 1`,
-            [idem_key]
+            [idemKey]
           );
+
+          // try to fetch existing ride_tips row too (if any)
+          const [[tipRow]] = await conn.query(
+            `SELECT tip_id, ride_id, driver_id, passenger_id, booking_id,
+                    amount_cents, currency, status, created_at, updated_at
+               FROM ${RTIPS_TBL}
+              WHERE idempotency_key = ?
+              LIMIT 1`,
+            [idemKey]
+          );
+
           await conn.commit();
           return res.json({
             success: true,
             idempotent: true,
             journal_code: ex?.journal_code || null,
+            tip: tipRow
+              ? {
+                  tip_id: Number(tipRow.tip_id),
+                  ride_id: Number(tipRow.ride_id),
+                  driver_id: Number(tipRow.driver_id),
+                  passenger_id: Number(tipRow.passenger_id),
+                  booking_id: tipRow.booking_id
+                    ? Number(tipRow.booking_id)
+                    : null,
+                  amount_nu: Number(tipRow.amount_cents) / 100,
+                  amount_cents: Number(tipRow.amount_cents),
+                  currency: tipRow.currency,
+                  status: tipRow.status,
+                  created_at: tipRow.created_at,
+                  updated_at: tipRow.updated_at,
+                }
+              : null,
           });
         }
       }
@@ -327,7 +358,6 @@ export default function tipsRouter(mysqlPool, io) {
       }
 
       // Accrue in earnings (cents)
-      const tip_cents = Math.round(Number(amount_nu) * 100);
       if (booking_id) {
         await conn.execute(
           `INSERT INTO ${PBE_TBL}
@@ -367,12 +397,34 @@ export default function tipsRouter(mysqlPool, io) {
       }
 
       // Save journal_code on idem row (if used)
-      if (idem_key) {
+      if (idemKey) {
         await conn.execute(
           `UPDATE idempotency_keys SET journal_code=? WHERE idem_key=?`,
-          [transfer.journal_code || null, idem_key]
+          [transfer.journal_code || null, idemKey]
         );
       }
+
+      // ✅ Insert into ride_tips table
+      const tipCurrency = (currency || ride.currency || "BTN")
+        .toUpperCase()
+        .slice(0, 3);
+
+      const [tipRes] = await conn.execute(
+        `INSERT INTO ${RTIPS_TBL}
+           (ride_id, driver_id, passenger_id, booking_id,
+            amount_cents, currency, idempotency_key, status)
+         VALUES (?,?,?,?,?,?,?, 'captured')`,
+        [
+          ride_id,
+          driver_id,
+          passenger_id,
+          booking_id,
+          tip_cents,
+          tipCurrency,
+          idemKey ? idemKey.slice(0, 64) : null,
+        ]
+      );
+      const tip_id = tipRes.insertId;
 
       await conn.commit();
 
@@ -385,28 +437,33 @@ export default function tipsRouter(mysqlPool, io) {
           booking_id: booking_id ? String(booking_id) : null,
           amount_nu: Number(amount_nu),
           journal_code: transfer.journal_code,
+          tip_id,
         });
         io.to(driverRoom(String(driver_id))).emit("tipAdded", {
           ride_id: String(ride_id),
           amount_nu: Number(amount_nu),
           journal_code: transfer.journal_code,
+          tip_id,
         });
         io.to(passengerRoom(String(passenger_user_id))).emit("tipAdded", {
           ride_id: String(ride_id),
           amount_nu: Number(amount_nu),
           journal_code: transfer.journal_code,
+          tip_id,
         });
       } catch {}
 
       return res.json({
         success: true,
         data: {
+          tip_id,
           ride_id,
           driver_id,
           passenger_id,
           booking_id,
           amount_nu: Number(amount_nu),
-          currency: currency || ride.currency || "BTN",
+          amount_cents: tip_cents,
+          currency: tipCurrency,
           journal_code: transfer.journal_code,
           transactions: {
             passenger_dr: transfer.tx_dr,

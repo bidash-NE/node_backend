@@ -3,42 +3,109 @@ import { withConn } from "../db/mysql.js";
 
 export const ridesTypesRouter = express.Router();
 
-// Add ride type
+/* ===================== money helpers ===================== */
+// Admin enters Nu (e.g. 10 or "10.00") -> store cents (1000)
+function toCents(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * 100);
+}
+
+// DB cents -> Nu (e.g. 1000 -> 10)
+function toNu(cents) {
+  const n = Number(cents);
+  if (!Number.isFinite(n)) return 0;
+  return Number((n / 100).toFixed(2));
+}
+
+function toTinyIntBool(v, fallback = 1) {
+  if (v === null || v === undefined) return fallback;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  const s = String(v).trim().toLowerCase();
+  if (["1", "true", "yes", "y"].includes(s)) return 1;
+  if (["0", "false", "no", "n"].includes(s)) return 0;
+  return fallback;
+}
+
+/**
+ * DB row -> API row
+ * - keeps *_cents
+ * - adds Nu fields: base_fare, per_km_rate, per_min_rate, min_fare, cancellation_fee
+ */
+function mapRideTypeRow(row) {
+  if (!row) return row;
+
+  return {
+    ...row,
+
+    // ✅ add Nu fields
+    base_fare: toNu(row.base_fare_cents),
+    per_km_rate: toNu(row.per_km_rate_cents),
+    min_fare: toNu(row.min_fare_cents),
+    cancellation_fee: toNu(row.cancellation_fee_cents),
+
+    // ✅ ensure cents are numbers
+    base_fare_cents: Number(row.base_fare_cents || 0),
+    per_km_rate_cents: Number(row.per_km_rate_cents || 0),
+    min_fare_cents: Number(row.min_fare_cents || 0),
+    cancellation_fee_cents: Number(row.cancellation_fee_cents || 0),
+  };
+}
+
+/* ===================== Add ride type ===================== */
 ridesTypesRouter.post("/add-ride-types", async (req, res) => {
   const {
     name,
     code,
     description,
-    base_fare,
-    per_km_rate,
-    per_min_rate,
-    min_fare,
-    cancellation_fee,
+    base_fare, // Nu
+    per_km_rate, // Nu
+    min_fare, // Nu
+    cancellation_fee, // Nu
     capacity,
     vehicle_type,
     icon_url,
-    is_active = true
+    is_active = true,
   } = req.body;
+
+  if (!name || !code) {
+    return res.status(400).json({
+      success: false,
+      message: "name and code are required",
+    });
+  }
+
+  // Convert Nu -> cents for DB
+  const base_fare_cents = toCents(base_fare) ?? 0;
+  const per_km_rate_cents = toCents(per_km_rate) ?? 0;
+  const min_fare_cents = toCents(min_fare) ?? 0;
+  const cancellation_fee_cents = toCents(cancellation_fee) ?? 0;
+  const is_active_int = toTinyIntBool(is_active, 1);
 
   try {
     await withConn(async (db) => {
       const [result] = await db.query(
-        `INSERT INTO ride_types
-        (name, code, description, base_fare, per_km_rate, per_min_rate, min_fare, cancellation_fee, capacity, vehicle_type, icon_url, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `
+        INSERT INTO ride_types
+          (name, code, description,
+           base_fare_cents, per_km_rate_cents,
+           min_fare_cents, cancellation_fee_cents,
+           capacity, vehicle_type, icon_url, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
         [
           name,
           code,
-          description,
-          base_fare,
-          per_km_rate,
-          per_min_rate,
-          min_fare,
-          cancellation_fee,
-          capacity,
-          vehicle_type,
-          icon_url,
-          is_active
+          description || null,
+          base_fare_cents,
+          per_km_rate_cents,
+          min_fare_cents,
+          cancellation_fee_cents,
+          capacity ?? null,
+          vehicle_type || null,
+          icon_url || null,
+          is_active_int,
         ]
       );
 
@@ -54,17 +121,25 @@ ridesTypesRouter.post("/add-ride-types", async (req, res) => {
   }
 });
 
-// Get all ride types
+/* ===================== Get all ride types ===================== */
 ridesTypesRouter.get("/get-ride-types", async (req, res) => {
   try {
     await withConn(async (db) => {
       const [rows] = await db.query(
-        "SELECT id, name, code, description, base_fare, per_km_rate, per_min_rate, min_fare, cancellation_fee, capacity, vehicle_type, icon_url, is_active, created_at, updated_at FROM ride_types ORDER BY id DESC"
+        `
+        SELECT
+          id, name, code, description,
+          base_fare_cents, per_km_rate_cents,
+          min_fare_cents, cancellation_fee_cents,
+          capacity, vehicle_type, icon_url, is_active, created_at, updated_at
+        FROM ride_types
+        ORDER BY id DESC
+        `
       );
 
       res.status(200).json({
         success: true,
-        data: rows,
+        data: (rows || []).map(mapRideTypeRow),
       });
     });
   } catch (err) {
@@ -73,35 +148,38 @@ ridesTypesRouter.get("/get-ride-types", async (req, res) => {
   }
 });
 
-// Get ride type by user_id (driver's vehicle type)
+/* ===================== Get ride type by user_id ===================== */
 ridesTypesRouter.get("/get-ride-type/:user_id", async (req, res) => {
   const { user_id } = req.params;
 
   try {
     await withConn(async (db) => {
-      // 1️⃣ Get driver_id from user_id
+      // 1) driver_id from user_id
       const [driverResult] = await db.query(
         "SELECT driver_id FROM drivers WHERE user_id = ?",
         [user_id]
       );
 
       if (driverResult.length === 0) {
-        return res.status(404).json({ success: false, message: "Driver not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Driver not found" });
       }
 
       const driver_id = driverResult[0].driver_id;
 
-      // 2️⃣ Now get ride type using driver_id
+      // 2) driver vehicle info
       const [vehicleRows] = await db.query(
-        "SELECT vehicle_type,code FROM driver_vehicles WHERE driver_id = ?",
+        "SELECT vehicle_type, code FROM driver_vehicles WHERE driver_id = ?",
         [driver_id]
       );
 
       if (vehicleRows.length === 0) {
-        return res.status(404).json({ success: false, message: "Ride type not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Ride type not found" });
       }
 
-      // 3️⃣ Send response
       res.status(200).json({
         success: true,
         data: vehicleRows[0],
@@ -113,27 +191,26 @@ ridesTypesRouter.get("/get-ride-type/:user_id", async (req, res) => {
   }
 });
 
-// ✅ EDIT/UPDATE ride type by ID
+/* ===================== EDIT/UPDATE ride type by ID ===================== */
 ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
   const { id } = req.params;
+
   const {
     name,
     code,
     description,
-    base_fare,
-    per_km_rate,
-    per_min_rate,
-    min_fare,
-    cancellation_fee,
+    base_fare, // Nu
+    per_km_rate, // Nu
+    min_fare, // Nu
+    cancellation_fee, // Nu
     capacity,
     vehicle_type,
     icon_url,
-    is_active
+    is_active,
   } = req.body;
 
   try {
     await withConn(async (db) => {
-      // First check if ride type exists
       const [existingRide] = await db.query(
         "SELECT id FROM ride_types WHERE id = ?",
         [id]
@@ -142,11 +219,10 @@ ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
       if (existingRide.length === 0) {
         return res.status(404).json({
           success: false,
-          message: "Ride type not found"
+          message: "Ride type not found",
         });
       }
 
-      // Build dynamic update query based on provided fields
       const updateFields = [];
       const updateValues = [];
 
@@ -162,26 +238,25 @@ ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
         updateFields.push("description = ?");
         updateValues.push(description);
       }
+
+      // ✅ Convert Nu -> cents before update
       if (base_fare !== undefined) {
-        updateFields.push("base_fare = ?");
-        updateValues.push(base_fare);
+        updateFields.push("base_fare_cents = ?");
+        updateValues.push(toCents(base_fare) ?? 0);
       }
       if (per_km_rate !== undefined) {
-        updateFields.push("per_km_rate = ?");
-        updateValues.push(per_km_rate);
-      }
-      if (per_min_rate !== undefined) {
-        updateFields.push("per_min_rate = ?");
-        updateValues.push(per_min_rate);
+        updateFields.push("per_km_rate_cents = ?");
+        updateValues.push(toCents(per_km_rate) ?? 0);
       }
       if (min_fare !== undefined) {
-        updateFields.push("min_fare = ?");
-        updateValues.push(min_fare);
+        updateFields.push("min_fare_cents = ?");
+        updateValues.push(toCents(min_fare) ?? 0);
       }
       if (cancellation_fee !== undefined) {
-        updateFields.push("cancellation_fee = ?");
-        updateValues.push(cancellation_fee);
+        updateFields.push("cancellation_fee_cents = ?");
+        updateValues.push(toCents(cancellation_fee) ?? 0);
       }
+
       if (capacity !== undefined) {
         updateFields.push("capacity = ?");
         updateValues.push(capacity);
@@ -196,56 +271,47 @@ ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
       }
       if (is_active !== undefined) {
         updateFields.push("is_active = ?");
-        updateValues.push(is_active);
+        updateValues.push(toTinyIntBool(is_active, 1));
       }
 
-      // Add updated_at timestamp
       updateFields.push("updated_at = CURRENT_TIMESTAMP");
-      
-      // Add the ID as the last parameter for WHERE clause
-      updateValues.push(id);
 
-      if (updateFields.length === 1) { // Only updated_at was added
+      if (updateFields.length === 1) {
         return res.status(400).json({
           success: false,
-          message: "No fields to update"
+          message: "No fields to update",
         });
       }
 
-      const query = `UPDATE ride_types SET ${updateFields.join(", ")} WHERE id = ?`;
+      updateValues.push(id);
 
+      const query = `UPDATE ride_types SET ${updateFields.join(
+        ", "
+      )} WHERE id = ?`;
       const [result] = await db.query(query, updateValues);
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Ride type not found or no changes made"
-        });
-      }
 
       res.status(200).json({
         success: true,
         message: "Ride type updated successfully",
-        affectedRows: result.affectedRows
+        affectedRows: result.affectedRows,
       });
     });
   } catch (err) {
     console.error("Error updating ride type:", err);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "Server error",
-      error: err.message 
+      error: err.message,
     });
   }
 });
 
-// ✅ HARD DELETE ride type by ID (Completely remove from database - use with caution)
+/* ===================== HARD DELETE ride type by ID ===================== */
 ridesTypesRouter.delete("/hard-delete-ride-type/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
     await withConn(async (db) => {
-      // First check if ride type exists
       const [existingRide] = await db.query(
         "SELECT id, name, code FROM ride_types WHERE id = ?",
         [id]
@@ -254,76 +320,76 @@ ridesTypesRouter.delete("/hard-delete-ride-type/:id", async (req, res) => {
       if (existingRide.length === 0) {
         return res.status(404).json({
           success: false,
-          message: "Ride type not found"
+          message: "Ride type not found",
         });
       }
 
-      // Check if this ride type is being used by any drivers - FIXED COLLATION
       const [driversUsingRideType] = await db.query(
-        `SELECT COUNT(*) as driver_count 
-         FROM driver_vehicles dv 
-         WHERE dv.vehicle_type COLLATE utf8mb4_unicode_ci = ?`,
-        [existingRide[0].code]  // Use the code directly instead of subquery
+        `
+        SELECT COUNT(*) as driver_count
+        FROM driver_vehicles dv
+        WHERE dv.vehicle_type COLLATE utf8mb4_unicode_ci = ?
+        `,
+        [existingRide[0].code]
       );
 
       if (driversUsingRideType[0].driver_count > 0) {
         return res.status(400).json({
           success: false,
-          message: "Cannot delete ride type. It is currently being used by drivers.",
-          driverCount: driversUsingRideType[0].driver_count
+          message:
+            "Cannot delete ride type. It is currently being used by drivers.",
+          driverCount: driversUsingRideType[0].driver_count,
         });
       }
 
-      // Perform hard delete
-      const [result] = await db.query(
-        "DELETE FROM ride_types WHERE id = ?",
-        [id]
-      );
-
-      if (result.affectedRows === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Ride type not found"
-        });
-      }
+      const [result] = await db.query("DELETE FROM ride_types WHERE id = ?", [
+        id,
+      ]);
 
       res.status(200).json({
         success: true,
         message: "Ride type permanently deleted",
-        deletedRideType: existingRide[0].name
+        deletedRideType: existingRide[0].name,
       });
     });
   } catch (err) {
     console.error("Error hard deleting ride type:", err);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "Server error",
-      error: err.message 
+      error: err.message,
     });
   }
 });
 
-// ✅ Get ride type by ID (for editing)
+/* ===================== Get ride type by ID ===================== */
 ridesTypesRouter.get("/get-ride-type-by-id/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
     await withConn(async (db) => {
       const [rows] = await db.query(
-        "SELECT id, name, code, description, base_fare, per_km_rate, per_min_rate, min_fare, cancellation_fee, capacity, vehicle_type, icon_url, is_active, created_at, updated_at FROM ride_types WHERE id = ?",
+        `
+        SELECT
+          id, name, code, description,
+          base_fare_cents, per_km_rate_cents,
+          min_fare_cents, cancellation_fee_cents,
+          capacity, vehicle_type, icon_url, is_active, created_at, updated_at
+        FROM ride_types
+        WHERE id = ?
+        `,
         [id]
       );
 
       if (rows.length === 0) {
-        return res.status(404).json({ 
-          success: false, 
-          message: "Ride type not found" 
-        });
+        return res
+          .status(404)
+          .json({ success: false, message: "Ride type not found" });
       }
 
       res.status(200).json({
         success: true,
-        data: rows[0],
+        data: mapRideTypeRow(rows[0]),
       });
     });
   } catch (err) {

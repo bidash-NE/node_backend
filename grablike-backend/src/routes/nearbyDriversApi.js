@@ -7,9 +7,9 @@ const redis = getRedis();
 const norm = (s) => String(s || "").trim();
 
 /** DB helper (adjust column names to your schema) */
-async function getUserAndDriver(mysqlPool, userId) {
-  const uid = Number(userId);
-  if (!Number.isFinite(uid)) return { user: null, driver: null };
+async function getUserAndDriver(mysqlPool, driverId) {
+  const did = Number(driverId);
+  if (!Number.isFinite(did)) return { user: null, driver: null };
 
   const conn = await mysqlPool.getConnection();
   try {
@@ -29,15 +29,15 @@ async function getUserAndDriver(mysqlPool, userId) {
 
     dv.vehicle_id     AS vehicle_id,
     dv.vehicle_type   AS vehicle_type
-  FROM users u
-  LEFT JOIN drivers d
-    ON d.user_id = u.user_id
+  FROM drivers d
+  LEFT JOIN users u
+    ON u.user_id = d.user_id
   LEFT JOIN driver_vehicles dv
     ON dv.driver_id = d.driver_id
-  WHERE u.user_id = ?
+  WHERE d.driver_id = ?
   LIMIT 1
   `,
-      [uid]
+      [did]
     );
 
     if (!rows.length) return { user: null, driver: null };

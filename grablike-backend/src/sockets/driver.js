@@ -2,81 +2,58 @@
 import { DriverOnlineSession } from "../models/DriverOnlineSession.js";
 import { presence } from "../matching/presence.js";
 import { matcher } from "../matching/matcher.js";
+import { getRedis } from "../matching/redis.js";
+import {
+  rideHash,
+  currentRidesKey,
+  currentPassengerRideKey,
+} from "../matching/redisKeys.js";
+import { initRideChat } from "./chat.js";
+import { computePlatformFeeAndGST } from "../services/pricing/rulesEngine.js";
+
 
 /* ---------------------- Dev logger ---------------------- */
 const dbg = (...args) => {
   if (process.env.NODE_ENV !== "production") console.log(...args);
 };
 
+/* ---------------------- Feature toggles (ENV optional) ---------------------- */
+const PERF_SOCKETS = String(process.env.PERF_SOCKETS || "0") === "1";
+const PRESENCE_NEARBY = String(process.env.PRESENCE_NEARBY || "1") === "1";
+const GLOBAL_DRIVER_BROADCAST =
+  String(process.env.GLOBAL_DRIVER_BROADCAST || "1") === "1";
+
 /* ---------------------- Room helpers ---------------------- */
 const driverRoom = (driverId) => `driver:${driverId}`;
 const passengerRoom = (passengerId) => `passenger:${passengerId}`;
 const rideRoom = (rideId) => `ride:${rideId}`;
-const isNum = (n) => Number.isFinite(n);
+const orderRoom = (orderId) => `order:${orderId}`;
+const merchantRoom = (id) => `merchant:${id}`;
+
+const isNum = (n) => Number.isFinite(Number(n));
 
 /* ---------------------- Ratings table config ---------------------- */
 const RATINGS_TABLE = "ride_ratings";
 const RATING_COLUMN = "rating";
 
 /* ---------------------- Wallet config ---------------------- */
-const PLATFORM_WALLET_ID = process.env.PLATFORM_WALLET_ID.trim(); // may be used elsewhere
+const PLATFORM_WALLET_ID = (
+  process.env.PLATFORM_WALLET_ID || "NET000001"
+).trim();
 const WALLET_TBL = "wallet_transactions";
 const WALLETS_TBL = "wallets";
 
 /* ---------------------- External IDs service ---------------------- */
-const WALLET_IDS_ENDPOINT = process.env.WALLET_IDS_ENDPOINT.trim();
+const WALLET_IDS_ENDPOINT = (
+  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
+).trim();
 const WALLET_IDS_API_KEY = (process.env.WALLET_IDS_API_KEY || "").trim();
 
 /* ---------------------- Small helpers ---------------------- */
-const pad6 = (n) => String(n).padStart(6, "0");
 const nowIso = () => new Date().toISOString().slice(0, 19).replace("T", " ");
 const rand = () => Math.random().toString(36).slice(2);
 const genTxnId = () => `TNX${Date.now()}${rand().toUpperCase()}`;
 const genJournal = () => `JRN${rand().toUpperCase()}${rand().toUpperCase()}`;
-
-/* ---------------------- Shape DB row → client payload ---------------------- */
-function toClientRide(db) {
-  if (!db) return null;
-  const km = db.distance_m; // meters in DB
-  const min = db.duration_s;
-
-  return {
-    request_id: db.ride_id,
-    driver_id: db.driver_id,
-    passenger_id: db.passenger_id,
-    status: db.status,
-
-    pickup: db.pickup_place,
-    dropoff: db.dropoff_place,
-    pickup_lat: db.pickup_lat,
-    pickup_lng: db.pickup_lng,
-    dropoff_lat: db.dropoff_lat,
-    dropoff_lng: db.dropoff_lng,
-
-    distance_km: km,
-    eta_min: min,
-    currency: db.currency,
-    fare: db.fare_cents,
-    requested_at: db.requested_at,
-    accepted_at: db.accepted_at,
-    arrived_pickup_at: db.arrived_pickup_at,
-    started_at: db.started_at,
-    completed_at: db.completed_at,
-    trip_type: db.trip_type || "instant",
-    vehicle_type: db.service_type,
-    pool_batch_id: db.pool_batch_id || null,
-
-    driver_name: db.driver_name || null,
-    driver_phone: db.driver_phone || null,
-    driver_rating: db.driver_rating != null ? Number(db.driver_rating) : null,
-    driver_ratings_count:
-      db.driver_ratings_count != null ? Number(db.driver_ratings_count) : null,
-    driver_trips: db.driver_trips != null ? Number(db.driver_trips) : null,
-
-    vehicle_label: db.vehicle_label || null,
-    vehicle_plate: db.vehicle_plate || null,
-  };
-}
 
 function safeAck(cb, payload) {
   try {
@@ -84,69 +61,33 @@ function safeAck(cb, payload) {
   } catch {}
 }
 
-/* Helper: does this driver have a *foreground* socket connected? */
-function hasForegroundConn(io, driverId) {
-  const room = io.sockets.adapter.rooms.get(driverRoom(driverId));
-  if (!room) return false;
-  for (const sid of room) {
-    const s = io.sockets.sockets.get(sid);
-    if (s?.data?.driver_id === driverId && !s?.data?.isBg) return true;
-  }
-  return false;
-}
-
-/* Helper: fetch passenger_id for a ride */
-async function getPassengerId(conn, request_id) {
-  const [[row]] = await conn.query(
-    `SELECT passenger_id FROM rides WHERE ride_id = ?`,
-    [request_id]
-  );
-  return row?.passenger_id ?? null;
-}
-
-/* Helper: room size + stage logging */
 function roomSize(io, room) {
   return io.sockets.adapter.rooms.get(room)?.size ?? 0;
 }
-function logStage(io, request_id, stage, passenger_id) {
-  const room = rideRoom(request_id);
-  const size = roomSize(io, room);
-  console.log(
-    `[stage emit] ride:${request_id} stage:${stage} roomSize:${size} to passenger:${
-      passenger_id ?? "-"
-    }`
-  );
-}
 
-/* ======================================================================== */
-/*                    Resolve incoming → canonical driver_id                 */
-/* ======================================================================== */
-async function resolveDriverId(conn, incomingId) {
-  const id = Number(incomingId);
-  if (!Number.isFinite(id)) return null;
+/* =====================================================================
+   PERFORMANCE: CACHES & THROTTLES
+   ===================================================================== */
 
-  const [[byDriverId]] = await conn.query(
-    "SELECT driver_id FROM drivers WHERE driver_id = ? LIMIT 1",
-    [id]
-  );
-  if (byDriverId) return byDriverId.driver_id;
+// 1) Delivery rooms target cache (DB expensive)
+const deliveryTargetCache = new Map(); // driverId -> { ts, targets }
+const DELIVERY_CACHE_MS = 4000;
 
-  const [[byUserId]] = await conn.query(
-    "SELECT driver_id FROM drivers WHERE user_id = ? LIMIT 1",
-    [id]
-  );
-  return byUserId?.driver_id ?? null;
-}
+// 2) RideIds cache (Redis hkeys per GPS tick expensive)
+const rideIdsCache = new Map(); // driverId -> { ts, rideIds[] }
+const RIDEIDS_CACHE_MS = 3000;
 
-/* ======================================================================== */
-/*                         Socket lifecycle improvements                     */
-/* ======================================================================== */
+// 3) Presence/nearby throttle (heavy)
+const lastPresenceAt = new Map(); // driverId -> ts
+const PRESENCE_MIN_MS = 2500;
 
-// Single-socket enforcement & light movement debounce
-const liveSocketByDriver = new Map(); // driverId -> socketId
-const lastLocByDriver = new Map(); // driverId -> { lat, lng, ts }
+// 4) Emit throttle (avoid flooding)
+const lastEmitAt = new Map(); // driverId -> ts
+const EMIT_MIN_MS = 800;
 
-/* meters */
+// 5) Movement debounce
+const lastLocByDriver = new Map();
+
 function haversine(a, b) {
   if (!a || !b) return Infinity;
   const R = 6371000;
@@ -167,41 +108,346 @@ function shouldProcessMove(
   lng,
   ts,
   minMeters = 5,
-  minMs = 1500
+  minMs = 1200,
+  forceEveryMs = 4500 // guarantee emit at least every 4.5s even if not moving
 ) {
   const prev = lastLocByDriver.get(driverId);
+
   const moved = prev ? haversine(prev, { lat, lng }) > minMeters : true;
   const spaced = prev ? ts - prev.ts > minMs : true;
-  if (moved && spaced) {
+
+  const forced = prev ? ts - prev.ts > forceEveryMs : true;
+
+  if ((moved && spaced) || forced) {
     lastLocByDriver.set(driverId, { lat, lng, ts });
     return true;
   }
   return false;
 }
 
-/* ---------------- POOL SUMMARY emitter (NEW) ---------------- */
+
+function shouldEmit(driverId, ts, minMs = EMIT_MIN_MS) {
+  const prev = lastEmitAt.get(driverId) || 0;
+  if (ts - prev >= minMs) {
+    lastEmitAt.set(driverId, ts);
+    return true;
+  }
+  return false;
+}
+
+function shouldPresence(driverId, ts, minMs = PRESENCE_MIN_MS) {
+  const prev = lastPresenceAt.get(driverId) || 0;
+  if (ts - prev >= minMs) {
+    lastPresenceAt.set(driverId, ts);
+    return true;
+  }
+  return false;
+}
+
+/* =====================================================================
+   DELIVERY TARGETS: DB → rooms (cached)
+   ===================================================================== */
+
+async function getDeliveryTargetsForDriver(conn, driverId) {
+  const [rows] = await conn.query(
+    `
+    SELECT
+      o.order_id,
+      o.business_id,
+      o.delivery_ride_id,
+      COALESCE(o.delivery_status, o.status) AS st
+    FROM orders o
+    WHERE o.delivery_driver_id = ?
+      AND COALESCE(o.delivery_status, o.status) IN ('ASSIGNED','PICKED_UP','ON_ROAD') -- ✅ include ASSIGNED
+      AND o.delivery_ride_id IS NOT NULL
+    `,
+    [String(driverId)]
+  );
+
+  const rideRooms = new Set();
+  const orderRooms = new Set();
+  const merchantRooms = new Set();
+
+  for (const r of rows || []) {
+    if (r?.delivery_ride_id) rideRooms.add(`ride:${String(r.delivery_ride_id)}`);
+    if (r?.order_id) orderRooms.add(`order:${String(r.order_id)}`);
+    if (r?.business_id) merchantRooms.add(`merchant:${String(r.business_id)}`);
+  }
+
+  return {
+    rideRooms: [...rideRooms],
+    orderRooms: [...orderRooms],
+    merchantRooms: [...merchantRooms],
+    rows,
+  };
+}
+
+
+function emitToTargets(io, driverId, loc, source, targets) {
+  const totalRooms =
+    (targets.rideRooms?.length || 0) +
+    (targets.orderRooms?.length || 0) +
+    (targets.merchantRooms?.length || 0);
+  if (!totalRooms) return;
+
+  const payloadOut = {
+    driver_id: String(driverId),
+    lat: Number(loc.lat),
+    lng: Number(loc.lng),
+    heading: isNum(loc.heading) ? Number(loc.heading) : null,
+    speed: isNum(loc.speed) ? Number(loc.speed) : null,
+    accuracy: isNum(loc.accuracy) ? Number(loc.accuracy) : null,
+    source: source || "unknown",
+    ts: loc.ts || Date.now(),
+  };
+
+  for (const room of targets.rideRooms || []) {
+    io.to(room).emit("deliveryDriverLocation", payloadOut);
+  }
+  for (const room of targets.orderRooms || []) {
+    io.to(room).emit("deliveryDriverLocation", payloadOut);
+  }
+  for (const room of targets.merchantRooms || []) {
+    io.to(room).emit("deliveryDriverLocation", payloadOut);
+  }
+}
+
+async function emitDeliveryDriverLocationFast({
+  io,
+  mysqlPool,
+  driverId,
+  loc,
+  source,
+}) {
+  if (!mysqlPool?.getConnection) return;
+
+  const did = String(driverId);
+  const now = Date.now();
+
+  const cached = deliveryTargetCache.get(did);
+  if (cached && now - cached.ts < DELIVERY_CACHE_MS) {
+    emitToTargets(io, did, loc, source, cached.targets);
+    return;
+  }
+
+  const conn = await mysqlPool.getConnection();
+  try {
+    const targets = await getDeliveryTargetsForDriver(conn, did);
+    deliveryTargetCache.set(did, { ts: now, targets });
+    emitToTargets(io, did, loc, source, targets);
+  } catch (e) {
+    console.warn("⚠️ [DELIVERY] emit error:", e?.message || e);
+  } finally {
+    conn.release();
+  }
+}
+
+/* =====================================================================
+   RIDES: driverId -> rideIds (cached Redis)
+   ===================================================================== */
+
+async function getRideIdsForDriver(redis, driverId) {
+  const did = String(driverId);
+  const now = Date.now();
+  const cached = rideIdsCache.get(did);
+  if (cached && now - cached.ts < RIDEIDS_CACHE_MS) return cached.rideIds;
+
+  const rideIds = await redis.hkeys(currentRidesKey(did));
+  rideIdsCache.set(did, { ts: now, rideIds: rideIds || [] });
+  return rideIds || [];
+}
+
+/* =====================================================================
+   Clear Redis current-ride snapshots
+   ===================================================================== */
+async function clearCurrentRideSnapshots(rideId, driverId, passengerId) {
+  try {
+    const redis = getRedis();
+    const rid = String(rideId || "").trim();
+    if (!rid) return;
+
+    if (driverId != null) {
+      const did = String(driverId).trim();
+      if (did) await redis.hdel(currentRidesKey(did), rid);
+    }
+
+    if (passengerId != null) {
+      const pid = String(passengerId).trim();
+      if (pid) await redis.del(currentPassengerRideKey(pid));
+    }
+
+    console.log("[clearCurrentRideSnapshots] cleared", {
+      rideId: rid,
+      driverId,
+      passengerId,
+    });
+  } catch (e) {
+    console.warn("[clearCurrentRideSnapshots] warn:", e?.message || String(e));
+  }
+}
+
+/* ---------------- Payment method helpers ---------------- */
+function normalizePaymentMethod(pm) {
+  try {
+    if (!pm) return "";
+    if (typeof pm === "string") return pm.trim().toLowerCase();
+    if (typeof pm === "object") {
+      const m = (pm.method || pm.type || pm.name || "")
+        .toString()
+        .trim()
+        .toLowerCase();
+      return m;
+    }
+  } catch {}
+  return "";
+}
+
+function isWalletPayment(pm) {
+  const m = normalizePaymentMethod(pm);
+  return ["wallet", "grabwallet", "in_app_wallet"].includes(m);
+}
+
+async function getRidePaymentMethodFromRedis(rideId) {
+  try {
+    const r = getRedis();
+    const h = await r.hgetall(rideHash(String(rideId)));
+    if (h?.payment_method) {
+      try {
+        return JSON.parse(h.payment_method);
+      } catch {
+        return h.payment_method;
+      }
+    }
+  } catch (e) {
+    dbg("[payment method] redis read warn:", e?.message);
+  }
+  return null;
+}
+
+/* ---------------------- Shape DB row → client payload ---------------------- */
+function toClientRide(db) {
+  if (!db) return null;
+  const m = Number(db.distance_m || 0);
+  const s = Number(db.duration_s || 0);
+
+  return {
+    request_id: db.ride_id,
+    driver_id: db.driver_id,
+    passenger_id: db.passenger_id,
+    status: db.status,
+    pickup: db.pickup_place,
+    dropoff: db.dropoff_place,
+    pickup_lat: db.pickup_lat,
+    pickup_lng: db.pickup_lng,
+    dropoff_lat: db.dropoff_lat,
+    dropoff_lng: db.dropoff_lng,
+    distance_km: Math.round((m / 1000) * 10) / 10,
+    eta_min: Math.round(s / 60),
+    currency: db.currency,
+    fare_cents: db.fare_cents,
+    requested_at: db.requested_at,
+    accepted_at: db.accepted_at,
+    arrived_pickup_at: db.arrived_pickup_at,
+    started_at: db.started_at,
+    completed_at: db.completed_at,
+    trip_type: db.trip_type || "instant",
+    vehicle_type: db.service_type,
+    pool_batch_id: db.pool_batch_id || null,
+    driver_name: db.driver_name || null,
+    driver_phone: db.driver_phone || null,
+    driver_rating: db.driver_rating != null ? Number(db.driver_rating) : null,
+    driver_ratings_count:
+      db.driver_ratings_count != null ? Number(db.driver_ratings_count) : null,
+    driver_trips: db.driver_trips != null ? Number(db.driver_trips) : null,
+    vehicle_label: db.vehicle_label || null,
+    vehicle_plate: db.vehicle_plate || null,
+  };
+}
+
+/* Helper: foreground socket check */
+function hasForegroundConn(io, driverId) {
+  const room = io.sockets.adapter.rooms.get(driverRoom(driverId));
+  if (!room) return false;
+  for (const sid of room) {
+    const s = io.sockets.sockets.get(sid);
+    if (s?.data?.driver_id === driverId && !s?.data?.isBg) return true;
+  }
+  return false;
+}
+
+/* Helper: fetch passenger_id for a ride */
+async function getPassengerId(conn, request_id) {
+  const [[row]] = await conn.query(
+    `SELECT passenger_id FROM rides WHERE ride_id = ?`,
+    [request_id]
+  );
+  return row?.passenger_id ?? null;
+}
+
+function logStage(io, request_id, stage, passenger_id) {
+  const room = rideRoom(request_id);
+  const size = roomSize(io, room);
+  console.log(
+    `[stage emit] ride:${request_id} stage:${stage} roomSize:${size} to passenger:${
+      passenger_id ?? "-"
+    }`
+  );
+}
+
+/* ========================================================================
+   Resolve incoming → canonical driver_id
+   ======================================================================== */
+async function resolveDriverId(conn, incomingId) {
+  const id = Number(incomingId);
+  if (!Number.isFinite(id)) return null;
+
+  const [[byDriverId]] = await conn.query(
+    "SELECT driver_id FROM drivers WHERE driver_id = ? LIMIT 1",
+    [id]
+  );
+  if (byDriverId) return byDriverId.driver_id;
+
+  const [[byUserId]] = await conn.query(
+    "SELECT driver_id FROM drivers WHERE user_id = ? LIMIT 1",
+    [id]
+  );
+  return byUserId?.driver_id ?? null;
+}
+
+/* ========================================================================
+   POOL SUMMARY emitter
+   ======================================================================== */
 async function emitPoolSummary(io, conn, rideId) {
   const [[sum]] = await conn.query(
-    `SELECT
-       r.ride_id,
-       COALESCE(r.capacity_seats, 0) AS capacity_seats,
-       COALESCE(r.seats_booked, 0)   AS seats_booked,
-       COALESCE(SUM(CASE WHEN b.status IN ('accepted','arrived_pickup','started') THEN b.seats END),0) AS seats_confirmed
-     FROM rides r
-     LEFT JOIN ride_bookings b ON b.ride_id = r.ride_id
-     WHERE r.ride_id = ?
-     GROUP BY r.ride_id`,
+    `
+    SELECT
+      r.ride_id,
+      COALESCE(r.capacity_seats, 0) AS capacity_seats,
+      COALESCE(r.seats_booked, 0) AS seats_booked,
+      COALESCE(SUM(CASE WHEN b.status IN ('accepted','arrived_pickup','started') THEN b.seats END),0)
+        AS seats_confirmed
+    FROM rides r
+    LEFT JOIN ride_bookings b ON b.ride_id = r.ride_id
+    WHERE r.ride_id = ?
+    GROUP BY r.ride_id
+    `,
     [rideId]
   );
 
   const [rows] = await conn.query(
-    `SELECT booking_id, passenger_id, seats,
-            pickup_place AS pickup, dropoff_place AS dropoff,
-            pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
-            fare_cents, currency, status
-       FROM ride_bookings
-      WHERE ride_id = ?
-        AND status IN ('accepted','arrived_pickup','started','requested')`,
+    `
+    SELECT
+      booking_id,
+      passenger_id,
+      seats,
+      pickup_place AS pickup,
+      dropoff_place AS dropoff,
+      pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+      fare_cents, currency, status
+    FROM ride_bookings
+    WHERE ride_id = ?
+      AND status IN ('accepted','arrived_pickup','started','requested')
+    `,
     [rideId]
   );
 
@@ -221,187 +467,13 @@ async function emitPoolSummary(io, conn, rideId) {
   });
 }
 
-/* ---------------- Earnings/Levies upsert (DRY helper) ---------------- */
-async function upsertEarningsAndLevies(conn, rideId) {
-  const [[cur]] = await conn.query(
-    `SELECT * FROM rides WHERE ride_id = ? FOR UPDATE`,
-    [rideId]
-  );
-  if (!cur) throw new Error("Ride not found for earnings");
-
-  const rideCurrency = cur.currency || "BTN";
-  const rideFareCents = Number(cur.fare_cents) || 0;
-  const rideDriverId = Number(cur.driver_id) || null;
-
-  const [[feeRule]] = await conn.query(
-    `SELECT *
-       FROM platform_fee_rules
-      WHERE is_active = 1
-        AND starts_at <= NOW()
-        AND (ends_at IS NULL OR ends_at >= NOW())
-      ORDER BY priority ASC, rule_id ASC
-      LIMIT 1`
-  );
-
-  const [[taxRule]] = await conn.query(
-    `SELECT *
-       FROM tax_rules
-      WHERE is_active = 1
-        AND starts_at <= NOW()
-        AND (ends_at IS NULL OR ends_at >= NOW())
-      ORDER BY priority ASC, tax_rule_id ASC
-      LIMIT 1`
-  );
-
-  let platform_fee_cents = 0;
-  let fee_rule_id = null;
-  const feeBaseCents = rideFareCents;
-
-  if (feeRule) {
-    fee_rule_id = feeRule.rule_id;
-    const type = String(feeRule.fee_type || "fixed");
-    const percentBp = Number(feeRule.fee_percent_bp) || 0;
-    const fixedCents = Number(feeRule.fee_fixed_cents) || 0;
-
-    let raw = 0;
-    if (type === "percent")
-      raw = Math.floor((feeBaseCents * percentBp) / 10000);
-    else if (type === "fixed") raw = fixedCents;
-    else if (type === "mixed")
-      raw = Math.floor((feeBaseCents * percentBp) / 10000) + fixedCents;
-
-    const minCents = Number(feeRule.min_cents) || 0;
-    const maxCents = Number(feeRule.max_cents) || 0;
-    if (minCents && raw < minCents) raw = minCents;
-    if (maxCents && maxCents > 0 && raw > maxCents) raw = maxCents;
-
-    platform_fee_cents = Math.max(0, raw);
-  }
-
-  let tax_cents = 0;
-  let tax_rule_id = null;
-  if (taxRule) {
-    tax_rule_id = taxRule.tax_rule_id;
-    const baseKey = String(taxRule.taxable_base || "platform_fee");
-    const rateBp = Number(taxRule.rate_percent_bp) || 0;
-    const inclusive = !!Number(taxRule.tax_inclusive);
-
-    let taxableBaseCents = platform_fee_cents;
-    if (baseKey === "fare_subtotal" || baseKey === "fare_after_discounts") {
-      taxableBaseCents = rideFareCents;
-    } else if (baseKey === "driver_earnings") {
-      taxableBaseCents = Math.max(0, rideFareCents - platform_fee_cents);
-    }
-
-    if (!inclusive) {
-      tax_cents = Math.floor((taxableBaseCents * rateBp) / 10000);
-    } else {
-      const denom = 10000 + rateBp;
-      tax_cents = Math.floor(
-        taxableBaseCents - Math.floor((taxableBaseCents * 10000) / denom)
-      );
-    }
-    if (tax_cents < 0) tax_cents = 0;
-  }
-
-  const base_fare_cents = rideFareCents;
-  const time_cents = 0;
-  const tips_cents = 0;
-
-  if (rideDriverId) {
-    await conn.execute(
-      `INSERT INTO platform_levies
-         (driver_id, ride_id, platform_fee_cents, tax_cents, currency,
-          fee_rule_id, tax_rule_id, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?, NOW(), NOW())
-       ON DUPLICATE KEY UPDATE
-         platform_fee_cents = VALUES(platform_fee_cents),
-         tax_cents          = VALUES(tax_cents),
-         currency           = VALUES(currency),
-         fee_rule_id        = VALUES(fee_rule_id),
-         tax_rule_id        = VALUES(tax_rule_id),
-         updated_at         = NOW()`,
-      [
-        rideDriverId,
-        rideId,
-        platform_fee_cents,
-        tax_cents,
-        rideCurrency,
-        fee_rule_id,
-        tax_rule_id,
-      ]
-    );
-  }
-
-  await conn.execute(
-    `INSERT INTO driver_earnings
-       (ride_id, driver_id, currency, base_fare_cents, time_cents, tips_cents, created_at, updated_at)
-     VALUES (?,?,?,?,?,?, NOW(), NOW())
-     ON DUPLICATE KEY UPDATE
-       currency        = VALUES(currency),
-       base_fare_cents = VALUES(base_fare_cents),
-       time_cents      = VALUES(time_cents),
-       tips_cents      = VALUES(tips_cents),
-       updated_at      = NOW()`,
-    [
-      rideId,
-      rideDriverId,
-      rideCurrency,
-      base_fare_cents,
-      time_cents,
-      tips_cents,
-    ]
-  );
-
-  const driver_take_home_cents = Math.max(
-    0,
-    base_fare_cents + time_cents + tips_cents - platform_fee_cents - tax_cents
-  );
-
-  return {
-    currency: rideCurrency,
-    breakdown: {
-      base: base_fare_cents / 100,
-      time: time_cents / 100,
-      tips: tips_cents / 100,
-      tax: tax_cents / 100,
-      platform_fee: platform_fee_cents / 100,
-    },
-    driver_take_home: driver_take_home_cents / 100,
-    fee_rule_id,
-    tax_rule_id,
-  };
-}
-
-/* ---------------- Resolve user_id + wallet_id for a driver ---------------- */
+/* ---------------- Resolve user_id + wallet_id for driver/passenger ---------------- */
 async function getDriverUserAndWallet(conn, driverId) {
   const [[row]] = await conn.query(
-    `SELECT d.user_id
-       FROM drivers d
-      WHERE d.driver_id = ?
-      LIMIT 1`,
+    `SELECT d.user_id FROM drivers d WHERE d.driver_id = ? LIMIT 1`,
     [driverId]
   );
-  const user_id = row?.user_id ? Number(row.user_id) : null;
-  if (!user_id) return { user_id: null, wallet_id: null };
 
-  const [[w]] = await conn.query(
-    `SELECT wallet_id FROM ${WALLETS_TBL} WHERE user_id=? LIMIT 1`,
-    [user_id]
-  );
-  const wallet_id = w?.wallet_id || null;
-  return { user_id, wallet_id };
-}
-
-/* ---------------- Resolve user_id + wallet_id for a passenger ------------- */
-async function getPassengerUserAndWallet(conn, passengerId) {
-  const [[row]] = await conn.query(
-    `SELECT p.user_id
-       FROM users p
-      WHERE p.user_id = ?
-      LIMIT 1`,
-    [passengerId]
-  );
   const user_id = row?.user_id ? Number(row.user_id) : null;
   if (!user_id) return { user_id: null, wallet_id: null };
 
@@ -409,202 +481,163 @@ async function getPassengerUserAndWallet(conn, passengerId) {
     `SELECT wallet_id FROM ${WALLETS_TBL} WHERE user_id = ? LIMIT 1`,
     [user_id]
   );
-  const wallet_id = w?.wallet_id || null;
-  return { user_id, wallet_id };
+
+  return { user_id, wallet_id: w?.wallet_id || null };
 }
 
-/* ===== Wallet — read/lock helpers that use the WALLETS table amounts ===== */
+async function getPassengerUserAndWallet(conn, passengerId) {
+  // passengerId treated as user_id in your system
+  const user_id = passengerId != null ? Number(passengerId) : null;
+  if (!user_id) return { user_id: null, wallet_id: null };
 
-/** Lock a wallet row for update; returns the full row (must exist). */
-async function lockWalletRow(conn, wallet_id) {
-  const [rows] = await conn.query(
-    `SELECT wallet_id, user_id, amount
-       FROM ${WALLETS_TBL}
-      WHERE wallet_id = ?
-      FOR UPDATE`,
-    [wallet_id]
+  const [[w]] = await conn.query(
+    `SELECT wallet_id FROM ${WALLETS_TBL} WHERE user_id = ? LIMIT 1`,
+    [user_id]
   );
-  return rows?.[0] || null;
+
+  return { user_id, wallet_id: w?.wallet_id || null };
 }
 
-/** Read current wallet amount from wallets table (no lock). */
-async function getWalletAmount(conn, wallet_id) {
-  const [[row]] = await conn.query(
-    `SELECT amount FROM ${WALLETS_TBL} WHERE wallet_id = ? LIMIT 1`,
-    [wallet_id]
+function asMoneyString(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  // 2dp string to avoid float issues in SQL
+  return n.toFixed(2);
+}
+
+function clampNote(s, max = 180) {
+  if (s == null) return null;
+  const str = String(s);
+  return str.length > max ? str.slice(0, max - 1) + "…" : str;
+}
+
+async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, passenger_debit_nu, reason, meta }) {
+  const driver_credit_str = asMoneyString(driver_credit_nu);
+  const passenger_debit_str = asMoneyString(passenger_debit_nu);
+  if (!driver_credit_str) return { ok: false, reason: "invalid_amount" };
+  if (Number(driver_credit_str) <= 0) return { ok: false, reason: "amount_not_positive" };
+
+  const fromId = String(from_wallet).trim();
+  const toId = String(to_wallet).trim();
+  if (!fromId || !toId) return { ok: false, reason: "wallet_missing" };
+  if (fromId === toId) return { ok: false, reason: "same_wallet" };
+
+  // Lock wallets in consistent order to avoid deadlocks
+  const [w1, w2] = fromId < toId ? [fromId, toId] : [toId, fromId];
+
+  const [[w1row]] = await conn.execute(
+    `SELECT wallet_id, amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
+    [w1]
   );
-  return Number(row?.amount || 0);
-}
+  const [[w2row]] = await conn.execute(
+    `SELECT wallet_id, amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
+    [w2]
+  );
+  if (!w1row || !w2row) return { ok: false, reason: "wallet_not_found" };
 
-/** Compute wallet balance from the wallets table (amount column). */
-async function getWalletBalance(conn, wallet_id) {
-  if (!wallet_id) return 0;
-  return getWalletAmount(conn, wallet_id);
-}
+  // Ensure sender has balance
+  const [[fromRow]] = await conn.execute(
+    `SELECT amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
+    [fromId]
+  );
+  const fromBal = Number(fromRow?.amount ?? 0);
+  if (!Number.isFinite(fromBal)) return { ok: false, reason: "invalid_balance" };
+  if (fromBal < Number(driver_credit_str)) return { ok: false, reason: "insufficient_balance" };
 
-/* ---------------- Atomic passenger→driver wallet transfer ------------------ */
-async function walletTransfer(
-  conn,
-  {
-    from_wallet,
-    to_wallet,
-    amount_nu,
-    baseFare,
-    reason = "RIDE_PAYOUT",
-    meta = {},
-  }
-) {
-  if (!(amount_nu > 0)) return { ok: false, reason: "zero_amount" };
-  if (!from_wallet || !to_wallet) return { ok: false, reason: "bad_wallet" };
+  console.log("Driver credit Str:", driver_credit_str);
+  console.log("Passenger debit Str:", passenger_debit_str);
+  // ✅ debit with guard
+  const [debit] = await conn.execute(
+    `UPDATE wallets
+     SET amount = amount - ?
+     WHERE wallet_id = ? AND amount >= ?`,
+    [passenger_debit_str, fromId, driver_credit_str]
+  );
+  if (!debit.affectedRows) return { ok: false, reason: "insufficient_balance_race" };
 
-  // 1) Lock both wallet rows to keep balances consistent
-  const fromRow = await lockWalletRow(conn, from_wallet);
-  const toRow = await lockWalletRow(conn, to_wallet);
-
-  if (!fromRow || !toRow) {
-    return {
-      ok: false,
-      reason: "wallet_not_found",
-      missing: { from: !fromRow, to: !toRow },
-    };
-  }
-
-  const from_before = Number(fromRow.amount || 0);
-  const to_before = Number(toRow.amount || 0);
-  const amt = Number(amount_nu);
-  const base_fare = Number(baseFare);
-
-  // 2) Sufficient funds check on passenger
-  if (from_before < amt) {
-    return {
-      ok: false,
-      reason: "insufficient_funds",
-      need: amt,
-      have: from_before,
-    };
-  }
-
-  // 3) Update wallet amounts
+  // ✅ credit
   await conn.execute(
-    `UPDATE ${WALLETS_TBL} SET amount = amount - ? WHERE wallet_id = ?`,
-    [base_fare, from_wallet]
+    `UPDATE wallets
+     SET amount = amount + ?
+     WHERE wallet_id = ?`,
+    [driver_credit_str, toId]
   );
+
+  // ✅ transaction ids must be UNIQUE (your DB enforces it)
+
+  const txn_cr = genTxnId();
+  const txn_dr = genTxnId();
+
+  const journal_code = genJournal(); // varchar(36) ok
+  const note = clampNote(JSON.stringify({ reason, ...(meta || {}) }), 500);
+  const ts = new Date();
+
+  // Sender row (DR) - remark ENUM('CR','DR')
   await conn.execute(
-    `UPDATE ${WALLETS_TBL} SET amount = amount + ? WHERE wallet_id = ?`,
-    [amt, to_wallet]
+    `
+    INSERT INTO wallet_transactions
+      (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    `,
+    [txn_dr, journal_code, fromId, toId, passenger_debit_str, "DR", note, ts, ts]
   );
 
-  const from_after = from_before - base_fare;
-  const to_after = to_before + amt;
-
-  // 4) Get journal_code + two transaction_ids from external endpoint; fallback to local gen
-  let journal_code = null;
-  let tx_for_passenger_dr = null; // DR
-  let tx_for_driver_cr = null; // CR
-  try {
-    const res = await fetch(WALLET_IDS_ENDPOINT, { method: "POST" });
-    if (res.ok) {
-      const json = await res.json();
-      const ids = json?.data?.transaction_ids;
-      const jr = json?.data?.journal_code;
-      if (Array.isArray(ids) && ids.length >= 2 && jr) {
-        // keep order stable: first use for CR, second for DR (or vice versa — consistent per your API usage)
-        tx_for_driver_cr = String(ids[0]);
-        tx_for_passenger_dr = String(ids[1]);
-        journal_code = String(jr);
-      }
-      console.log("tx_for_passenger_dr: ", tx_for_passenger_dr);
-      console.log("tx_for_driver_cr: ", tx_for_driver_cr);
-    }
-  } catch (e) {
-    // ignore; will fallback
-  }
-  if (!journal_code || !tx_for_driver_cr || !tx_for_passenger_dr) {
-    journal_code = genJournal();
-    tx_for_driver_cr = genTxnId();
-    tx_for_passenger_dr = genTxnId();
-  }
-
-  const created_at = nowIso();
-  const noteJson = JSON.stringify({ reason, ...meta });
-
-  // 5) Journal rows in wallet_transactions (DR from passenger, CR to driver)
-  const rows = [
-    {
-      transaction_id: tx_for_passenger_dr,
-      journal_code,
-      tnx_from: from_wallet,
-      tnx_to: to_wallet,
-      amount: base_fare,
-      remark: "DR", // passenger debit
-      note: noteJson,
-      created_at,
-      updated_at: created_at,
-    },
-    {
-      transaction_id: tx_for_driver_cr,
-      journal_code,
-      tnx_from: from_wallet,
-      tnx_to: to_wallet,
-      amount: amt,
-      remark: "CR", // driver credit
-      note: noteJson,
-      created_at,
-      updated_at: created_at,
-    },
-  ];
-
-  for (const r of rows) {
-    await conn.execute(
-      `INSERT INTO ${WALLET_TBL}
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [
-        r.transaction_id,
-        r.journal_code,
-        r.tnx_from,
-        r.tnx_to,
-        r.amount,
-        r.remark,
-        r.note,
-        r.created_at,
-        r.updated_at,
-      ]
-    );
-  }
+  // Receiver row (CR)
+  await conn.execute(
+    `
+    INSERT INTO wallet_transactions
+      (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    `,
+    [txn_cr, journal_code, fromId, toId, driver_credit_str, "CR", note, ts, ts]
+  );
 
   return {
     ok: true,
-    journal_code,
-    from_wallet,
-    to_wallet,
-    amount: amt,
-    baseFare: base_fare,
-    balances: {
-      passenger_before: from_before,
-      passenger_after: from_after,
-      driver_before: to_before,
-      driver_after: to_after,
-    },
+    transaction_id_dr: txn_dr,
+    transaction_id_cr: txn_cr,
+    amount: Number(driver_credit_str),
   };
 }
 
-/* ======================================================================== */
-/*                             Socket bootstrap                              */
-/* ======================================================================== */
+
+
+/* ========================================================================
+   SOCKET BOOTSTRAP
+   ======================================================================== */
+
+const liveSocketByDriver = new Map();
+
 export function initDriverSocket(io, mysqlPool) {
   io.on("connection", (socket) => {
     console.log("[socket] connected:", socket.id);
-    dbg("[socket] handshake", {
-      socket: socket.id,
-      driverId: socket.handshake?.auth?.driverId ?? null,
-      passengerId: socket.handshake?.auth?.passengerId ?? null,
-      bg: !!socket.handshake?.auth?.bg,
-    });
 
-    socket.data = { role: "unknown", isBg: !!socket.handshake?.auth?.bg };
+    const auth = socket.handshake?.auth || {};
+    const query = socket.handshake?.query || {};
 
-    const { driverId, passengerId } = socket.handshake?.auth || {};
+    const driverId =
+      auth.driverId ??
+      auth.driver_id ??
+      query.driverId ??
+      query.driver_id ??
+      null;
+
+    const passengerId =
+      auth.passengerId ??
+      auth.passenger_id ??
+      query.passengerId ??
+      query.passenger_id ??
+      null;
+
+    const merchantId =
+      auth.merchantId ??
+      auth.merchant_id ??
+      query.merchantId ??
+      query.merchant_id ??
+      null;
+
+    socket.data = { role: "unknown", isBg: !!auth.bg };
+
     if (driverId != null) {
       const member = String(driverId);
       socket.data.role = "driver";
@@ -615,15 +648,11 @@ export function initDriverSocket(io, mysqlPool) {
       const prevId = liveSocketByDriver.get(member);
       if (prevId && prevId !== socket.id) {
         const prevSock = io.sockets.sockets.get(prevId);
-        if (prevSock) {
-          dbg(
-            `[single-socket] kicking previous socket ${prevId} for driver ${member}`
-          );
-          prevSock.disconnect(true);
-        }
+        if (prevSock) prevSock.disconnect(true);
       }
       liveSocketByDriver.set(member, socket.id);
     }
+
     if (passengerId != null) {
       const pid = String(passengerId);
       socket.data.role = socket.data.role === "driver" ? "driver" : "passenger";
@@ -632,93 +661,93 @@ export function initDriverSocket(io, mysqlPool) {
       console.log(`[socket] passenger connected via handshake: ${pid}`);
     }
 
+    if (merchantId != null) {
+      const mid = String(merchantId);
+      socket.data.role = socket.data.role === "driver" ? "driver" : "merchant";
+      socket.data.merchant_id = mid;
+      socket.join(merchantRoom(mid));
+      console.log(`[socket] merchant connected via handshake/query: ${mid}`);
+    }
+
+    initRideChat(io, mysqlPool, socket);
+
     /* -------- Optional explicit identity event -------- */
-    socket.on("whoami", ({ role, driver_id, passenger_id, bg } = {}) => {
-      socket.data.role = role || "unknown";
-      if (typeof bg === "boolean") socket.data.isBg = bg;
+    socket.on(
+      "whoami",
+      ({ role, driver_id, passenger_id, merchant_id, bg } = {}) => {
+        socket.data.role = role || "unknown";
+        if (typeof bg === "boolean") socket.data.isBg = bg;
 
-      if (role === "driver" && driver_id != null) {
-        const member = String(driver_id);
-        socket.data.driver_id = member;
-        socket.join(driverRoom(member));
+        if (role === "driver" && driver_id != null) {
+          const member = String(driver_id);
+          socket.data.driver_id = member;
+          socket.join(driverRoom(member));
 
-        const prevId = liveSocketByDriver.get(member);
-        if (prevId && prevId !== socket.id) {
-          const prevSock = io.sockets.sockets.get(prevId);
-          if (prevSock) prevSock.disconnect(true);
+          const prevId = liveSocketByDriver.get(member);
+          if (prevId && prevId !== socket.id) {
+            const prevSock = io.sockets.sockets.get(prevId);
+            if (prevSock) prevSock.disconnect(true);
+          }
+          liveSocketByDriver.set(member, socket.id);
         }
-        liveSocketByDriver.set(member, socket.id);
+
+        if (role === "passenger" && passenger_id != null) {
+          const pid = String(passenger_id);
+          socket.data.passenger_id = pid;
+          socket.join(passengerRoom(pid));
+        }
+
+        if (role === "merchant" && merchant_id != null) {
+          const mid = String(merchant_id);
+          socket.data.merchant_id = mid;
+          socket.join(merchantRoom(mid));
+        }
       }
-      if (role === "passenger" && passenger_id != null) {
-        const pid = String(passenger_id);
-        socket.data.passenger_id = pid;
-        socket.join(passengerRoom(pid));
-      }
+    );
+
+    /* -------- Join / Leave order room -------- */
+    socket.on("joinOrder", async ({ orderId } = {}, ack) => {
+      if (!orderId)
+        return safeAck(ack, { ok: false, error: "orderId required" });
+      const oid = String(orderId);
+      const room = orderRoom(oid);
+      socket.join(room);
+
+      console.log("👥 [ORDER ROOM] joinOrder", {
+        orderId: oid,
+        room,
+        size: roomSize(io, room),
+        socketId: socket.id,
+      });
+
+      return safeAck(ack, { ok: true, room });
+    });
+
+    socket.on("leaveOrder", ({ orderId } = {}, ack) => {
+      if (!orderId)
+        return safeAck(ack, { ok: false, error: "orderId required" });
+      socket.leave(orderRoom(String(orderId)));
+      return safeAck(ack, { ok: true });
     });
 
     /* -------- Join / Leave ride room -------- */
     socket.on("joinRide", async ({ rideId } = {}, ack) => {
-      if (!rideId) {
-        console.warn(`[room] ${socket.id} attempted join with missing rideId`);
-        return safeAck(ack, { ok: false, error: "rideId required" });
-      }
+      if (!rideId) return safeAck(ack, { ok: false, error: "rideId required" });
       const rid = String(rideId);
-      const room = rideRoom(rid);
-
-      socket.join(room);
-      const sizeAfter = roomSize(io, room);
-
-      let status = null;
-      let ridePassengerId = null;
-      if (mysqlPool?.getConnection) {
-        try {
-          const conn = await mysqlPool.getConnection();
-          const [[row]] = await conn.query(
-            `SELECT status, passenger_id FROM rides WHERE ride_id = ?`,
-            [rid]
-          );
-          status = row?.status ?? null;
-          ridePassengerId = row?.passenger_id ?? null;
-          try {
-            conn.release();
-          } catch {}
-        } catch (e) {
-          console.warn("[joinRide] status lookup failed:", e?.message);
-        }
-      }
-
-      console.log(
-        `[room] join ride:${rid} | socket:${socket.id} role:${socket.data.role}` +
-          ` joinedAsPassenger:${socket.data.passenger_id ?? "-"}` +
-          ` joinedAsDriver:${socket.data.driver_id ?? "-"}` +
-          ` ridePassengerId:${ridePassengerId ?? "-"} size:${sizeAfter}`
-      );
-
-      dbg(`[socket] joined ride room ${room}`);
-      safeAck(ack, { ok: true, status, passenger_id: ridePassengerId });
+      socket.join(rideRoom(rid));
+      return safeAck(ack, { ok: true, room: rideRoom(rid) });
     });
 
     socket.on("leaveRide", ({ rideId } = {}, ack) => {
       if (!rideId) return safeAck(ack, { ok: false, error: "rideId required" });
-      const rid = String(rideId);
-      const room = rideRoom(rid);
-      socket.leave(room);
-      const sizeAfter = roomSize(io, room);
-      console.log(
-        `[room] leave ride:${rid} | socket:${socket.id} role:${socket.data.role}` +
-          ` passenger:${socket.data.passenger_id ?? "-"} driver:${
-            socket.data.driver_id ?? "-"
-          }` +
-          ` size:${sizeAfter}`
-      );
-      dbg(`[socket] left ride room ${room}`);
-      safeAck(ack, { ok: true });
+      socket.leave(rideRoom(String(rideId)));
+      return safeAck(ack, { ok: true });
     });
 
     /* -------- Heartbeat -------- */
     socket.on("ping", (msg) => socket.emit("pong", { msg, ts: Date.now() }));
 
-    /* -------- Presence + location -------- */
+    /* -------- Presence + online/offline -------- */
     socket.on(
       "driverOnline",
       async (
@@ -739,6 +768,7 @@ export function initDriverSocket(io, mysqlPool) {
         socket.data.cityId = cityId;
         socket.data.serviceType = serviceType;
         socket.data.serviceCode = serviceCode;
+
         socket.join(`city:${cityId}:${serviceType}`);
 
         try {
@@ -755,11 +785,11 @@ export function initDriverSocket(io, mysqlPool) {
               serviceType,
               serviceCode,
               socketId: socket.id,
-              lat: isNum(lat) ? lat : undefined,
-              lng: isNum(lng) ? lng : undefined,
+              lat: isNum(lat) ? Number(lat) : undefined,
+              lng: isNum(lng) ? Number(lng) : undefined,
             });
           } catch (e) {
-            console.warn("[presence.setOnline] skipped:", e.message);
+            console.warn("[presence.setOnline] skipped:", e?.message);
           }
 
           safeAck(ack, { ok: true });
@@ -773,8 +803,9 @@ export function initDriverSocket(io, mysqlPool) {
     socket.on("driverOffline", async (_payload, ack) => {
       const driver_id = socket.data.driver_id;
       if (!driver_id) return safeAck(ack, { ok: false, error: "No driver_id" });
+
       try {
-        const res = await DriverOnlineSession.updateOne(
+        await DriverOnlineSession.updateOne(
           { driver_id, ended_at: null },
           { $set: { ended_at: new Date() } }
         );
@@ -782,17 +813,22 @@ export function initDriverSocket(io, mysqlPool) {
         try {
           await presence.setOffline(driver_id, socket.id);
         } catch (e) {
-          console.warn("[presence.setOffline] skipped:", e.message);
+          console.warn("[presence.setOffline] skipped:", e?.message);
         }
 
-        safeAck(ack, { ok: true, updated: res.modifiedCount });
+        safeAck(ack, { ok: true });
       } catch (err) {
         console.error("[driverOffline] error:", err);
         safeAck(ack, { ok: false, error: "Server error" });
       }
     });
 
+    /* =====================================================================
+       FAST LOCATION PIPELINE
+       ===================================================================== */
     socket.on("driverLocationUpdate", async (payload = {}, ack) => {
+      const t0 = PERF_SOCKETS ? Date.now() : 0;
+
       const {
         driver_id: pId,
         lat,
@@ -803,13 +839,9 @@ export function initDriverSocket(io, mysqlPool) {
         source = "foreground",
       } = payload || {};
 
-      const member = pId || socket.data.driver_id;
-      if (!member) {
-        return safeAck(ack, {
-          ok: false,
-          error: "Missing driver_id (handshake or payload)",
-        });
-      }
+      const member = String(pId || socket.data.driver_id || "").trim();
+      if (!member)
+        return safeAck(ack, { ok: false, error: "Missing driver_id" });
 
       if (!socket.data.driver_id) {
         socket.data.driver_id = member;
@@ -820,163 +852,253 @@ export function initDriverSocket(io, mysqlPool) {
       const serviceType = socket.data.serviceType || "bike";
       const serviceCode = socket.data.serviceCode || "default";
 
-      dbg("[driverLocationUpdate]", {
-        socketId: socket.id,
-        driver_id: member,
-        lat,
-        lng,
-        heading,
-        speed,
-        accuracy,
-        source,
-        cityId,
-        serviceType,
-        serviceCode,
-        ts: new Date().toISOString(),
-      });
-
       const isBgConn =
         !!socket.handshake?.auth?.bg ||
         socket.data.isBg ||
         source === "background";
+
       if (isBgConn && hasForegroundConn(io, member)) {
         return safeAck(ack, { ok: true, dropped: "bg-duplicate" });
       }
 
-      if (isNum(lat) && isNum(lng)) {
-        const ts = Date.now();
-        if (!shouldProcessMove(String(member), Number(lat), Number(lng), ts)) {
-          return safeAck(ack, { ok: true, dropped: "debounced" });
-        }
+      if (!isNum(lat) || !isNum(lng)) {
+        return safeAck(ack, { ok: true, dropped: "no-coords" });
       }
 
-      socket.broadcast.emit("driverLocationBroadcast", {
-        driver_id: member,
-        lat,
-        lng,
+      const tsNow = Date.now();
+
+      if (!shouldProcessMove(member, Number(lat), Number(lng), tsNow)) {
+        return safeAck(ack, { ok: true, dropped: "debounced" });
+      }
+
+      if (!shouldEmit(member, tsNow)) {
+        return safeAck(ack, { ok: true, dropped: "emit-throttled" });
+      }
+
+      const loc = {
+        lat: Number(lat),
+        lng: Number(lng),
         heading,
         speed,
         accuracy,
-        source,
-      });
+        ts: tsNow,
+      };
 
+      // 1) transport ride passengers (Redis cached)
       try {
-        if (isNum(lat) && isNum(lng)) {
-          await presence.updateLocation(member, {
-            cityId,
-            serviceType,
-            serviceCode,
-            lat,
-            lng,
+        const redis = getRedis();
+        const rideIds = await getRideIdsForDriver(redis, member);
+
+        for (const rideId of rideIds || []) {
+          io.to(rideRoom(String(rideId))).emit("rideDriverLocation", {
+            request_id: String(rideId),
+            driver_id: String(member),
+            lat: loc.lat,
+            lng: loc.lng,
+            heading: isNum(heading) ? Number(heading) : null,
+            speed: isNum(speed) ? Number(speed) : null,
+            accuracy: isNum(accuracy) ? Number(accuracy) : null,
+            ts: loc.ts,
           });
-          const peers = await presence.getNearby({
-            cityId,
-            serviceType,
-            serviceCode,
-            lat,
-            lng,
-            radiusM: 3000,
-            count: 25,
-          });
-          io.to(driverRoom(member)).emit("allDriversData", peers);
-          dbg(
-            `[driverLocationUpdate] peers for ${member}:`,
-            peers?.length ?? 0
-          );
-        } else {
-          io.to(driverRoom(member)).emit("allDriversData", []);
         }
       } catch (e) {
-        console.warn("[presence.updateLocation] warn:", e?.message);
-        if (isNum(lat) && isNum(lng)) {
-          io.to(driverRoom(member)).emit("allDriversData", [
-            { id: member, lat, lng },
-          ]);
-        }
+        console.warn("[rideDriverLocation] warn:", e?.message || e);
       }
 
-      safeAck(ack, { ok: true });
+      // 2) delivery emit (DB cached) — do not block ack
+      setImmediate(() => {
+        emitDeliveryDriverLocationFast({
+          io,
+          mysqlPool,
+          driverId: member,
+          loc,
+          source,
+        }).catch((e) => console.warn("[delivery emit] warn:", e?.message || e));
+      });
+
+      // 3) presence update (heavy) throttled
+      if (shouldPresence(member, tsNow)) {
+        setImmediate(async () => {
+          try {
+            await presence.updateLocation(member, {
+              cityId,
+              serviceType,
+              serviceCode,
+              lat: loc.lat,
+              lng: loc.lng,
+            });
+
+            if (PRESENCE_NEARBY) {
+              const peers = await presence.getNearby({
+                cityId,
+                serviceType,
+                serviceCode,
+                lat: loc.lat,
+                lng: loc.lng,
+                radiusM: 3000,
+                count: 25,
+              });
+              io.to(driverRoom(member)).emit("allDriversData", peers);
+            } else {
+              io.to(driverRoom(member)).emit("allDriversData", []);
+            }
+          } catch (e) {
+            io.to(driverRoom(member)).emit("allDriversData", [
+              { id: member, lat: loc.lat, lng: loc.lng },
+            ]);
+          }
+        });
+      }
+
+      // 4) global broadcast (optional)
+      if (GLOBAL_DRIVER_BROADCAST) {
+        socket.broadcast.emit("driverLocationBroadcast", {
+          driver_id: member,
+          lat: loc.lat,
+          lng: loc.lng,
+          heading: isNum(heading) ? Number(heading) : null,
+          speed: isNum(speed) ? Number(speed) : null,
+          accuracy: isNum(accuracy) ? Number(accuracy) : null,
+          source,
+        });
+      }
+
+      if (PERF_SOCKETS) {
+        const ms = Date.now() - t0;
+        if (ms > 60)
+          console.log("[perf] driverLocationUpdate took", ms, "ms", { member });
+      }
+
+      return safeAck(ack, { ok: true });
     });
 
     /* ===================== Core ride lifecycle ===================== */
-    socket.on(
-      "jobAccept",
-      (payload) =>
-        console.log("[evt recv] jobAccept", payload) ||
-        handleJobAccept({ io, socket, mysqlPool, payload })
+    socket.on("jobAccept", (payload) =>
+      handleJobAccept({ io, socket, mysqlPool, payload })
     );
     socket.on("jobReject", (payload) =>
       handleJobReject({ io, socket, mysqlPool, payload })
     );
-
-    socket.on("driverArrivedPickup", (payload) => {
-      console.log("[evt recv] driverArrivedPickup", payload);
-      handleDriverArrivedPickup({ io, socket, mysqlPool, payload });
-    });
-    socket.on("driverStartTrip", (payload) => {
-      console.log("[evt recv] driverStartTrip", payload);
-      handleDriverStartTrip({ io, socket, mysqlPool, payload });
-    });
+    socket.on("driverArrivedPickup", (payload) =>
+      handleDriverArrivedPickup({ io, socket, mysqlPool, payload })
+    );
+    socket.on("driverStartTrip", (payload) =>
+      handleDriverStartTrip({ io, socket, mysqlPool, payload })
+    );
     socket.on("driverCompleteTrip", (payload) => {
       console.log("[evt recv] driverCompleteTrip", payload);
       handleDriverCompleteTrip({ io, socket, mysqlPool, payload });
     });
 
-    /* ===================== Matching compat ===================== */
-    socket.on("offer:accept", ({ request_id }) => {
+    /* ===================== DELIVERY: per-order drop update ===================== */
+    socket.on("deliveryDropUpdate", async ({ order_id, status } = {}, ack) => {
+      const ok = (data = {}) => safeAck(ack, { ok: true, ...data });
+      const fail = (error) => safeAck(ack, { ok: false, error });
+
       const driver_id = socket.data.driver_id;
-      if (!driver_id || !request_id) return;
-      handleJobAccept({
-        io,
-        socket,
-        mysqlPool,
-        payload: { request_id, driver_id },
-      });
+      if (!driver_id) return fail("Not authenticated as driver");
+      if (!order_id || !status) return fail("Missing order_id or status");
+
+      const nextStatus = String(status).toUpperCase();
+      if (!["DELIVERED"].includes(nextStatus))
+        return fail("Invalid delivery status");
+
+      let conn;
+      try {
+        conn = await mysqlPool.getConnection();
+      } catch {
+        return fail("DB busy");
+      }
+
+      try {
+        await conn.beginTransaction();
+
+        const [[ord]] = await conn.query(
+          `
+          SELECT order_id, delivery_status, delivery_driver_id
+          FROM orders
+          WHERE order_id = ?
+          FOR UPDATE
+          `,
+          [order_id]
+        );
+
+        if (!ord) {
+          await conn.rollback();
+          return fail("Order not found");
+        }
+
+        if (String(ord.delivery_driver_id) !== String(driver_id)) {
+          await conn.rollback();
+          return fail("Order not assigned to this driver");
+        }
+
+        if (ord.delivery_status === "DELIVERED") {
+          await conn.rollback();
+          return ok({ info: "already delivered" });
+        }
+
+        await conn.execute(
+          `
+          UPDATE orders
+          SET delivery_status = 'DELIVERED',
+              status = 'DELIVERED',
+              delivered_at = NOW()
+          WHERE order_id = ?
+          `,
+          [order_id]
+        );
+
+        await conn.commit();
+
+        socket.emit("deliveryDropUpdated", { order_id, status: "DELIVERED" });
+        ok({ order_id, status: "DELIVERED" });
+      } catch (e) {
+        try {
+          await conn.rollback();
+        } catch {}
+        console.error("[deliveryDropUpdate] error:", e);
+        fail("Server error");
+      } finally {
+        try {
+          conn.release();
+        } catch {}
+      }
     });
 
-    socket.on("offer:reject", ({ request_id, reason = "reject" }) => {
-      const driver_id = socket.data.driver_id;
-      if (!driver_id || !request_id) return;
-      handleJobReject({
-        io,
-        socket,
-        mysqlPool,
-        payload: { request_id, driver_id, reason },
-      });
-    });
+    /* ===================== POOL booking stage events ===================== */
 
-    socket.on("offer:timeout", ({ request_id }) => {
-      const driver_id = socket.data.driver_id;
-      if (!driver_id || !request_id) return;
-      handleJobReject({
-        io,
-        socket,
-        mysqlPool,
-        payload: { request_id, driver_id, reason: "timeout" },
-      });
-    });
-
-    // ---------------- accepted/requested -> arrived_pickup
     socket.on(
       "bookingArrived",
       async ({ request_id, booking_id } = {}, ack) => {
         const ok = (data = {}) => safeAck(ack, { ok: true, ...data });
         const fail = (error) => safeAck(ack, { ok: false, error });
 
-        console.log("[evt recv] bookingArrived", request_id, booking_id);
         const rideId = Number(request_id);
         const bkId = Number(booking_id);
         if (!Number.isFinite(rideId) || !Number.isFinite(bkId))
           return fail("Bad IDs");
 
-        const conn = await mysqlPool.getConnection();
+        let conn;
+        try {
+          conn = await mysqlPool.getConnection();
+        } catch {
+          return fail("Server busy, please try again");
+        }
+
         try {
           await conn.beginTransaction();
 
           const [[curBk]] = await conn.query(
-            `SELECT status, passenger_id FROM ride_bookings WHERE ride_id=? AND booking_id=? FOR UPDATE`,
+            `
+          SELECT status, passenger_id
+          FROM ride_bookings
+          WHERE ride_id = ? AND booking_id = ?
+          FOR UPDATE
+          `,
             [rideId, bkId]
           );
+
           if (!curBk) {
             await conn.rollback();
             return fail("Booking not found");
@@ -984,46 +1106,25 @@ export function initDriverSocket(io, mysqlPool) {
 
           const passenger_id = curBk.passenger_id ?? null;
 
-          if (curBk.status === "arrived_pickup") {
-            const [liftRes] = await conn.execute(
-              `UPDATE rides
-               SET status='arrived_pickup',
-                   arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
-             WHERE ride_id=? AND status IN ('requested','accepted')`,
-              [rideId]
-            );
-
-            await emitPoolSummary(io, conn, rideId);
-            await conn.commit();
-
-            if (liftRes.affectedRows > 0) {
-              io.to(rideRoom(rideId)).emit("rideStageUpdate", {
+          if (
+            !["accepted", "requested", "arrived_pickup"].includes(curBk.status)
+          ) {
+            if (curBk.status === "arrived_pickup") {
+              await emitPoolSummary(io, conn, rideId);
+              await conn.commit();
+              const msg = {
                 request_id: String(rideId),
+                booking_id: String(bkId),
                 stage: "arrived_pickup",
-              });
+              };
+              io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
               if (passenger_id)
-                io.to(passengerRoom(passenger_id)).emit("rideStageUpdate", {
-                  request_id: String(rideId),
-                  stage: "arrived_pickup",
-                });
+                io.to(passengerRoom(passenger_id)).emit(
+                  "bookingStageUpdate",
+                  msg
+                );
+              return ok({ info: "idempotent" });
             }
-
-            const msg = {
-              request_id: String(rideId),
-              booking_id: String(bkId),
-              stage: "arrived_pickup",
-            };
-            io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
-            if (passenger_id)
-              io.to(passengerRoom(passenger_id)).emit(
-                "bookingStageUpdate",
-                msg
-              );
-
-            return ok({ info: "idempotent" });
-          }
-
-          if (!["accepted", "requested"].includes(curBk.status)) {
             await conn.rollback();
             return fail(
               `Not in a state that can arrive (current=${curBk.status})`
@@ -1031,17 +1132,21 @@ export function initDriverSocket(io, mysqlPool) {
           }
 
           await conn.execute(
-            `UPDATE ride_bookings
-             SET status='arrived_pickup', arrived_pickup_at=NOW()
-           WHERE ride_id=? AND booking_id=?`,
+            `
+          UPDATE ride_bookings
+          SET status='arrived_pickup', arrived_pickup_at=NOW()
+          WHERE ride_id=? AND booking_id=?
+          `,
             [rideId, bkId]
           );
 
           const [rideLift] = await conn.execute(
-            `UPDATE rides
-             SET status='arrived_pickup',
-                 arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
-           WHERE ride_id=? AND status IN ('requested','accepted')`,
+            `
+          UPDATE rides
+          SET status='arrived_pickup',
+              arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
+          WHERE ride_id=? AND status IN ('requested','accepted')
+          `,
             [rideId]
           );
 
@@ -1053,11 +1158,12 @@ export function initDriverSocket(io, mysqlPool) {
               request_id: String(rideId),
               stage: "arrived_pickup",
             });
-            if (passenger_id)
+            if (passenger_id) {
               io.to(passengerRoom(passenger_id)).emit("rideStageUpdate", {
                 request_id: String(rideId),
                 stage: "arrived_pickup",
               });
+            }
           }
 
           const msg = {
@@ -1074,7 +1180,7 @@ export function initDriverSocket(io, mysqlPool) {
           try {
             await conn.rollback();
           } catch {}
-          console.error("[bookingArrived] error:", e?.message);
+          console.error("[bookingArrived] error:", e?.message || e);
           fail("Server error");
         } finally {
           try {
@@ -1084,58 +1190,48 @@ export function initDriverSocket(io, mysqlPool) {
       }
     );
 
-    // ---------------- arrived_pickup -> started
     socket.on(
       "bookingOnboard",
       async ({ request_id, booking_id } = {}, ack) => {
         const ok = (data = {}) => safeAck(ack, { ok: true, ...data });
         const fail = (error) => safeAck(ack, { ok: false, error });
 
-        console.log("[evt recv] bookingOnboard", request_id, booking_id);
         const rideId = Number(request_id);
         const bkId = Number(booking_id);
         if (!Number.isFinite(rideId) || !Number.isFinite(bkId))
           return fail("Bad IDs");
 
-        const conn = await mysqlPool.getConnection();
+        let conn;
+        try {
+          conn = await mysqlPool.getConnection();
+        } catch {
+          return fail("Server busy, please try again");
+        }
+
         try {
           await conn.beginTransaction();
 
           const [[curBk]] = await conn.query(
-            `SELECT status, passenger_id FROM ride_bookings WHERE ride_id=? AND booking_id=? FOR UPDATE`,
+            `
+          SELECT status, passenger_id
+          FROM ride_bookings
+          WHERE ride_id=? AND booking_id=?
+          FOR UPDATE
+          `,
             [rideId, bkId]
           );
+
           if (!curBk) {
             await conn.rollback();
             return fail("Booking not found");
           }
 
           const passenger_id = curBk.passenger_id ?? null;
+          const curStatus = curBk.status;
 
-          if (curBk.status === "started") {
-            const [rideLift] = await conn.execute(
-              `UPDATE rides
-               SET status='started',
-                   started_at = COALESCE(started_at, NOW())
-             WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup')`,
-              [rideId]
-            );
-
+          if (curStatus === "started") {
             await emitPoolSummary(io, conn, rideId);
             await conn.commit();
-
-            if (rideLift.affectedRows > 0) {
-              io.to(rideRoom(rideId)).emit("rideStageUpdate", {
-                request_id: String(rideId),
-                stage: "started",
-              });
-              if (passenger_id)
-                io.to(passengerRoom(passenger_id)).emit("rideStageUpdate", {
-                  request_id: String(rideId),
-                  stage: "started",
-                });
-            }
-
             const msg = {
               request_id: String(rideId),
               booking_id: String(bkId),
@@ -1147,29 +1243,44 @@ export function initDriverSocket(io, mysqlPool) {
                 "bookingStageUpdate",
                 msg
               );
-
             return ok({ info: "idempotent" });
           }
 
-          if (curBk.status !== "arrived_pickup") {
+          if (
+            !["requested", "accepted", "arrived_pickup"].includes(curStatus)
+          ) {
             await conn.rollback();
-            return fail(
-              `Not in a state that can start (current=${curBk.status})`
+            return fail(`Not in a state that can start (current=${curStatus})`);
+          }
+
+          if (curStatus === "requested" || curStatus === "accepted") {
+            await conn.execute(
+              `
+            UPDATE ride_bookings
+            SET status='arrived_pickup',
+                arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
+            WHERE ride_id=? AND booking_id=?
+            `,
+              [rideId, bkId]
             );
           }
 
           await conn.execute(
-            `UPDATE ride_bookings
-             SET status='started', started_at=NOW()
-           WHERE ride_id=? AND booking_id=?`,
+            `
+          UPDATE ride_bookings
+          SET status='started', started_at=NOW()
+          WHERE ride_id=? AND booking_id=?
+          `,
             [rideId, bkId]
           );
 
           const [rideLift] = await conn.execute(
-            `UPDATE rides
-             SET status='started',
-                 started_at = COALESCE(started_at, NOW())
-           WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup')`,
+            `
+          UPDATE rides
+          SET status='started',
+              started_at = COALESCE(started_at, NOW())
+          WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup')
+          `,
             [rideId]
           );
 
@@ -1181,11 +1292,12 @@ export function initDriverSocket(io, mysqlPool) {
               request_id: String(rideId),
               stage: "started",
             });
-            if (passenger_id)
+            if (passenger_id) {
               io.to(passengerRoom(passenger_id)).emit("rideStageUpdate", {
                 request_id: String(rideId),
                 stage: "started",
               });
+            }
           }
 
           const msg = {
@@ -1202,7 +1314,7 @@ export function initDriverSocket(io, mysqlPool) {
           try {
             await conn.rollback();
           } catch {}
-          console.error("[bookingOnboard] error:", e?.message);
+          console.error("[bookingOnboard] error:", e?.message || e);
           fail("Server error");
         } finally {
           try {
@@ -1212,216 +1324,167 @@ export function initDriverSocket(io, mysqlPool) {
       }
     );
 
-    // ---------------- started -> completed (+ wallet transfer)
-    async function handleDriverCompleteTrip({
-      io,
-      socket,
-      mysqlPool,
-      payload,
-    }) {
-      console.log(
-        "[driverCompleteTrip] incoming payload:",
-        JSON.stringify(payload, null, 2)
-      );
+    socket.on(
+      "bookingDropped",
+      async ({ request_id, booking_id } = {}, ack) => {
+        const ok = (data = {}) => safeAck(ack, { ok: true, ...data });
+        const fail = (error) => safeAck(ack, { ok: false, error });
 
-      const { request_id } = payload || {};
-      if (!request_id) {
-        return socket.emit("fareFinalized", {
-          ok: false,
-          error: "Missing request_id",
-        });
-      }
+        const rideId = Number(request_id);
+        const bkId = Number(booking_id);
+        if (!Number.isFinite(rideId) || !Number.isFinite(bkId))
+          return fail("Bad IDs");
 
-      const conn = await mysqlPool.getConnection();
-      try {
-        await conn.beginTransaction();
-
-        const [[cur]] = await conn.query(
-          `SELECT * FROM rides WHERE ride_id = ? FOR UPDATE`,
-          [request_id]
-        );
-        if (!cur) {
-          await conn.rollback();
-          return socket.emit("fareFinalized", {
-            ok: false,
-            request_id,
-            error: "Ride not found",
-          });
+        let conn;
+        try {
+          conn = await mysqlPool.getConnection();
+        } catch {
+          return fail("Server busy, please try again");
         }
 
-        const [res] = await conn.execute(
-          `UPDATE rides
-              SET status = 'completed', completed_at = NOW()
-            WHERE ride_id = ? AND status = 'started'`,
-          [request_id]
-        );
-        if (!res || res.affectedRows === 0) {
-          await conn.rollback();
-          return socket.emit("fareFinalized", {
-            ok: false,
-            request_id,
-            error: "Ride not in 'started' state",
-          });
-        }
+        try {
+          await conn.beginTransaction();
 
-        if (cur?.trip_type === "pool") {
-          await conn.execute(
-            `UPDATE ride_bookings
-                SET status = 'completed', completed_at = NOW()
-              WHERE ride_id = ?
-                AND status = 'started'`,
-            [request_id]
+          const [[curBk]] = await conn.query(
+            `
+          SELECT status, passenger_id
+          FROM ride_bookings
+          WHERE ride_id=? AND booking_id=?
+          FOR UPDATE
+          `,
+            [rideId, bkId]
           );
-        }
 
-        const fare = await upsertEarningsAndLevies(conn, request_id);
-
-        // Wallet transfer: passenger pays driver (take-home)
-        const driver_id = Number(cur.driver_id);
-        const passenger_id = Number(cur.passenger_id);
-        const pickup_place = cur.pickup_place || "unknown";
-        const dropoff_place = cur.dropoff_place || "unknown";
-        const takeHome = Number(fare?.driver_take_home || 0);
-        const baseFare = Number(fare?.breakdown?.base || 0);
-
-        let walletDepositRes = { ok: false };
-
-        if (driver_id && passenger_id && takeHome > 0) {
-          const { wallet_id: driver_wallet } = await getDriverUserAndWallet(
-            conn,
-            driver_id
-          );
-          const { wallet_id: passenger_wallet } =
-            await getPassengerUserAndWallet(conn, passenger_id);
-
-          if (!driver_wallet || !passenger_wallet) {
-            dbg("[walletTransfer] missing wallet(s)", {
-              driver_wallet,
-              passenger_wallet,
-            });
-            walletDepositRes = { ok: false, reason: "missing_wallet" };
-          } else {
-            walletDepositRes = await walletTransfer(conn, {
-              from_wallet: passenger_wallet,
-              to_wallet: driver_wallet,
-              amount_nu: takeHome,
-              baseFare: baseFare,
-              reason: "RIDE_PAYOUT",
-              meta: { Pickup: pickup_place, Dropoff: dropoff_place },
-            });
-            dbg("[walletTransfer]", walletDepositRes, {
-              driver_id,
-              passenger_id,
-              takeHome,
-            });
-            if (!walletDepositRes.ok) {
-              // if funds are insufficient, you can decide to rollback or keep ride completed.
-              // Here we keep ride completed but surface the error in the event payload.
-            }
+          if (!curBk) {
+            await conn.rollback();
+            return fail("Booking not found");
           }
-        } else {
-          dbg("[walletTransfer] skipped", {
-            driver_id,
-            passenger_id,
-            takeHome,
-          });
-        }
 
-        await conn.commit();
+          const passenger_id = curBk.passenger_id ?? null;
 
-        if (cur?.trip_type === "pool") {
-          try {
-            const c2 = await mysqlPool.getConnection();
-            await emitPoolSummary(io, c2, request_id);
-            c2.release();
-          } catch {}
-        }
+          if (curBk.status === "completed") {
+            await emitPoolSummary(io, conn, rideId);
+            await conn.commit();
+            const msg = {
+              request_id: String(rideId),
+              booking_id: String(bkId),
+              stage: "completed",
+            };
+            io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
+            if (passenger_id)
+              io.to(passengerRoom(passenger_id)).emit(
+                "bookingStageUpdate",
+                msg
+              );
+            return ok({ info: "idempotent" });
+          }
 
-        let passenger_id_emit = cur?.passenger_id ?? null;
-        if (!passenger_id_emit) {
-          try {
-            const c3 = await mysqlPool.getConnection();
-            const [[p]] = await c3.query(
-              `SELECT passenger_id FROM rides WHERE ride_id = ?`,
-              [request_id]
+          if (curBk.status !== "started") {
+            await conn.rollback();
+            return fail(
+              `Not in a state that can drop (current=${curBk.status})`
             );
-            passenger_id_emit = p?.passenger_id ?? null;
-            try {
-              c3.release();
-            } catch {}
+          }
+
+          await conn.execute(
+            `
+          UPDATE ride_bookings
+          SET status='completed', completed_at=NOW()
+          WHERE ride_id=? AND booking_id=?
+          `,
+            [rideId, bkId]
+          );
+
+          const [[pending]] = await conn.query(
+            `
+          SELECT COUNT(*) AS cnt
+          FROM ride_bookings
+          WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup','started')
+          `,
+            [rideId]
+          );
+
+          const anyActive = Number(pending?.cnt || 0) > 0;
+
+          await emitPoolSummary(io, conn, rideId);
+          await conn.commit();
+
+          const msg = {
+            request_id: String(rideId),
+            booking_id: String(bkId),
+            stage: "completed",
+          };
+          io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
+          if (passenger_id)
+            io.to(passengerRoom(passenger_id)).emit("bookingStageUpdate", msg);
+
+          if (!anyActive) {
+            handleDriverCompleteTrip({
+              io,
+              socket,
+              mysqlPool,
+              payload: { request_id: rideId },
+            });
+            return ok({ ride_completed: true });
+          }
+
+          ok({ ride_completed: false });
+        } catch (e) {
+          try {
+            await conn.rollback();
+          } catch {}
+          console.error("[bookingDropped] error:", e?.message || e);
+          fail("Server error");
+        } finally {
+          try {
+            conn.release();
           } catch {}
         }
-
-        logStage(io, request_id, "completed", passenger_id_emit);
-        io.to(rideRoom(request_id)).emit("rideStageUpdate", {
-          request_id,
-          stage: "completed",
-        });
-        if (cur?.trip_type === "pool") {
-          io.to(rideRoom(request_id)).emit("bookingStageUpdate", {
-            request_id,
-            stage: "completed",
-          });
-        }
-        if (passenger_id_emit) {
-          io.to(passengerRoom(passenger_id_emit)).emit("rideStageUpdate", {
-            request_id,
-            stage: "completed",
-          });
-        }
-
-        const rRoom = rideRoom(request_id);
-        io.to(rRoom).emit("fareFinalized", {
-          ok: true,
-          request_id,
-          fare,
-          wallet: walletDepositRes,
-        });
-        if (passenger_id_emit) {
-          io.to(passengerRoom(passenger_id_emit)).emit("fareFinalized", {
-            ok: true,
-            request_id,
-            fare,
-            wallet: walletDepositRes,
-          });
-        }
-        socket.emit("fareFinalized", {
-          ok: true,
-          request_id,
-          fare,
-          wallet: walletDepositRes,
-        });
-      } catch (err) {
-        try {
-          await conn.rollback();
-        } catch {}
-        console.error("[driverCompleteTrip] error:", err);
-        socket.emit("fareFinalized", {
-          ok: false,
-          request_id,
-          error: "Server error",
-        });
-      } finally {
-        try {
-          conn.release();
-        } catch {}
       }
-    }
-
-    socket.on("driverCompleteTrip", (payload) =>
-      handleDriverCompleteTrip({ io, socket, mysqlPool, payload })
     );
+
+    /* ===================== Matching compat ===================== */
+    socket.on("offer:accept", ({ request_id, batch_id } = {}) => {
+      const driver_id = socket.data.driver_id;
+      const batch = batch_id ?? socket.data.batch_id ?? null;
+      if (!driver_id || !request_id) return;
+      handleJobAccept({
+        io,
+        socket,
+        mysqlPool,
+        payload: { request_id, driver_id, batch_id: batch },
+      });
+    });
+
+    socket.on("offer:reject", ({ request_id, reason = "reject" } = {}) => {
+      const driver_id = socket.data.driver_id;
+      if (!driver_id || !request_id) return;
+      handleJobReject({
+        io,
+        socket,
+        mysqlPool,
+        payload: { request_id, driver_id, reason },
+      });
+    });
+
+    socket.on("offer:timeout", ({ request_id } = {}) => {
+      const driver_id = socket.data.driver_id;
+      if (!driver_id || !request_id) return;
+      handleJobReject({
+        io,
+        socket,
+        mysqlPool,
+        payload: { request_id, driver_id, reason: "timeout" },
+      });
+    });
 
     /* -------- Disconnect -------- */
     socket.on("disconnect", async (reason) => {
       console.log("[socket] disconnected:", socket.id, reason);
-      const id = socket.data?.driver_id;
 
-      if (id) {
-        if (liveSocketByDriver.get(id) === socket.id) {
-          liveSocketByDriver.delete(id);
-        }
-      }
+      const id = socket.data?.driver_id;
+      if (id && liveSocketByDriver.get(id) === socket.id)
+        liveSocketByDriver.delete(id);
 
       if (socket.data.role === "driver" && id) {
         const room = io.sockets.adapter.rooms.get(driverRoom(id));
@@ -1445,16 +1508,16 @@ export function initDriverSocket(io, mysqlPool) {
     });
   });
 }
-/* ======================================================================== */
-/*                          Event implementations                           */
-/* ======================================================================== */
 
-/* jobAccept, jobReject, driverArrivedPickup, driverStartTrip
-   stay unchanged from above (already included in this file) */
+/* ========================================================================
+   Event implementations (ride lifecycle + delivery merchant notify)
+   ======================================================================== */
+
 async function handleJobAccept({ io, socket, mysqlPool, payload }) {
   const where = "[jobAccept]";
   try {
-    const { request_id, driver_id: rawDriverId } = payload || {};
+    const { request_id, driver_id: rawDriverId, batch_id } = payload || {};
+
     if (!request_id || !rawDriverId) {
       return socket.emit("jobAssigned", {
         ok: false,
@@ -1470,6 +1533,7 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
     }
 
     const conn = await mysqlPool.getConnection();
+
     try {
       await conn.beginTransaction();
 
@@ -1483,20 +1547,43 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         });
       }
 
-      // 1) accept the ride
       const [res] = await conn.execute(
         `
-          UPDATE rides
-             SET driver_id = ?,
-                 status = 'accepted',
-                 accepted_at = NOW(),
-                 offer_driver_id = NULL,
-                 offer_expire_at = NULL
-           WHERE ride_id = ?
-             AND status IN ('offered_to_driver','requested')
+        UPDATE rides
+        SET driver_id = ?,
+            status = 'accepted',
+            accepted_at = NOW(),
+            offer_driver_id = NULL,
+            offer_expire_at = NULL
+        WHERE ride_id = ?
+          AND status IN ('offered_to_driver','requested')
         `,
         [canonicalDriverId, request_id]
       );
+
+      // delivery: assign orders in batch
+      if (batch_id != null) {
+        const batchIdNum = Number(batch_id);
+        if (Number.isFinite(batchIdNum)) {
+          const [deliveryRes] = await conn.execute(
+            `
+            UPDATE orders
+            SET delivery_driver_id = ?,
+                delivery_ride_id = ?,
+                delivery_status = 'ASSIGNED',
+                status = 'ASSIGNED'
+            WHERE delivery_batch_id = ?
+              AND (status = 'PENDING' OR delivery_status = 'PENDING')
+            `,
+            [canonicalDriverId, request_id, batchIdNum]
+          );
+          console.log(
+            "[jobAccept] delivery orders updated:",
+            deliveryRes.affectedRows
+          );
+        }
+      }
+
       if (!res || res.affectedRows === 0) {
         await conn.rollback();
         return socket.emit("jobAssigned", {
@@ -1506,89 +1593,130 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         });
       }
 
-      // 2) read ride & enrich
       const [[ride]] = await conn.query(
         `
-          SELECT
-            r.ride_id, r.driver_id, r.passenger_id, r.status,
-            r.pickup_place, r.dropoff_place, r.pickup_lat, r.pickup_lng,
-            r.dropoff_lat, r.dropoff_lng, r.distance_m, r.duration_s, r.currency,
-            r.fare_cents, r.requested_at, r.accepted_at, r.arrived_pickup_at,
-            r.started_at, r.completed_at, r.service_type, r.trip_type, r.pool_batch_id,
-
-            u.user_name  AS driver_name,
-            u.phone      AS driver_phone,
-
-            (SELECT COUNT(*) FROM rides rr WHERE rr.driver_id = r.driver_id AND rr.status = 'completed') AS driver_trips,
-            (SELECT ROUND(AVG(${RATING_COLUMN}), 2) FROM ${RATINGS_TABLE} drt WHERE drt.driver_id = r.driver_id) AS driver_rating,
-            (SELECT COUNT(*) FROM ${RATINGS_TABLE} drt2 WHERE drt2.driver_id = r.driver_id) AS driver_ratings_count,
-
-            NULL AS vehicle_label,
-            NULL AS vehicle_plate
-
-          FROM rides r
-          LEFT JOIN drivers dr ON dr.driver_id = r.driver_id
-          LEFT JOIN users   u  ON u.user_id   = dr.user_id
-          WHERE r.ride_id = ?
-          LIMIT 1
+        SELECT
+          r.ride_id,
+          r.driver_id,
+          r.passenger_id,
+          r.status,
+          r.pickup_place,
+          r.dropoff_place,
+          r.pickup_lat,
+          r.pickup_lng,
+          r.dropoff_lat,
+          r.dropoff_lng,
+          r.distance_m,
+          r.duration_s,
+          r.currency,
+          r.fare_cents,
+          r.requested_at,
+          r.accepted_at,
+          r.arrived_pickup_at,
+          r.started_at,
+          r.completed_at,
+          r.service_type,
+          r.trip_type,
+          r.pool_batch_id,
+          u.user_name AS driver_name,
+          u.phone AS driver_phone,
+          (SELECT COUNT(*)
+             FROM rides rr
+            WHERE rr.driver_id = r.driver_id
+              AND rr.status = 'completed') AS driver_trips,
+          (SELECT ROUND(AVG(${RATING_COLUMN}), 2)
+             FROM ${RATINGS_TABLE} drt
+            WHERE drt.driver_id = r.driver_id) AS driver_rating,
+          (SELECT COUNT(*)
+             FROM ${RATINGS_TABLE} drt2
+            WHERE drt2.driver_id = r.driver_id) AS driver_ratings_count,
+          NULL AS vehicle_label,
+          NULL AS vehicle_plate
+        FROM rides r
+        LEFT JOIN drivers dr ON dr.driver_id = r.driver_id
+        LEFT JOIN users u ON u.user_id = dr.user_id
+        WHERE r.ride_id = ?
+        LIMIT 1
         `,
         [request_id]
       );
 
-      if (ride && (ride.driver_name == null || ride.driver_phone == null)) {
-        const [[drvUser]] = await conn.query(
-          `
-            SELECT u.user_name AS driver_name, u.phone AS driver_phone
-              FROM drivers dr
-              JOIN users   u ON u.user_id = dr.user_id
-             WHERE dr.driver_id = ?
-             LIMIT 1
-          `,
-          [canonicalDriverId]
-        );
-        dbg("[jobAccept] fallback driver lookup", drvUser || null);
-        if (drvUser) Object.assign(ride, drvUser);
-      }
-
-      // 3) POOL: accept all pending bookings and collect rows
-      let acceptedBookings = [];
-      if (ride?.trip_type === "pool") {
-        await conn.execute(
-          `
-            UPDATE ride_bookings
-               SET status = 'accepted',
-                   accepted_at = NOW(),
-                   driver_id = ?
-             WHERE ride_id = ?
-               AND status = 'requested'
-          `,
-          [canonicalDriverId, request_id]
-        );
-
-        const [bkRows] = await conn.query(
-          `
-            SELECT booking_id, passenger_id, seats, pickup_place, dropoff_place,
-                   pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, fare_cents, currency
-              FROM ride_bookings
-             WHERE ride_id = ?
-               AND status = 'accepted'
-          `,
-          [request_id]
-        );
-        acceptedBookings = bkRows || [];
-      }
-
       await conn.commit();
 
-      // rooms
+      // Redis enrich: payment, waypoints, delivery meta
+      const r = getRedis();
+      let payment_method = null;
+      let offer_code = null;
+      let waypoints = [];
+      let stops_count = 0;
+
+      let job_type = "SINGLE";
+      let batch_id_out = null;
+      let drops = [];
+      let service_code = null;
+
+      try {
+        const h = await r.hgetall(rideHash(String(request_id)));
+
+        if (h?.payment_method) {
+          try {
+            payment_method = JSON.parse(h.payment_method);
+          } catch {
+            payment_method = h.payment_method;
+          }
+        }
+        if (h?.offer_code) offer_code = h.offer_code || null;
+
+        if (h?.waypoints_json) {
+          try {
+            waypoints = JSON.parse(h.waypoints_json) || [];
+          } catch {
+            waypoints = [];
+          }
+        }
+
+        if (h?.stops_count != null) {
+          const sc = Number(h.stops_count);
+          if (Number.isFinite(sc)) stops_count = sc;
+        }
+
+        if (h?.service_code) service_code = String(h.service_code);
+
+        if (h?.job_type) job_type = String(h.job_type).toUpperCase();
+        if (h?.batch_id != null && h.batch_id !== "") {
+          const bn = Number(h.batch_id);
+          if (Number.isFinite(bn)) batch_id_out = bn;
+        }
+
+        if (h?.drops_json) {
+          try {
+            const parsed = JSON.parse(h.drops_json);
+            drops = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            drops = [];
+          }
+        }
+      } catch (e) {
+        dbg("[jobAccept] redis enrich warn:", e?.message);
+      }
+
       try {
         socket.join(driverRoom(String(canonicalDriverId)));
       } catch {}
       socket.join(rideRoom(request_id));
 
-      const rideOut = toClientRide(ride);
+      const rideOut = {
+        ...toClientRide(ride),
+        payment_method,
+        offer_code,
+        waypoints,
+        stops_count,
+        service_code: service_code || null,
+        job_type,
+        batch_id: batch_id_out,
+        drops,
+      };
 
-      // emits to driver room(s)
       io.to(driverRoom(String(canonicalDriverId))).emit("jobAssigned", {
         ok: true,
         request_id,
@@ -1600,18 +1728,34 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         ride: rideOut,
       });
 
-      // passenger emit (container-level)
       if (ride?.passenger_id) {
         const msg = { request_id, driver_id: canonicalDriverId, ride: rideOut };
         io.to(passengerRoom(ride.passenger_id)).emit("rideAccepted", msg);
         io.to(rideRoom(request_id)).emit("rideAccepted", msg);
-        console.log(
-          `[emit] rideAccepted ride:${request_id} passenger:${ride.passenger_id} driver:${canonicalDriverId}`
-        );
       }
 
-      // Per-booking emits + POOL SUMMARY
-      if (ride?.trip_type === "pool" && acceptedBookings.length) {
+      if (ride?.trip_type === "pool") {
+        let acceptedBookings = [];
+        try {
+          const c2 = await mysqlPool.getConnection();
+          try {
+            const [bkRows] = await c2.query(
+              `
+              SELECT booking_id, passenger_id, seats, pickup_place, dropoff_place,
+                     pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                     fare_cents, currency
+              FROM ride_bookings
+              WHERE ride_id = ?
+                AND status = 'accepted'
+              `,
+              [request_id]
+            );
+            acceptedBookings = bkRows || [];
+          } finally {
+            c2.release();
+          }
+        } catch {}
+
         for (const b of acceptedBookings) {
           const msg = {
             ok: true,
@@ -1633,15 +1777,15 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         }
 
         try {
-          const c2 = await mysqlPool.getConnection();
-          await emitPoolSummary(io, c2, request_id);
-          c2.release();
-        } catch (e) {
-          console.warn("[poolSummary emit] warn:", e?.message);
-        }
+          const c3 = await mysqlPool.getConnection();
+          try {
+            await emitPoolSummary(io, c3, request_id);
+          } finally {
+            c3.release();
+          }
+        } catch {}
       }
 
-      // Close open offers, and notify matcher
       socket.broadcast.emit("rideClosed", { request_id });
       socket.broadcast.emit("jobRequestCancelled", { request_id });
 
@@ -1671,8 +1815,6 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
 }
 
 async function handleJobReject({ io, socket, mysqlPool, payload }) {
-  console.log("handleJobReject called with payload:", payload);
-  const where = "[jobReject]";
   try {
     const { request_id, driver_id: rawDriverId } = payload || {};
     if (!request_id || !rawDriverId) {
@@ -1681,15 +1823,9 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
         error: "Missing request_id or driver_id",
       });
     }
-    if (!mysqlPool?.getConnection) {
-      console.error(`${where} mysqlPool not ready`);
-      return socket.emit("jobRejectedAck", {
-        ok: false,
-        error: "Server DB not ready",
-      });
-    }
 
     const conn = await mysqlPool.getConnection();
+
     try {
       await conn.beginTransaction();
 
@@ -1704,15 +1840,15 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
 
       const [res] = await conn.execute(
         `
-          UPDATE rides
-             SET status = 'requested',
-                 offer_driver_id = NULL,
-                 offer_expire_at = NULL,
-                 accepted_at = NULL,
-                 driver_id = NULL
-           WHERE ride_id = ?
-             AND status = 'offered_to_driver'
-             AND (offer_driver_id IS NULL OR offer_driver_id = ?)
+        UPDATE rides
+        SET status = 'requested',
+            offer_driver_id = NULL,
+            offer_expire_at = NULL,
+            accepted_at = NULL,
+            driver_id = NULL
+        WHERE ride_id = ?
+          AND status = 'offered_to_driver'
+          AND (offer_driver_id IS NULL OR offer_driver_id = ?)
         `,
         [request_id, canonicalDriverId]
       );
@@ -1728,7 +1864,7 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
       }
 
       const [[row]] = await conn.query(
-        `SELECT passenger_id FROM rides WHERE ride_id = ?`,
+        "SELECT passenger_id FROM rides WHERE ride_id = ?",
         [request_id]
       );
 
@@ -1772,13 +1908,15 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
 
 async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
   const { request_id } = payload || {};
-  if (!request_id)
+  if (!request_id) {
     return socket.emit("driverArrivedAck", {
       ok: false,
       error: "Missing request_id",
     });
+  }
 
   const conn = await mysqlPool.getConnection();
+
   try {
     await conn.beginTransaction();
 
@@ -1786,21 +1924,16 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
       "SELECT status, trip_type FROM rides WHERE ride_id = ?",
       [request_id]
     );
-    console.log(`[stage dbg] BEFORE ride:${request_id} status:`, cur?.status);
 
     const [res] = await conn.execute(
       `
-        UPDATE rides
-           SET status = 'arrived_pickup',
-               arrived_pickup_at = NOW()
-         WHERE ride_id = ?
-           AND status = 'accepted'
+      UPDATE rides
+      SET status = 'arrived_pickup',
+          arrived_pickup_at = NOW()
+      WHERE ride_id = ?
+        AND status = 'accepted'
       `,
       [request_id]
-    );
-    console.log(
-      `[stage dbg] UPDATE ride:${request_id} affectedRows:`,
-      res?.affectedRows
     );
 
     if (res.affectedRows === 0) {
@@ -1814,32 +1947,88 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
 
     if (cur?.trip_type === "pool") {
       await conn.execute(
-        `UPDATE ride_bookings
-            SET status = 'arrived_pickup', arrived_pickup_at = NOW()
-          WHERE ride_id = ?
-            AND status IN ('requested','accepted')`,
+        `
+        UPDATE ride_bookings
+        SET status = 'arrived_pickup',
+            arrived_pickup_at = NOW()
+        WHERE ride_id = ?
+          AND status IN ('requested','accepted')
+        `,
         [request_id]
+      );
+    }
+
+    // DELIVERY: ASSIGNED -> PICKED_UP
+    try {
+      const r = getRedis();
+      const h = await r.hgetall(rideHash(String(request_id)));
+      const jobType = String(h?.job_type || "SINGLE").toUpperCase();
+      const batchId =
+        h?.batch_id != null && h.batch_id !== "" ? Number(h.batch_id) : null;
+
+      if (jobType === "BATCH" && Number.isFinite(batchId)) {
+        await conn.execute(
+          `
+          UPDATE orders
+          SET delivery_status = 'PICKED_UP',
+              status = 'PICKED_UP'
+          WHERE delivery_batch_id = ?
+            AND delivery_ride_id = ?
+            AND delivery_status = 'ASSIGNED'
+          `,
+          [batchId, String(request_id)]
+        );
+      } else {
+        await conn.execute(
+          `
+          UPDATE orders
+          SET delivery_status = 'PICKED_UP',
+              status = 'PICKED_UP'
+          WHERE delivery_ride_id = ?
+            AND delivery_status = 'ASSIGNED'
+          `,
+          [String(request_id)]
+        );
+      }
+    } catch (e) {
+      console.warn(
+        "[driverArrivedPickup] orders PICKED_UP update skipped:",
+        e?.message || e
       );
     }
 
     await conn.commit();
 
-    // Emit pool summary (NEW)
+    // merchant notify
+    try {
+      const cM = await mysqlPool.getConnection();
+      try {
+        await emitMerchantDriverArrived({ io, conn: cM, request_id });
+      } finally {
+        cM.release();
+      }
+    } catch {}
+
+    // pool summary
     if (cur?.trip_type === "pool") {
       try {
         const c2 = await mysqlPool.getConnection();
-        await emitPoolSummary(io, c2, request_id);
-        c2.release();
+        try {
+          await emitPoolSummary(io, c2, request_id);
+        } finally {
+          c2.release();
+        }
       } catch {}
     }
 
     let passenger_id = null;
     try {
       const c3 = await mysqlPool.getConnection();
-      passenger_id = await getPassengerId(c3, request_id);
       try {
+        passenger_id = await getPassengerId(c3, request_id);
+      } finally {
         c3.release();
-      } catch {}
+      }
     } catch {}
 
     socket.emit("driverArrivedAck", { ok: true, request_id });
@@ -1850,6 +2039,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
       request_id,
       stage: "arrived_pickup",
     });
+
     if (cur?.trip_type === "pool") {
       io.to(rideRoom(request_id)).emit("bookingStageUpdate", {
         request_id,
@@ -1882,35 +2072,32 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
 
 async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
   const { request_id } = payload || {};
-  if (!request_id)
+  if (!request_id) {
     return socket.emit("driverStartAck", {
       ok: false,
       error: "Missing request_id",
     });
+  }
 
   const conn = await mysqlPool.getConnection();
+
   try {
     await conn.beginTransaction();
 
     const [[cur]] = await conn.query(
-      "SELECT status, trip_type FROM rides WHERE ride_id = ?",
+      "SELECT status, trip_type, driver_id, passenger_id, pickup_place, dropoff_place FROM rides WHERE ride_id = ?",
       [request_id]
     );
-    console.log(`[stage dbg] BEFORE ride:${request_id} status:`, cur?.status);
 
     const [res] = await conn.execute(
       `
-        UPDATE rides
-           SET status = 'started',
-               started_at = NOW()
-         WHERE ride_id = ?
-           AND status = 'arrived_pickup'
+      UPDATE rides
+      SET status = 'started',
+          started_at = NOW()
+      WHERE ride_id = ?
+        AND status = 'arrived_pickup'
       `,
       [request_id]
-    );
-    console.log(
-      `[stage dbg] UPDATE ride:${request_id} affectedRows:`,
-      res?.affectedRows
     );
 
     if (res.affectedRows === 0) {
@@ -1924,33 +2111,82 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
 
     if (cur?.trip_type === "pool") {
       await conn.execute(
-        `UPDATE ride_bookings
-            SET status = 'started', started_at = NOW()
-          WHERE ride_id = ?
-            AND status = 'arrived_pickup'`,
+        `
+        UPDATE ride_bookings
+        SET status = 'started',
+            started_at = NOW()
+        WHERE ride_id = ?
+          AND status = 'arrived_pickup'
+        `,
         [request_id]
+      );
+    }
+
+    // DELIVERY: PICKED_UP -> ON_ROAD
+    try {
+      const r = getRedis();
+      const h = await r.hgetall(rideHash(String(request_id)));
+
+      const jobType = String(h?.job_type || "SINGLE").toUpperCase();
+      const batchId =
+        h?.batch_id != null && h.batch_id !== "" ? Number(h.batch_id) : null;
+
+      if (jobType === "BATCH" && Number.isFinite(batchId)) {
+        await conn.execute(
+          `
+          UPDATE orders
+          SET delivery_status = 'ON_ROAD',
+              status = 'ON_ROAD'
+          WHERE delivery_batch_id = ?
+            AND delivery_ride_id = ?
+            AND delivery_status = 'PICKED_UP'
+          `,
+          [batchId, String(request_id)]
+        );
+      } else {
+        await conn.execute(
+          `
+          UPDATE orders
+          SET delivery_status = 'ON_ROAD',
+              status = 'ON_ROAD'
+          WHERE delivery_ride_id = ?
+            AND delivery_status = 'PICKED_UP'
+          `,
+          [String(request_id)]
+        );
+      }
+    } catch (e) {
+      console.warn(
+        "[driverStartTrip] orders ON_ROAD update skipped:",
+        e?.message || e
       );
     }
 
     await conn.commit();
 
-    // Emit pool summary (NEW)
+    // merchant notify
+    try {
+      const cM = await mysqlPool.getConnection();
+      try {
+        await emitMerchantOnRoad({ io, conn: cM, request_id });
+      } finally {
+        cM.release();
+      }
+    } catch {}
+
+    // pool summary
     if (cur?.trip_type === "pool") {
       try {
         const c2 = await mysqlPool.getConnection();
-        await emitPoolSummary(io, c2, request_id);
-        c2.release();
+        try {
+          await emitPoolSummary(io, c2, request_id);
+        } finally {
+          c2.release();
+        }
       } catch {}
     }
 
-    let passenger_id = null;
-    try {
-      const c3 = await mysqlPool.getConnection();
-      passenger_id = await getPassengerId(c3, request_id);
-      try {
-        c3.release();
-      } catch {}
-    } catch {}
+    const passenger_id = cur?.passenger_id ?? null;
 
     socket.emit("driverStartAck", { ok: true, request_id });
 
@@ -1960,12 +2196,14 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       request_id,
       stage: "started",
     });
+
     if (cur?.trip_type === "pool") {
       io.to(rideRoom(request_id)).emit("bookingStageUpdate", {
         request_id,
         stage: "started",
       });
     }
+
     if (passenger_id) {
       io.to(passengerRoom(passenger_id)).emit("rideStageUpdate", {
         request_id,
@@ -1987,4 +2225,582 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       conn.release();
     } catch {}
   }
+}
+
+async function postSettlementLines(
+  conn,
+  { party_type, party_id, source_type, source_id, currency = "BTN", lines }
+) {
+  if (!party_type || !party_id || !source_type || !source_id) {
+    throw new Error("postSettlementLines: missing required fields");
+  }
+
+  const cleanLines = (Array.isArray(lines) ? lines : [])
+    .map((l) => ({
+      entry_type: String(l.entry_type || "").trim(),
+      amount_cents: Number(l.amount_cents || 0),
+      note: l.note ? String(l.note).slice(0, 255) : null,
+    }))
+    .filter((l) => l.entry_type && Number.isFinite(l.amount_cents));
+
+  if (!cleanLines.length) return { ok: true, delta_cents: 0 };
+
+  // Lock existing rows for this source so delta is safe (no double add)
+  const [existing] = await conn.query(
+    `
+    SELECT entry_type, amount_cents
+    FROM settlement_ledger
+    WHERE party_type = ? AND party_id = ?
+      AND source_type = ? AND source_id = ?
+      AND entry_type IN (${cleanLines.map(() => "?").join(",")})
+    FOR UPDATE
+    `,
+    [
+      party_type,
+      party_id,
+      source_type,
+      source_id,
+      ...cleanLines.map((l) => l.entry_type),
+    ]
+  );
+
+  const oldMap = new Map();
+  for (const r of existing) {
+    oldMap.set(String(r.entry_type), Number(r.amount_cents || 0));
+  }
+
+  const oldSum = cleanLines.reduce(
+    (s, l) => s + (oldMap.get(l.entry_type) || 0),
+    0
+  );
+  const newSum = cleanLines.reduce((s, l) => s + l.amount_cents, 0);
+  const delta = newSum - oldSum;
+
+  // Upsert each line (idempotent)
+  for (const l of cleanLines) {
+    await conn.query(
+      `
+      INSERT INTO settlement_ledger
+        (party_type, party_id, source_type, source_id, entry_type, amount_cents, currency, note)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        amount_cents = VALUES(amount_cents),
+        currency     = VALUES(currency),
+        note         = VALUES(note)
+      `,
+      [
+        party_type,
+        party_id,
+        source_type,
+        source_id,
+        l.entry_type,
+        l.amount_cents,
+        currency,
+        l.note,
+      ]
+    );
+  }
+
+  // Apply ONLY delta to the account balance
+  if (delta !== 0) {
+    await conn.query(
+      `
+      INSERT INTO settlement_accounts (party_type, party_id, balance_cents, currency)
+      VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        balance_cents = balance_cents + VALUES(balance_cents),
+        currency      = VALUES(currency)
+      `,
+      [party_type, party_id, delta, currency]
+    );
+  }
+
+  return { ok: true, delta_cents: delta };
+}
+
+/* ---------------- started -> completed (whole ride) + wallet payout ---------------- */
+async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
+  const { request_id } = payload || {};
+
+  if (!request_id) {
+    return socket.emit("fareFinalized", {
+      ok: false,
+      error: "Missing request_id",
+    });
+  }
+
+  let conn;
+  try {
+    conn = await mysqlPool.getConnection();
+    await conn.beginTransaction();
+
+    /* -------------------------------------------------
+       1) Lock ride row
+    ------------------------------------------------- */
+    const [[ride]] = await conn.query(
+      `SELECT * FROM rides WHERE ride_id = ? FOR UPDATE`,
+      [request_id]
+    );
+
+    if (!ride) {
+      await conn.rollback();
+      return socket.emit("fareFinalized", {
+        ok: false,
+        request_id,
+        error: "Ride not found",
+      });
+    }
+
+    // idempotency: if already completed, just return
+    if (ride.status === "completed") {
+      await conn.rollback();
+      return socket.emit("fareFinalized", {
+        ok: true,
+        request_id,
+        info: "already_completed",
+      });
+    }
+
+    if (ride.status !== "started") {
+      await conn.rollback();
+      return socket.emit("fareFinalized", {
+        ok: false,
+        request_id,
+        error: "Ride not found or invalid state",
+      });
+    }
+
+    /* -------------------------------------------------
+       2) Mark ride completed
+    ------------------------------------------------- */
+    await conn.execute(
+      `
+      UPDATE rides
+      SET status = 'completed',
+          completed_at = NOW()
+      WHERE ride_id = ?
+      `,
+      [request_id]
+    );
+
+    if (ride.trip_type === "pool") {
+      await conn.execute(
+        `
+        UPDATE ride_bookings
+        SET status = 'completed',
+            completed_at = NOW()
+        WHERE ride_id = ?
+          AND status = 'started'
+        `,
+        [request_id]
+      );
+    }
+
+    /* -------------------------------------------------
+       3) Pricing engine (single source of truth)
+    ------------------------------------------------- */
+    const pricing = await computePlatformFeeAndGST({
+      country_code: "BT",
+      city_id: ride.city_id || "THIMPHU",
+      service_type: ride.service_type,
+      trip_type: ride.trip_type || "instant",
+      channel: "app",
+      subtotal_cents: Number(ride.base_fare_cents),
+      total_cents: Number(ride.fare_cents),
+    });
+
+    const amounts = pricing?.amounts || {};
+    const matched = pricing?.matched_rules || {};
+    const pfRule = matched?.platform_fee_rule || null;
+    const taxRule = matched?.tax_rule || null;
+
+    const platform_fee_cents = Number(amounts.platform_fee_cents || 0);
+    const gst_cents = Number(amounts.gst_cents || 0);
+    const total_payable_cents = Number(amounts.total_payable_cents || 0);
+    const driver_payout_cents = Number(amounts.driver_payout_cents || 0);
+    const driver_payout_nu = Number(amounts.driver_payout_nu || 0);
+
+    console.log("Total payable cents : ", total_payable_cents);
+
+    /* -------------------------------------------------
+       4) Pricing snapshot (audit safe)
+    ------------------------------------------------- */
+    await conn.execute(
+      `
+      INSERT INTO ride_pricing_snapshots
+        (ride_id, platform_fee_cents, gst_cents,
+         total_payable_cents, driver_payout_cents,
+         platform_fee_rule_id, tax_rule_id)
+      VALUES (?,?,?,?,?,?,?)
+      ON DUPLICATE KEY UPDATE
+        platform_fee_cents = VALUES(platform_fee_cents),
+        gst_cents = VALUES(gst_cents),
+        total_payable_cents = VALUES(total_payable_cents),
+        driver_payout_cents = VALUES(driver_payout_cents),
+        platform_fee_rule_id = VALUES(platform_fee_rule_id),
+        tax_rule_id = VALUES(tax_rule_id)
+      `,
+      [
+        Number(request_id),
+        platform_fee_cents,
+        gst_cents,
+        total_payable_cents,
+        driver_payout_cents,
+        pfRule?.rule_id || null,
+        taxRule?.tax_rule_id || null,
+      ]
+    );
+
+    /* -------------------------------------------------
+       5) DRIVER EARNINGS (ALWAYS – cash or wallet)
+       Uses YOUR schema
+    ------------------------------------------------- */
+    await conn.execute(
+      `
+      INSERT INTO driver_earnings
+        (driver_id, ride_id,
+         base_fare_cents, time_cents, tips_cents, currency)
+      VALUES (?,?,?,?,?,?)
+      ON DUPLICATE KEY UPDATE
+        base_fare_cents = VALUES(base_fare_cents),
+        updated_at = CURRENT_TIMESTAMP
+      `,
+      [
+        Number(ride.driver_id),
+        Number(request_id),
+        Number(driver_payout_cents || 0),
+        0,
+        0,
+        "BTN",
+      ]
+    );
+
+    /* -------------------------------------------------
+       6) PLATFORM LEVIES (ALWAYS)
+    ------------------------------------------------- */
+    await conn.execute(
+      `
+      INSERT INTO platform_levies
+        (driver_id, ride_id,
+         platform_fee_cents, tax_cents, currency,
+         fee_rule_id, tax_rule_id)
+      VALUES (?,?,?,?,?,?,?)
+      ON DUPLICATE KEY UPDATE
+        platform_fee_cents = VALUES(platform_fee_cents),
+        tax_cents = VALUES(tax_cents),
+        currency = VALUES(currency),
+        fee_rule_id = VALUES(fee_rule_id),
+        tax_rule_id = VALUES(tax_rule_id),
+        updated_at = CURRENT_TIMESTAMP
+      `,
+      [
+        Number(ride.driver_id),
+        Number(request_id),
+        platform_fee_cents,
+        gst_cents,
+        ride.currency || "BTN",
+        pfRule?.rule_id || null,
+        taxRule?.tax_rule_id || null,
+      ]
+    );
+
+    /* -------------------------------------------------
+       7) PLATFORM REVENUE (TRANSPORT)
+       NOTE:
+       - gross_amount_cents is before tax (platform_fee_cents)
+       - GST is liability, not income
+       ✅ net_revenue_cents should be platform_fee_cents (NOT minus gst)
+    ------------------------------------------------- */
+    const feeType = String(pfRule?.fee_type || "percent").toLowerCase();
+    const commission_type = feeType === "fixed" ? "FIXED" : "PERCENT";
+
+    const commission_rate_bp = 0;
+    const commission_fixed_cents = 0;
+
+    await conn.execute(
+      `
+      INSERT INTO platform_revenue
+        (source_type, source_id,
+         gross_amount_cents, tax_cents, net_revenue_cents,
+         commission_type, commission_rate_bp, commission_fixed_cents)
+      VALUES ('TRANSPORT', ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        gross_amount_cents = VALUES(gross_amount_cents),
+        tax_cents = VALUES(tax_cents),
+        net_revenue_cents = VALUES(net_revenue_cents),
+        commission_type = VALUES(commission_type),
+        commission_rate_bp = VALUES(commission_rate_bp),
+        commission_fixed_cents = VALUES(commission_fixed_cents)
+      `,
+      [
+        String(request_id),
+        platform_fee_cents, // before tax
+        gst_cents,          // GST collected
+        platform_fee_cents, // ✅ income (GST excluded)
+        commission_type,
+        commission_rate_bp,
+        commission_fixed_cents,
+      ]
+    );
+
+    /* -------------------------------------------------
+       7.1) GST ledger (government liability)
+    ------------------------------------------------- */
+    if (gst_cents > 0) {
+      await conn.execute(
+        `
+        INSERT INTO tax_ledger
+          (source_type, source_id, tax_type, tax_amount_cents)
+        VALUES ('TRANSPORT', ?, 'GST', ?)
+        ON DUPLICATE KEY UPDATE
+          tax_amount_cents = VALUES(tax_amount_cents)
+        `,
+        [Number(request_id), Number(gst_cents)]
+      );
+    }
+
+    /* -------------------------------------------------
+       8) Wallet transfer (ONLY if wallet + valid amount)
+       + Settlement posting (ONLY if NOT wallet -> cash)
+    ------------------------------------------------- */
+    const payment_method = await getRidePaymentMethodFromRedis(request_id);
+    const isWallet = isWalletPayment(payment_method);
+
+    // ✅ CASH (or non-wallet) → driver owes platform_fee + gst
+    if (!isWallet) {
+      const currency = ride.currency || "BTN";
+      const driverId = Number(ride.driver_id);
+
+      if (driverId && (platform_fee_cents > 0 || gst_cents > 0)) {
+        await postSettlementLines(conn, {
+          party_type: "DRIVER",
+          party_id: driverId,
+          source_type: "RIDE",
+          source_id: String(request_id),
+          currency,
+          lines: [
+            {
+              entry_type: "PLATFORM_FEE_DUE",
+              amount_cents: platform_fee_cents, // + increases debt
+              note: "Cash ride: platform fee due",
+            },
+            {
+              entry_type: "TAX_DUE",
+              amount_cents: gst_cents, // + increases debt
+              note: "Cash ride: GST due",
+            },
+          ],
+        });
+      }
+    }
+
+    let walletResult = { ok: false, reason: "not_wallet_payment" };
+    const payoutNu = Number(driver_payout_nu);
+
+    if (isWallet && Number.isFinite(payoutNu) && payoutNu > 0) {
+      const { wallet_id: driver_wallet } = await getDriverUserAndWallet(
+        conn,
+        ride.driver_id
+      );
+
+      const { wallet_id: passenger_wallet } = await getPassengerUserAndWallet(
+        conn,
+        ride.passenger_id
+      );
+
+      if (driver_wallet && passenger_wallet) {
+        walletResult = await walletTransfer(conn, {
+          from_wallet: passenger_wallet,
+          to_wallet: driver_wallet,
+          driver_credit_nu: Number(pricing.amounts.driver_payout_nu).toFixed(2),
+          passenger_debit_nu: Number(pricing.amounts.total_payable_nu).toFixed(
+            2
+          ),
+          reason: "RIDE_PAYOUT",
+          meta: {
+            ride_id: request_id,
+            service_type: ride.service_type,
+            payment_method,
+          },
+        });
+      } else {
+        walletResult = { ok: false, reason: "wallet_missing" };
+      }
+    }
+
+    await conn.commit();
+
+    /* -------------------------------------------------
+       9) Emit events
+    ------------------------------------------------- */
+    const out = {
+      ok: true,
+      request_id,
+      pricing,
+      wallet: walletResult,
+    };
+
+    io.to(rideRoom(request_id)).emit("fareFinalized", out);
+    if (ride.passenger_id) {
+      io.to(passengerRoom(ride.passenger_id)).emit("fareFinalized", out);
+    }
+    socket.emit("fareFinalized", out);
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch {}
+    console.error("[handleDriverCompleteTrip] error:", err);
+
+    socket.emit("fareFinalized", {
+      ok: false,
+      request_id,
+      error: "Server error",
+    });
+  } finally {
+    try {
+      conn.release();
+    } catch {}
+  }
+}
+
+
+
+
+/* ---------------- Merchant Notifiers ---------------- */
+
+async function emitMerchantDriverArrived({ io, conn, request_id }) {
+  const redis = getRedis();
+  let job_type = "SINGLE";
+  let batch_id = null;
+
+  try {
+    const h = await redis.hgetall(rideHash(String(request_id)));
+    if (h?.job_type) job_type = String(h.job_type).toUpperCase();
+    if (h?.batch_id != null && h.batch_id !== "") {
+      const bn = Number(h.batch_id);
+      if (Number.isFinite(bn)) batch_id = bn;
+    }
+  } catch {}
+
+  let businessRows = [];
+
+  if (batch_id != null) {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_batch_id = ?
+      `,
+      [batch_id]
+    );
+    businessRows = rows || [];
+  } else {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_ride_id = ?
+      `,
+      [String(request_id)]
+    );
+    businessRows = rows || [];
+  }
+
+  const businesses = [
+    ...new Set(businessRows.map((r) => r.business_id).filter(Boolean)),
+  ];
+
+  businesses.forEach((bid) => {
+    io.to(merchantRoom(String(bid))).emit("deliveryDriverArrived", {
+      request_id: String(request_id),
+      batch_id,
+      job_type,
+      stage: "arrived_pickup",
+      orders: businessRows
+        .filter((r) => String(r.business_id) === String(bid))
+        .map((r) => r.order_id),
+    });
+  });
+
+  console.log("[merchant notify] driver arrived", {
+    request_id,
+    batch_id,
+    job_type,
+    businesses,
+  });
+}
+
+async function emitMerchantOnRoad({ io, conn, request_id }) {
+  const redis = getRedis();
+  let job_type = "SINGLE";
+  let batch_id = null;
+
+  try {
+    const h = await redis.hgetall(rideHash(String(request_id)));
+    if (h?.job_type) job_type = String(h.job_type).toUpperCase();
+    if (h?.batch_id != null && h.batch_id !== "") {
+      const bn = Number(h.batch_id);
+      if (Number.isFinite(bn)) batch_id = bn;
+    }
+  } catch {}
+
+  let businessRows = [];
+
+  if (batch_id != null) {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_batch_id = ?
+      `,
+      [batch_id]
+    );
+    businessRows = rows || [];
+  } else {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_ride_id = ?
+      `,
+      [String(request_id)]
+    );
+    businessRows = rows || [];
+  }
+
+  const businesses = [
+    ...new Set(businessRows.map((r) => r.business_id).filter(Boolean)),
+  ];
+
+  businesses.forEach((bid) => {
+    const room = merchantRoom(String(bid));
+    const orders = businessRows
+      .filter((r) => String(r.business_id) === String(bid))
+      .map((r) => r.order_id);
+
+    io.to(room).emit("deliveryOnRoad", {
+      request_id: String(request_id),
+      batch_id,
+      job_type,
+      stage: "on_road",
+      orders,
+    });
+
+    console.log(
+      `[notify->merchant] event=deliveryOnRoad room=${room} sockets=${roomSize(
+        io,
+        room
+      )} orders=${orders.length} request_id=${request_id} batch_id=${
+        batch_id ?? "-"
+      }`
+    );
+  });
+
+  console.log("[merchant notify] driver on road", {
+    request_id,
+    batch_id,
+    job_type,
+    businesses,
+  });
 }

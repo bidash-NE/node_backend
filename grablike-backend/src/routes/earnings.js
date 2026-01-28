@@ -166,9 +166,15 @@ export function earningsRouter(mysqlPool) {
                 startDate,
               ],
             },
+            // Fix: compute overlapEnd only if ended_at exists and is before endPlusOne
             overlapEnd: {
               $cond: [
-                { $and: ["$ended_at", { $lt: ["$ended_at", endPlusOne] }] },
+                {
+                  $and: [
+                    { $ne: ["$ended_at", null] },
+                    { $lt: ["$ended_at", endPlusOne] },
+                  ],
+                },
                 "$ended_at",
                 endPlusOne,
               ],
@@ -491,7 +497,7 @@ export function earningsRouter(mysqlPool) {
             tips_nu: Number(r.tips_nu),
             platform_fee_nu: Number(r.platform_fee_nu),
             tax_nu: Number(r.tax_nu),
-            payment_method: "cash", // Placeholder; extend v_driver_payouts if needed
+            payment_method: Number(r.payment_method), // Placeholder; extend v_driver_payouts if needed
           },
         })),
         meta: { limit, offset, count: total },

@@ -1,9 +1,16 @@
 // src/index.js
-import "dotenv/config.js";
+import "dotenv/config.js"; // if this fails, change to: import "dotenv/config";
+import path from "node:path"; // ⬅️ for static /uploads
 import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
+import mongoose from "mongoose";
+import { startScheduledRidesWorker } from "./workers/scheduledRidesWorker.js";
+import scheduledRoutes from "./routes/scheduledRides.routes.js";
+
+import matchRoutes from "./routes/match.routes.js";
+import { makeDbOfferAdapter } from "./matching/dbOfferAdapter.js";
 
 import { mysqlPool } from "./db/mysql.js";
 import { initDriverSocket } from "./sockets/driver.js";
@@ -12,6 +19,7 @@ import { earningsRouter } from "./routes/earnings.js";
 import { ratingsRouter } from "./routes/ratings.js";
 import { ridesTypesRouter } from "./routes/rideTypes.js";
 
+// ⬇️ matching (unchanged)
 import { makeMatchingRouter } from "./routes/matching.js";
 import { makeOfferAdapter } from "./services/offerAdapter.js";
 import { configureMatcher } from "./matching/matcher.js";
@@ -21,47 +29,45 @@ import places from "./routes/places.js";
 import makeDriverLookupRouter from "./routes/driverLookup.js";
 import currentRidesRouter from "./routes/currentRides.js";
 import tipsRouter from "./routes/tipsRouter.js";
+import userDetailsLookup from "./routes/userDetails.js";
+import rideGroupRoutes from "./routes/rideGroup.routes.js";
+import guestWaypointsRouter from "./routes/guestWaypoints.routes.js";
+
+// ⬇️ chat upload/list routes
+import { makeChatUploadRouter } from "../src/routes/chatUpload.js";
+import { makeChatListRouter } from "../src/routes/chatList.js";
+import driverDeliveryRoutes from "./routes/driverDelivery.js";
+import  {getDeliveryRideId}  from "./routes/getDeliveryRideId.js";
+import { getBatchAndRideId } from "./routes/getBatchId&RideId.js";
+
+
+// tax and platform rules
+import taxRulesRoutes from "./routes/taxRules.routes.js";
+import platformFeeRulesRoutes from "./routes/platformFeeRules.route.js";
+import pricingRoutes from "./routes/pricing.route.js";
+// finance routes
+import financeRoutes from "./routes/finance.routes.js";
+import refundRoutes from "./routes/refund.routes.js";
+import driverSettlementRoutes from "./routes/drivers.settlement.routes.js";
 
 const app = express();
 
 /* ============================= Middlewares ============================= */
-app.use(cors());
-app.use(express.json());
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    credentials: false,
+  })
+);
+
+app.use(express.json({ limit: "10mb" })); // ✅ allow bigger payloads (chat/meta)
+
+/** serve /uploads/* (for chat images & other assets) */
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 /* ============================== Health ================================ */
-// Basic health checks (for both internal and ingress access)
-app.use((req, _res, next) => {
-  if (req.url.startsWith("/grablike/")) {
-    req.url = req.url.slice("/grablike".length); // "/grablike/api/..." -> "/api/..."
-  } else if (req.url === "/grablike") {
-    req.url = "/";
-  }
-  next();
-});
-
-// Extended MySQL + uptime health check
-app.get(["/health", "/grablike/health"], async (_req, res) => {
-  try {
-    const conn = await mysqlPool.getConnection();
-    await conn.ping();
-    conn.release();
-
-    res.status(200).json({
-      ok: true,
-      service: "grablike-backend",
-      mysql: "connected",
-      uptime_sec: Math.round(process.uptime()),
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err) {
-    res.status(500).json({
-      ok: false,
-      service: "grablike-backend",
-      mysql: "disconnected",
-      error: err.message || String(err),
-    });
-  }
-});
+app.get("/", (_req, res) => res.json({ ok: true }));
 
 /* =============================== Routes =============================== */
 app.use("/api/driver/jobs", driverJobsRouter(mysqlPool));
@@ -73,25 +79,107 @@ app.use("/api/rides/locations", locationsRouter);
 app.use("/api/places", places);
 app.use("/api", makeDriverLookupRouter(mysqlPool));
 app.use("/api/tips", tipsRouter(mysqlPool));
+app.use("/api", userDetailsLookup(mysqlPool));
+app.use("/driver/delivery", driverDeliveryRoutes);
+app.use("/api/settlements", driverSettlementRoutes);
+app.use("/api", rideGroupRoutes);
+app.use("/api", guestWaypointsRouter(mysqlPool));
+
+
+// tax and platform fee rules routes
+app.use("/tax-rules", taxRulesRoutes);
+app.use("/platform-fee-rules", platformFeeRulesRoutes);
+app.use("/pricing", pricingRoutes);
+
+// finance routes
+app.use("/finance", financeRoutes);
+app.use("/finance", refundRoutes);
+
+
+app.use("/api/batch-ride", getBatchAndRideId());
+
+
+
+// chat upload route
+app.use("/chat", makeChatUploadRouter("/uploads"));
 
 /* ========================= HTTP + Socket.IO =========================== */
 const server = http.createServer(app);
 
+// ✅ Smooth + stable Socket.IO config for mobile networks
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: false,
+  },
+
+  // ✅ IMPORTANT: do not force websocket only; allow fallback
+  transports: ["websocket", "polling"],
+
+  // ✅ prevent "ping timeout" when server is busy (Node event-loop stalls)
+  pingInterval: 25000,
+  pingTimeout: 60000,
+
+  // ✅ reduce CPU & latency spikes (especially on high-frequency events)
+  perMessageDeflate: false,
+
+  // ✅ if you send images/chat payloads through socket, avoid buffer errors
+  maxHttpBufferSize: 10 * 1024 * 1024, // 10MB
 });
 
-const adapter = makeOfferAdapter(mysqlPool);
+// Optional: hydrate socket identity from handshake
+// This won't override existing values.
+io.use((socket, next) => {
+  const a = socket.handshake.auth || socket.handshake.query || {};
+
+  try {
+    if (!socket.data.role && (a.role === "driver" || a.role === "passenger" || a.role === "merchant")) {
+      socket.data.role = a.role;
+    }
+    if (socket.data.driver_id == null && a.driver_id != null) {
+      socket.data.driver_id = String(a.driver_id);
+    }
+    if (socket.data.passenger_id == null && a.passenger_id != null) {
+      socket.data.passenger_id = String(a.passenger_id);
+    }
+    if (socket.data.merchant_id == null && a.merchant_id != null) {
+      socket.data.merchant_id = String(a.merchant_id);
+    }
+  } catch {}
+
+  next();
+});
+
+// matcher setup (unchanged)
+const adapter = {
+  ...makeOfferAdapter(mysqlPool),       // your existing logic (if any)
+  ...makeDbOfferAdapter({ mysqlPool }), // adds DB offer-state writes
+};
 configureMatcher(adapter);
 
 // Attach sockets
 initDriverSocket(io, mysqlPool);
 
-// Mount routes that depend on IO
+// Mount routers that need `io` AFTER io is created
 app.use("/rides/match", makeMatchingRouter(io, mysqlPool));
-app.use("/rides", currentRidesRouter);
+app.use("/rides", currentRidesRouter(mysqlPool));
+app.use("/api", makeChatListRouter(mysqlPool));
+app.use("/api/delivery", getDeliveryRideId);
+app.use("/api/scheduled-rides", scheduledRoutes);
 
-/* ============================ MySQL Check ============================= */
+/* ============================ Mongo events ============================ */
+mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
+mongoose.connection.on("error", (err) =>
+  console.error("❌ MongoDB connection error:", err)
+);
+mongoose.connection.on("disconnected", () =>
+  console.warn("⚠ MongoDB disconnected")
+);
+
+startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
+
+/* ============================ MySQL check ============================= */
 async function testMySQLConnection() {
   try {
     const conn = await mysqlPool.getConnection();
@@ -107,17 +195,25 @@ async function testMySQLConnection() {
 /* ============================== Startup =============================== */
 async function startServer() {
   try {
-    await testMySQLConnection();
-
-    const PORT = Number(process.env.PORT || 3000);
-    server.listen(PORT, "0.0.0.0", () => {
-      console.log(`✅ Grablike Backend running on http://0.0.0.0:${PORT}`);
-      console.log(`🩺 Health check available at: /health and /grablike/health`);
+    await mongoose.connect(process.env.MONGO_URI, {
+      // For Mongoose v7+, these options are not required; harmless if left.
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
     });
 
-    // Graceful shutdown
+    await testMySQLConnection();
+
+    const PORT = process.env.PORT || 4000;
+    server.listen(PORT, () => {
+      console.log(`HTTP+WS listening on http://localhost:${PORT}`);
+    });
+
+    // Optional: graceful shutdown
     const shutdown = async (sig) => {
       console.log(`\n${sig} received — shutting down...`);
+      try {
+        await mongoose.disconnect();
+      } catch {}
       try {
         server.close();
       } catch {}

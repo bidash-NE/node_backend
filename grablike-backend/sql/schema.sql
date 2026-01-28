@@ -170,7 +170,6 @@ SELECT
   GREATEST(
     0,
     (de.base_fare_cents + de.time_cents + de.tips_cents)
-      - (COALESCE(pl.platform_fee_cents,0) + COALESCE(pl.tax_cents,0))
   ) AS total_cents
 FROM driver_earnings de
 LEFT JOIN platform_levies pl
@@ -204,6 +203,42 @@ CREATE TABLE platform_fee_rules (
 
   KEY idx_match (country_code, city_id, service_type, trip_type, channel, is_active, starts_at, ends_at)
 );
+CREATE TABLE platform_revenue (
+  revenue_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+
+  source_type ENUM('TRANSPORT','FOOD','MART') NOT NULL,
+  source_id VARCHAR(64) NOT NULL,   -- ride_id / order_id
+
+  gross_amount_cents INT UNSIGNED NOT NULL,   -- before tax
+  tax_cents INT UNSIGNED NOT NULL,             -- GST
+  net_revenue_cents INT UNSIGNED NOT NULL,     -- your real income
+
+  commission_type ENUM('PERCENT','FIXED') NOT NULL,
+  commission_rate_bp INT UNSIGNED DEFAULT 0,   -- for % commissions
+  commission_fixed_cents INT UNSIGNED DEFAULT 0,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE KEY uq_source (source_type, source_id),
+  KEY idx_revenue_date (created_at),
+  KEY idx_source_type (source_type)
+);
+
+CREATE TABLE IF NOT EXISTS ride_pricing_snapshots (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  ride_id BIGINT NOT NULL UNIQUE,
+
+  platform_fee_cents INT NOT NULL,
+  gst_cents INT NOT NULL,
+  total_payable_cents INT NOT NULL,
+  driver_payout_cents INT NOT NULL,
+
+  platform_fee_rule_id BIGINT NULL,
+  tax_rule_id BIGINT NULL,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 
 -- Tax rules (VAT/GST/TDS/etc.)
 CREATE TABLE tax_rules (
@@ -249,6 +284,20 @@ CREATE TABLE IF NOT EXISTS cancellation_rules (
   created_at                        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at                        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS cancellation_levies (
+  levy_id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  ride_id              BIGINT UNSIGNED NOT NULL,
+  booking_id           BIGINT UNSIGNED NULL,
+  fee_cents            INT NOT NULL,
+  driver_share_cents   INT NOT NULL,
+  platform_share_cents INT NOT NULL,
+  stage                VARCHAR(32) NOT NULL,
+  rule_id              BIGINT UNSIGNED NULL,
+  created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_levies_ride (ride_id),
+  KEY idx_levies_booking (booking_id),
+  CONSTRAINT fk_levies_rides FOREIGN KEY (ride_id) REFERENCES rides(ride_id)
+) ENGINE=InnoDB;
 
 -- Sensible defaults:
 -- after 'accepted': Nu 5, split 50/50
@@ -386,5 +435,97 @@ CREATE TABLE IF NOT EXISTS ride_tips (
 );
 
 
+CREATE TABLE IF NOT EXISTS ride_waypoints (
+  ride_id BIGINT NOT NULL,
+  order_index INT NOT NULL,
+  lat DOUBLE NOT NULL,
+  lng DOUBLE NOT NULL,
+  address VARCHAR(255) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (ride_id, order_index),
+  KEY idx_ride (ride_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
+CREATE TABLE settlement_accounts (
+  party_type ENUM('DRIVER','MERCHANT','USER','PARTNER') NOT NULL,
+  party_id   BIGINT UNSIGNED NOT NULL,
+
+  balance_cents BIGINT SIGNED NOT NULL DEFAULT 0, -- + means party owes platform
+  currency CHAR(3) NOT NULL DEFAULT 'BTN',
+
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (party_type, party_id),
+  KEY idx_balance (balance_cents)
+);
+
+
+
+
+CREATE TABLE settlement_ledger (
+  entry_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+
+  party_type ENUM('DRIVER','MERCHANT','USER','PARTNER') NOT NULL,
+  party_id   BIGINT UNSIGNED NOT NULL,
+
+  source_type ENUM('RIDE','FOOD_ORDER','MART_ORDER','PAYOUT','PAYMENT','ADJUSTMENT') NOT NULL,
+  source_id   VARCHAR(64) NOT NULL,
+
+  entry_type ENUM(
+    'PLATFORM_FEE_DUE',          -- + increases debt to platform
+    'TAX_DUE',
+    'DELIVERY_FEE_DUE',
+    'AUTO_DEDUCT',
+    'WALLET_PAYMENT',
+    'MANUAL_PAYMENT',
+    'REFUND_CREDIT',             -- - reduces debt / becomes platform payable
+    'ADJUSTMENT',
+    'REVERSAL'
+  ) NOT NULL,
+
+  amount_cents BIGINT SIGNED NOT NULL, -- + owe platform, - platform owes/paid
+  currency CHAR(3) NOT NULL DEFAULT 'BTN',
+
+  note VARCHAR(255) NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  -- prevents double posting per event
+  UNIQUE KEY uq_post_once (party_type, party_id, source_type, source_id, entry_type),
+  KEY idx_party_date (party_type, party_id, created_at),
+  KEY idx_source (source_type, source_id)
+);
+
+
+-- Invite table (share code / expiry)
+CREATE TABLE IF NOT EXISTS ride_invites (
+  invite_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  ride_id BIGINT UNSIGNED NOT NULL,
+  invite_code VARCHAR(16) NOT NULL,
+  created_by BIGINT UNSIGNED NOT NULL,
+  max_guests TINYINT UNSIGNED DEFAULT 3,
+  expires_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_invite_code (invite_code),
+  KEY idx_ride_id (ride_id)
+);
+
+-- Participants table (host + guests)
+CREATE TABLE IF NOT EXISTS ride_participants (
+  participant_id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  ride_id BIGINT UNSIGNED NOT NULL,
+  user_id BIGINT UNSIGNED NOT NULL,
+  role ENUM('host','guest') NOT NULL,
+  seats TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  join_status ENUM('joined','left','removed') NOT NULL DEFAULT 'joined',
+  joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  UNIQUE KEY uq_ride_user (ride_id, user_id),
+  KEY idx_ride_id (ride_id),
+  KEY idx_user_id (user_id)
+);
+
+ALTER TABLE rides
+  MODIFY booking_type ENUM('INSTANT','SCHEDULED','GROUP')
+  NOT NULL DEFAULT 'INSTANT';
