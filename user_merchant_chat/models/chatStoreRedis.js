@@ -1,22 +1,18 @@
+// File: models/chatStoreRedis.js
 const redis = require("../config/redis");
 
 const K = {
-  orderConv: (orderId) => `chat:order:${orderId}`, // order -> convId
-  convId: () => `chat:conv:id`, // INCR
-  conv: (cid) => `chat:conv:${cid}`, // HASH meta
-  members: (cid) => `chat:conv:${cid}:members`, // SET of "ROLE:ID"
-  msgs: (cid) => `chat:conv:${cid}:msgs`, // STREAM
-  inbox: (role, uid) => `chat:user:${role}:${uid}:inbox`, // ZSET score=ts member=convId
-  unread: (cid) => `chat:conv:${cid}:unread`, // HASH memberKey->count
-  lastread: (cid) => `chat:conv:${cid}:lastread`, // HASH memberKey->streamId
+  orderConv: (orderId) => `chat:order:${orderId}`,
+  convId: () => `chat:conv:id`,
+  conv: (cid) => `chat:conv:${cid}`,
+  members: (cid) => `chat:conv:${cid}:members`,
+  msgs: (cid) => `chat:conv:${cid}:msgs`,
+  inbox: (role, uid) => `chat:user:${role}:${uid}:inbox`,
+  unread: (cid) => `chat:conv:${cid}:unread`,
+  lastread: (cid) => `chat:conv:${cid}:lastread`,
 };
 
 const memberKey = (role, id) => `${role}:${id}`;
-
-async function addMembers(conversationId, members = []) {
-  if (!members.length) return;
-  await redis.sadd(K.members(conversationId), ...members);
-}
 
 async function getOrCreateConversation(
   orderId,
@@ -26,10 +22,11 @@ async function getOrCreateConversation(
 ) {
   const existing = await redis.get(K.orderConv(orderId));
   if (existing) {
-    await addMembers(existing, [
+    await redis.sadd(
+      K.members(existing),
       memberKey(callerRole, callerId),
       ...extraMembers,
-    ]);
+    );
     return existing;
   }
 
@@ -45,10 +42,14 @@ async function getOrCreateConversation(
     lastMsgType: "",
     lastMsgText: "",
     lastMsgMedia: "",
+    customerName: "",
+    merchantBusinessName: "",
+    customerId: "",
+    businessId: "",
   });
   multi.sadd(K.members(cid), memberKey(callerRole, callerId), ...extraMembers);
-
   await multi.exec();
+
   return cid;
 }
 
@@ -59,6 +60,31 @@ async function isMember(conversationId, role, userId) {
       memberKey(role, userId),
     )) === 1
   );
+}
+
+async function setConversationMeta(conversationId, meta = {}) {
+  const clean = {};
+
+  if (meta.customerId != null && String(meta.customerId).trim())
+    clean.customerId = String(meta.customerId).trim();
+  if (meta.businessId != null && String(meta.businessId).trim())
+    clean.businessId = String(meta.businessId).trim();
+
+  if (typeof meta.customerName === "string" && meta.customerName.trim())
+    clean.customerName = meta.customerName.trim();
+  if (
+    typeof meta.merchantBusinessName === "string" &&
+    meta.merchantBusinessName.trim()
+  )
+    clean.merchantBusinessName = meta.merchantBusinessName.trim();
+
+  if (Object.keys(clean).length) {
+    await redis.hset(K.conv(conversationId), clean);
+  }
+}
+
+async function getConversationMeta(conversationId) {
+  return await redis.hgetall(K.conv(conversationId));
 }
 
 async function addMessage(
@@ -93,8 +119,8 @@ async function addMessage(
   });
 
   const members = await redis.smembers(K.members(conversationId));
-
   const multi = redis.multi();
+
   for (const m of members) {
     const [mRole, mId] = m.split(":");
     multi.zadd(K.inbox(mRole, mId), ts, conversationId);
@@ -103,8 +129,8 @@ async function addMessage(
       multi.hincrby(K.unread(conversationId), m, 1);
     }
   }
-  await multi.exec();
 
+  await multi.exec();
   return { streamId, ts };
 }
 
@@ -138,15 +164,16 @@ async function listInbox(role, userId, { limit = 50 } = {}) {
   if (!ids.length) return [];
 
   const me = memberKey(role, userId);
-
   const multi = redis.multi();
+
   for (const cid of ids) {
     multi.hgetall(K.conv(cid));
     multi.hget(K.unread(cid), me);
   }
-  const res = await multi.exec();
 
+  const res = await multi.exec();
   const out = [];
+
   for (let i = 0; i < ids.length; i++) {
     const meta = res[i * 2]?.[1] || {};
     const unread = Number(res[i * 2 + 1]?.[1] || 0);
@@ -159,26 +186,39 @@ async function listInbox(role, userId, { limit = 50 } = {}) {
       last_message_body: meta.lastMsgText || "",
       last_message_media_url: meta.lastMsgMedia || "",
       unread_count: unread,
+
+      customer_id: meta.customerId ? Number(meta.customerId) : null,
+      business_id: meta.businessId ? Number(meta.businessId) : null,
+
+      customer_name: meta.customerName || "",
+      merchant_business_name: meta.merchantBusinessName || "",
     });
   }
+
   return out;
 }
 
 async function markRead(conversationId, role, userId, lastReadStreamId) {
   const me = memberKey(role, userId);
-
   const multi = redis.multi();
   multi.hset(K.lastread(conversationId), me, lastReadStreamId || "");
   multi.hset(K.unread(conversationId), me, 0);
   await multi.exec();
 }
 
+async function getMembers(conversationId) {
+  return await redis.smembers(K.members(conversationId));
+}
+
 module.exports = {
   memberKey,
   getOrCreateConversation,
   isMember,
+  setConversationMeta,
+  getConversationMeta,
   addMessage,
   getMessages,
   listInbox,
   markRead,
+  getMembers,
 };

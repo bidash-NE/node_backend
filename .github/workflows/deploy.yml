@@ -16,6 +16,7 @@ on:
       - "bfs-wallet-backend/**"
       - "grablike-backend/**"
       - "sms-gateway-backend/**"
+      - "user_merchant_chat/**"
       - "k8s/**"
       - ".github/workflows/deploy.yml"
 
@@ -37,6 +38,7 @@ jobs:
       bfs_wallet_backend: ${{ steps.filter.outputs.bfs_wallet_backend }}
       grablike_backend: ${{ steps.filter.outputs.grablike_backend }}
       sms_gateway: ${{ steps.filter.outputs.sms_gateway }}
+      user_merchant_chat: ${{ steps.filter.outputs.user_merchant_chat }}
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +59,7 @@ jobs:
             bfs_wallet_backend:   'bfs-wallet-backend/**'
             grablike_backend:     'grablike-backend/**'
             sms_gateway:          'sms-gateway-backend/**'
+            user_merchant_chat:   'user_merchant_chat/**'
             k8s:                  'k8s/**'
             any:
               - 'food/**'
@@ -71,6 +74,7 @@ jobs:
               - 'bfs-wallet-backend/**'
               - 'grablike-backend/**'
               - 'sms-gateway-backend/**'
+              - 'user_merchant_chat/**'
               - 'k8s/**'
 
   build:
@@ -207,6 +211,16 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:${{ github.sha }}
 
+      - name: Build & push User Merchant Chat
+        if: needs.changes.outputs.user_merchant_chat == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./user_merchant_chat
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:latest
+            ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:${{ github.sha }}
+
   deploy:
     name: Deploy changed services to k3s (prod)
     runs-on: self-hosted
@@ -229,6 +243,7 @@ jobs:
       BFS_WALLET_CHANGED: ${{ needs.changes.outputs.bfs_wallet_backend }}
       GRABLIKE_CHANGED: ${{ needs.changes.outputs.grablike_backend }}
       SMS_GATEWAY_CHANGED: ${{ needs.changes.outputs.sms_gateway }}
+      USER_MERCHANT_CHAT_CHANGED: ${{ needs.changes.outputs.user_merchant_chat }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -297,6 +312,9 @@ jobs:
           fi
           if [ "${SMS_GATEWAY_CHANGED:-}" = "true" ]; then
             deploy_if_exists sms-gateway-backend sms-gateway-backend "${DOCKER_USER}/superapp-sms-gateway-backend:${SHA}"
+          fi
+          if [ "${USER_MERCHANT_CHAT_CHANGED:-}" = "true" ]; then
+            deploy_if_exists user-merchant-chat user-merchant-chat "${DOCKER_USER}/superapp-user-merchant-chat:${SHA}"
           fi
 
           exit 0
