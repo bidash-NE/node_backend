@@ -73,4 +73,4 @@ io.on("connection", (socket) => {
 });
 
 const PORT = Number(process.env.PORT || 4010);
-server.listen(PORT, () => console.log(`chat running on :${PORT}`));
+server.listen(PORT, () => console.log(`chat running on port :${PORT}`));
