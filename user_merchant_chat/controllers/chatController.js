@@ -39,9 +39,20 @@ function getActor(req) {
 }
 
 function buildStoredMediaUrl(req, fieldname, filename) {
-  const rel = upload.toWebPath(fieldname, filename); // /uploads/chat/...
-  const base = process.env.MEDIA_BASE_URL || "";
-  return base ? `${base}${rel}` : rel;
+  // upload.toWebPath("chat_image", file) => "/uploads/chat/<file>"
+  const rel = upload.toWebPath(fieldname, filename);
+
+  // ✅ force chat images to be served under "/chat/uploads/..."
+  // final path: "/chat/uploads/chat/<file>"
+  let out = rel;
+  if (fieldname === "chat_image") {
+    out = `/chat${rel.startsWith("/") ? rel : `/${rel}`}`;
+  }
+
+  // Optional: if you want FULL URL stored in Redis:
+  // set MEDIA_BASE_URL=https://grab.newedge.bt   (NO /chat at end)
+  const base = (process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
+  return base ? `${base}${out}` : out;
 }
 
 function cleanStr(v) {
