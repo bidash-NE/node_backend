@@ -1,3 +1,4 @@
+// File: middlewares/upload.js
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -6,16 +7,10 @@ const fs = require("fs");
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 
-// 🧩 Map field names → subfolders
+// ✅ Only CHAT subfolder
 const SUBFOLDERS = {
-  license_image: "licenses",
-  business_logo: "logos",
-  bank_qr_code_image: "bank_qr",
-
-  // ✅ CHAT
   chat_image: "chat",
-
-  default: "misc",
+  default: "chat",
 };
 
 // 🧱 Ensure a directory exists
@@ -23,10 +18,8 @@ function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-// 🧰 Create all known upload subfolders at startup
-Object.values(SUBFOLDERS).forEach((sub) => {
-  ensureDirSync(path.join(UPLOAD_ROOT, sub));
-});
+// ✅ Ensure chat folder exists at startup
+ensureDirSync(path.join(UPLOAD_ROOT, SUBFOLDERS.chat_image));
 
 // ⚙️ Multer Storage Configuration
 const storage = multer.diskStorage({
@@ -69,7 +62,7 @@ const upload = multer({
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB
-    files: 2,
+    files: 1, // ✅ only one chat_image
   },
 });
 

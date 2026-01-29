@@ -5,25 +5,60 @@ const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
 
+const { createAdapter } = require("@socket.io/redis-adapter");
+const Redis = require("ioredis");
+
 const chatRoutes = require("./routes/chatRoutes");
 const upload = require("./middlewares/upload");
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: "*", credentials: true }));
 
-// serve uploads
+// ✅ serve uploads from BOTH paths (prod safe)
 app.use("/uploads", express.static(upload.UPLOAD_ROOT));
+app.use("/chat/uploads", express.static(upload.UPLOAD_ROOT));
 
-// create server + io
+app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/", (_req, res) =>
+  res.json({ ok: true, service: "user_merchant_chat" }),
+);
+
+// ✅ mount your routes (keep as-is)
+app.use("/chat", chatRoutes);
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
-// make io available inside controllers via req.app.get("io")
+// ✅ IMPORTANT: socket path under /chat (works with ingress pathPrefix /chat)
+const io = new Server(server, {
+  path: "/chat/socket.io",
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["websocket", "polling"],
+});
+
 app.set("io", io);
 
-// ✅ socket join logic (MUST match controller room name)
+// ✅ Redis adapter (works across multiple replicas)
+const REDIS_URL = process.env.REDIS_URL;
+if (!REDIS_URL)
+  console.warn("[socket] REDIS_URL missing (live across pods will NOT work)");
+else {
+  const pubClient = new Redis(REDIS_URL);
+  const subClient = pubClient.duplicate();
+
+  pubClient.on("error", (e) =>
+    console.error("[redis pub] error", e?.message || e),
+  );
+  subClient.on("error", (e) =>
+    console.error("[redis sub] error", e?.message || e),
+  );
+
+  io.adapter(createAdapter(pubClient, subClient));
+  console.log("[socket] redis adapter enabled");
+}
+
+// ✅ join rooms EXACTLY matching controller emit room name
 io.on("connection", (socket) => {
-  console.log("[socket] connected id=", socket.id);
+  console.log("[socket] connected", socket.id);
 
   socket.on("chat:join", ({ conversationId }) => {
     if (!conversationId) return;
@@ -32,34 +67,10 @@ io.on("connection", (socket) => {
     console.log("[socket] join", room, "socket=", socket.id);
   });
 
-  socket.on("chat:leave", ({ conversationId }) => {
-    if (!conversationId) return;
-    const room = `chat:conv:${conversationId}`;
-    socket.leave(room);
-    console.log("[socket] leave", room, "socket=", socket.id);
-  });
-
   socket.on("disconnect", () => {
-    console.log("[socket] disconnected id=", socket.id);
+    console.log("[socket] disconnected", socket.id);
   });
-});
-
-app.get("/", (_req, res) =>
-  res.json({ ok: true, service: "user_merchant_chat is live" }),
-);
-
-// mount routes
-app.use("/chat", chatRoutes);
-
-// error handler
-app.use((err, _req, res, _next) => {
-  console.error("[error]", err?.message || err);
-  res
-    .status(400)
-    .json({ success: false, message: err?.message || "Server error" });
 });
 
 const PORT = Number(process.env.PORT || 4010);
-server.listen(PORT, () =>
-  console.log(`Chat server running on http://localhost:${PORT}`),
-);
+server.listen(PORT, () => console.log(`chat running on :${PORT}`));
