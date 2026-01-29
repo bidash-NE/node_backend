@@ -45,7 +45,7 @@ io.on("connection", (socket) => {
 });
 
 app.get("/", (_req, res) =>
-  res.json({ ok: true, service: "user_merchant_chat" }),
+  res.json({ ok: true, service: "user_merchant_chat is live" }),
 );
 
 // mount routes
