@@ -210,6 +210,84 @@ async function getMembers(conversationId) {
   return await redis.smembers(K.members(conversationId));
 }
 
+// auto delete the chats when the order status == delivered
+async function collectMediaUrls(conversationId) {
+  const key = K.msgs(conversationId);
+  const media = [];
+  const COUNT = 500;
+
+  let start = "-";
+  const end = "+";
+
+  while (true) {
+    const rows = await redis.xrange(key, start, end, "COUNT", COUNT);
+    if (!rows.length) break;
+
+    for (const [id, arr] of rows) {
+      for (let i = 0; i < arr.length; i += 2) {
+        if (arr[i] === "mediaUrl" && arr[i + 1]) media.push(arr[i + 1]);
+      }
+      start = id;
+    }
+
+    start = "(" + start;
+    if (rows.length < COUNT) break;
+  }
+
+  return media;
+}
+
+async function deleteConversationByOrderId(orderId, { deleteFiles } = {}) {
+  const cid = await redis.get(K.orderConv(orderId));
+  if (!cid)
+    return { deleted: false, orderId, message: "No conversation for orderId" };
+
+  const members = await redis.smembers(K.members(cid));
+  const mediaUrls = await collectMediaUrls(cid);
+
+  if (typeof deleteFiles === "function") {
+    await deleteFiles(mediaUrls);
+  }
+
+  const multi = redis.multi();
+
+  for (const m of members) {
+    const [role, id] = m.split(":");
+    multi.zrem(K.inbox(role, id), cid);
+  }
+
+  multi.del(K.msgs(cid));
+  multi.del(K.members(cid));
+  multi.del(K.conv(cid));
+  multi.del(K.unread(cid));
+  multi.del(K.lastread(cid));
+  multi.del(K.orderConv(orderId));
+
+  await multi.exec();
+
+  return {
+    deleted: true,
+    orderId,
+    conversationId: cid,
+    mediaCount: mediaUrls.length,
+  };
+}
+
+async function wasOrderCleaned(orderId) {
+  return (await redis.get(`chat:cleanup:done:${orderId}`)) === "1";
+}
+
+async function markOrderCleaned(orderId, ttlSeconds = 60 * 60 * 24 * 30) {
+  await redis.set(`chat:cleanup:done:${orderId}`, "1", "EX", ttlSeconds);
+}
+
+// ✅ simple distributed lock so only 1 pod runs cleanup loop
+async function tryAcquireCleanupLock(ttlSeconds = 25) {
+  const key = "chat:cleanup:lock";
+  const ok = await redis.set(key, "1", "NX", "EX", ttlSeconds);
+  return ok === "OK";
+}
+
 module.exports = {
   memberKey,
   getOrCreateConversation,
@@ -221,4 +299,9 @@ module.exports = {
   listInbox,
   markRead,
   getMembers,
+  collectMediaUrls,
+  deleteConversationByOrderId,
+  wasOrderCleaned,
+  markOrderCleaned,
+  tryAcquireCleanupLock,
 };
