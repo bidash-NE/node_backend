@@ -60,10 +60,12 @@ app.use(
   }),
 );
 
-app.use(express.json({ limit: "10mb" })); // ✅ allow bigger payloads (chat/meta)
+app.use(express.json({ limit: "10mb" }));
 
-/** serve /uploads/* (for chat images & other assets) */
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+// ✅ IMPORTANT: serve uploads from the same root where multer saves
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+app.use("/uploads", express.static(UPLOAD_ROOT));
 
 /* ============================== Health ================================ */
 app.get("/", (_req, res) => res.json({ ok: true }));
