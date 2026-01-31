@@ -17,13 +17,15 @@ async function migrateDELIVEREDOrdersOnce({
     // Grab a batch of DELIVERED orders still sitting in main tables
     const [rows] = await db.query(
       `
-      SELECT order_id
-        FROM orders
-       WHERE UPPER(status) = 'DELIVERED'
-       ORDER BY updated_at ASC, created_at ASC
-       LIMIT ?
-      `,
-      [batchSize]
+  SELECT order_id
+    FROM orders
+   WHERE UPPER(status) = 'DELIVERED'
+     AND delivered_at IS NOT NULL
+     AND delivered_at <= (NOW() - INTERVAL 30 MINUTE)
+   ORDER BY delivered_at ASC
+   LIMIT ?
+  `,
+      [batchSize],
     );
 
     if (!rows.length) return;
@@ -83,8 +85,8 @@ function startDeliveredMigrationJob({
 
   console.log(
     `✅ Delivered migration job started (every ${Math.round(
-      intervalMs / 1000
-    )}s, batchSize=${batchSize})`
+      intervalMs / 1000,
+    )}s, batchSize=${batchSize})`,
   );
 
   // Optional: graceful stop

@@ -847,117 +847,93 @@ async function updateOrderStatus(req, res) {
     /* =========================================================
        ✅ DELIVERED (unchanged)
        ========================================================= */
+    /* =========================================================
+   ✅ DELIVERED (mark now, archive after 30 mins via job)
+   ========================================================= */
     if (normalized === "DELIVERED") {
       const by =
         String(delivered_by || "SYSTEM")
           .trim()
           .toUpperCase() || "SYSTEM";
 
-      const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
-        delivered_by: by,
-        reason: finalReason,
-        capture_at: CAPTURE_AT,
-      });
+      // update status in main table (NO archive/delete here)
+      const finalReason = String(reason || "").trim();
 
-      if (!out || !out.ok) {
-        if (out?.code === "NOT_FOUND") {
-          return res.status(404).json({ message: "Order not found" });
-        }
-        if (out?.code === "SKIPPED") {
-          return res.status(400).json({
-            message: "Unable to mark this order as delivered.",
-            current_status: out.current_status,
-          });
-        }
-        if (out?.code === "CAPTURE_FAILED") {
-          return res.status(500).json({
-            success: false,
-            message: "Unable to deliver order. Capture failed.",
-            error: out.error || "Capture error",
-          });
-        }
-        return res
-          .status(400)
-          .json({ message: "Unable to mark this order as delivered." });
+      // set status + reason
+      await Order.updateStatus(order_id, "DELIVERED", finalReason);
+
+      // set delivered_at if column exists (safe)
+      try {
+        await db.query(
+          `UPDATE orders
+          SET delivered_at = COALESCE(delivered_at, NOW())
+        WHERE order_id = ?
+        LIMIT 1`,
+          [order_id],
+        );
+      } catch (_) {
+        // ignore if column doesn't exist
       }
 
-      const business_ids = Array.isArray(out.business_ids)
-        ? out.business_ids
-        : [];
+      // get businesses for broadcast/notifications
+      const [bizRows] = await db.query(
+        `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+        [order_id],
+      );
+      const business_ids = bizRows.map((r) => r.business_id);
 
       broadcastOrderStatusToMany({
         order_id,
-        user_id: out.user_id,
+        user_id,
         business_ids,
         status: "DELIVERED",
       });
 
+      // notify merchants
       for (const business_id of business_ids) {
         try {
           await insertAndEmitNotification({
             business_id,
-            user_id: out.user_id,
+            user_id,
             order_id,
             type: "order:status",
             title: `Order #${order_id} DELIVERED`,
             body_preview: finalReason || "Order delivered.",
           });
         } catch (e) {
-          console.error(
-            "[updateOrderStatus DELIVERED notify merchant failed]",
-            { order_id, business_id, err: e?.message },
-          );
+          console.error("[DELIVERED notify merchant failed]", {
+            order_id,
+            business_id,
+            err: e?.message,
+          });
         }
       }
 
+      // notify user (order status)
       try {
         await Order.addUserOrderStatusNotification({
-          user_id: out.user_id,
+          user_id,
           order_id,
           status: "DELIVERED",
           reason: finalReason,
         });
       } catch (e) {
-        console.error("[updateOrderStatus DELIVERED notify user failed]", {
+        console.error("[DELIVERED notify user failed]", {
           order_id,
-          user_id: out.user_id,
+          user_id,
           err: e?.message,
         });
       }
 
-      try {
-        const cap = out?.capture || null;
-        if (
-          cap &&
-          cap.captured &&
-          !cap.skipped &&
-          !cap.alreadyCaptured &&
-          (cap.payment_method === "WALLET" || cap.payment_method === "COD")
-        ) {
-          await Order.addUserWalletDebitNotification({
-            user_id: cap.user_id,
-            order_id,
-            order_amount: cap.order_amount || 0,
-            platform_fee: cap.platform_fee_user || 0,
-            method: cap.payment_method,
-          });
-        }
-      } catch (e) {
-        console.error("[DELIVERED wallet debit notify failed]", e?.message);
-      }
-
       return res.json({
         success: true,
-        message: "Order delivered and archived successfully.",
+        message:
+          "Order marked as delivered. It will be archived after 30 minutes.",
         order_id,
         status: "DELIVERED",
-        points_awarded:
-          out.points && out.points.awarded ? out.points.points_awarded : null,
-        capture: out.capture || null,
-        earnings: out.earnings || null,
+        archive_after_minutes: 30,
       });
     }
-
     /* =========================================================
        ✅ CANCELLED (unchanged)
        ========================================================= */

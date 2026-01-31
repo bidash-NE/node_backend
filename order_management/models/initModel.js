@@ -12,7 +12,7 @@ async function indexExists(table, indexName) {
       AND INDEX_NAME = ?
     LIMIT 1
     `,
-    [table, indexName]
+    [table, indexName],
   );
   return rows.length > 0;
 }
@@ -32,7 +32,7 @@ async function columnExists(table, column) {
       AND COLUMN_NAME = ?
     LIMIT 1
     `,
-    [table, column]
+    [table, column],
   );
   return rows.length > 0;
 }
@@ -52,7 +52,7 @@ async function getColumnDataType(table, column) {
       AND COLUMN_NAME = ?
     LIMIT 1
     `,
-    [table, column]
+    [table, column],
   );
   return rows[0] || null;
 }
@@ -75,7 +75,7 @@ async function tableExists(table) {
       AND TABLE_NAME = ?
     LIMIT 1
     `,
-    [table]
+    [table],
   );
   return rows.length > 0;
 }
@@ -217,13 +217,28 @@ CREATE TABLE IF NOT EXISTS orders (
       "delivery_instruction_note",
       `ALTER TABLE orders ADD COLUMN delivery_instruction_note VARCHAR(256) DEFAULT NULL`,
     ],
+
+    // ✅ existing single url (legacy)
     [
       "delivery_photo_url",
       `ALTER TABLE orders ADD COLUMN delivery_photo_url TEXT NULL`,
     ],
+
+    // ✅ NEW: list of urls (stored as JSON string)
+    [
+      "delivery_photo_urls",
+      `ALTER TABLE orders ADD COLUMN delivery_photo_urls TEXT NULL`,
+    ],
+
     [
       "delivery_special_mode",
       `ALTER TABLE orders ADD COLUMN delivery_special_mode ENUM('DROP_OFF','MEET_UP') DEFAULT NULL`,
+    ],
+
+    // ✅ NEW: store exact time order was marked DELIVERED
+    [
+      "delivered_at",
+      `ALTER TABLE orders ADD COLUMN delivered_at DATETIME NULL`,
     ],
   ];
 
@@ -241,29 +256,29 @@ CREATE TABLE IF NOT EXISTS orders (
         t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
       );
     },
-    `ALTER TABLE orders MODIFY COLUMN delivery_photo_url TEXT NULL`
+    `ALTER TABLE orders MODIFY COLUMN delivery_photo_url TEXT NULL`,
   );
 
   // Ensure indexes exist (idempotent)
   await ensureIndex(
     "orders",
     "idx_orders_user",
-    "CREATE INDEX idx_orders_user ON orders(user_id)"
+    "CREATE INDEX idx_orders_user ON orders(user_id)",
   );
   await ensureIndex(
     "orders",
     "idx_orders_created",
-    "CREATE INDEX idx_orders_created ON orders(created_at)"
+    "CREATE INDEX idx_orders_created ON orders(created_at)",
   );
   await ensureIndex(
     "orders",
     "idx_orders_batch_id",
-    "CREATE INDEX idx_orders_batch_id ON orders(batch_id)"
+    "CREATE INDEX idx_orders_batch_id ON orders(batch_id)",
   );
   await ensureIndex(
     "orders",
     "idx_orders_business_service_created",
-    "CREATE INDEX idx_orders_business_service_created ON orders(business_id, service_type, created_at)"
+    "CREATE INDEX idx_orders_business_service_created ON orders(business_id, service_type, created_at)",
   );
 
   /* -------- Order items -------- */
@@ -288,23 +303,23 @@ CREATE TABLE IF NOT EXISTS order_items (
   await ensureColumn(
     "order_items",
     "platform_fee",
-    `ALTER TABLE order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
+    `ALTER TABLE order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`,
   );
   await ensureColumn(
     "order_items",
     "delivery_fee",
-    `ALTER TABLE order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
+    `ALTER TABLE order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`,
   );
 
   await ensureIndex(
     "order_items",
     "idx_items_order",
-    "CREATE INDEX idx_items_order ON order_items(order_id)"
+    "CREATE INDEX idx_items_order ON order_items(order_id)",
   );
   await ensureIndex(
     "order_items",
     "idx_items_biz_order",
-    "CREATE INDEX idx_items_biz_order ON order_items(business_id, order_id)"
+    "CREATE INDEX idx_items_biz_order ON order_items(business_id, order_id)",
   );
 
   /* -------- Order notification -------- */
@@ -440,7 +455,7 @@ CREATE TABLE IF NOT EXISTS cancelled_orders (
           t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
         );
       },
-      `ALTER TABLE cancelled_orders MODIFY COLUMN delivery_photo_url TEXT NULL`
+      `ALTER TABLE cancelled_orders MODIFY COLUMN delivery_photo_url TEXT NULL`,
     );
   }
 
@@ -604,7 +619,7 @@ CREATE TABLE IF NOT EXISTS delivered_orders (
           t !== "text" && t !== "mediumtext" && t !== "longtext" && t !== "json"
         );
       },
-      `ALTER TABLE delivered_orders MODIFY COLUMN delivery_photo_url TEXT NULL`
+      `ALTER TABLE delivered_orders MODIFY COLUMN delivery_photo_url TEXT NULL`,
     );
   }
 
@@ -642,12 +657,12 @@ CREATE TABLE IF NOT EXISTS delivered_order_items (
     await ensureColumn(
       "delivered_order_items",
       "platform_fee",
-      `ALTER TABLE delivered_order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`
+      `ALTER TABLE delivered_order_items ADD COLUMN platform_fee DECIMAL(10,2) DEFAULT 0`,
     );
     await ensureColumn(
       "delivered_order_items",
       "delivery_fee",
-      `ALTER TABLE delivered_order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`
+      `ALTER TABLE delivered_order_items ADD COLUMN delivery_fee DECIMAL(10,2) DEFAULT 0`,
     );
   }
 
@@ -655,27 +670,27 @@ CREATE TABLE IF NOT EXISTS delivered_order_items (
   await ensureIndex(
     "delivered_orders",
     "idx_delivered_user",
-    "CREATE INDEX idx_delivered_user ON delivered_orders(user_id)"
+    "CREATE INDEX idx_delivered_user ON delivered_orders(user_id)",
   );
   await ensureIndex(
     "delivered_orders",
     "idx_delivered_time",
-    "CREATE INDEX idx_delivered_time ON delivered_orders(delivered_at)"
+    "CREATE INDEX idx_delivered_time ON delivered_orders(delivered_at)",
   );
   await ensureIndex(
     "delivered_orders",
     "idx_delivered_service_created",
-    "CREATE INDEX idx_delivered_service_created ON delivered_orders(service_type, original_created_at)"
+    "CREATE INDEX idx_delivered_service_created ON delivered_orders(service_type, original_created_at)",
   );
   await ensureIndex(
     "delivered_order_items",
     "idx_delivered_items_order",
-    "CREATE INDEX idx_delivered_items_order ON delivered_order_items(order_id)"
+    "CREATE INDEX idx_delivered_items_order ON delivered_order_items(order_id)",
   );
   await ensureIndex(
     "delivered_order_items",
     "idx_delivered_items_biz",
-    "CREATE INDEX idx_delivered_items_biz ON delivered_order_items(business_id)"
+    "CREATE INDEX idx_delivered_items_biz ON delivered_order_items(business_id)",
   );
 
   /* ================= NEW: FOOD/MART REVENUE SNAPSHOT TABLE =================
@@ -797,39 +812,39 @@ CREATE TABLE IF NOT EXISTS food_mart_revenue (
         const t = String(info.DATA_TYPE || "").toLowerCase();
         return t !== "longtext" && t !== "json";
       },
-      `ALTER TABLE food_mart_revenue MODIFY COLUMN details_json LONGTEXT NULL`
+      `ALTER TABLE food_mart_revenue MODIFY COLUMN details_json LONGTEXT NULL`,
     );
 
     // indexes (idempotent)
     await ensureIndex(
       "food_mart_revenue",
       "uk_food_mart_revenue_order",
-      "CREATE UNIQUE INDEX uk_food_mart_revenue_order ON food_mart_revenue(order_id)"
+      "CREATE UNIQUE INDEX uk_food_mart_revenue_order ON food_mart_revenue(order_id)",
     );
     await ensureIndex(
       "food_mart_revenue",
       "idx_fmr_owner_time",
-      "CREATE INDEX idx_fmr_owner_time ON food_mart_revenue(owner_type, placed_at)"
+      "CREATE INDEX idx_fmr_owner_time ON food_mart_revenue(owner_type, placed_at)",
     );
     await ensureIndex(
       "food_mart_revenue",
       "idx_fmr_biz_time",
-      "CREATE INDEX idx_fmr_biz_time ON food_mart_revenue(business_id, placed_at)"
+      "CREATE INDEX idx_fmr_biz_time ON food_mart_revenue(business_id, placed_at)",
     );
     await ensureIndex(
       "food_mart_revenue",
       "idx_fmr_user_time",
-      "CREATE INDEX idx_fmr_user_time ON food_mart_revenue(user_id, placed_at)"
+      "CREATE INDEX idx_fmr_user_time ON food_mart_revenue(user_id, placed_at)",
     );
     await ensureIndex(
       "food_mart_revenue",
       "idx_fmr_source_time",
-      "CREATE INDEX idx_fmr_source_time ON food_mart_revenue(source, placed_at)"
+      "CREATE INDEX idx_fmr_source_time ON food_mart_revenue(source, placed_at)",
     );
   }
 
   console.log(
-    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items*, delivered_orders*, delivered_order_items*, food_mart_revenue are ready (version-safe)."
+    "✅ orders*, order_items, order_notification, order_wallet_captures, cancelled_orders*, cancelled_order_items*, delivered_orders*, delivered_order_items*, food_mart_revenue are ready (version-safe).",
   );
 }
 

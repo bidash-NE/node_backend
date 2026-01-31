@@ -1009,7 +1009,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
       o?.product?.image,
       o?.product?.image_url,
       o?.product?.imageUrl,
-      fallback
+      fallback,
     );
 
   const conn = await db.getConnection();
@@ -1026,7 +1026,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
         `DELETE FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bid, mid]
+        [order_id, bid, mid],
       );
     }
 
@@ -1043,7 +1043,7 @@ async function applyUnavailableItemChanges(order_id, changes) {
         `SELECT * FROM order_items
           WHERE order_id = ? AND business_id = ? AND menu_id = ?
           LIMIT 1`,
-        [order_id, bidOld, midOld]
+        [order_id, bidOld, midOld],
       );
       if (!rows.length) continue;
 
@@ -1062,10 +1062,14 @@ async function applyUnavailableItemChanges(order_id, changes) {
 
       // qty/price/subtotal
       const qty = numOr(neu?.quantity ?? neu?.qty ?? neu?.count, row.quantity);
-      const price = numOr(neu?.price ?? neu?.unit_price ?? neu?.unitPrice, row.price);
+      const price = numOr(
+        neu?.price ?? neu?.unit_price ?? neu?.unitPrice,
+        row.price,
+      );
 
       // if subtotal not provided, recompute
-      const subtotalRaw = neu?.subtotal ?? neu?.line_subtotal ?? neu?.lineSubtotal;
+      const subtotalRaw =
+        neu?.subtotal ?? neu?.line_subtotal ?? neu?.lineSubtotal;
       const subtotal =
         subtotalRaw !== undefined && subtotalRaw !== null && subtotalRaw !== ""
           ? numOr(subtotalRaw, row.subtotal)
@@ -1091,20 +1095,21 @@ async function applyUnavailableItemChanges(order_id, changes) {
           qty,
           price,
           subtotal,
-          row.item_id
-        ]
+          row.item_id,
+        ],
       );
     }
 
     await conn.commit();
   } catch (e) {
-    try { await conn.rollback(); } catch {}
+    try {
+      await conn.rollback();
+    } catch {}
     throw e;
   } finally {
     conn.release();
   }
 }
-
 
 /* ================= CANCELLED ARCHIVE HELPERS ================= */
 async function tableExists(table, conn = null) {
@@ -2108,34 +2113,38 @@ async function completeAndArchiveDeliveredOrder(
   }
 
   // -------- helper: insert into food_mart_revenue (idempotent) --------
-async function insertFoodMartRevenueWithConn(conn, row) {
-  const [t] = await conn.query(
-    `
+  async function insertFoodMartRevenueWithConn(conn, row) {
+    const [t] = await conn.query(
+      `
     SELECT 1
       FROM INFORMATION_SCHEMA.TABLES
      WHERE TABLE_SCHEMA = DATABASE()
        AND TABLE_NAME = 'food_mart_revenue'
      LIMIT 1
-    `
-  );
+    `,
+    );
 
-  if (!t.length) {
-    const [[d]] = await conn.query("SELECT DATABASE() AS db");
-    console.log("[FMR] table not found in db:", d?.db);
-    return;
-  }
+    if (!t.length) {
+      const [[d]] = await conn.query("SELECT DATABASE() AS db");
+      console.log("[FMR] table not found in db:", d?.db);
+      return;
+    }
 
-  const ownerType = String(row.owner_type || "FOOD").trim().toUpperCase();
-  if (!["FOOD", "MART"].includes(ownerType)) {
-    throw new Error(`[FMR] invalid owner_type: ${ownerType}`);
-  }
+    const ownerType = String(row.owner_type || "FOOD")
+      .trim()
+      .toUpperCase();
+    if (!["FOOD", "MART"].includes(ownerType)) {
+      throw new Error(`[FMR] invalid owner_type: ${ownerType}`);
+    }
 
-  const source = String(row.source || "delivered").trim().toLowerCase();
-  if (!["orders", "cancelled", "delivered"].includes(source)) {
-    throw new Error(`[FMR] invalid source: ${source}`);
-  }
+    const source = String(row.source || "delivered")
+      .trim()
+      .toLowerCase();
+    if (!["orders", "cancelled", "delivered"].includes(source)) {
+      throw new Error(`[FMR] invalid source: ${source}`);
+    }
 
-  const sql = `
+    const sql = `
     INSERT INTO food_mart_revenue
     (
       order_id, user_id, business_id, owner_type, source,
@@ -2165,31 +2174,31 @@ async function insertFoodMartRevenueWithConn(conn, row) {
       details_json   = VALUES(details_json)
   `;
 
-  await conn.query(sql, [
-    String(row.order_id).trim(),
-    Number(row.user_id),
-    Number(row.business_id),
-    ownerType,
-    source,
+    await conn.query(sql, [
+      String(row.order_id).trim(),
+      Number(row.user_id),
+      Number(row.business_id),
+      ownerType,
+      source,
 
-    row.status || null,
-    row.placed_at || null,
-    row.payment_method || null,
+      row.status || null,
+      row.placed_at || null,
+      row.payment_method || null,
 
-    Number(row.total_amount || 0),
-    Number(row.platform_fee || 0),
-    Number(row.revenue_earned || 0),
-    Number(row.tax || 0),
+      Number(row.total_amount || 0),
+      Number(row.platform_fee || 0),
+      Number(row.revenue_earned || 0),
+      Number(row.tax || 0),
 
-    row.customer_name || null,
-    row.customer_phone || null,
-    row.business_name || null,
+      row.customer_name || null,
+      row.customer_phone || null,
+      row.business_name || null,
 
-    row.items_summary || null,
-    Number(row.total_quantity || 0),
-    row.details_json || null,
-  ]);
-}
+      row.items_summary || null,
+      Number(row.total_quantity || 0),
+      row.details_json || null,
+    ]);
+  }
 
   // ✅ Prefetch wallet txn ids OUTSIDE transaction (avoids locks while doing HTTP)
   let payMethodForPrefetch = null;
@@ -2286,11 +2295,23 @@ async function insertFoodMartRevenueWithConn(conn, row) {
     if (CAPTURE_AT === "DELIVERED") {
       try {
         if (payMethod === "WALLET") {
-          capture = await captureOrderFundsWithConn(conn, order_id, prefetchedIds);
+          capture = await captureOrderFundsWithConn(
+            conn,
+            order_id,
+            prefetchedIds,
+          );
         } else if (payMethod === "COD") {
-          capture = await captureOrderCODFeeWithConn(conn, order_id, prefetchedIds);
+          capture = await captureOrderCODFeeWithConn(
+            conn,
+            order_id,
+            prefetchedIds,
+          );
         } else {
-          capture = { captured: false, skipped: true, payment_method: payMethod };
+          capture = {
+            captured: false,
+            skipped: true,
+            payment_method: payMethod,
+          };
         }
       } catch (e) {
         await conn.rollback();
@@ -2305,7 +2326,9 @@ async function insertFoodMartRevenueWithConn(conn, row) {
     /* =========================================================
        ✅ INSERT merchant_earnings (idempotent)
        ========================================================= */
-    const deliveredAt = new Date();
+    const deliveredAt = order?.delivered_at
+      ? new Date(order.delivered_at)
+      : new Date();
     try {
       await insertMerchantEarningWithConn(conn, {
         business_id: split.business_id,
@@ -2348,7 +2371,9 @@ async function insertFoodMartRevenueWithConn(conn, row) {
       );
       const businessName =
         (mbd?.business_name && String(mbd.business_name).trim()) ||
-        (items?.[0]?.business_name ? String(items[0].business_name).trim() : null) ||
+        (items?.[0]?.business_name
+          ? String(items[0].business_name).trim()
+          : null) ||
         `Business ${split.business_id}`;
 
       // items summary
@@ -2457,7 +2482,11 @@ async function insertFoodMartRevenueWithConn(conn, row) {
     try {
       pointsInfo = await awardPointsForCompletedOrderWithConn(conn, order_id);
     } catch (e) {
-      pointsInfo = { awarded: false, reason: "points_error", error: e?.message };
+      pointsInfo = {
+        awarded: false,
+        reason: "points_error",
+        error: e?.message,
+      };
     }
 
     /* ================= archive into delivered_* (unchanged) ================= */
@@ -2499,7 +2528,6 @@ async function insertFoodMartRevenueWithConn(conn, row) {
     conn.release();
   }
 }
-
 
 /* ================= OPTIONAL: CAPTURE ON ACCEPT (✅ NEW helper) ================= */
 // Call this from your "accept/confirm order" controller if you want deduction on accept.
