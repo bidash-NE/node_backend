@@ -1,11 +1,15 @@
 import smpp from "smpp";
-import { config } from "../config.js";
 import { parseDlrText } from "./dlr.js";
 import { updateBySmppMessageId } from "../db/messages.repo.js";
 
 export class SmppClient {
-  constructor({ logger }) {
-    this.log = logger;
+  constructor({ logger, smppConfig }) {
+    if (!smppConfig) throw new Error("smppConfig is required for SmppClient");
+
+    const providerName = smppConfig.id || smppConfig.provider || "smpp";
+    this.log = logger?.child ? logger.child({ smppProvider: providerName }) : logger;
+    this.name = providerName;
+    this.cfg = smppConfig;
 
     this.session = null;
     this.connected = false;
@@ -16,7 +20,7 @@ export class SmppClient {
     this.reconnectTimer = null;
 
     // throughput throttle (tokens refill per second)
-    this.maxMps = config.smpp.maxMps;
+    this.maxMps = Number(smppConfig.maxMps || 10);
     this.tokens = this.maxMps;
     this.lastRefill = Date.now();
   }
@@ -51,11 +55,11 @@ export class SmppClient {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this._connect();
-    }, config.smpp.reconnectMs);
+    }, this.cfg.reconnectMs);
   }
 
   _connect() {
-    const { host, port } = config.smpp;
+    const { host, port } = this.cfg;
     this.log.info({ host, port }, "Connecting to SMPP...");
 
     try {
@@ -125,7 +129,7 @@ export class SmppClient {
     if (!this.session || this.binding) return;
     this.binding = true;
 
-    const { systemId, password, systemType, interfaceVersion } = config.smpp;
+    const { systemId, password, systemType, interfaceVersion } = this.cfg;
 
     this.session.bind_transceiver(
       {
@@ -159,7 +163,7 @@ export class SmppClient {
       } catch (err) {
         this.log.error({ err }, "enquire_link error");
       }
-    }, config.smpp.enquireLinkMs);
+    }, this.cfg.enquireLinkMs);
   }
 
   _clearEnquire() {
@@ -191,7 +195,7 @@ export class SmppClient {
 
     await this._takeToken();
 
-    const sender = from || config.smpp.defaultSenderId;
+    const sender = from || this.cfg.defaultSenderId;
     const dest = String(to).trim();
     const body = String(text);
 
