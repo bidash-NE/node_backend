@@ -236,7 +236,7 @@ async function startServer() {
 
     // Optional: graceful shutdown
     const shutdown = async (sig) => {
-      console.log(`\n${sig} received — shutting down...`);
+      console.log(`\n${sig} received — shutting down.....`);
       try {
         await mongoose.disconnect();
       } catch {}
