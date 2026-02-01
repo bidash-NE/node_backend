@@ -70,6 +70,25 @@ app.use("/uploads", express.static(UPLOAD_ROOT));
 /* ============================== Health ================================ */
 app.get("/", (_req, res) => res.json({ ok: true }));
 
+// ✅ richer health endpoint (shows mongo readiness)
+app.get("/health", (_req, res) => {
+  const rs = mongoose.connection.readyState; // 0,1,2,3
+  const mongoState =
+    rs === 1
+      ? "connected"
+      : rs === 2
+        ? "connecting"
+        : rs === 3
+          ? "disconnecting"
+          : "disconnected";
+
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    mongo: { readyState: rs, state: mongoState },
+  });
+});
+
 /* =============================== Routes =============================== */
 app.use("/api/driver/jobs", driverJobsRouter(mysqlPool));
 app.use("/api/driver", earningsRouter(mysqlPool));
@@ -169,15 +188,13 @@ app.use("/api/delivery", getDeliveryRideId);
 app.use("/api/scheduled-rides", scheduledRoutes);
 
 /* ============================ Mongo events ============================ */
-// mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
-// mongoose.connection.on("error", (err) =>
-//   console.error("❌ MongoDB connection error:", err)
-// );
-// mongoose.connection.on("disconnected", () =>
-//   console.warn("⚠ MongoDB disconnected")
-// );
-
-startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
+mongoose.connection.on("connected", () => console.log("✅ MongoDB connected"));
+mongoose.connection.on("error", (err) =>
+  console.error("❌ MongoDB connection error:", err),
+);
+mongoose.connection.on("disconnected", () =>
+  console.warn("⚠ MongoDB disconnected"),
+);
 
 /* ============================ MySQL check ============================= */
 async function testMySQLConnection() {
@@ -195,18 +212,27 @@ async function testMySQLConnection() {
 /* ============================== Startup =============================== */
 async function startServer() {
   try {
-    // await mongoose.connect(process.env.MONGO_URI, {
-    //   // For Mongoose v7+, these options are not required; harmless if left.
-    //   useNewUrlParser: true,
-    //   useUnifiedTopology: true,
-    // });
+    // ✅ connect Mongo first so any mongo usage won't buffer/time out
+    const MONGO_URI = process.env.MONGO_URI;
+    if (!MONGO_URI) {
+      console.warn("⚠ MONGO_URI not set — Mongo features may fail");
+    } else {
+      await mongoose.connect(MONGO_URI, {
+        serverSelectionTimeoutMS: 10000,
+      });
+    }
 
+    // ✅ Then check MySQL
     await testMySQLConnection();
 
+    // ✅ Start HTTP server
     const PORT = process.env.PORT || 4000;
     server.listen(PORT, () => {
       console.log(`HTTP+WS listening on http://localhost:${PORT}`);
     });
+
+    // ✅ Start workers AFTER DB connections are ready
+    startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
 
     // Optional: graceful shutdown
     const shutdown = async (sig) => {
