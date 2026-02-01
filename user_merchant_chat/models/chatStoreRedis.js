@@ -10,16 +10,16 @@ const K = {
   inbox: (role, uid) => `chat:user:${role}:${uid}:inbox`,
   unread: (cid) => `chat:conv:${cid}:unread`,
   lastread: (cid) => `chat:conv:${cid}:lastread`,
+
+  // ✅ NEW: business inbox (merchant list uses this)
+  bizInbox: (businessId) => `chat:business:${businessId}:inbox`,
 };
 
 const memberKey = (role, id) => `${role}:${id}`;
 
-async function getOrCreateConversation(
-  orderId,
-  callerRole,
-  callerId,
-  extraMembers = [],
-) {
+/* ===================== conversation ===================== */
+
+async function getOrCreateConversation(orderId, callerRole, callerId, extraMembers = []) {
   const existing = await redis.get(K.orderConv(orderId));
   if (existing) {
     await redis.sadd(
@@ -55,11 +55,18 @@ async function getOrCreateConversation(
 
 async function isMember(conversationId, role, userId) {
   return (
-    (await redis.sismember(
-      K.members(conversationId),
-      memberKey(role, userId),
-    )) === 1
+    (await redis.sismember(K.members(conversationId), memberKey(role, userId))) === 1
   );
+}
+
+/**
+ * ✅ NEW: link a conversation into the business inbox (ZSET)
+ * score should be a timestamp so newest is on top.
+ */
+async function linkConversationToBusiness(conversationId, businessId, scoreTs = Date.now()) {
+  const bid = String(businessId || "").trim();
+  if (!bid) return;
+  await redis.zadd(K.bizInbox(bid), Number(scoreTs || Date.now()), String(conversationId));
 }
 
 async function setConversationMeta(conversationId, meta = {}) {
@@ -72,14 +79,16 @@ async function setConversationMeta(conversationId, meta = {}) {
 
   if (typeof meta.customerName === "string" && meta.customerName.trim())
     clean.customerName = meta.customerName.trim();
-  if (
-    typeof meta.merchantBusinessName === "string" &&
-    meta.merchantBusinessName.trim()
-  )
+  if (typeof meta.merchantBusinessName === "string" && meta.merchantBusinessName.trim())
     clean.merchantBusinessName = meta.merchantBusinessName.trim();
 
   if (Object.keys(clean).length) {
     await redis.hset(K.conv(conversationId), clean);
+  }
+
+  // ✅ If businessId is being set, ensure business inbox contains this conversation
+  if (clean.businessId) {
+    await linkConversationToBusiness(conversationId, clean.businessId, Date.now());
   }
 }
 
@@ -87,10 +96,9 @@ async function getConversationMeta(conversationId) {
   return await redis.hgetall(K.conv(conversationId));
 }
 
-async function addMessage(
-  conversationId,
-  { senderRole, senderId, type, text, mediaUrl },
-) {
+/* ===================== messages ===================== */
+
+async function addMessage(conversationId, { senderRole, senderId, type, text, mediaUrl }) {
   const ts = Date.now();
 
   const streamId = await redis.xadd(
@@ -110,7 +118,7 @@ async function addMessage(
     String(ts),
   );
 
-  const lastText = type === "TEXT" ? text || "" : text ? text : "[image]";
+  const lastText = type === "TEXT" ? (text || "") : text ? text : "[image]";
   await redis.hset(K.conv(conversationId), {
     lastMsgAt: String(ts),
     lastMsgType: type,
@@ -118,9 +126,17 @@ async function addMessage(
     lastMsgMedia: mediaUrl || "",
   });
 
+  // ✅ NEW: keep business inbox ordering up to date based on last message time
+  const meta = await redis.hgetall(K.conv(conversationId));
+  const businessId = meta?.businessId ? String(meta.businessId).trim() : "";
+  if (businessId) {
+    await linkConversationToBusiness(conversationId, businessId, ts);
+  }
+
   const members = await redis.smembers(K.members(conversationId));
   const multi = redis.multi();
 
+  // existing per-user inbox/unread logic
   for (const m of members) {
     const [mRole, mId] = m.split(":");
     multi.zadd(K.inbox(mRole, mId), ts, conversationId);
@@ -136,14 +152,9 @@ async function addMessage(
 
 async function getMessages(conversationId, { limit = 30, beforeId = null }) {
   const end = beforeId ? beforeId : "+";
-  const rows = await redis.xrevrange(
-    K.msgs(conversationId),
-    end,
-    "-",
-    "COUNT",
-    limit,
-  );
+  const rows = await redis.xrevrange(K.msgs(conversationId), end, "-", "COUNT", limit);
 
+  // NOTE: xrevrange returns newest-first; client sorts if needed
   return rows.map(([id, arr]) => {
     const o = {};
     for (let i = 0; i < arr.length; i += 2) o[arr[i]] = arr[i + 1];
@@ -198,6 +209,50 @@ async function listInbox(role, userId, { limit = 50 } = {}) {
   return out;
 }
 
+/**
+ * ✅ NEW: list conversations for a business (merchant list)
+ * Uses ZSET chat:business:<businessId>:inbox
+ */
+async function listBusinessInbox(businessId, { limit = 50 } = {}) {
+  const bid = String(businessId || "").trim();
+  if (!bid) return [];
+
+  const ids = await redis.zrevrange(K.bizInbox(bid), 0, limit - 1);
+  if (!ids.length) return [];
+
+  const multi = redis.multi();
+  for (const cid of ids) {
+    multi.hgetall(K.conv(cid));
+  }
+  const res = await multi.exec();
+
+  const out = [];
+  for (let i = 0; i < ids.length; i++) {
+    const meta = res[i]?.[1] || {};
+
+    out.push({
+      conversation_id: ids[i],
+      order_id: meta.orderId || "",
+      last_message_at: Number(meta.lastMsgAt || 0),
+      last_message_type: meta.lastMsgType || "",
+      last_message_body: meta.lastMsgText || "",
+      last_message_media_url: meta.lastMsgMedia || "",
+
+      // business-level list cannot know “per merchant user unread”
+      // your UI can hide badge or show 0
+      unread_count: 0,
+
+      customer_id: meta.customerId ? Number(meta.customerId) : null,
+      business_id: meta.businessId ? Number(meta.businessId) : null,
+
+      customer_name: meta.customerName || "",
+      merchant_business_name: meta.merchantBusinessName || "",
+    });
+  }
+
+  return out;
+}
+
 async function markRead(conversationId, role, userId, lastReadStreamId) {
   const me = memberKey(role, userId);
   const multi = redis.multi();
@@ -210,7 +265,8 @@ async function getMembers(conversationId) {
   return await redis.smembers(K.members(conversationId));
 }
 
-// auto delete the chats when the order status == delivered
+/* ===================== cleanup (kept as your original) ===================== */
+
 async function collectMediaUrls(conversationId) {
   const key = K.msgs(conversationId);
   const media = [];
@@ -249,11 +305,19 @@ async function deleteConversationByOrderId(orderId, { deleteFiles } = {}) {
     await deleteFiles(mediaUrls);
   }
 
+  const meta = await redis.hgetall(K.conv(cid));
+  const businessId = meta?.businessId ? String(meta.businessId).trim() : "";
+
   const multi = redis.multi();
 
   for (const m of members) {
     const [role, id] = m.split(":");
     multi.zrem(K.inbox(role, id), cid);
+  }
+
+  // ✅ remove from business inbox too
+  if (businessId) {
+    multi.zrem(K.bizInbox(businessId), cid);
   }
 
   multi.del(K.msgs(cid));
@@ -281,7 +345,6 @@ async function markOrderCleaned(orderId, ttlSeconds = 60 * 60 * 24 * 30) {
   await redis.set(`chat:cleanup:done:${orderId}`, "1", "EX", ttlSeconds);
 }
 
-// ✅ simple distributed lock so only 1 pod runs cleanup loop
 async function tryAcquireCleanupLock(ttlSeconds = 25) {
   const key = "chat:cleanup:lock";
   const ok = await redis.set(key, "1", "NX", "EX", ttlSeconds);
@@ -290,15 +353,28 @@ async function tryAcquireCleanupLock(ttlSeconds = 25) {
 
 module.exports = {
   memberKey,
+
   getOrCreateConversation,
   isMember,
   setConversationMeta,
   getConversationMeta,
+
+  // messages
   addMessage,
   getMessages,
+
+  // inboxes
   listInbox,
+  listBusinessInbox,
+  linkConversationToBusiness,
+
+  // reads
   markRead,
+
+  // misc
   getMembers,
+
+  // cleanup
   collectMediaUrls,
   deleteConversationByOrderId,
   wasOrderCleaned,

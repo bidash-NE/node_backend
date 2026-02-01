@@ -1,12 +1,7 @@
 // File: controllers/chatController.js
-// ✅ users.user_id + users.profile_image
-// ✅ merchant_business_details.business_id + business_logo
-// ✅ business id hint: x-business-id OR ?business_id=
-// ✅ emits live socket event chat:new_message to room chat:conv:<conversationId>
-//
-// ✅ UPDATED: chat creation can work with just customer_id + business_id
-// - merchant_id is OPTIONAL (derived from business_id if not provided)
-// - customer_id is OPTIONAL (falls back to actor id if actor is CUSTOMER)
+// ✅ Updated listConversations:
+// - CUSTOMER lists by x-user-id
+// - MERCHANT lists by x-business-id only (no x-user-id required for listing)
 
 const store = require("../models/chatStoreRedis");
 const upload = require("../middlewares/upload");
@@ -15,17 +10,12 @@ const upload = require("../middlewares/upload");
 const dbMod = require("../config/db");
 const db =
   (dbMod && typeof dbMod.query === "function" && dbMod) ||
-  (dbMod &&
-    dbMod.pool &&
-    typeof dbMod.pool.query === "function" &&
-    dbMod.pool) ||
+  (dbMod && dbMod.pool && typeof dbMod.pool.query === "function" && dbMod.pool) ||
   null;
 
 if (!db) {
   console.error("[DB] Invalid export from config/db.js ->", dbMod);
-  throw new Error(
-    "DB pool not initialized. config/db.js must export mysql pool.",
-  );
+  throw new Error("DB pool not initialized. config/db.js must export mysql pool.");
 }
 
 function ts() {
@@ -35,35 +25,60 @@ function log(...a) {
   console.log(`[${ts()}]`, ...a);
 }
 
-function getActor(req) {
+function cleanStr(v) {
+  return (v ?? "").toString().trim();
+}
+
+/* ==================== ACTOR PARSERS ==================== */
+
+// CUSTOMER must have x-user-id
+function getCustomerActor(req) {
+  const role = String(req.headers["x-user-type"] || "").toUpperCase();
+  if (role !== "CUSTOMER") return null;
+
+  const id = Number(req.headers["x-user-id"] || 0);
+  if (!id) return null;
+
+  return { role: "CUSTOMER", id };
+}
+
+// MERCHANT listing uses business_id (no x-user-id required for list)
+function getMerchantBusinessId(req) {
+  const role = String(req.headers["x-user-type"] || "").toUpperCase();
+  if (role !== "MERCHANT") return null;
+
+  const bid =
+    Number(req.headers["x-business-id"] || 0) ||
+    Number(req.query.business_id || 0) ||
+    0;
+
+  return bid ? String(bid) : null;
+}
+
+// For other endpoints (messages / read) you can keep strict actor check:
+function getActorStrict(req) {
   const role = String(req.headers["x-user-type"] || "").toUpperCase();
   const id = Number(req.headers["x-user-id"] || 0);
   if (!["CUSTOMER", "MERCHANT"].includes(role) || !id) return null;
   return { role, id };
 }
 
+/* ==================== MEDIA URL BUILDER ==================== */
+
 function buildStoredMediaUrl(req, fieldname, filename) {
-  // upload.toWebPath("chat_image", file) => "/uploads/chat/<file>"
   const rel = upload.toWebPath(fieldname, filename);
 
-  // ✅ force chat images to be served under "/chat/uploads/..."
-  // final path: "/chat/uploads/chat/<file>"
+  // ✅ force chat images served under "/chat/uploads/..."
   let out = rel;
   if (fieldname === "chat_image") {
     out = `/chat${rel.startsWith("/") ? rel : `/${rel}`}`;
   }
 
-  // Optional: store FULL URL in Redis:
-  // set MEDIA_BASE_URL=https://grab.newedge.bt   (NO /chat at end)
   const base = (process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
   return base ? `${base}${out}` : out;
 }
 
-function cleanStr(v) {
-  return (v ?? "").toString().trim();
-}
-
-/* ---------------- DB fetchers ---------------- */
+/* ==================== DB FETCHERS (for enrichment) ==================== */
 
 async function fetchUsersByIds(userIds) {
   const ids = [...new Set((userIds || []).filter(Boolean).map(Number))];
@@ -80,12 +95,10 @@ async function fetchUsersByIds(userIds) {
   const map = new Map();
   for (const r of rows) {
     const uid = Number(r.user_id);
-    const name = cleanStr(r.display_name);
-    const profile_image = cleanStr(r.profile_image);
-    log(
-      `[db] users.user_id=${uid} name="${name}" profile_image="${profile_image}"`,
-    );
-    map.set(uid, { name, profile_image });
+    map.set(uid, {
+      name: cleanStr(r.display_name),
+      profile_image: cleanStr(r.profile_image),
+    });
   }
   return map;
 }
@@ -105,20 +118,17 @@ async function fetchBusinessesByIds(businessIds) {
   const map = new Map();
   for (const r of rows) {
     const bid = Number(r.business_id);
-    const business_name = cleanStr(r.business_name);
-    const business_logo = cleanStr(r.business_logo);
-    log(
-      `[db] business_id=${bid} business_name="${business_name}" business_logo="${business_logo}"`,
-    );
-    map.set(bid, { business_name, business_logo });
+    map.set(bid, {
+      business_name: cleanStr(r.business_name),
+      business_logo: cleanStr(r.business_logo),
+    });
   }
   return map;
 }
 
 /**
- * ✅ Derive merchant user id from business_id
- * Tries common column names without schema changes.
- * If your table uses a different column, add it to variants below.
+ * ✅ Derive merchant user id from business_id (used only for conversation creation)
+ * Adjust column names if needed.
  */
 async function fetchMerchantIdByBusinessId(businessId) {
   const bid = Number(businessId || 0);
@@ -130,11 +140,6 @@ async function fetchMerchantIdByBusinessId(businessId) {
     `SELECT owner_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
     `SELECT merchant_user_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
     `SELECT owner_user_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
-    `SELECT created_by AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
-
-    // fallback if you keep mapping elsewhere
-    `SELECT merchant_id AS mid FROM merchants WHERE business_id=? LIMIT 1`,
-    `SELECT user_id AS mid FROM merchants WHERE business_id=? LIMIT 1`,
   ];
 
   for (const sql of sqlVariants) {
@@ -153,14 +158,14 @@ async function fetchMerchantIdByBusinessId(businessId) {
   return null;
 }
 
-/* ---------------- controllers ---------------- */
+/* ==================== CONTROLLERS ==================== */
 
 // POST /chat/conversations/order/:orderId
-// Body (new preferred): { customer_id, business_id }
-// Optional: { merchant_id } (kept backward compatible)
+// Body preferred: { customer_id, business_id }  (merchant_id optional)
+// ✅ Adds conversation to business inbox immediately so merchant can list by business_id
 exports.getOrCreateConversationForOrder = async (req, res) => {
   try {
-    const actor = getActor(req);
+    const actor = getActorStrict(req);
     if (!actor) {
       return res
         .status(401)
@@ -169,14 +174,9 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
 
     const orderId = String(req.params.orderId || "").trim();
     if (!orderId) {
-      return res
-        .status(400)
-        .json({ success: false, message: "orderId required" });
+      return res.status(400).json({ success: false, message: "orderId required" });
     }
 
-    // ✅ accept just customer_id + business_id
-    // - customer_id optional: if actor is CUSTOMER, default to actor.id
-    // - merchant_id optional: derived from business_id if not provided
     let customerId = Number(req.body?.customer_id || 0) || null;
     const businessId = Number(req.body?.business_id || 0) || null;
     let merchantId = Number(req.body?.merchant_id || 0) || null;
@@ -184,24 +184,9 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
     if (!customerId && actor.role === "CUSTOMER") customerId = actor.id;
     if (!merchantId && actor.role === "MERCHANT") merchantId = actor.id;
 
-    // Derive merchantId from businessId only if still missing
     if (!merchantId && businessId) {
       merchantId = await fetchMerchantIdByBusinessId(businessId);
-      if (!merchantId) {
-        log("[chat] WARN: could not derive merchantId from businessId", {
-          businessId,
-          orderId,
-        });
-      }
     }
-
-    log("[chat] startChat", {
-      actor,
-      orderId,
-      customerId,
-      merchantId,
-      businessId,
-    });
 
     const extraMembers = [];
     if (customerId) extraMembers.push(store.memberKey("CUSTOMER", customerId));
@@ -214,8 +199,15 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
       extraMembers,
     );
 
+    // store meta
     await store.setConversationMeta(cid, { customerId, businessId });
 
+    // ✅ ensure business inbox gets this conversation right away
+    if (businessId) {
+      await store.linkConversationToBusiness(cid, String(businessId), Date.now());
+    }
+
+    // enrich
     const [usersMap, bizMap] = await Promise.all([
       fetchUsersByIds(customerId ? [customerId] : []),
       fetchBusinessesByIds(businessId ? [businessId] : []),
@@ -240,8 +232,6 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
       businessId,
     });
 
-    log("[chat] startChat meta return =", meta);
-
     return res.json({
       success: true,
       conversation_id: cid,
@@ -250,101 +240,91 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
     });
   } catch (e) {
     log("[chat] startChat ERROR:", e.message);
-    return res
-      .status(500)
-      .json({ success: false, message: e.message || "Server error" });
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };
 
-// GET /chat/conversations
+// ✅ GET /chat/conversations
+// CUSTOMER -> uses x-user-id
+// MERCHANT -> uses x-business-id only
 exports.listConversations = async (req, res) => {
   try {
-    const actor = getActor(req);
-    if (!actor) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Missing x-user-type / x-user-id" });
-    }
+    const role = String(req.headers["x-user-type"] || "").toUpperCase();
 
-    const businessIdHint =
-      Number(req.headers["x-business-id"] || 0) ||
-      Number(req.query.business_id || 0) ||
-      null;
-
-    log(
-      "[chat] listConversations actor=",
-      actor,
-      "businessIdHint=",
-      businessIdHint,
-    );
-
-    const rows = await store.listInbox(actor.role, actor.id, { limit: 50 });
-
-    // If MERCHANT passes business_id and some convs don't have it yet, backfill it now
-    if (actor.role === "MERCHANT" && businessIdHint) {
-      for (const r of rows) {
-        if (!r.business_id) {
-          r.business_id = businessIdHint;
-          await store.setConversationMeta(r.conversation_id, {
-            businessId: businessIdHint,
-          });
-          log(
-            `[chat] backfilled conv=${r.conversation_id} business_id=${businessIdHint}`,
-          );
-        }
+    // CUSTOMER: list by user inbox
+    if (role === "CUSTOMER") {
+      const actor = getCustomerActor(req);
+      if (!actor) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Missing x-user-type=CUSTOMER / x-user-id" });
       }
+
+      const rows = await store.listInbox("CUSTOMER", actor.id, { limit: 50 });
+
+      // enrich for customer (optional)
+      const bizIds = [...new Set(rows.map((r) => r.business_id).filter(Boolean))];
+      const [bizMap] = await Promise.all([fetchBusinessesByIds(bizIds)]);
+
+      const out = rows.map((r) => {
+        const b = r.business_id ? bizMap.get(r.business_id) : null;
+        return {
+          ...r,
+          merchant_business_name: b?.business_name || r.merchant_business_name || "",
+          merchant_business_logo: b?.business_logo || "",
+        };
+      });
+
+      return res.json({ success: true, rows: out });
     }
 
-    const userIds = [
-      ...new Set(rows.map((r) => r.customer_id).filter(Boolean)),
-    ];
-    const bizIds = [...new Set(rows.map((r) => r.business_id).filter(Boolean))];
+    // MERCHANT: list by business inbox (no x-user-id required)
+    if (role === "MERCHANT") {
+      const businessId = getMerchantBusinessId(req);
+      if (!businessId) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Missing x-user-type=MERCHANT / x-business-id" });
+      }
 
-    log(
-      "[chat] listConversations will fetch userIds=",
-      userIds,
-      "bizIds=",
-      bizIds,
-    );
+      const rows = await store.listBusinessInbox(String(businessId), { limit: 50 });
 
-    const [usersMap, bizMap] = await Promise.all([
-      fetchUsersByIds(userIds),
-      fetchBusinessesByIds(bizIds),
-    ]);
+      // enrich: fetch customer names + business logo
+      const userIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean))];
+      const bizIds = [...new Set(rows.map((r) => r.business_id).filter(Boolean))];
 
-    const out = rows.map((r) => {
-      const u = r.customer_id ? usersMap.get(r.customer_id) : null;
-      const b = r.business_id ? bizMap.get(r.business_id) : null;
+      const [usersMap, bizMap] = await Promise.all([
+        fetchUsersByIds(userIds),
+        fetchBusinessesByIds(bizIds),
+      ]);
 
-      const item = {
-        ...r,
-        customer_name: u?.name || r.customer_name || "",
-        merchant_business_name:
-          b?.business_name || r.merchant_business_name || "",
-        customer_profile_image: u?.profile_image || "",
-        merchant_business_logo: b?.business_logo || "",
-      };
+      const out = rows.map((r) => {
+        const u = r.customer_id ? usersMap.get(r.customer_id) : null;
+        const b = r.business_id ? bizMap.get(r.business_id) : null;
 
-      log(
-        `[chat] inbox conv=${item.conversation_id} business_id=${item.business_id || ""} customer_profile_image="${item.customer_profile_image}" merchant_business_logo="${item.merchant_business_logo}"`,
-      );
+        return {
+          ...r,
+          customer_name: u?.name || r.customer_name || "",
+          customer_profile_image: u?.profile_image || "",
+          merchant_business_name: b?.business_name || r.merchant_business_name || "",
+          merchant_business_logo: b?.business_logo || "",
+        };
+      });
 
-      return item;
-    });
+      return res.json({ success: true, rows: out });
+    }
 
-    return res.json({ success: true, rows: out });
+    return res.status(401).json({ success: false, message: "Missing x-user-type" });
   } catch (e) {
     log("[chat] listConversations ERROR:", e.message);
-    return res
-      .status(500)
-      .json({ success: false, message: e.message || "Server error" });
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };
 
-// GET /chat/messages/:conversationId
+// GET /chat/messages/:conversationId  (unchanged; still strict membership by user)
 exports.getMessages = async (req, res) => {
   try {
-    const actor = getActor(req);
+    const actor = getActorStrict(req);
     if (!actor) {
       return res
         .status(401)
@@ -356,9 +336,7 @@ exports.getMessages = async (req, res) => {
     const beforeId = req.query.beforeId ? String(req.query.beforeId) : null;
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
-    if (!ok) {
-      return res.status(403).json({ success: false, message: "Not allowed" });
-    }
+    if (!ok) return res.status(403).json({ success: false, message: "Not allowed" });
 
     const businessIdHint =
       Number(req.headers["x-business-id"] || 0) ||
@@ -369,16 +347,11 @@ exports.getMessages = async (req, res) => {
     let customerId = metaR.customerId ? Number(metaR.customerId) : null;
     let businessId = metaR.businessId ? Number(metaR.businessId) : null;
 
-    log(
-      `[chat] getMessages conv=${conversationId} meta businessId=${businessId || ""} hint=${businessIdHint || ""}`,
-    );
-
+    // backfill businessId if merchant provided it
     if (!businessId && actor.role === "MERCHANT" && businessIdHint) {
       businessId = businessIdHint;
       await store.setConversationMeta(conversationId, { businessId });
-      log(
-        `[chat] getMessages backfilled businessId=${businessIdHint} for conv=${conversationId}`,
-      );
+      await store.linkConversationToBusiness(conversationId, String(businessIdHint), Date.now());
     }
 
     const [usersMap, bizMap] = await Promise.all([
@@ -393,31 +366,23 @@ exports.getMessages = async (req, res) => {
       customerId,
       businessId,
       customerName: u?.name || metaR.customerName || "",
-      merchantBusinessName:
-        b?.business_name || metaR.merchantBusinessName || "",
+      merchantBusinessName: b?.business_name || metaR.merchantBusinessName || "",
       customer_profile_image: u?.profile_image || "",
       merchant_business_logo: b?.business_logo || "",
     };
 
-    log(
-      `[chat] getMessages conv=${conversationId} customer_profile_image="${meta.customer_profile_image}" merchant_business_logo="${meta.merchant_business_logo}"`,
-    );
-
     const rows = await store.getMessages(conversationId, { limit, beforeId });
-
     return res.json({ success: true, meta, rows });
   } catch (e) {
     log("[chat] getMessages ERROR:", e.message);
-    return res
-      .status(500)
-      .json({ success: false, message: e.message || "Server error" });
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };
 
-// POST /chat/messages/:conversationId
+// POST /chat/messages/:conversationId (unchanged except: business inbox touch is handled in store.addMessage)
 exports.sendMessage = async (req, res) => {
   try {
-    const actor = getActor(req);
+    const actor = getActorStrict(req);
     if (!actor) {
       return res
         .status(401)
@@ -429,9 +394,7 @@ exports.sendMessage = async (req, res) => {
     const hasImage = !!req.file;
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
-    if (!ok) {
-      return res.status(403).json({ success: false, message: "Not allowed" });
-    }
+    if (!ok) return res.status(403).json({ success: false, message: "Not allowed" });
 
     if (!text && !hasImage) {
       return res
@@ -445,9 +408,6 @@ exports.sendMessage = async (req, res) => {
     if (hasImage) {
       type = "IMAGE";
       mediaUrl = buildStoredMediaUrl(req, "chat_image", req.file.filename);
-      log(
-        `[chat] uploaded chat_image path="${req.file.path}" media_url="${mediaUrl}"`,
-      );
     }
 
     const { streamId, ts: tsMs } = await store.addMessage(conversationId, {
@@ -469,52 +429,37 @@ exports.sendMessage = async (req, res) => {
     };
 
     const io = req.app.get("io");
-    log("[chat] io exists?", !!io);
-
     if (io) {
       const room = `chat:conv:${conversationId}`;
-      log("[chat] emitting chat:new_message to", room);
       io.to(room).emit("chat:new_message", { conversationId, message });
     }
 
     return res.json({ success: true, message });
   } catch (e) {
     log("[chat] sendMessage ERROR:", e.message);
-    return res
-      .status(500)
-      .json({ success: false, message: e.message || "Server error" });
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };
 
-// POST /chat/read/:conversationId
+// POST /chat/read/:conversationId (unchanged)
 exports.markRead = async (req, res) => {
   try {
-    const actor = getActor(req);
-    if (!actor) {
+    const actor = getActorStrict(req);
+    if (!actor)
       return res
         .status(401)
         .json({ success: false, message: "Missing x-user-type / x-user-id" });
-    }
 
     const conversationId = String(req.params.conversationId || "");
     const lastReadMessageId = String(req.body?.lastReadMessageId || "");
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
-    if (!ok) {
-      return res.status(403).json({ success: false, message: "Not allowed" });
-    }
+    if (!ok) return res.status(403).json({ success: false, message: "Not allowed" });
 
-    await store.markRead(
-      conversationId,
-      actor.role,
-      actor.id,
-      lastReadMessageId,
-    );
+    await store.markRead(conversationId, actor.role, actor.id, lastReadMessageId);
     return res.json({ success: true });
   } catch (e) {
     log("[chat] markRead ERROR:", e.message);
-    return res
-      .status(500)
-      .json({ success: false, message: e.message || "Server error" });
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };

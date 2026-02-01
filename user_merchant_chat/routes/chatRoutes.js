@@ -24,13 +24,18 @@ function maybeUploadSingle(field) {
   };
 }
 
+// create/get conversation for order
 router.post(
   "/conversations/order/:orderId",
   express.json(),
   chat.getOrCreateConversationForOrder,
 );
 
+// ✅ LIST CONVERSATIONS
+// - CUSTOMER uses x-user-id
+// - MERCHANT uses x-business-id (or ?business_id=)
 router.get("/conversations", chat.listConversations);
+
 router.get("/messages/:conversationId", chat.getMessages);
 
 router.post(
