@@ -3,6 +3,10 @@
 // ✅ merchant_business_details.business_id + business_logo
 // ✅ business id hint: x-business-id OR ?business_id=
 // ✅ emits live socket event chat:new_message to room chat:conv:<conversationId>
+//
+// ✅ UPDATED: chat creation can work with just customer_id + business_id
+// - merchant_id is OPTIONAL (derived from business_id if not provided)
+// - customer_id is OPTIONAL (falls back to actor id if actor is CUSTOMER)
 
 const store = require("../models/chatStoreRedis");
 const upload = require("../middlewares/upload");
@@ -49,7 +53,7 @@ function buildStoredMediaUrl(req, fieldname, filename) {
     out = `/chat${rel.startsWith("/") ? rel : `/${rel}`}`;
   }
 
-  // Optional: if you want FULL URL stored in Redis:
+  // Optional: store FULL URL in Redis:
   // set MEDIA_BASE_URL=https://grab.newedge.bt   (NO /chat at end)
   const base = (process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
   return base ? `${base}${out}` : out;
@@ -111,27 +115,85 @@ async function fetchBusinessesByIds(businessIds) {
   return map;
 }
 
+/**
+ * ✅ Derive merchant user id from business_id
+ * Tries common column names without schema changes.
+ * If your table uses a different column, add it to variants below.
+ */
+async function fetchMerchantIdByBusinessId(businessId) {
+  const bid = Number(businessId || 0);
+  if (!bid) return null;
+
+  const sqlVariants = [
+    `SELECT merchant_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+    `SELECT user_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+    `SELECT owner_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+    `SELECT merchant_user_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+    `SELECT owner_user_id AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+    `SELECT created_by AS mid FROM merchant_business_details WHERE business_id=? LIMIT 1`,
+
+    // fallback if you keep mapping elsewhere
+    `SELECT merchant_id AS mid FROM merchants WHERE business_id=? LIMIT 1`,
+    `SELECT user_id AS mid FROM merchants WHERE business_id=? LIMIT 1`,
+  ];
+
+  for (const sql of sqlVariants) {
+    try {
+      const [rows] = await db.query(sql, [bid]);
+      const mid = Number(rows?.[0]?.mid || 0);
+      if (mid) return mid;
+      return null;
+    } catch (e) {
+      if (String(e.code) === "ER_BAD_FIELD_ERROR") continue;
+      if (String(e.code) === "ER_NO_SUCH_TABLE") continue;
+      throw e;
+    }
+  }
+
+  return null;
+}
+
 /* ---------------- controllers ---------------- */
 
 // POST /chat/conversations/order/:orderId
-// Body: { customer_id, merchant_id, business_id }
+// Body (new preferred): { customer_id, business_id }
+// Optional: { merchant_id } (kept backward compatible)
 exports.getOrCreateConversationForOrder = async (req, res) => {
   try {
     const actor = getActor(req);
-    if (!actor)
+    if (!actor) {
       return res
         .status(401)
         .json({ success: false, message: "Missing x-user-type / x-user-id" });
+    }
 
     const orderId = String(req.params.orderId || "").trim();
-    if (!orderId)
+    if (!orderId) {
       return res
         .status(400)
         .json({ success: false, message: "orderId required" });
+    }
 
-    const customerId = Number(req.body?.customer_id || 0) || null;
-    const merchantId = Number(req.body?.merchant_id || 0) || null;
+    // ✅ accept just customer_id + business_id
+    // - customer_id optional: if actor is CUSTOMER, default to actor.id
+    // - merchant_id optional: derived from business_id if not provided
+    let customerId = Number(req.body?.customer_id || 0) || null;
     const businessId = Number(req.body?.business_id || 0) || null;
+    let merchantId = Number(req.body?.merchant_id || 0) || null;
+
+    if (!customerId && actor.role === "CUSTOMER") customerId = actor.id;
+    if (!merchantId && actor.role === "MERCHANT") merchantId = actor.id;
+
+    // Derive merchantId from businessId only if still missing
+    if (!merchantId && businessId) {
+      merchantId = await fetchMerchantIdByBusinessId(businessId);
+      if (!merchantId) {
+        log("[chat] WARN: could not derive merchantId from businessId", {
+          businessId,
+          orderId,
+        });
+      }
+    }
 
     log("[chat] startChat", {
       actor,
@@ -198,10 +260,11 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
 exports.listConversations = async (req, res) => {
   try {
     const actor = getActor(req);
-    if (!actor)
+    if (!actor) {
       return res
         .status(401)
         .json({ success: false, message: "Missing x-user-type / x-user-id" });
+    }
 
     const businessIdHint =
       Number(req.headers["x-business-id"] || 0) ||
@@ -355,18 +418,20 @@ exports.getMessages = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   try {
     const actor = getActor(req);
-    if (!actor)
+    if (!actor) {
       return res
         .status(401)
         .json({ success: false, message: "Missing x-user-type / x-user-id" });
+    }
 
     const conversationId = String(req.params.conversationId || "");
     const text = String(req.body?.body || "").trim();
     const hasImage = !!req.file;
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
-    if (!ok)
+    if (!ok) {
       return res.status(403).json({ success: false, message: "Not allowed" });
+    }
 
     if (!text && !hasImage) {
       return res
@@ -425,17 +490,19 @@ exports.sendMessage = async (req, res) => {
 exports.markRead = async (req, res) => {
   try {
     const actor = getActor(req);
-    if (!actor)
+    if (!actor) {
       return res
         .status(401)
         .json({ success: false, message: "Missing x-user-type / x-user-id" });
+    }
 
     const conversationId = String(req.params.conversationId || "");
     const lastReadMessageId = String(req.body?.lastReadMessageId || "");
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
-    if (!ok)
+    if (!ok) {
       return res.status(403).json({ success: false, message: "Not allowed" });
+    }
 
     await store.markRead(
       conversationId,
