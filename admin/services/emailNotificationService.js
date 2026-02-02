@@ -176,7 +176,7 @@ Regards,
 ${brandName}${supportEmail ? `\n${supportEmail}` : ""}${appUrl ? `\n${appUrl}` : ""}
 
 ---
-This is an automated message. Please do not reply to this email.${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
+${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
 `.trim();
 
     // ✅ Professional HTML
@@ -238,7 +238,6 @@ This is an automated message. Please do not reply to this email.${notificationId
           </p>
 
           <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;line-height:1.5;">
-            This is an automated message. Please do not reply to this email.
             ${
               notificationId
                 ? `<br/>Reference ID: <span style="font-family:monospace;">${escapeHtml(
