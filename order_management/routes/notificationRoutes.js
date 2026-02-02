@@ -62,14 +62,16 @@ const validBusinessId = (req, res, next) => {
     .json({ success: false, message: "Invalid businessId" });
 };
 
+const UUID_RX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const validNotificationId = (req, res, next) => {
-  const id = Number(req.params.notificationId);
-  if (Number.isFinite(id) && id > 0) return next();
+  const id = String(req.params.notificationId || "").trim();
+  if (UUID_RX.test(id)) return next();
   return res
     .status(400)
     .json({ success: false, message: "Invalid notificationId" });
 };
-
 /**
  * List notifications for a business (with pagination and unread filter)
  * GET /api/notifications/business/:businessId?limit=50&offset=0&unreadOnly=true
