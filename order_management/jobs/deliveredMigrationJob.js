@@ -8,23 +8,35 @@ let _running = false;
 async function migrateDELIVEREDOrdersOnce({
   batchSize = Number(process.env.DELIVERED_MIGRATION_BATCH || 50),
   delivered_by = "SYSTEM",
-  reason = "Successsfully delivered",
+  reason = "Successfully delivered",
 } = {}) {
   if (_running) return;
   _running = true;
 
   try {
-    // Grab a batch of DELIVERED orders still sitting in main tables
+    // ✅ Only migrate orders that:
+    // - status = DELIVERED
+    // - delivered_at older than 30 mins
+    // - AND if WALLET/COD => capture record exists (so migration never blocks on capture)
     const [rows] = await db.query(
       `
-  SELECT order_id
-    FROM orders
-   WHERE UPPER(status) = 'DELIVERED'
-     AND delivered_at IS NOT NULL
-     AND delivered_at <= (NOW() - INTERVAL 30 MINUTE)
-   ORDER BY delivered_at ASC
-   LIMIT ?
-  `,
+      SELECT o.order_id
+        FROM orders o
+        LEFT JOIN order_wallet_captures cw
+          ON cw.order_id = o.order_id AND cw.capture_type = 'WALLET_FULL'
+        LEFT JOIN order_wallet_captures cc
+          ON cc.order_id = o.order_id AND cc.capture_type = 'COD_FEE'
+       WHERE UPPER(o.status) = 'DELIVERED'
+         AND o.delivered_at IS NOT NULL
+         AND o.delivered_at <= (NOW() - INTERVAL 30 MINUTE)
+         AND (
+           (UPPER(o.payment_method) = 'WALLET' AND cw.order_id IS NOT NULL) OR
+           (UPPER(o.payment_method) = 'COD'    AND cc.order_id IS NOT NULL) OR
+           (UPPER(o.payment_method) NOT IN ('WALLET','COD'))
+         )
+       ORDER BY o.delivered_at ASC
+       LIMIT ?
+      `,
       [batchSize],
     );
 
@@ -32,21 +44,21 @@ async function migrateDELIVEREDOrdersOnce({
 
     for (const r of rows) {
       const order_id = r.order_id;
+
       try {
-        // This will:
-        // - ensure status=DELIVERED
-        // - archive to delivered_*
-        // - delete from orders + order_items
-        // - trim delivered to latest 10 for that user (if you added it there)
+        // ✅ IMPORTANT:
+        // Skip capture during migration — capture already happened at delivery.
         const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
           delivered_by,
           reason,
+          capture_at: "SKIP", // anything != "DELIVERED"
         });
 
         if (!out?.ok) {
           console.log("[DELIVERED MIGRATION] skipped:", {
             order_id,
             code: out?.code,
+            error: out?.error,
             current_status: out?.current_status,
           });
         } else {

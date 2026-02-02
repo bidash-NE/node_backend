@@ -845,10 +845,7 @@ async function updateOrderStatus(req, res) {
       .toUpperCase();
 
     /* =========================================================
-       ✅ DELIVERED (unchanged)
-       ========================================================= */
-    /* =========================================================
-   ✅ DELIVERED (mark now, archive after 30 mins via job)
+   ✅ DELIVERED: mark now + capture now + archive later (30 mins job)
    ========================================================= */
     if (normalized === "DELIVERED") {
       const by =
@@ -856,32 +853,61 @@ async function updateOrderStatus(req, res) {
           .trim()
           .toUpperCase() || "SYSTEM";
 
-      // update status in main table (NO archive/delete here)
       const finalReason = String(reason || "").trim();
 
-      // set status + reason
+      // 1) Mark delivered in main table
       await Order.updateStatus(order_id, "DELIVERED", finalReason);
 
-      // set delivered_at if column exists (safe)
+      // 2) Set delivered_at once (used for 30-min migration)
       try {
         await db.query(
           `UPDATE orders
-          SET delivered_at = COALESCE(delivered_at, NOW())
+          SET delivered_at = COALESCE(delivered_at, NOW()),
+              updated_at = NOW()
         WHERE order_id = ?
         LIMIT 1`,
           [order_id],
         );
-      } catch (_) {
-        // ignore if column doesn't exist
+      } catch (e) {
+        console.error("[DELIVERED delivered_at update failed]", e?.message);
       }
 
-      // get businesses for broadcast/notifications
+      // 3) Try CAPTURE immediately (so migration won't be blocked later)
+      //    NOTE: idempotent because your capture functions check order_wallet_captures
+      let captureNow = null;
+      let captureFailed = null;
+
+      try {
+        if (payMethod === "WALLET") {
+          captureNow = await Order.captureOrderFunds(order_id);
+        } else if (payMethod === "COD") {
+          captureNow = await Order.captureOrderCODFee(order_id);
+        } else {
+          captureNow = {
+            captured: false,
+            skipped: true,
+            payment_method: payMethod,
+          };
+        }
+      } catch (e) {
+        captureFailed = e?.message || "Capture failed";
+        console.error("[DELIVERED CAPTURE FAILED]", {
+          order_id,
+          err: captureFailed,
+        });
+
+        // Important: we DO NOT rollback delivery status.
+        // The 30-min migration job will only migrate WALLET/COD orders if capture exists.
+      }
+
+      // 4) Get businesses for broadcast/notifications
       const [bizRows] = await db.query(
         `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
         [order_id],
       );
       const business_ids = bizRows.map((r) => r.business_id);
 
+      // 5) Broadcast delivered
       broadcastOrderStatusToMany({
         order_id,
         user_id,
@@ -889,7 +915,7 @@ async function updateOrderStatus(req, res) {
         status: "DELIVERED",
       });
 
-      // notify merchants
+      // 6) Notify merchants
       for (const business_id of business_ids) {
         try {
           await insertAndEmitNotification({
@@ -909,7 +935,7 @@ async function updateOrderStatus(req, res) {
         }
       }
 
-      // notify user (order status)
+      // 7) Notify user (order status)
       try {
         await Order.addUserOrderStatusNotification({
           user_id,
@@ -925,15 +951,44 @@ async function updateOrderStatus(req, res) {
         });
       }
 
+      // 8) If capture succeeded, optionally notify wallet debit (your existing pattern)
+      //    Only do for actual captured transfers
+      try {
+        if (
+          captureNow &&
+          captureNow.captured &&
+          !captureNow.skipped &&
+          !captureNow.alreadyCaptured &&
+          (payMethod === "WALLET" || payMethod === "COD")
+        ) {
+          // WALLET: order_amount + platform_fee_user
+          // COD: only platform_fee_user (order_amount is 0)
+          await Order.addUserWalletDebitNotification({
+            user_id,
+            order_id,
+            order_amount: captureNow.order_amount || 0,
+            platform_fee: captureNow.platform_fee_user || 0,
+            method: payMethod,
+          });
+        }
+      } catch (e) {
+        console.error("[DELIVERED wallet debit notify failed]", e?.message);
+      }
+
       return res.json({
         success: true,
-        message:
-          "Order marked as delivered. It will be archived after 30 minutes.",
+        message: captureFailed
+          ? "Order marked as delivered, but capture failed. It will not be archived until capture succeeds."
+          : "Order marked as delivered. It will be archived after 30 minutes.",
         order_id,
         status: "DELIVERED",
+        delivered_by: by,
         archive_after_minutes: 30,
+        capture: captureNow || null,
+        capture_error: captureFailed || null,
       });
     }
+
     /* =========================================================
        ✅ CANCELLED (unchanged)
        ========================================================= */
