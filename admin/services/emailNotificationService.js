@@ -10,17 +10,25 @@ const {
   SMTP_FROM = "",
   SMTP_INSECURE_TLS = "false",
   EMAIL_CONCURRENCY = "10", // ✅ tune this (10–20 recommended for Gmail)
+
+  // ✅ Optional (for nicer/professional emails)
+  BRAND_NAME = "TabDhey",
+  SUPPORT_EMAIL = "", // e.g. support@tabdhey.bt
+  APP_URL = "", // e.g. https://tabdhey.bt (adds button)
+  BRAND_COLOR = "#0b7a3b", // header/button color
 } = process.env;
 
 const host = String(SMTP_HOST).trim();
 const port = Number(String(SMTP_PORT).trim() || 587);
 const user = String(SMTP_USER).trim();
 const pass = String(SMTP_PASS).trim();
+
 const from =
-  (SMTP_FROM && String(SMTP_FROM).trim()) || (user ? `TabDhey <${user}>` : "");
+  (SMTP_FROM && String(SMTP_FROM).trim()) ||
+  (user ? `${String(BRAND_NAME || "TabDhey").trim()} <${user}>` : "");
 
 const insecureTls = ["true", "1", "yes", "y"].includes(
-  String(SMTP_INSECURE_TLS).trim().toLowerCase()
+  String(SMTP_INSECURE_TLS).trim().toLowerCase(),
 );
 
 const isConfigured = Boolean(host && user && pass);
@@ -66,13 +74,14 @@ async function sendNotificationEmails({
   roles,
   recipients, // ✅ NEW (optional)
 }) {
+  const brandName = String(BRAND_NAME || "TabDhey").trim();
   const safeTitle = String(title || "System Notification").trim();
   const safeMessage = String(message || "").trim();
-  const subject = `TabDhey Notification: ${safeTitle}`;
+  const subject = `${brandName} Notification: ${safeTitle}`;
 
   if (!isConfigured || !transporter) {
     throw new Error(
-      "SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing)"
+      "SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing)",
     );
   }
 
@@ -87,10 +96,10 @@ async function sendNotificationEmails({
           .map((e) =>
             String(e || "")
               .trim()
-              .toLowerCase()
+              .toLowerCase(),
           )
-          .filter(Boolean)
-      )
+          .filter(Boolean),
+      ),
     );
 
     users = uniq.map((email, i) => ({
@@ -115,7 +124,7 @@ async function sendNotificationEmails({
 
     const [dbUsers] = await db.query(
       sql,
-      roles.map((r) => String(r).trim())
+      roles.map((r) => String(r).trim()),
     );
 
     if (!dbUsers.length) {
@@ -127,15 +136,22 @@ async function sendNotificationEmails({
 
   const concurrency = Math.max(
     1,
-    Math.min(30, Number(EMAIL_CONCURRENCY) || 10)
+    Math.min(30, Number(EMAIL_CONCURRENCY) || 10),
   );
+
+  const year = new Date().getFullYear();
+  const brandColor = String(BRAND_COLOR || "#0b7a3b").trim();
+  const supportEmail = String(SUPPORT_EMAIL || "").trim();
+  const appUrl = String(APP_URL || "").trim();
 
   // build jobs
   const jobs = users.map((u) => async () => {
     const to = String(u.email || "")
       .trim()
       .toLowerCase();
+
     const name = String(u.user_name || "Valued User").trim();
+    const greetingName = name && name !== "Valued User" ? name : "there";
 
     if (!isValidEmail(to)) {
       return {
@@ -146,26 +162,103 @@ async function sendNotificationEmails({
       };
     }
 
+    // ✅ Professional plain text
     const text = `
-Dear ${name},
+${brandName} Notification
+
+Hello ${greetingName},
 
 ${safeTitle}
 
 ${safeMessage}
 
-This is an automated message from TabDhey Admin.
-Everything at your door step!
-TabDhey
+Regards,
+${brandName}${supportEmail ? `\n${supportEmail}` : ""}${appUrl ? `\n${appUrl}` : ""}
+
+---
+This is an automated message. Please do not reply to this email.${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
 `.trim();
 
+    // ✅ Professional HTML
     const html = `
-<div style="font-family: Arial, sans-serif; line-height: 1.6;">
-  <p>Dear ${escapeHtml(name)},</p>
-  <h3 style="margin:0 0 8px 0;">${escapeHtml(safeTitle)}</h3>
-  <p style="white-space: pre-line;">${escapeHtml(safeMessage)}</p>
-  <hr />
-  <p style="font-size:12px;color:#777;">This is an automated message from TabDhey Admin.</p>
-  <p><b>Everything at your door step!</b><br/>TabDhey</p>
+<div style="margin:0;padding:0;background:#f6f8fb;">
+  <div style="max-width:640px;margin:0 auto;padding:24px 16px;">
+    <div style="background:#ffffff;border:1px solid #e6eaf0;border-radius:12px;overflow:hidden;">
+      
+      <!-- Header -->
+      <div style="padding:18px 22px;background:${escapeHtml(brandColor)};">
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#ffffff;font-weight:700;">
+          ${escapeHtml(brandName)}
+        </div>
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#e9f5ee;margin-top:4px;">
+          Notification
+        </div>
+      </div>
+
+      <!-- Body -->
+      <div style="padding:22px;">
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;line-height:1.6;">
+          <p style="margin:0 0 12px 0;">Hello ${escapeHtml(greetingName)},</p>
+
+          <p style="margin:0 0 10px 0;font-size:16px;font-weight:700;color:#111827;">
+            ${escapeHtml(safeTitle)}
+          </p>
+
+          <div style="margin:0 0 16px 0;color:#374151;white-space:pre-line;">
+            ${escapeHtml(safeMessage)}
+          </div>
+
+          ${
+            appUrl
+              ? `
+          <div style="margin:18px 0 8px 0;">
+            <a href="${escapeHtml(appUrl)}"
+               style="display:inline-block;padding:10px 14px;border-radius:10px;background:${escapeHtml(
+                 brandColor,
+               )};color:#ffffff;text-decoration:none;font-size:14px;font-weight:700;">
+              Open ${escapeHtml(brandName)}
+            </a>
+          </div>
+          `
+              : ""
+          }
+
+          <hr style="border:none;border-top:1px solid #e6eaf0;margin:18px 0;" />
+
+          <p style="margin:0;color:#111827;">
+            Regards,<br/>
+            <b>${escapeHtml(brandName)} Team</b>
+            ${
+              supportEmail
+                ? `<br/><span style="color:#6b7280;font-size:12px;">Support: ${escapeHtml(
+                    supportEmail,
+                  )}</span>`
+                : ""
+            }
+          </p>
+
+          <p style="margin:14px 0 0 0;color:#6b7280;font-size:12px;line-height:1.5;">
+            This is an automated message. Please do not reply to this email.
+            ${
+              notificationId
+                ? `<br/>Reference ID: <span style="font-family:monospace;">${escapeHtml(
+                    notificationId,
+                  )}</span>`
+                : ""
+            }
+          </p>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div style="padding:14px 22px;background:#f9fafb;border-top:1px solid #e6eaf0;">
+        <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#6b7280;">
+          © ${year} ${escapeHtml(brandName)}. All rights reserved.
+        </div>
+      </div>
+
+    </div>
+  </div>
 </div>
 `.trim();
 
