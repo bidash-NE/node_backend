@@ -14,27 +14,14 @@ async function migrateDELIVEREDOrdersOnce({
   _running = true;
 
   try {
-    // ✅ Only migrate orders that:
-    // - status = DELIVERED
-    // - delivered_at older than 30 mins
-    // - AND if WALLET/COD => capture record exists (so migration never blocks on capture)
     const [rows] = await db.query(
       `
-      SELECT o.order_id
-        FROM orders o
-        LEFT JOIN order_wallet_captures cw
-          ON cw.order_id = o.order_id AND cw.capture_type = 'WALLET_FULL'
-        LEFT JOIN order_wallet_captures cc
-          ON cc.order_id = o.order_id AND cc.capture_type = 'COD_FEE'
-       WHERE UPPER(o.status) = 'DELIVERED'
-         AND o.delivered_at IS NOT NULL
-         AND o.delivered_at <= (NOW() - INTERVAL 30 MINUTE)
-         AND (
-           (UPPER(o.payment_method) = 'WALLET' AND cw.order_id IS NOT NULL) OR
-           (UPPER(o.payment_method) = 'COD'    AND cc.order_id IS NOT NULL) OR
-           (UPPER(o.payment_method) NOT IN ('WALLET','COD'))
-         )
-       ORDER BY o.delivered_at ASC
+      SELECT order_id
+        FROM orders
+       WHERE UPPER(status) = 'DELIVERED'
+         AND delivered_at IS NOT NULL
+         AND delivered_at <= (NOW() - INTERVAL 30 MINUTE)
+       ORDER BY delivered_at ASC
        LIMIT ?
       `,
       [batchSize],
@@ -44,14 +31,11 @@ async function migrateDELIVEREDOrdersOnce({
 
     for (const r of rows) {
       const order_id = r.order_id;
-
       try {
-        // ✅ IMPORTANT:
-        // Skip capture during migration — capture already happened at delivery.
         const out = await Order.completeAndArchiveDeliveredOrder(order_id, {
           delivered_by,
           reason,
-          capture_at: "SKIP", // anything != "DELIVERED"
+          capture_at: "SKIP", // ✅ IMPORTANT
         });
 
         if (!out?.ok) {
