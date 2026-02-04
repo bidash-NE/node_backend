@@ -297,8 +297,11 @@ async function loginByEmail(req, res) {
       try {
         await db.query(
           `INSERT INTO all_device_ids (user_id, device_id, last_seen)
-           VALUES (?, ?, NOW())
-           ON DUPLICATE KEY UPDATE last_seen = NOW()`,
+VALUES (?, ?, NOW())
+ON DUPLICATE KEY UPDATE
+  device_id = VALUES(device_id),
+  last_seen = NOW();
+`,
           [user.user_id, deviceId],
         );
       } catch (e) {
