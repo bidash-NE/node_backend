@@ -255,15 +255,21 @@ async function updateMerchant(req, res) {
 
 async function loginByEmail(req, res) {
   try {
-    const { email, password } = req.body || {};
+    const { email, password, device_id } = req.body || {};
+
     if (!email || !password) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
+    // ✅ device_id OPTIONAL (save only if provided)
+    const deviceId =
+      device_id && String(device_id).trim() ? String(device_id).trim() : null;
+
     // 1) Fetch by email (case-insensitive)
     const candidates = await findCandidatesByEmail(email); // newest first
-    if (!candidates.length)
+    if (!candidates.length) {
       return res.status(404).json({ error: "User not found" });
+    }
 
     // 2) Compare password
     const matched = [];
@@ -272,34 +278,50 @@ async function loginByEmail(req, res) {
       const ok = await bcrypt.compare(password, u.password_hash);
       if (ok) matched.push(u);
     }
-    if (!matched.length)
+
+    if (!matched.length) {
       return res.status(401).json({ error: "Incorrect password" });
+    }
 
     matched.sort((a, b) => b.user_id - a.user_id);
     const user = matched[0];
 
-    if (user.is_active === 0) {
+    if (Number(user.is_active) === 0) {
       return res
         .status(403)
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
+    // ✅ Save device_id for notifications (ONLY if provided)
+    if (deviceId) {
+      try {
+        await db.query(
+          `INSERT INTO all_device_ids (user_id, device_id, last_seen)
+           VALUES (?, ?, NOW())
+           ON DUPLICATE KEY UPDATE last_seen = NOW()`,
+          [user.user_id, deviceId],
+        );
+      } catch (e) {
+        console.error("device_id save failed:", e?.message || e);
+      }
+    }
+
     /* -----------------------------------------------------------
-       Mark as verified on first successful login (idempotent)
+       Mark as verified on successful login (idempotent)
     ----------------------------------------------------------- */
     try {
       await db.query(
         `UPDATE users
             SET is_verified = 1,
                 last_login = NOW()
-          WHERE user_id = ? AND (is_verified IS NULL OR is_verified = 0)`,
+          WHERE user_id = ?`,
         [user.user_id],
       );
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
     }
 
-    // Pull latest (or primary) business attached to this user
+    // Pull latest business attached to this user
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
@@ -336,6 +358,7 @@ async function loginByEmail(req, res) {
         phone: user.phone,
         role: user.role,
         email: user.email,
+        ...(deviceId ? { device_id: deviceId } : {}),
         owner_type: biz?.owner_type ?? null,
         business_id: biz?.business_id ?? null,
         business_name: biz?.business_name ?? null,
