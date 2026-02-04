@@ -61,10 +61,10 @@ function roomSize(io, room) {
 function logEmit(io, room, evt, payload, extra = "") {
   const size = roomSize(io, room);
   const rid = String(
-    payload?.request_id ?? payload?.message?.request_id ?? "?"
+    payload?.request_id ?? payload?.message?.request_id ?? "?",
   );
   console.log(
-    `[chat EMIT] ride:${rid} evt:${evt} room:${room} size:${size} ${extra}`
+    `[chat EMIT] ride:${rid} evt:${evt} room:${room} size:${size} ${extra}`,
   );
 }
 
@@ -73,8 +73,12 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
   const conn = await mysqlPool.getConnection();
   try {
     const [[row]] = await conn.query(
-      `SELECT driver_id, passenger_id FROM rides WHERE ride_id = ? LIMIT 1`,
-      [rideId]
+      `SELECT r.driver_id, r.passenger_id, MAX(o.business_id) AS merchant_id
+       FROM rides r
+       LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
+       WHERE r.ride_id = ?
+       GROUP BY r.driver_id, r.passenger_id`,
+      [rideId],
     );
     if (!row) return { ok: false, reason: "ride_not_found" };
 
@@ -83,7 +87,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
       const did = Number(socket.data?.driver_id);
       if (!did || Number(row.driver_id) !== did) {
         console.warn(
-          `[chat SEC] ride:${rideId} not_member_driver (did=${did}, row.did=${row.driver_id})`
+          `[chat SEC] ride:${rideId} not_member_driver (did=${did}, row.did=${row.driver_id})`,
         );
         return { ok: false, reason: "not_member_driver" };
       }
@@ -98,7 +102,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
       const pid = Number(socket.data?.passenger_id);
       if (!pid || Number(row.passenger_id) !== pid) {
         console.warn(
-          `[chat SEC] ride:${rideId} not_member_passenger (pid=${pid}, row.pid=${row.passenger_id})`
+          `[chat SEC] ride:${rideId} not_member_passenger (pid=${pid}, row.pid=${row.passenger_id})`,
         );
         return { ok: false, reason: "not_member_passenger" };
       }
@@ -109,8 +113,25 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
         otherId: Number(row.driver_id) || null,
       };
     }
+    if (role === "merchant") {
+      const mid = Number(socket.data?.merchant_id);
+      const merchantIdFromRide = Number(row.merchant_id); // join rides→merchants if needed
+      if (!mid || merchantIdFromRide !== mid) {
+        console.warn(
+          `[chat SEC] ride:${rideId} not_member_merchant (mid=${mid}, row.mid=${merchantIdFromRide})`,
+        );
+        return { ok: false, reason: "not_member_merchant" };
+      }
+      return {
+        ok: true,
+        role: "merchant",
+        selfId: mid,
+        otherId: Number(row.driver_id) || null,
+      };
+    }
+
     console.warn(
-      `[chat SEC] ride:${rideId} unknown_role (socket role=${role})`
+      `[chat SEC] ride:${rideId} unknown_role (socket role=${role})`,
     );
     return { ok: false, reason: "unknown_role" };
   } finally {
@@ -127,7 +148,7 @@ export function initRideChat(io, mysqlPool, socket) {
   const r = getRedis();
 
   console.log(
-    `[chat BOOT] socket:${socket.id} role:${socket.data?.role} d:${socket.data?.driver_id ?? "-"} p:${socket.data?.passenger_id ?? "-"}`
+    `[chat BOOT] socket:${socket.id} role:${socket.data?.role} d:${socket.data?.driver_id ?? "-"} p:${socket.data?.passenger_id ?? "-"}`,
   );
 
   /* ---------------------- JOIN ---------------------- */
@@ -142,7 +163,9 @@ export function initRideChat(io, mysqlPool, socket) {
       await socket.join(room);
 
       const size = roomSize(io, room);
-      console.log(`[chat JOIN] ride:${rideId} room:${room} size:${size} by ${mem.role}:${mem.selfId}`);
+      console.log(
+        `[chat JOIN] ride:${rideId} room:${room} size:${size} by ${mem.role}:${mem.selfId}`,
+      );
       ackOk(ack, { room, size });
     } catch (e) {
       console.error("[chat ERROR] chat:join", e?.message);
@@ -170,10 +193,14 @@ export function initRideChat(io, mysqlPool, socket) {
   /* ---------------------- SEND ---------------------- */
   socket.on("chat:send", async (payload = {}, ack) => {
     const rideId = Number(payload.request_id);
-    console.log(`[chat RECV] chat:send ride:${rideId} from socket:${socket.id} payload=`, payload);
+    console.log(
+      `[chat RECV] chat:send ride:${rideId} from socket:${socket.id} payload=`,
+      payload,
+    );
 
     try {
-      const text = typeof payload.message === "string" ? payload.message.trim() : "";
+      const text =
+        typeof payload.message === "string" ? payload.message.trim() : "";
       const attachments = payload.attachments ?? null;
       const temp_id = payload.temp_id || null;
 
@@ -199,7 +226,9 @@ export function initRideChat(io, mysqlPool, socket) {
       };
 
       await r.zadd(msgKey(rideId), id, JSON.stringify(messageObj));
-      console.log(`[chat STORE] ride:${rideId} msgId:${id} by:${mem.role} uid:${mem.selfId} textLen:${(text || "").length}`);
+      console.log(
+        `[chat STORE] ride:${rideId} msgId:${id} by:${mem.role} uid:${mem.selfId} textLen:${(text || "").length}`,
+      );
 
       const out = toOut(messageObj);
       logEmit(io, room, "chat:new", { message: out, temp_id });
@@ -215,10 +244,14 @@ export function initRideChat(io, mysqlPool, socket) {
   /* --------------------- HISTORY --------------------- */
   socket.on("chat:history", async (payload = {}, ack) => {
     const rideId = Number(payload.request_id);
-    console.log(`[chat RECV] chat:history ride:${rideId} from socket:${socket.id} payload=`, payload);
+    console.log(
+      `[chat RECV] chat:history ride:${rideId} from socket:${socket.id} payload=`,
+      payload,
+    );
 
     try {
-      const beforeId = payload.before_id != null ? Number(payload.before_id) : null;
+      const beforeId =
+        payload.before_id != null ? Number(payload.before_id) : null;
       const limit = Math.min(200, Math.max(1, Number(payload.limit || 50)));
       if (!rideId) return ackFail(ack, "request_id_required");
 
@@ -230,10 +263,19 @@ export function initRideChat(io, mysqlPool, socket) {
       await socket.join(room);
 
       const maxScore = Number.isFinite(beforeId) ? beforeId - 1 : "+inf";
-      const rows = await r.zrevrangebyscore(msgKey(rideId), maxScore, "-inf", "LIMIT", 0, limit);
+      const rows = await r.zrevrangebyscore(
+        msgKey(rideId),
+        maxScore,
+        "-inf",
+        "LIMIT",
+        0,
+        limit,
+      );
       const messages = rows.map(safeParse).filter(Boolean).map(toOut).reverse();
 
-      console.log(`[chat OK] history ride:${rideId} -> ${messages.length} msgs (limit=${limit}, before=${beforeId ?? "∞"})`);
+      console.log(
+        `[chat OK] history ride:${rideId} -> ${messages.length} msgs (limit=${limit}, before=${beforeId ?? "∞"})`,
+      );
       ackOk(ack, { messages });
     } catch (e) {
       console.error("[chat ERROR] chat:history", e?.message);
@@ -246,11 +288,18 @@ export function initRideChat(io, mysqlPool, socket) {
     const rideId = Number(payload.request_id);
     const is_typing = !!payload.is_typing;
     const role = socket.data?.role || "unknown";
-    const id = role === "driver" ? socket.data?.driver_id : socket.data?.passenger_id;
+    const id =
+      role === "driver" ? socket.data?.driver_id : socket.data?.passenger_id;
 
     if (!rideId) return;
     const room = ROOM.ride(rideId);
-    logEmit(io, room, "chat:typing", { request_id: rideId }, `(from ${role}:${id})`);
+    logEmit(
+      io,
+      room,
+      "chat:typing",
+      { request_id: rideId },
+      `(from ${role}:${id})`,
+    );
     socket.to(room).emit("chat:typing", {
       request_id: rideId,
       from: { role, id: id || null },
@@ -262,7 +311,9 @@ export function initRideChat(io, mysqlPool, socket) {
   socket.on("chat:read", async (payload = {}, ack) => {
     const rideId = Number(payload.request_id);
     const lastId = Number(payload.last_seen_id || 0);
-    console.log(`[chat RECV] chat:read ride:${rideId} last_seen_id:${lastId} socket:${socket.id}`);
+    console.log(
+      `[chat RECV] chat:read ride:${rideId} last_seen_id:${lastId} socket:${socket.id}`,
+    );
 
     try {
       if (!rideId || !Number.isFinite(lastId)) return ackFail(ack, "bad_args");
@@ -276,7 +327,13 @@ export function initRideChat(io, mysqlPool, socket) {
       });
 
       const room = ROOM.ride(rideId);
-      logEmit(io, room, "chat:read", { request_id: rideId, last_seen_id: lastId }, `(reader ${mem.role}:${mem.selfId})`);
+      logEmit(
+        io,
+        room,
+        "chat:read",
+        { request_id: rideId, last_seen_id: lastId },
+        `(reader ${mem.role}:${mem.selfId})`,
+      );
       socket.to(room).emit("chat:read", {
         request_id: rideId,
         reader: { role: mem.role, id: mem.selfId },

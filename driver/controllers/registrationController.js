@@ -31,7 +31,7 @@ const registerUser = async (req, res) => {
     const [userResult] = await connection.query(
       `INSERT INTO users (user_name, email, phone, password_hash, is_verified, role)
        VALUES (?, ?, ?, ?, 1, ?)`,
-      [user.user_name, user.email, user.phone, hashedPassword, user.role]
+      [user.user_name, user.email, user.phone, hashedPassword, user.role],
     );
     user_id = userResult.insertId;
 
@@ -41,7 +41,7 @@ const registerUser = async (req, res) => {
         user.role === "driver" ? "driver_devices" : "user_devices";
       await connection.query(
         `INSERT INTO ${deviceTable} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
-        [user_id, deviceID]
+        [user_id, deviceID],
       );
     }
 
@@ -58,7 +58,7 @@ const registerUser = async (req, res) => {
           driver.license_expiry,
           `POINT(${driver.current_location.coordinates[0]} ${driver.current_location.coordinates[1]})`,
           new Date(),
-        ]
+        ],
       );
 
       driver_id = driverResult.insertId;
@@ -86,7 +86,7 @@ const registerUser = async (req, res) => {
         const placeholders = docValues.map(() => "(?, ?, ?)").join(", ");
         await connection.query(
           `INSERT INTO driver_documents (driver_id, document_type, document_url) VALUES ${placeholders}`,
-          docValues.flat()
+          docValues.flat(),
         );
       }
 
@@ -110,7 +110,7 @@ const registerUser = async (req, res) => {
             vehicle.features ? vehicle.features.join(",") : null,
             vehicle.insurance_expiry,
             vehicle.code,
-          ]
+          ],
         );
       }
     }
@@ -122,8 +122,8 @@ const registerUser = async (req, res) => {
         user.role === "driver"
           ? "User and driver registered successfully"
           : user.role === "admin"
-          ? "Admin registered successfully"
-          : "User registered successfully",
+            ? "Admin registered successfully"
+            : "User registered successfully",
       user_id,
     });
   } catch (err) {
@@ -180,15 +180,19 @@ const registerUser = async (req, res) => {
 /* ===================== LOGIN (sets is_verified=1) ===================== */
 
 const loginUser = async (req, res) => {
-  const { phone, password, role } = req.body || {};
+  const { phone, password, role, device_id } = req.body || {};
 
   try {
+    // ✅ device_id OPTIONAL for now
+    const deviceId =
+      device_id && String(device_id).trim() ? String(device_id).trim() : null;
+
     // 1) Find by phone
     const [rows] = await pool.query(
       `SELECT user_id, user_name, phone, email, role, password_hash, is_active, is_verified
        FROM users
        WHERE phone = ?`,
-      [phone]
+      [phone],
     );
 
     if (rows.length === 0) {
@@ -199,7 +203,7 @@ const loginUser = async (req, res) => {
 
     const user = rows[0];
 
-    // 2) Optionally enforce active accounts (kept from your code)
+    // 2) Enforce active accounts
     if (Number(user.is_active) !== 1) {
       return res.status(403).json({ error: "Account is deactivated." });
     }
@@ -210,7 +214,7 @@ const loginUser = async (req, res) => {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 4) Role allowlist (admin, super admin, user, merchant, driver)
+    // 4) Role allowlist
     const allowed = new Set([
       "admin",
       "super admin",
@@ -231,7 +235,7 @@ const loginUser = async (req, res) => {
         .json({ error: `Role mismatch. Expected: ${user.role}` });
     }
 
-    // 5) If merchant, fetch owner_type from merchant_business_details
+    // 5) If merchant, fetch business info
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -240,13 +244,14 @@ const loginUser = async (req, res) => {
 
     if (user.role === "merchant" || role === "merchant") {
       const [mbd] = await pool.query(
-        `SELECT owner_type,business_id, business_name,business_logo,address
+        `SELECT owner_type, business_id, business_name, business_logo, address
            FROM merchant_business_details
           WHERE user_id = ?
           ORDER BY created_at DESC, business_id DESC
           LIMIT 1`,
-        [user.user_id]
+        [user.user_id],
       );
+
       if (mbd.length) {
         owner_type = mbd[0]?.owner_type ?? null;
         business_id = mbd[0]?.business_id ?? null;
@@ -256,13 +261,23 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 6) Mark as verified on successful login
+    // ✅ 6) Save device_id for notifications (ONLY if provided)
+    if (deviceId) {
+      await pool.query(
+        `INSERT INTO all_device_ids (user_id, device_id, last_seen)
+         VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE last_seen = NOW()`,
+        [user.user_id, deviceId],
+      );
+    }
+
+    // 7) Mark verified + last_login
     await pool.query(
       `UPDATE users SET is_verified = 1, last_login = NOW() WHERE user_id = ?`,
-      [user.user_id]
+      [user.user_id],
     );
 
-    // 7) Issue tokens
+    // 8) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -277,7 +292,7 @@ const loginUser = async (req, res) => {
       expiresIn: "10m",
     });
 
-    // 8) Response (include owner_type if merchant)
+    // 9) Response
     return res.status(200).json({
       message: "Login successful",
       token: {
@@ -292,7 +307,8 @@ const loginUser = async (req, res) => {
         phone: user.phone,
         role: user.role,
         email: user.email,
-        is_verified: 1, // reflects post-login state
+        is_verified: 1,
+        ...(deviceId ? { device_id: deviceId } : {}),
         ...(user.role === "merchant" || role === "merchant"
           ? { owner_type, business_id, business_name, business_logo, address }
           : {}),
@@ -319,7 +335,7 @@ const logoutUser = async (req, res) => {
       req.method,
       req.originalUrl,
       req.params,
-      new Date().toISOString()
+      new Date().toISOString(),
     );
 
     const { user_id } = req.params; // expects /logout/:user_id
@@ -337,7 +353,7 @@ const logoutUser = async (req, res) => {
           SET is_verified = 0,
               last_login = NOW()
         WHERE user_id = ?`,
-      [n]
+      [n],
     );
 
     if (result.affectedRows === 0) {

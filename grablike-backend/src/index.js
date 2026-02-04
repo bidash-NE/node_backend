@@ -60,34 +60,13 @@ app.use(
   }),
 );
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "10mb" })); // ✅ allow bigger payloads (chat/meta)
 
-// ✅ IMPORTANT: serve uploads from the same root where multer saves
-const UPLOAD_ROOT =
-  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
-app.use("/uploads", express.static(UPLOAD_ROOT));
+/** serve /uploads/* (for chat images & other assets) */
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 /* ============================== Health ================================ */
 app.get("/", (_req, res) => res.json({ ok: true }));
-
-// ✅ richer health endpoint (shows mongo readiness)
-app.get("/health", (_req, res) => {
-  const rs = mongoose.connection.readyState; // 0,1,2,3
-  const mongoState =
-    rs === 1
-      ? "connected"
-      : rs === 2
-        ? "connecting"
-        : rs === 3
-          ? "disconnecting"
-          : "disconnected";
-
-  res.json({
-    ok: true,
-    time: new Date().toISOString(),
-    mongo: { readyState: rs, state: mongoState },
-  });
-});
 
 /* =============================== Routes =============================== */
 app.use("/api/driver/jobs", driverJobsRouter(mysqlPool));
@@ -196,6 +175,8 @@ mongoose.connection.on("disconnected", () =>
   console.warn("⚠ MongoDB disconnected"),
 );
 
+startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
+
 /* ============================ MySQL check ============================= */
 async function testMySQLConnection() {
   try {
@@ -212,31 +193,22 @@ async function testMySQLConnection() {
 /* ============================== Startup =============================== */
 async function startServer() {
   try {
-    // ✅ connect Mongo first so any mongo usage won't buffer/time out
-    const MONGO_URI = process.env.MONGO_URI;
-    if (!MONGO_URI) {
-      console.warn("⚠ MONGO_URI not set — Mongo features may fail");
-    } else {
-      await mongoose.connect(MONGO_URI, {
-        serverSelectionTimeoutMS: 10000,
-      });
-    }
+    await mongoose.connect(process.env.MONGO_URI, {
+      // For Mongoose v7+, these options are not required; harmless if left.
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
 
-    // ✅ Then check MySQL
     await testMySQLConnection();
 
-    // ✅ Start HTTP server
     const PORT = process.env.PORT || 4000;
     server.listen(PORT, () => {
       console.log(`HTTP+WS listening on http://localhost:${PORT}`);
     });
 
-    // ✅ Start workers AFTER DB connections are ready
-    startScheduledRidesWorker({ io, mysqlPool, pollMs: 20000, batchSize: 25 });
-
     // Optional: graceful shutdown
     const shutdown = async (sig) => {
-      console.log(`\n${sig} received — shutting down.....`);
+      console.log(`\n${sig} received — shutting down...`);
       try {
         await mongoose.disconnect();
       } catch {}

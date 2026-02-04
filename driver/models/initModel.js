@@ -166,7 +166,7 @@ const tables = [
     `,
   },
   {
-    name: "notification",
+    name: "notifications",
     sql: `
       CREATE TABLE notifications (
         id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -180,6 +180,26 @@ const tables = [
         INDEX idx_user_id (user_id)
       );
     `,
+  },
+  {
+    name: "all_device_ids",
+    sql: `
+    CREATE TABLE all_device_ids (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id BIGINT UNSIGNED NOT NULL,
+      device_id VARCHAR(255) NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+      UNIQUE KEY uniq_user_device (user_id, device_id),
+      INDEX idx_user_id (user_id),
+      INDEX idx_device_id (device_id),
+
+      CONSTRAINT fk_all_device_ids_user
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `,
   },
 ];
 

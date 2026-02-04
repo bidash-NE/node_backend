@@ -43,6 +43,10 @@ const PLATFORM_WALLET_ID = (
 const WALLET_TBL = "wallet_transactions";
 const WALLETS_TBL = "wallets";
 
+/* ---------------------- Loyalty config ---------------------- */
+const LOYALTY_MIN_TOTAL_CENTS = 100 * 100; // BTN 100 in cents
+const LOYALTY_AWARD_POINTS = 5;
+
 /* ---------------------- External IDs service ---------------------- */
 const WALLET_IDS_ENDPOINT = (
   process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
@@ -2422,6 +2426,20 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     const driver_payout_nu = Number(amounts.driver_payout_nu || 0);
 
     console.log("Total payable cents : ", total_payable_cents);
+
+    if (
+      total_payable_cents > LOYALTY_MIN_TOTAL_CENTS &&
+      Number.isFinite(Number(ride.passenger_id))
+    ) {
+      await conn.execute(
+        `
+        UPDATE users
+        SET points = COALESCE(points, 0) + ?
+        WHERE user_id = ?
+        `,
+        [LOYALTY_AWARD_POINTS, Number(ride.passenger_id)]
+      );
+    }
 
     /* -------------------------------------------------
        4) Pricing snapshot (audit safe)

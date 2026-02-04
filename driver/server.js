@@ -42,6 +42,28 @@ app.use("/api", deviceRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/forgotpassword", forgotPasswordRoute);
 app.use("/api/profile", profileRoutes);
+
+const listRoutes = () => {
+  const stack = app?._router?.stack || [];
+  console.log("---- ROUTES ----");
+  for (const layer of stack) {
+    // Direct routes
+    if (layer.route?.path) {
+      const methods = Object.keys(layer.route.methods)
+        .map((m) => m.toUpperCase())
+        .join(",");
+      console.log(`${methods} ${layer.route.path}`);
+    }
+    // Mounted routers
+    else if (layer.name === "router" && layer.regexp) {
+      console.log("MOUNTED ROUTER:", layer.regexp);
+    }
+  }
+  console.log("---------------");
+};
+
+listRoutes();
+
 // Default test route
 app.get("/", (req, res) => {
   res.send("🚗 Ride App Backend Running");

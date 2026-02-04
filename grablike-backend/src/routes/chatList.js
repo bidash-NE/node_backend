@@ -69,16 +69,28 @@ async function buildThreadSummary(rideRow, role, selfId) {
   }
 
   // 3) peer info
-  const peer =
-    role === "driver"
-      ? {
-          role: "passenger",
-          id: rideRow.passenger_id ? Number(rideRow.passenger_id) : null,
-        }
-      : {
-          role: "driver",
-          id: rideRow.driver_id ? Number(rideRow.driver_id) : null,
-        };
+  let peer;
+  if (role === "driver") {
+    peer = {
+      role: "passenger",
+      id: rideRow.passenger_id ? Number(rideRow.passenger_id) : null,
+    };
+  } else if (role === "passenger") {
+    peer = {
+      role: "driver",
+      id: rideRow.driver_id ? Number(rideRow.driver_id) : null,
+    };
+  } else if (role === "merchant") {
+    peer = {
+      role: "driver",
+      id: rideRow.driver_id ? Number(rideRow.driver_id) : null,
+    };
+  } else {
+    peer = {
+      role: "driver",
+      id: rideRow.driver_id ? Number(rideRow.driver_id) : null,
+    };
+  }
 
   // 4) pick a "started_at" timestamp for sorting
   const startedAt =
@@ -113,10 +125,7 @@ export function makeChatListRouter(mysqlPool) {
    */
   router.get("/rides/driver/chat-list", async (req, res) => {
     const driverId = Number(req.query.driver_id || 0);
-    const limit = Math.min(
-      200,
-      Math.max(1, Number(req.query.limit || 50))
-    );
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
 
     if (!driverId) {
       return res.status(400).json({
@@ -146,7 +155,7 @@ export function makeChatListRouter(mysqlPool) {
         ORDER BY COALESCE(completed_at, started_at, accepted_at, requested_at) DESC
         LIMIT ?
       `,
-        [driverId, limit]
+        [driverId, limit],
       );
 
       const threads = [];
@@ -186,10 +195,7 @@ export function makeChatListRouter(mysqlPool) {
    */
   router.get("/rides/passenger/chat-list", async (req, res) => {
     const passengerId = Number(req.query.passenger_id || 0);
-    const limit = Math.min(
-      200,
-      Math.max(1, Number(req.query.limit || 50))
-    );
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
 
     if (!passengerId) {
       return res.status(400).json({
@@ -219,16 +225,12 @@ export function makeChatListRouter(mysqlPool) {
         ORDER BY COALESCE(completed_at, started_at, accepted_at, requested_at) DESC
         LIMIT ?
       `,
-        [passengerId, limit]
+        [passengerId, limit],
       );
 
       const threads = [];
       for (const row of rows) {
-        const summary = await buildThreadSummary(
-          row,
-          "passenger",
-          passengerId
-        );
+        const summary = await buildThreadSummary(row, "passenger", passengerId);
         if (summary) threads.push(summary);
       }
 
@@ -246,6 +248,75 @@ export function makeChatListRouter(mysqlPool) {
       });
     } catch (e) {
       console.error("[chatList ERROR] /rides/passenger/chat-list", e);
+      return res.status(500).json({
+        ok: false,
+        error: "server_error",
+      });
+    } finally {
+      try {
+        conn?.release();
+      } catch {}
+    }
+  });
+
+  /* ================= MERCHANT CHAT LIST =================
+   * GET /rides/merchant/chat-list?merchant_id=99&limit=50
+   */
+  router.get("/rides/merchant/chat-list", async (req, res) => {
+    const merchantId = Number(req.query.merchant_id || 0);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+
+    if (!merchantId) {
+      return res.status(400).json({
+        ok: false,
+        error: "merchant_id_required",
+      });
+    }
+
+    let conn;
+    try {
+      conn = await mysqlPool.getConnection();
+
+      const [rows] = await conn.query(
+        `
+        SELECT DISTINCT
+          r.ride_id,
+          r.driver_id,
+          r.passenger_id,
+          r.requested_at,
+          r.accepted_at,
+          r.arrived_pickup_at,
+          r.started_at,
+          r.completed_at
+        FROM rides r
+        JOIN orders o ON o.delivery_ride_id = r.ride_id
+        WHERE o.business_id = ?
+        ORDER BY COALESCE(r.completed_at, r.started_at, r.accepted_at, r.requested_at) DESC
+        LIMIT ?
+      `,
+        [merchantId, limit],
+      );
+
+      const threads = [];
+      for (const row of rows) {
+        const summary = await buildThreadSummary(row, "merchant", merchantId);
+        if (summary) threads.push(summary);
+      }
+
+      threads.sort((a, b) => {
+        const ta = new Date(a.last_message_at).getTime();
+        const tb = new Date(b.last_message_at).getTime();
+        return tb - ta;
+      });
+
+      return res.json({
+        ok: true,
+        role: "merchant",
+        merchant_id: merchantId,
+        threads,
+      });
+    } catch (e) {
+      console.error("[chatList ERROR] /rides/merchant/chat-list", e);
       return res.status(500).json({
         ok: false,
         error: "server_error",
