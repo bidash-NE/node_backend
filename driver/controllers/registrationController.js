@@ -374,8 +374,144 @@ const logoutUser = async (req, res) => {
   }
 };
 
+// controllers/authController.js (add this function)
+
+const verifyActiveSession = async (req, res) => {
+  const { user_id, device_id } = req.body || {};
+
+  const uid = Number(user_id);
+  const deviceId =
+    device_id && String(device_id).trim() ? String(device_id).trim() : null;
+
+  if (!Number.isInteger(uid) || uid <= 0) {
+    return res.status(400).json({ success: false, message: "Invalid user_id" });
+  }
+
+  if (!deviceId) {
+    return res
+      .status(400)
+      .json({ success: false, message: "device_id is required" });
+  }
+
+  try {
+    // 1) Check user + is_verified
+    const [urows] = await pool.query(
+      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
+         FROM users
+        WHERE user_id = ?
+        LIMIT 1`,
+      [uid],
+    );
+
+    if (urows.length === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    const user = urows[0];
+
+    if (Number(user.is_active) !== 1) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Account is deactivated." });
+    }
+
+    if (Number(user.is_verified) !== 1) {
+      return res.status(200).json({ success: false });
+    }
+
+    // 2) Check device match in all_device_ids
+    const [drows] = await pool.query(
+      `SELECT device_id
+         FROM all_device_ids
+        WHERE user_id = ?
+        LIMIT 1`,
+      [uid],
+    );
+
+    if (drows.length === 0) {
+      return res.status(200).json({ success: false });
+    }
+
+    const dbDeviceId = drows[0]?.device_id ? String(drows[0].device_id) : null;
+
+    if (!dbDeviceId || dbDeviceId !== deviceId) {
+      return res.status(200).json({ success: false });
+    }
+
+    // 3) Merchant extras (same as login)
+    let owner_type = null;
+    let business_id = null;
+    let business_name = null;
+    let business_logo = null;
+    let address = null;
+
+    if (user.role === "merchant") {
+      const [mbd] = await pool.query(
+        `SELECT owner_type, business_id, business_name, business_logo, address
+           FROM merchant_business_details
+          WHERE user_id = ?
+          ORDER BY created_at DESC, business_id DESC
+          LIMIT 1`,
+        [uid],
+      );
+
+      if (mbd.length) {
+        owner_type = mbd[0]?.owner_type ?? null;
+        business_id = mbd[0]?.business_id ?? null;
+        business_name = mbd[0]?.business_name ?? null;
+        business_logo = mbd[0]?.business_logo ?? null;
+        address = mbd[0]?.address ?? null;
+      }
+    }
+
+    // 4) Issue tokens (same payload as login)
+    const payload = {
+      user_id: user.user_id,
+      role: user.role,
+      phone: user.phone,
+    };
+
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
+
+    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
+      expiresIn: "10m",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      token: {
+        access_token,
+        access_token_time: 60,
+        refresh_token,
+        refresh_token_time: 10,
+      },
+      user: {
+        user_id: user.user_id,
+        user_name: user.user_name,
+        phone: user.phone,
+        role: user.role,
+        email: user.email,
+        is_verified: 1,
+        device_id: deviceId,
+        ...(user.role === "merchant"
+          ? { owner_type, business_id, business_name, business_logo, address }
+          : {}),
+      },
+    });
+  } catch (err) {
+    console.error("verifyActiveSession error:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser, // now sets is_verified=1 + updates last_login
   logoutUser, // sets is_verified=0
+  verifyActiveSession,
 };

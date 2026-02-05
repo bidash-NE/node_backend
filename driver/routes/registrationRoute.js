@@ -7,6 +7,7 @@ const {
   registerUser,
   loginUser,
   logoutUser,
+  verifyActiveSession,
 } = require("../controllers/registrationController");
 
 /* ---------------- rate limit helper ---------------- */
@@ -53,5 +54,7 @@ router.post("/login", loginLimiter, loginUser);
 
 // Logout
 router.post("/logout/:user_id", logoutLimiter, validUserId, logoutUser);
+
+router.post("/verify-session", loginLimiter, verifyActiveSession);
 
 module.exports = router;
