@@ -261,30 +261,46 @@ async function loginByEmail(req, res) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    // ✅ device_id OPTIONAL (save only if provided)
     const deviceId =
       device_id && String(device_id).trim() ? String(device_id).trim() : null;
 
-    // 1) Fetch by email (case-insensitive)
-    const candidates = await findCandidatesByEmail(email); // newest first
+    if (!deviceId) {
+      return res.status(400).json({ error: "device_id is required" });
+    }
+
+    // 1) Fetch by email (case-insensitive) -> get newest matched user
+    const candidates = await findCandidatesByEmail(email);
     if (!candidates.length) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // 2) Compare password
-    const matched = [];
+    // 2) Compare password against candidates
+    let picked = null;
     for (const u of candidates) {
       if (!u?.password_hash) continue;
       const ok = await bcrypt.compare(password, u.password_hash);
-      if (ok) matched.push(u);
+      if (ok) {
+        picked = u;
+        break; // newest first
+      }
     }
 
-    if (!matched.length) {
+    if (!picked) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    matched.sort((a, b) => b.user_id - a.user_id);
-    const user = matched[0];
+    // 3) Fetch the user row using user_id (fresh data)
+    const [[user]] = await db.query(
+      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
+         FROM users
+        WHERE user_id = ?
+        LIMIT 1`,
+      [picked.user_id],
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
 
     if (Number(user.is_active) === 0) {
       return res
@@ -292,26 +308,43 @@ async function loginByEmail(req, res) {
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
-    // ✅ Save device_id for notifications (ONLY if provided)
-    if (deviceId) {
-      try {
-        await db.query(
-          `INSERT INTO all_device_ids (user_id, device_id, last_seen)
-VALUES (?, ?, NOW())
-ON DUPLICATE KEY UPDATE
-  device_id = VALUES(device_id),
-  last_seen = NOW();
-`,
-          [user.user_id, deviceId],
-        );
-      } catch (e) {
-        console.error("device_id save failed:", e?.message || e);
-      }
+    // 4) Fetch stored device_id from all_device_ids using user_id
+    const [drows] = await db.query(
+      `SELECT device_id
+         FROM all_device_ids
+        WHERE user_id = ?
+        LIMIT 1`,
+      [user.user_id],
+    );
+
+    const dbDeviceId = drows?.[0]?.device_id
+      ? String(drows[0].device_id)
+      : null;
+
+    // ✅ Compare sent device_id vs DB device_id
+    // If DB has a device_id and it doesn't match -> block login
+    if (dbDeviceId && dbDeviceId !== deviceId) {
+      return res.status(409).json({
+        error:
+          "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+      });
     }
 
-    /* -----------------------------------------------------------
-       Mark as verified on successful login (idempotent)
-    ----------------------------------------------------------- */
+    // 5) Save/refresh device_id (first login OR same device)
+    try {
+      await db.query(
+        `INSERT INTO all_device_ids (user_id, device_id, last_seen)
+         VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           device_id = VALUES(device_id),
+           last_seen = NOW();`,
+        [user.user_id, deviceId],
+      );
+    } catch (e) {
+      console.error("device_id save failed:", e?.message || e);
+    }
+
+    // 6) Mark verified on successful login
     try {
       await db.query(
         `UPDATE users
@@ -324,7 +357,7 @@ ON DUPLICATE KEY UPDATE
       console.error("is_verified update failed:", e?.message || e);
     }
 
-    // Pull latest business attached to this user
+    // 7) Pull latest business attached to this user
     const [[biz]] = await db.query(
       `SELECT business_id, business_name, owner_type, business_logo, address
          FROM merchant_business_details
@@ -334,6 +367,7 @@ ON DUPLICATE KEY UPDATE
       [user.user_id],
     );
 
+    // 8) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -343,6 +377,7 @@ ON DUPLICATE KEY UPDATE
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
+
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
       expiresIn: "10m",
     });
@@ -361,7 +396,8 @@ ON DUPLICATE KEY UPDATE
         phone: user.phone,
         role: user.role,
         email: user.email,
-        ...(deviceId ? { device_id: deviceId } : {}),
+        is_verified: 1,
+        device_id: deviceId,
         owner_type: biz?.owner_type ?? null,
         business_id: biz?.business_id ?? null,
         business_name: biz?.business_name ?? null,

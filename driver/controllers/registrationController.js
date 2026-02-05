@@ -183,15 +183,15 @@ const loginUser = async (req, res) => {
   const { phone, password, role, device_id } = req.body || {};
 
   try {
-    // ✅ device_id OPTIONAL for now
     const deviceId =
       device_id && String(device_id).trim() ? String(device_id).trim() : null;
 
     // 1) Find by phone
     const [rows] = await pool.query(
       `SELECT user_id, user_name, phone, email, role, password_hash, is_active, is_verified
-       FROM users
-       WHERE phone = ?`,
+         FROM users
+        WHERE phone = ?
+        LIMIT 1`,
       [phone],
     );
 
@@ -208,13 +208,46 @@ const loginUser = async (req, res) => {
       return res.status(403).json({ error: "Account is deactivated." });
     }
 
-    // 3) Check password
+    // ✅ 3) If already logged in (is_verified=1), allow ONLY if same device_id
+    if (Number(user.is_verified) === 1) {
+      // If client didn't send a device id, treat as blocked
+      if (!deviceId) {
+        return res.status(409).json({
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device and try again.",
+        });
+      }
+
+      const [drows] = await pool.query(
+        `SELECT device_id
+           FROM all_device_ids
+          WHERE user_id = ?
+          LIMIT 1`,
+        [user.user_id],
+      );
+
+      const dbDeviceId = drows[0]?.device_id
+        ? String(drows[0].device_id)
+        : null;
+
+      // If no stored device OR mismatch -> block
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
+        return res.status(409).json({
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+        });
+      }
+
+      // Same device: proceed (re-issue tokens)
+    }
+
+    // 4) Check password
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 4) Role allowlist
+    // 5) Role allowlist
     const allowed = new Set([
       "admin",
       "super admin",
@@ -235,7 +268,7 @@ const loginUser = async (req, res) => {
         .json({ error: `Role mismatch. Expected: ${user.role}` });
     }
 
-    // 5) If merchant, fetch business info
+    // 6) If merchant, fetch business info
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -261,26 +294,28 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // ✅ 6) Save device_id for notifications (ONLY if provided)
+    // 7) Save device_id for notifications (ONLY if provided)
     if (deviceId) {
       await pool.query(
         `INSERT INTO all_device_ids (user_id, device_id, last_seen)
-VALUES (?, ?, NOW())
-ON DUPLICATE KEY UPDATE
-  device_id = VALUES(device_id),
-  last_seen = NOW();
-`,
+         VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           device_id = VALUES(device_id),
+           last_seen = NOW()`,
         [user.user_id, deviceId],
       );
     }
 
-    // 7) Mark verified + last_login
+    // 8) Mark verified + last_login (keep verified=1 even for same-device re-login)
     await pool.query(
-      `UPDATE users SET is_verified = 1, last_login = NOW() WHERE user_id = ?`,
+      `UPDATE users
+          SET is_verified = 1,
+              last_login = NOW()
+        WHERE user_id = ?`,
       [user.user_id],
     );
 
-    // 8) Issue tokens
+    // 9) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -295,7 +330,7 @@ ON DUPLICATE KEY UPDATE
       expiresIn: "10m",
     });
 
-    // 9) Response
+    // 10) Response
     return res.status(200).json({
       message: "Login successful",
       token: {
@@ -411,13 +446,23 @@ const verifyActiveSession = async (req, res) => {
 
     const user = urows[0];
 
+    // If inactive -> force is_verified=0
     if (Number(user.is_active) !== 1) {
+      await pool.query(
+        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
+        [uid],
+      );
       return res
         .status(403)
         .json({ success: false, message: "Account is deactivated." });
     }
 
+    // If already not verified -> keep it 0
     if (Number(user.is_verified) !== 1) {
+      await pool.query(
+        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
+        [uid],
+      );
       return res.status(200).json({ success: false });
     }
 
@@ -430,17 +475,18 @@ const verifyActiveSession = async (req, res) => {
       [uid],
     );
 
-    if (drows.length === 0) {
-      return res.status(200).json({ success: false });
-    }
-
     const dbDeviceId = drows[0]?.device_id ? String(drows[0].device_id) : null;
 
     if (!dbDeviceId || dbDeviceId !== deviceId) {
+      // ✅ If mismatch -> force logout (is_verified=0)
+      await pool.query(
+        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
+        [uid],
+      );
       return res.status(200).json({ success: false });
     }
 
-    // 3) Merchant extras (same as login)
+    // 3) Merchant extras
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -466,7 +512,7 @@ const verifyActiveSession = async (req, res) => {
       }
     }
 
-    // 4) Issue tokens (same payload as login)
+    // 4) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
@@ -505,6 +551,7 @@ const verifyActiveSession = async (req, res) => {
     });
   } catch (err) {
     console.error("verifyActiveSession error:", err);
+    // optional: don't force is_verified=0 on server errors
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
