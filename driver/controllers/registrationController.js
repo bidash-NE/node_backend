@@ -208,8 +208,15 @@ const loginUser = async (req, res) => {
       return res.status(403).json({ error: "Account is deactivated." });
     }
 
+    const isAdminRole =
+      user.role === "admin" ||
+      user.role === "super admin" ||
+      role === "admin" ||
+      role === "super admin";
+
     // ✅ 3) If already logged in (is_verified=1), allow ONLY if same device_id
-    if (Number(user.is_verified) === 1) {
+    // EXCEPT admins/super admins (no restriction)
+    if (!isAdminRole && Number(user.is_verified) === 1) {
       // If client didn't send a device id, treat as blocked
       if (!deviceId) {
         return res.status(409).json({
@@ -294,8 +301,8 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 7) Save device_id for notifications (ONLY if provided)
-    if (deviceId) {
+    // 7) Save device_id for notifications (ONLY if provided) — skip for admin/super admin
+    if (!isAdminRole && deviceId) {
       await pool.query(
         `INSERT INTO all_device_ids (user_id, device_id, last_seen)
          VALUES (?, ?, NOW())
@@ -306,14 +313,22 @@ const loginUser = async (req, res) => {
       );
     }
 
-    // 8) Mark verified + last_login (keep verified=1 even for same-device re-login)
-    await pool.query(
-      `UPDATE users
-          SET is_verified = 1,
-              last_login = NOW()
-        WHERE user_id = ?`,
-      [user.user_id],
-    );
+    // 8) Mark verified + last_login
+    // For admin/super admin: only update last_login, do NOT toggle is_verified
+    if (isAdminRole) {
+      await pool.query(
+        `UPDATE users SET last_login = NOW() WHERE user_id = ?`,
+        [user.user_id],
+      );
+    } else {
+      await pool.query(
+        `UPDATE users
+            SET is_verified = 1,
+                last_login = NOW()
+          WHERE user_id = ?`,
+        [user.user_id],
+      );
+    }
 
     // 9) Issue tokens
     const payload = {
@@ -345,8 +360,8 @@ const loginUser = async (req, res) => {
         phone: user.phone,
         role: user.role,
         email: user.email,
-        is_verified: 1,
-        ...(deviceId ? { device_id: deviceId } : {}),
+        is_verified: isAdminRole ? Number(user.is_verified) : 1,
+        ...(deviceId && !isAdminRole ? { device_id: deviceId } : {}),
         ...(user.role === "merchant" || role === "merchant"
           ? { owner_type, business_id, business_name, business_logo, address }
           : {}),
