@@ -214,47 +214,13 @@ const loginUser = async (req, res) => {
       role === "admin" ||
       role === "super admin";
 
-    // ✅ 3) If already logged in (is_verified=1), allow ONLY if same device_id
-    // EXCEPT admins/super admins (no restriction)
-    if (!isAdminRole && Number(user.is_verified) === 1) {
-      // If client didn't send a device id, treat as blocked
-      if (!deviceId) {
-        return res.status(409).json({
-          error:
-            "This account appears to be logged in on another device. Please log out from the other device and try again.",
-        });
-      }
-
-      const [drows] = await pool.query(
-        `SELECT device_id
-           FROM all_device_ids
-          WHERE user_id = ?
-          LIMIT 1`,
-        [user.user_id],
-      );
-
-      const dbDeviceId = drows[0]?.device_id
-        ? String(drows[0].device_id)
-        : null;
-
-      // If no stored device OR mismatch -> block
-      if (!dbDeviceId || dbDeviceId !== deviceId) {
-        return res.status(409).json({
-          error:
-            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
-        });
-      }
-
-      // Same device: proceed (re-issue tokens)
-    }
-
-    // 4) Check password
+    // 3) Check password FIRST (so valid credentials don't get reported as invalid)
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 5) Role allowlist
+    // 4) Role allowlist
     const allowed = new Set([
       "admin",
       "super admin",
@@ -273,6 +239,37 @@ const loginUser = async (req, res) => {
       return res
         .status(403)
         .json({ error: `Role mismatch. Expected: ${user.role}` });
+    }
+
+    // ✅ 5) Device restriction ONLY after password is correct, and only for non-admin
+    if (!isAdminRole && Number(user.is_verified) === 1) {
+      if (!deviceId) {
+        return res.status(409).json({
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device and try again.",
+        });
+      }
+
+      const [drows] = await pool.query(
+        `SELECT device_id
+           FROM all_device_ids
+          WHERE user_id = ?
+          LIMIT 1`,
+        [user.user_id],
+      );
+
+      const dbDeviceId = drows?.[0]?.device_id
+        ? String(drows[0].device_id)
+        : null;
+
+      // If mismatch -> block
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
+        return res.status(409).json({
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device and try again.",
+        });
+      }
+      // Same device -> allow re-login
     }
 
     // 6) If merchant, fetch business info
