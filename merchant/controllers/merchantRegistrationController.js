@@ -308,29 +308,31 @@ async function loginByEmail(req, res) {
         .json({ error: "Account is deactivated. Please contact support." });
     }
 
-    // 4) Fetch stored device_id from all_device_ids using user_id
-    const [drows] = await db.query(
-      `SELECT device_id
-         FROM all_device_ids
-        WHERE user_id = ?
-        LIMIT 1`,
-      [user.user_id],
-    );
+    // 4) If already logged in (is_verified=1), block when device differs.
+    // If is_verified=0, allow login and REPLACE device id.
+    if (Number(user.is_verified) === 1) {
+      const [drows] = await db.query(
+        `SELECT device_id
+           FROM all_device_ids
+          WHERE user_id = ?
+          LIMIT 1`,
+        [user.user_id],
+      );
 
-    const dbDeviceId = drows?.[0]?.device_id
-      ? String(drows[0].device_id)
-      : null;
+      const dbDeviceId = drows?.[0]?.device_id
+        ? String(drows[0].device_id)
+        : null;
 
-    // ✅ Compare sent device_id vs DB device_id
-    // If DB has a device_id and it doesn't match -> block login
-    if (dbDeviceId && dbDeviceId !== deviceId) {
-      return res.status(409).json({
-        error:
-          "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
-      });
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
+        return res.status(409).json({
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+        });
+      }
+      // same device -> allow re-login
     }
 
-    // 5) Save/refresh device_id (first login OR same device)
+    // 5) Save/REPLACE device_id (always overwrite on login)
     try {
       await db.query(
         `INSERT INTO all_device_ids (user_id, device_id, last_seen)
