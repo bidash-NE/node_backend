@@ -42,6 +42,44 @@ async function registerMerchant(req, res) {
     const f = req.files || {};
     const b = req.body || {};
 
+    // --- helpers ---
+    const normalizeBhutanPhone = (raw) => {
+      if (raw == null) return null;
+
+      let s = String(raw)
+        .trim()
+        .replace(/[^\d+]/g, "");
+
+      // Convert 00 to +
+      if (s.startsWith("00")) s = `+${s.slice(2)}`;
+
+      // Already +975 => ok
+      if (s.startsWith("+975")) return s;
+
+      // Starts with 975 (no +) => add +
+      if (s.startsWith("975")) return `+${s}`;
+
+      // Starts with + (other) => keep as-is (change this if you want to force +975)
+      if (s.startsWith("+")) return s;
+
+      // Otherwise prepend +975
+      return `+975${s}`;
+    };
+
+    const toNumOrNull = (val) => {
+      if (val === undefined || val === null) return null;
+      const s = String(val).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const toLowerOrDefault = (val, def) => {
+      const s = val !== undefined && val !== null ? String(val).trim() : "";
+      return (s || def).toLowerCase();
+    };
+
+    // --- file paths ---
     const license_image = f.license_image?.[0]
       ? toRelPath(f.license_image[0])
       : fromBodyToStoredPath(b.license_image);
@@ -54,14 +92,17 @@ async function registerMerchant(req, res) {
       ? toRelPath(f.bank_qr_code_image[0])
       : fromBodyToStoredPath(b.bank_qr_code_image);
 
+    // ✅ Normalize phone (+975)
+    const normalizedPhone = normalizeBhutanPhone(b.phone);
+
     const payload = {
       // users
       user_name: b.user_name,
       email: b.email,
-      phone: b.phone,
+      phone: normalizedPhone,
       cid: b.cid,
       password: b.password,
-      role: (b.role || "merchant").toLowerCase(),
+      role: toLowerOrDefault(b.role, "merchant"),
 
       // business
       business_name: b.business_name,
@@ -76,25 +117,14 @@ async function registerMerchant(req, res) {
           : undefined,
       business_license_number: b.business_license_number,
       license_image,
-      latitude:
-        b.latitude !== undefined &&
-        b.latitude !== "" &&
-        !isNaN(Number(b.latitude))
-          ? Number(b.latitude)
-          : null,
-      longitude:
-        b.longitude !== undefined &&
-        b.longitude !== "" &&
-        !isNaN(Number(b.longitude))
-          ? Number(b.longitude)
-          : null,
+      latitude: toNumOrNull(b.latitude),
+      longitude: toNumOrNull(b.longitude),
       address: b.address || null,
       business_logo,
       delivery_option: b.delivery_option,
-      owner_type: (b.owner_type || "individual").toLowerCase(),
+      owner_type: toLowerOrDefault(b.owner_type, "individual"),
 
       // 🔹 free-delivery threshold (per merchant)
-      // missing / "" => 0 (feature off)
       min_amount_for_fd:
         b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== ""
           ? Number(b.min_amount_for_fd)
@@ -107,24 +137,26 @@ async function registerMerchant(req, res) {
       bank_qr_code_image,
 
       // special celebration and discount
-      special_celebration: b.special_celebration || null, // Handling the new field
+      special_celebration: b.special_celebration || null,
       special_celebration_discount_percentage:
-        b.special_celebration_discount_percentage || null, // Handling the new field
+        b.special_celebration_discount_percentage || null,
     };
 
     const result = await registerMerchantModel(payload);
-    res.status(201).json({
+
+    return res.status(201).json({
       message: "Merchant registered successfully",
       user_id: result.user_id,
       business_id: result.business_id,
       business_type_ids: result.business_type_ids,
+      phone: normalizedPhone, // ✅ helpful to confirm normalization
     });
   } catch (err) {
     console.error(err.message || err);
     const isClientErr = /exists|required|invalid|username/i.test(
       err.message || "",
     );
-    res
+    return res
       .status(isClientErr ? 400 : 500)
       .json({ error: err.message || "Merchant registration failed" });
   }
