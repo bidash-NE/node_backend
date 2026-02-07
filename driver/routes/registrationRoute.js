@@ -8,6 +8,7 @@ const {
   loginUser,
   logoutUser,
   verifyActiveSession,
+  refreshAccessToken,
 } = require("../controllers/registrationController");
 
 /* ---------------- rate limit helper ---------------- */
@@ -57,4 +58,5 @@ router.post("/logout/:user_id", logoutLimiter, validUserId, logoutUser);
 
 router.post("/verify-session", loginLimiter, verifyActiveSession);
 
+router.post("/refresh-token", loginLimiter, refreshAccessToken);
 module.exports = router;

@@ -375,7 +375,7 @@ const loginUser = async (req, res) => {
         access_token,
         access_token_time: 60,
         refresh_token,
-        refresh_token_time: 10,
+        refresh_token_time: 1440,
       },
       user: {
         user_id: user.user_id,
@@ -592,10 +592,136 @@ const verifyActiveSession = async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
+/* ===================== REFRESH ACCESS TOKEN ===================== */
+/**
+ * POST /api/auth/refresh-token
+ * Body: { refresh_token }  (or Authorization: Bearer <refresh_token> as fallback)
+ *
+ * - Verifies refresh token using REFRESH_TOKEN_SECRET
+ * - Optional: checks user's is_active and is_verified
+ * - Optional: checks device_id matches stored device (if you want strict binding)
+ * - Returns a NEW access_token (and optionally a new refresh_token if you want rotation)
+ */
+const refreshAccessToken = async (req, res) => {
+  try {
+    const bodyToken = req.body?.refresh_token;
 
+    // Optional fallback: allow refresh token in Authorization header
+    const auth = req.headers.authorization || "";
+    const headerToken = auth.startsWith("Bearer ")
+      ? auth.slice("Bearer ".length).trim()
+      : null;
+
+    const refreshToken = bodyToken || headerToken;
+
+    if (!refreshToken) {
+      return res
+        .status(400)
+        .json({ success: false, message: "refresh_token is required" });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    } catch (e) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired refresh token" });
+    }
+
+    const uid = Number(decoded?.user_id);
+    if (!Number.isInteger(uid) || uid <= 0) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid token payload" });
+    }
+
+    // ✅ Load user (and validate)
+    const [urows] = await pool.query(
+      `SELECT user_id, role, phone, is_active, is_verified
+         FROM users
+        WHERE user_id = ?
+        LIMIT 1`,
+      [uid],
+    );
+
+    if (!urows.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    const user = urows[0];
+
+    if (Number(user.is_active) !== 1) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Account is deactivated." });
+    }
+
+    // ✅ Optional: require active verified session to refresh
+    // If you want refresh to work even when is_verified=0, remove this block.
+    if (Number(user.is_verified) !== 1 && user.role !== "admin") {
+      return res.status(401).json({
+        success: false,
+        message: "Session expired. Please login again.",
+      });
+    }
+
+    // ✅ Optional strict device binding (uncomment if you want)
+    // const deviceId = req.body?.device_id ? String(req.body.device_id).trim() : null;
+    // if (!deviceId && user.role !== "admin") {
+    //   return res.status(400).json({ success: false, message: "device_id is required" });
+    // }
+    // if (deviceId && user.role !== "admin") {
+    //   const [drows] = await pool.query(
+    //     `SELECT device_id FROM all_device_ids WHERE user_id = ? LIMIT 1`,
+    //     [uid],
+    //   );
+    //   const dbDeviceId = drows[0]?.device_id ? String(drows[0].device_id) : null;
+    //   if (!dbDeviceId || dbDeviceId !== deviceId) {
+    //     await pool.query(
+    //       `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
+    //       [uid],
+    //     );
+    //     return res.status(401).json({ success: false, message: "Device mismatch. Please login again." });
+    //   }
+    // }
+
+    // ✅ Issue new access token (keep payload minimal)
+    const payload = {
+      user_id: user.user_id,
+      role: user.role,
+      phone: user.phone,
+    };
+
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
+
+    // ✅ Optional rotation: also return a new refresh token
+    // If you rotate, consider storing/blacklisting old refresh tokens.
+    // const new_refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: "10m" });
+
+    return res.status(200).json({
+      success: true,
+      message: "Token refreshed",
+      token: {
+        access_token,
+        access_token_time: 60,
+        // refresh_token: new_refresh_token,
+        // refresh_token_time: 10,
+      },
+    });
+  } catch (err) {
+    console.error("refreshAccessToken error:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+};
 module.exports = {
   registerUser,
   loginUser, // now sets is_verified=1 + updates last_login
   logoutUser, // sets is_verified=0
   verifyActiveSession,
+  refreshAccessToken,
 };
