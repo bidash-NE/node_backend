@@ -561,7 +561,7 @@ const verifyActiveSession = async (req, res) => {
     });
 
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "10m",
+      expiresIn: "1440m",
     });
 
     return res.status(200).json({
