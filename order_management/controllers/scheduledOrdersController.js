@@ -244,12 +244,10 @@ exports.listScheduledOrders = async (req, res) => {
         .json({ success: false, message: "Invalid user_id parameter." });
     }
 
-    // Fetch the scheduled orders by user
     const list = await getScheduledOrdersByUser(userId);
-
     if (!list.length) return res.json({ success: true, data: [] });
 
-    // Extract unique business_ids from the orders
+    // -------- business enrichment (logo + address) --------
     const businessIds = [
       ...new Set(
         list
@@ -259,94 +257,133 @@ exports.listScheduledOrders = async (req, res) => {
       ),
     ];
 
-    // Fetch business details (logo and address) for each business_id
     let businessData = new Map();
     if (businessIds.length) {
       const placeholders = businessIds.map(() => "?").join(",");
       const [rows] = await db.query(
         `SELECT business_id, business_logo, address
-         FROM merchant_business_details
-         WHERE business_id IN (${placeholders})`,
+           FROM merchant_business_details
+          WHERE business_id IN (${placeholders})`,
         businessIds,
       );
-      businessData = new Map(rows.map((r) => [r.business_id, r]));
+      businessData = new Map(rows.map((r) => [Number(r.business_id), r]));
     }
 
-    // Add item images to each item in the order based on menu_id
-    const enrichedList = await Promise.all(
-      list.map(async (job) => {
-        const business = businessData.get(job.business_id) || {};
-        const businessLogo = business.business_logo || null;
-        const businessAddress = business.address || null;
+    // -------- collect menu ids by service type (bulk fetch) --------
+    const foodMenuIds = new Set();
+    const martMenuIds = new Set();
 
-        // Extract item images from the order_payload.items array
-        const itemImagesPromises = job.order_payload.items.map(async (item) => {
-          let itemImage = null;
+    for (const job of list) {
+      const serviceType = String(job?.order_payload?.service_type || "")
+        .trim()
+        .toUpperCase();
 
-          if (job.order_payload.service_type === "FOOD") {
-            // Fetch item_image from food_menu table
-            console.log(
-              "Fetching item_image for food item menu_id:",
-              item.menu_id,
-            );
-            const [foodMenuRow] = await db.query(
-              `SELECT item_image FROM food_menu WHERE id = ? LIMIT 1`,
-              [Number(item.menu_id)], // Ensure that menu_id is converted to a number
-            );
-            itemImage = foodMenuRow[0]?.item_image || null;
-          } else if (job.order_payload.service_type === "MART") {
-            // Fetch item_image from mart_menu table using LEFT JOIN for better data handling
-            console.log(
-              "Fetching item_image for mart item menu_id:",
-              item.menu_id,
-            );
-            const [martMenuRow] = await db.query(
-              `SELECT item_image FROM mart_menu WHERE id = ? LIMIT 1`,
-              [Number(item.menu_id)], // Ensure that menu_id is converted to a number
-            );
-            console.log("Mart menu row:", martMenuRow);
-            itemImage = martMenuRow[0]?.item_image || null;
-          }
+      const items = job?.order_payload?.items;
+      if (!Array.isArray(items)) continue;
 
-          item.item_image = itemImage; // Add item_image to the item object
-          return item;
-        });
+      for (const it of items) {
+        const mid = Number(it?.menu_id);
+        if (!Number.isFinite(mid) || mid <= 0) continue;
 
-        const enrichedItems = await Promise.all(itemImagesPromises);
+        if (serviceType === "FOOD") foodMenuIds.add(mid);
+        else if (serviceType === "MART") martMenuIds.add(mid);
+      }
+    }
 
-        // console.log("Enriched Items After Update:", enrichedItems);
+    const foodImageById = new Map();
+    const martImageById = new Map();
 
-        return {
-          job_id: job.job_id,
-          user_id: job.user_id,
-          business_id: job.business_id ?? null,
-          business_logo: businessLogo,
-          business_address: businessAddress,
-          scheduled_at_utc: job.scheduled_at ?? null,
-          scheduled_at_local:
-            job.scheduled_at_local ??
-            (Number.isFinite(job.scheduled_epoch_ms)
-              ? epochToBhutanIso(job.scheduled_epoch_ms)
-              : null),
-          created_at_utc: job.created_at ?? null,
-          order_payload: {
-            ...job.order_payload,
-            items: enrichedItems, // Updated items with item_image
-          },
-        };
-      }),
-    );
+    if (foodMenuIds.size) {
+      const ids = [...foodMenuIds];
+      const placeholders = ids.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT id, item_image
+           FROM food_menu
+          WHERE id IN (${placeholders})`,
+        ids,
+      );
+      rows.forEach((r) => foodImageById.set(Number(r.id), r.item_image || null));
+    }
 
-    // console.log("Enriched List Before Response:", enrichedList);
-    return res.json({ success: true, data: enrichedList });
+    if (martMenuIds.size) {
+      const ids = [...martMenuIds];
+      const placeholders = ids.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT id, item_image
+           FROM mart_menu
+          WHERE id IN (${placeholders})`,
+        ids,
+      );
+      rows.forEach((r) => martImageById.set(Number(r.id), r.item_image || null));
+    }
+
+    // -------- build response with per-item item_image + top-level item_images list --------
+    const enriched = list.map((job) => {
+      const business = businessData.get(Number(job.business_id)) || {};
+      const businessLogo = business.business_logo || null;
+      const businessAddress = business.address || null;
+
+      const serviceType = String(job?.order_payload?.service_type || "")
+        .trim()
+        .toUpperCase();
+
+      const items = Array.isArray(job?.order_payload?.items)
+        ? job.order_payload.items
+        : [];
+
+      const enrichedItems = items.map((it) => {
+        const mid = Number(it?.menu_id);
+        let itemImage = null;
+
+        if (Number.isFinite(mid) && mid > 0) {
+          if (serviceType === "FOOD") itemImage = foodImageById.get(mid) || null;
+          else if (serviceType === "MART") itemImage = martImageById.get(mid) || null;
+        }
+
+        return { ...it, item_image: itemImage };
+      });
+
+      // list of images (one per item, preserves item order, may include nulls)
+      const itemImages = enrichedItems.map((it) => it.item_image || null);
+
+      return {
+        job_id: job.job_id,
+        user_id: job.user_id,
+        business_id: job.business_id ?? null,
+        business_logo: businessLogo,
+        business_address: businessAddress,
+
+        scheduled_at_utc: job.scheduled_at ?? null,
+        scheduled_at_local:
+          job.scheduled_at_local ??
+          (Number.isFinite(job.scheduled_epoch_ms)
+            ? epochToBhutanIso(job.scheduled_epoch_ms)
+            : null),
+
+        created_at_utc: job.created_at ?? null,
+
+        order_payload: {
+          ...job.order_payload,
+          items: enrichedItems,
+          item_images: itemImages, // ✅ requested: list of item images (matches items order)
+        },
+      };
+    });
+
+    return res.json({ success: true, data: enriched });
   } catch (err) {
-    console.error("getScheduledOrdersByUser error:", err);
+    console.error("listScheduledOrders error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
     });
   }
 };
+
+// controllers/scheduledOrdersController.js
+// ✅ Updated: listScheduledOrdersByBusiness
+// - Adds item_image per item (from food_menu or mart_menu based on service_type)
+// - Adds order_payload.item_images as list (same order as items)
 
 exports.listScheduledOrdersByBusiness = async (req, res) => {
   try {
@@ -359,9 +396,9 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     }
 
     const list = await getScheduledOrdersByBusiness(businessId);
-
     if (!list.length) return res.json({ success: true, data: [] });
 
+    // -------- users enrichment (name) --------
     const userIds = [
       ...new Set(
         list
@@ -381,12 +418,84 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
     }
 
+    // -------- collect menu ids by service type for bulk lookup --------
+    const foodMenuIds = new Set();
+    const martMenuIds = new Set();
+
+    for (const job of list) {
+      const serviceType = String(job?.order_payload?.service_type || "")
+        .trim()
+        .toUpperCase();
+
+      const items = job?.order_payload?.items;
+      if (!Array.isArray(items)) continue;
+
+      for (const it of items) {
+        const mid = Number(it?.menu_id);
+        if (!Number.isFinite(mid) || mid <= 0) continue;
+
+        if (serviceType === "FOOD") foodMenuIds.add(mid);
+        else if (serviceType === "MART") martMenuIds.add(mid);
+      }
+    }
+
+    const foodImageById = new Map();
+    const martImageById = new Map();
+
+    if (foodMenuIds.size) {
+      const ids = [...foodMenuIds];
+      const placeholders = ids.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT id, item_image
+           FROM food_menu
+          WHERE id IN (${placeholders})`,
+        ids,
+      );
+      rows.forEach((r) => foodImageById.set(Number(r.id), r.item_image || null));
+    }
+
+    if (martMenuIds.size) {
+      const ids = [...martMenuIds];
+      const placeholders = ids.map(() => "?").join(",");
+      const [rows] = await db.query(
+        `SELECT id, item_image
+           FROM mart_menu
+          WHERE id IN (${placeholders})`,
+        ids,
+      );
+      rows.forEach((r) => martImageById.set(Number(r.id), r.item_image || null));
+    }
+
+    // -------- sort + map --------
     const sorted = [...list].sort(
       (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0),
     );
 
     const mapped = sorted.map((job) => {
       const uid = Number(job.user_id);
+
+      const serviceType = String(job?.order_payload?.service_type || "")
+        .trim()
+        .toUpperCase();
+
+      const items = Array.isArray(job?.order_payload?.items)
+        ? job.order_payload.items
+        : [];
+
+      const enrichedItems = items.map((it) => {
+        const mid = Number(it?.menu_id);
+        let itemImage = null;
+
+        if (Number.isFinite(mid) && mid > 0) {
+          if (serviceType === "FOOD") itemImage = foodImageById.get(mid) || null;
+          else if (serviceType === "MART") itemImage = martImageById.get(mid) || null;
+        }
+
+        return { ...it, item_image: itemImage };
+      });
+
+      const itemImages = enrichedItems.map((it) => it.item_image || null);
+
       return {
         job_id: job.job_id,
         user_id: job.user_id,
@@ -402,7 +511,11 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
 
         created_at_utc: job.created_at ?? null,
 
-        order_payload: job.order_payload,
+        order_payload: {
+          ...job.order_payload,
+          items: enrichedItems,
+          item_images: itemImages, // ✅ list of item images in the same order as items
+        },
       };
     });
 
@@ -415,6 +528,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   }
 };
+
 
 // controllers/scheduledOrdersController.js
 // ✅ Replace your existing exports.cancelScheduledOrder with this one
