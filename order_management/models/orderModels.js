@@ -3205,6 +3205,9 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
         status: st,
         status_reason: r.status_reason || null,
 
+        // ✅ NEW: sum of item subtotals for THIS merchant (bid) within this order
+        items_total: 0,
+
         payment_method: r.payment_method,
         fulfillment_type: r.fulfillment_type,
         priority: r.priority,
@@ -3241,6 +3244,12 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
     }
 
     const orderRef = group._ordersMap.get(r.order_id);
+
+    const lineSubtotal = Number(r.subtotal || 0);
+    orderRef.items_total = Number(
+      (Number(orderRef.items_total || 0) + lineSubtotal).toFixed(2),
+    );
+
     orderRef.items.push({
       item_id: r.item_id,
       business_id: r.business_id,
@@ -3258,6 +3267,13 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
 
   const out = Array.from(byUser.values()).map((g) => {
     delete g._ordersMap;
+
+    // optional: ensure items_total always has 2dp number
+    g.orders = (g.orders || []).map((o) => ({
+      ...o,
+      items_total: Number(Number(o.items_total || 0).toFixed(2)),
+    }));
+
     return g;
   });
 
