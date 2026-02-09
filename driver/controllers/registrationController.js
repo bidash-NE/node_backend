@@ -244,130 +244,277 @@ const loginUser = async (req, res) => {
     let s = String(raw)
       .trim()
       .replace(/[^\d+]/g, "");
+    if (!s) return null;
+
     if (s.startsWith("00")) s = `+${s.slice(2)}`;
     if (s.startsWith("+975")) return s;
     if (s.startsWith("975")) return `+${s}`;
-    if (s.startsWith("+")) return s;
+    if (s.startsWith("+")) return s; // keep other country codes as-is
     return `+975${s}`;
   };
+
+  const normalizeEmail = (raw) => {
+    if (raw == null) return null;
+    const e = String(raw).trim().toLowerCase();
+    return e ? e : null;
+  };
+
+  const safeDeviceId = (raw) => {
+    const v = raw == null ? "" : String(raw).trim();
+    return v ? v : null;
+  };
+
+  const isAdminRole = (role) =>
+    String(role || "").toLowerCase() === "admin" ||
+    String(role || "").toLowerCase() === "super admin" ||
+    String(role || "").toLowerCase() === "super_admin" ||
+    String(role || "").toLowerCase() === "superadmin";
 
   try {
     const b = req.body || {};
 
-    // If your login uses phone, normalize it
     const phone = b.phone ? normalizeBhutanPhone(b.phone) : null;
+    const email = b.email ? normalizeEmail(b.email) : null;
 
-    // If your login uses email/username, keep them too
-    const email = b.email ? String(b.email).trim().toLowerCase() : null;
-
-    const password = b.password ? String(b.password) : null;
-    if (!password)
+    const password = b.password != null ? String(b.password) : null;
+    if (!password) {
       return res
         .status(400)
         .json({ success: false, message: "Password is required" });
-
-    // You may be using either phone or email to login
-    if (!phone && !email) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Phone or email is required" });
     }
 
-    // Device id (if you enforce one-login / session verify)
-    const deviceID = b.device_id ?? b.deviceID ?? null;
+    if (!phone && !email) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone or email is required",
+      });
+    }
 
-    // 1) Find user by phone or email
-    const [rows] = await pool.query(
-      `SELECT user_id, user_name, email, phone, password_hash, role, is_active, is_verified
-         FROM users
-        WHERE ${phone ? "phone = ?" : "email = ?"}
-        LIMIT 1`,
-      [phone ? phone : email],
+    const deviceId = safeDeviceId(
+      b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
     );
 
-    if (!rows.length) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid credentials" });
-    }
-
-    const user = rows[0];
-
-    if (Number(user.is_active) !== 1) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Account is deactivated." });
-    }
-
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid credentials" });
-    }
-
-    // ✅ Optional: normalize stored phone too (only if you want to auto-fix old data)
-    // If user.phone doesn't start with +975 and login was by phone, update DB once.
-    if (phone && user.phone !== phone) {
-      await pool.query(`UPDATE users SET phone = ? WHERE user_id = ?`, [
-        phone,
-        user.user_id,
-      ]);
-      user.phone = phone;
-    }
-
-    // ✅ Optional device check / update (your choice)
-    // If you want to store/update device id at login:
-    if (deviceID && user.role !== "admin") {
-      const deviceTable =
-        user.role === "driver" ? "driver_devices" : "user_devices";
-      await pool.query(
-        `INSERT INTO ${deviceTable} (user_id, device_id, updated_at)
-         VALUES (?, ?, NOW())
-         ON DUPLICATE KEY UPDATE device_id = VALUES(device_id), updated_at = NOW()`,
-        [user.user_id, String(deviceID)],
+    // 1) Fetch candidates (email case-insensitive OR exact phone)
+    let candidates = [];
+    if (email) {
+      const [rows] = await pool.query(
+        `SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
+           FROM users
+          WHERE LOWER(email) = LOWER(?)
+          ORDER BY user_id DESC
+          LIMIT 25`,
+        [email],
       );
+      candidates = rows || [];
+    } else {
+      const [rows] = await pool.query(
+        `SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
+           FROM users
+          WHERE phone = ?
+          ORDER BY user_id DESC
+          LIMIT 25`,
+        [phone],
+      );
+      candidates = rows || [];
     }
 
-    // 2) Merchant extras (same style you used)
+    if (!candidates.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // 2) Compare password against candidates (newest first)
+    let picked = null;
+    for (const u of candidates) {
+      if (!u?.password_hash) continue;
+      const ok = await bcrypt.compare(password, u.password_hash);
+      if (ok) {
+        picked = u;
+        break;
+      }
+    }
+
+    if (!picked) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Incorrect password" });
+    }
+
+    // 3) Fetch fresh user row
+    const [[user]] = await pool.query(
+      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
+         FROM users
+        WHERE user_id = ?
+        LIMIT 1`,
+      [picked.user_id],
+    );
+
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    if (Number(user.is_active) === 0) {
+      return res.status(403).json({
+        success: false,
+        message: "Account is deactivated. Please contact support.",
+      });
+    }
+
+    const roleLower = String(user.role || "").toLowerCase();
+    const isMerchant = roleLower === "merchant";
+    const adminNoDevice = isAdminRole(user.role);
+
+    // 4) Device id rules:
+    // - Admin/Super Admin: NO device id required, NO device lock
+    // - Others: device id REQUIRED
+    if (!adminNoDevice && !deviceId) {
+      return res.status(400).json({
+        success: false,
+        message: "device_id is required",
+      });
+    }
+
+    // 5) If already verified, enforce same-device lock (NOT for admin/super admin)
+    if (!adminNoDevice && Number(user.is_verified) === 1) {
+      const [drows] = await pool.query(
+        `SELECT device_id
+           FROM all_device_ids
+          WHERE user_id = ?
+          LIMIT 1`,
+        [user.user_id],
+      );
+
+      const dbDeviceId = drows?.[0]?.device_id
+        ? String(drows[0].device_id)
+        : null;
+
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+        });
+      }
+    }
+
+    // 6) Save/REPLACE device id (NOT for admin/super admin)
+    if (!adminNoDevice && deviceId) {
+      try {
+        await pool.query(
+          `INSERT INTO all_device_ids (user_id, device_id, last_seen)
+           VALUES (?, ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             device_id = VALUES(device_id),
+             last_seen = NOW()`,
+          [user.user_id, deviceId],
+        );
+      } catch (e) {
+        console.error("device_id save failed:", e?.message || e);
+      }
+    }
+
+    // 7) Normalize stored phone (optional, only if login was by phone and differs)
+    if (phone && user.phone && user.phone !== phone) {
+      try {
+        await pool.query(`UPDATE users SET phone = ? WHERE user_id = ?`, [
+          phone,
+          user.user_id,
+        ]);
+        user.phone = phone;
+      } catch (e) {
+        console.error("phone normalize update failed:", e?.message || e);
+      }
+    }
+
+    // 8) Mark verified + last_login (always on successful login)
+    try {
+      await pool.query(
+        `UPDATE users
+            SET is_verified = 1,
+                last_login = NOW()
+          WHERE user_id = ?`,
+        [user.user_id],
+      );
+      user.is_verified = 1;
+    } catch (e) {
+      console.error("is_verified update failed:", e?.message || e);
+    }
+
+    // 9) Merchant extras (only for merchant)
     let owner_type = null;
     let business_id = null;
     let business_name = null;
     let business_logo = null;
     let address = null;
 
-    if (user.role === "merchant") {
-      const [mbd] = await pool.query(
-        `SELECT owner_type, business_id, business_name, business_logo, address
-           FROM merchant_business_details
-          WHERE user_id = ?
-          ORDER BY created_at DESC, business_id DESC
-          LIMIT 1`,
-        [user.user_id],
-      );
+    if (isMerchant) {
+      try {
+        const [[biz]] = await pool.query(
+          `SELECT business_id, business_name, owner_type, business_logo, address
+             FROM merchant_business_details
+            WHERE user_id = ?
+            ORDER BY created_at DESC, business_id DESC
+            LIMIT 1`,
+          [user.user_id],
+        );
 
-      if (mbd.length) {
-        owner_type = mbd[0]?.owner_type ?? null;
-        business_id = mbd[0]?.business_id ?? null;
-        business_name = mbd[0]?.business_name ?? null;
-        business_logo = mbd[0]?.business_logo ?? null;
-        address = mbd[0]?.address ?? null;
+        owner_type = biz?.owner_type ?? null;
+        business_id = biz?.business_id ?? null;
+        business_name = biz?.business_name ?? null;
+        business_logo = biz?.business_logo ?? null;
+        address = biz?.address ?? null;
+      } catch (e) {
+        console.error("merchant extras fetch failed:", e?.message || e);
       }
     }
 
-    // 3) Issue tokens
+    // 10) Issue tokens
     const payload = {
       user_id: user.user_id,
       role: user.role,
+      user_name: user.user_name,
       phone: user.phone,
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
+
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "10m",
+      expiresIn: "1440m",
     });
+
+    // 11) Response shape:
+    // - Merchant: include business fields like your loginByEmail
+    // - Others: keep similar to your previous response
+    if (isMerchant) {
+      return res.status(200).json({
+        message: "Login successful",
+        token: {
+          access_token,
+          access_token_time: 60,
+          refresh_token,
+          refresh_token_time: 1440,
+        },
+        user: {
+          user_id: user.user_id,
+          user_name: user.user_name,
+          phone: user.phone,
+          role: user.role,
+          email: user.email,
+          is_verified: 1,
+          device_id: adminNoDevice ? null : deviceId,
+          owner_type,
+          business_id,
+          business_name,
+          business_logo,
+          address,
+        },
+      });
+    }
 
     return res.status(200).json({
       message: "Login successful",
@@ -383,15 +530,14 @@ const loginUser = async (req, res) => {
         phone: user.phone,
         role: user.role,
         email: user.email,
-        is_verified: Number(user.is_verified) === 1 ? 1 : 0,
-        ...(user.role === "merchant"
-          ? { owner_type, business_id, business_name, business_logo, address }
-          : {}),
+        is_verified: 1,
       },
     });
   } catch (err) {
     console.error("loginUser error:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Login failed due to server error" });
   }
 };
 
