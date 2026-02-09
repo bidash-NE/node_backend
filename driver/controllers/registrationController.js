@@ -264,11 +264,25 @@ const loginUser = async (req, res) => {
     return v ? v : null;
   };
 
-  const isAdminRole = (role) =>
-    String(role || "").toLowerCase() === "admin" ||
-    String(role || "").toLowerCase() === "super admin" ||
-    String(role || "").toLowerCase() === "super_admin" ||
-    String(role || "").toLowerCase() === "superadmin";
+  const truthy = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes" || s === "y";
+  };
+
+  const isAdminRole = (role) => {
+    const r = String(role || "")
+      .toLowerCase()
+      .trim();
+    return (
+      r === "admin" ||
+      r === "super admin" ||
+      r === "super_admin" ||
+      r === "superadmin"
+    );
+  };
 
   try {
     const b = req.body || {};
@@ -290,6 +304,7 @@ const loginUser = async (req, res) => {
       });
     }
 
+    const desktop = truthy(b.desktop);
     const deviceId = safeDeviceId(
       b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
     );
@@ -363,22 +378,33 @@ const loginUser = async (req, res) => {
       });
     }
 
-    const roleLower = String(user.role || "").toLowerCase();
+    const roleLower = String(user.role || "")
+      .toLowerCase()
+      .trim();
     const isMerchant = roleLower === "merchant";
     const adminNoDevice = isAdminRole(user.role);
 
-    // 4) Device id rules:
+    // ✅ NEW: Merchant desktop login -> no device id required
+    // Device rules:
     // - Admin/Super Admin: NO device id required, NO device lock
+    // - Merchant with desktop=true: NO device id required, NO device lock
     // - Others: device id REQUIRED
-    if (!adminNoDevice && !deviceId) {
+    const merchantDesktopNoDevice = isMerchant && desktop === true;
+
+    if (!adminNoDevice && !merchantDesktopNoDevice && !deviceId) {
       return res.status(400).json({
         success: false,
         message: "device_id is required",
       });
     }
 
-    // 5) If already verified, enforce same-device lock (NOT for admin/super admin)
-    if (!adminNoDevice && Number(user.is_verified) === 1) {
+    // 5) If already verified, enforce same-device lock
+    // (NOT for admin/super admin and NOT for merchant desktop=true)
+    if (
+      !adminNoDevice &&
+      !merchantDesktopNoDevice &&
+      Number(user.is_verified) === 1
+    ) {
       const [drows] = await pool.query(
         `SELECT device_id
            FROM all_device_ids
@@ -400,8 +426,9 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 6) Save/REPLACE device id (NOT for admin/super admin)
-    if (!adminNoDevice && deviceId) {
+    // 6) Save/REPLACE device id
+    // (NOT for admin/super admin and NOT for merchant desktop=true)
+    if (!adminNoDevice && !merchantDesktopNoDevice && deviceId) {
       try {
         await pool.query(
           `INSERT INTO all_device_ids (user_id, device_id, last_seen)
@@ -487,9 +514,7 @@ const loginUser = async (req, res) => {
       expiresIn: "1440m",
     });
 
-    // 11) Response shape:
-    // - Merchant: include business fields like your loginByEmail
-    // - Others: keep similar to your previous response
+    // 11) Response shape
     if (isMerchant) {
       return res.status(200).json({
         message: "Login successful",
@@ -506,7 +531,7 @@ const loginUser = async (req, res) => {
           role: user.role,
           email: user.email,
           is_verified: 1,
-          device_id: adminNoDevice ? null : deviceId,
+          device_id: adminNoDevice || merchantDesktopNoDevice ? null : deviceId,
           owner_type,
           business_id,
           business_name,
