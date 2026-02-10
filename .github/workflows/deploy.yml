@@ -17,6 +17,7 @@ on:
       - "grablike-backend/**"
       - "sms-gateway-backend/**"
       - "user_merchant_chat/**"
+      - "expo_push_notification/**" # ✅ NEW (your expo push notification service folder)
       - "k8s/**"
       - ".github/workflows/deploy.yml"
 
@@ -39,6 +40,7 @@ jobs:
       grablike_backend: ${{ steps.filter.outputs.grablike_backend }}
       sms_gateway: ${{ steps.filter.outputs.sms_gateway }}
       user_merchant_chat: ${{ steps.filter.outputs.user_merchant_chat }}
+      expo_push_notification: ${{ steps.filter.outputs.expo_push_notification }} # ✅ NEW
       k8s: ${{ steps.filter.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +62,7 @@ jobs:
             grablike_backend:     'grablike-backend/**'
             sms_gateway:          'sms-gateway-backend/**'
             user_merchant_chat:   'user_merchant_chat/**'
+            expo_push_notification: 'expo_push_notification/**'   # ✅ NEW
             k8s:                  'k8s/**'
             any:
               - 'food/**'
@@ -75,6 +78,7 @@ jobs:
               - 'grablike-backend/**'
               - 'sms-gateway-backend/**'
               - 'user_merchant_chat/**'
+              - 'expo_push_notification/**'                       # ✅ NEW
               - 'k8s/**'
 
   build:
@@ -221,6 +225,17 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:${{ github.sha }}
 
+      # ✅ NEW: Build & push Expo Push Notification Service
+      - name: Build & push Expo Push Notification
+        if: needs.changes.outputs.expo_push_notification == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./expo_push_notification
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:latest
+            ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:${{ github.sha }}
+
   deploy:
     name: Deploy changed services to k3s (prod)
     runs-on: self-hosted
@@ -244,6 +259,7 @@ jobs:
       GRABLIKE_CHANGED: ${{ needs.changes.outputs.grablike_backend }}
       SMS_GATEWAY_CHANGED: ${{ needs.changes.outputs.sms_gateway }}
       USER_MERCHANT_CHAT_CHANGED: ${{ needs.changes.outputs.user_merchant_chat }}
+      EXPO_PUSH_NOTIFICATION_CHANGED: ${{ needs.changes.outputs.expo_push_notification }} # ✅ NEW
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -315,6 +331,14 @@ jobs:
           fi
           if [ "${USER_MERCHANT_CHAT_CHANGED:-}" = "true" ]; then
             deploy_if_exists user-merchant-chat user-merchant-chat "${DOCKER_USER}/superapp-user-merchant-chat:${SHA}"
+          fi
+
+          # ✅ NEW: deploy expo push notification
+          if [ "${EXPO_PUSH_NOTIFICATION_CHANGED:-}" = "true" ]; then
+            # IMPORTANT:
+            # - deployment name in k8s should be: expo-push-notification
+            # - container name in that deployment should be: expo-push-notification
+            deploy_if_exists expo-push-notification expo-push-notification "${DOCKER_USER}/superapp-expo-push-notification:${SHA}"
           fi
 
           exit 0

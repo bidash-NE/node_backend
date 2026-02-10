@@ -4,7 +4,6 @@ const pushRoutes = require("./routes/pushRoutes");
 
 const app = express();
 
-// ✅ CORS (allow browser tools like Hoppscotch)
 app.use(
   cors({
     origin: "*",
@@ -21,6 +20,4 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 app.use("/api/push", pushRoutes);
 
 const port = Number(process.env.PORT || 5050);
-
-// ✅ also okay to bind like this:
 app.listen(port, "0.0.0.0", () => console.log(`✅ running on :${port}`));
