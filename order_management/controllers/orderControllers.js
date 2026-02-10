@@ -20,39 +20,29 @@ const EXPO_NOTIFICATION_URL =
   process.env.EXPO_NOTIFICATION_URL ||
   "https://grab.newedge.bt/expo/api/push/send";
 
+/* ======================== PUSH helpers ======================== */
+
 /**
- * ✅ IMPORTANT (as per your screenshot)
- * Your push API expects:
- *   { user_id: <number>, title: <string>, body: <string> }
- *
- * NOT Expo tokens.
+ * If it's business_id -> get merchant user_id from merchant_business_details
  */
-async function sendPushToUserId(user_id, { title, body }) {
-  try {
-    const uid = Number(user_id);
-    if (!Number.isFinite(uid) || uid <= 0) return { ok: false, skipped: true };
+async function resolveMerchantUserIdFromBusinessId(conn, business_id) {
+  const bid = Number(business_id);
+  if (!Number.isFinite(bid) || bid <= 0) return null;
 
-    const payload = {
-      user_id: uid,
-      title: String(title || "Notification"),
-      body: String(body || ""),
-    };
+  const [[row]] = await conn.query(
+    `SELECT user_id
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
+    [bid],
+  );
 
-    const { data } = await axios.post(EXPO_NOTIFICATION_URL, payload, {
-      timeout: 8000,
-      headers: { "Content-Type": "application/json" },
-    });
-
-    return { ok: true, data };
-  } catch (e) {
-    console.error("[PUSH FAILED]", e?.message || e);
-    return { ok: false, error: e?.message || "push_failed" };
-  }
+  const uid = row?.user_id != null ? Number(row.user_id) : null;
+  return Number.isFinite(uid) && uid > 0 ? uid : null;
 }
 
 /**
- * ✅ If it's business_id -> get merchant user_id from merchant_business_details
- * Supports multiple merchants per business_id (distinct).
+ * Supports multiple merchants across multiple business_ids
  */
 async function getMerchantUserIdsByBusinessIds(businessIds = []) {
   const ids = Array.from(
@@ -84,6 +74,119 @@ async function getMerchantUserIdsByBusinessIds(businessIds = []) {
   } catch (e) {
     console.error("[getMerchantUserIdsByBusinessIds ERROR]", e?.message || e);
     return [];
+  }
+}
+
+/**
+ * ✅ IMPORTANT (as per your screenshot)
+ * Your push API expects:
+ *   { user_id: <number>, title: <string>, body: <string> }
+ */
+async function sendPushToUserId(user_id, { title, body }) {
+  try {
+    const uid = Number(user_id);
+    if (!Number.isFinite(uid) || uid <= 0) return { ok: false, skipped: true };
+
+    const payload = {
+      user_id: uid,
+      title: String(title || "Notification"),
+      body: String(body || ""),
+    };
+
+    const { data } = await axios.post(EXPO_NOTIFICATION_URL, payload, {
+      timeout: 8000,
+      headers: { "Content-Type": "application/json" },
+    });
+
+    return { ok: true, data };
+  } catch (e) {
+    console.error("[PUSH FAILED]", e?.message || e);
+    return { ok: false, error: e?.message || "push_failed" };
+  }
+}
+
+/* ======================== wallet+delivery notifications ======================== */
+
+/**
+ * After DELIVERED capture, write DB notifications + send PUSH
+ * - Customer: wallet debit (order amount + platform fee share)
+ * - Merchant: wallet credit (net amount) + platform fee share
+ */
+async function safeNotifyWalletAndDelivery(
+  conn,
+  { order_id, user_id, capture },
+) {
+  // customer wallet debit (DB + push)
+  if (capture?.captured && user_id) {
+    try {
+      await Order.addUserWalletDebitNotification({
+        user_id: Number(user_id),
+        order_id,
+        order_amount: Number(capture.order_amount || 0),
+        platform_fee: Number(capture.platform_fee_user || 0),
+        method: "WALLET",
+        conn,
+      });
+
+      const orderAmt = Number(capture.order_amount || 0);
+      const feeAmt = Number(capture.platform_fee_user || 0);
+
+      const body =
+        `Order ${order_id} delivered. ` +
+        `Nu. ${orderAmt.toFixed(2)} deducted for order` +
+        (feeAmt > 0 ? ` and Nu. ${feeAmt.toFixed(2)} as platform fee.` : ".");
+
+      await sendPushToUserId(Number(user_id), {
+        title: "Wallet deduction",
+        body,
+      });
+    } catch (e) {
+      console.error("[notify user wallet debit failed]", e?.message);
+    }
+  }
+
+  // merchant wallet credit (DB + push)
+  if (capture?.captured && capture?.business_id) {
+    try {
+      const merchantUserId = await resolveMerchantUserIdFromBusinessId(
+        conn,
+        capture.business_id,
+      );
+      if (merchantUserId) {
+        const creditAmt = Number(capture.merchant_net_amount || 0);
+        const merchFee = Number(capture.platform_fee_merchant || 0);
+
+        const msg =
+          `Order ${order_id} delivered. ` +
+          `Nu. ${creditAmt.toFixed(2)} credited to your wallet.` +
+          (merchFee > 0
+            ? ` (Platform fee share: Nu. ${merchFee.toFixed(2)})`
+            : "");
+
+        await conn.query(
+          `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
+           VALUES (?, 'wallet_credit', 'Wallet credited', ?, ?, 'unread', NOW())`,
+          [
+            merchantUserId,
+            msg,
+            JSON.stringify({
+              order_id,
+              business_id: Number(capture.business_id),
+              merchant_net_amount: creditAmt,
+              platform_fee_merchant: merchFee,
+              payment_method: "WALLET",
+            }),
+          ],
+        );
+
+        await sendPushToUserId(merchantUserId, {
+          title: "Wallet credited",
+          body: msg,
+        });
+      }
+    } catch (e) {
+      console.error("[notify merchant wallet credit failed]", e?.message);
+    }
   }
 }
 
@@ -456,12 +559,14 @@ async function createOrder(req, res) {
       });
     }
 
+    // ✅ ONLY WALLET (COD/CARD removed)
     const payMethod = normalizePaymentMethod(payload.payment_method);
-    if (!payMethod || !["WALLET", "COD", "CARD"].includes(payMethod)) {
+    if (!payMethod || payMethod !== "WALLET") {
       cleanupUploadedFiles();
-      return res
-        .status(400)
-        .json({ ok: false, message: "Invalid or missing payment_method" });
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid or missing payment_method. Allowed: WALLET",
+      });
     }
 
     const normalizedItems = itemsRaw.map((it, idx) =>
@@ -528,8 +633,8 @@ async function createOrder(req, res) {
     payload.delivery_photo_urls = allPhotos;
     payload.delivery_photo_url = allPhotos.length ? allPhotos[0] : null;
 
-    // ✅ wallet balance check on place order (kept)
-    if (payMethod === "WALLET") {
+    // ✅ wallet balance check on place order
+    {
       const itemsSubtotal = normalizedItems.reduce(
         (s, it) =>
           s +
@@ -587,7 +692,7 @@ async function createOrder(req, res) {
     const created_id = await Order.create({
       ...payload,
       service_type: serviceType,
-      payment_method: payMethod,
+      payment_method: "WALLET",
       fulfillment_type: fulfillment,
       status,
       items: normalizedItems,
@@ -627,7 +732,7 @@ async function createOrder(req, res) {
       }
     }
 
-    // ✅ PUSH to merchant(s) by business_id -> merchant_business_details.user_id
+    // ✅ PUSH to merchant(s) by business_id
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(businessIds);
@@ -813,9 +918,8 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 
 /**
  * PUT/PATCH /orders/:order_id/status
- * ✅ Uses your push API (user_id based) for:
- *   - customer push on status update
- *   - merchant push (by business_id -> merchant_business_details.user_id) on status update
+ * ✅ Uses your push API (user_id based)
+ * ✅ IMPORTANT: If status is DELIVERED, we route to markOrderDelivered to run capture+archive+delete pipeline.
  */
 async function updateOrderStatus(req, res) {
   try {
@@ -863,7 +967,18 @@ async function updateOrderStatus(req, res) {
       await updateEstimatedArrivalTime(order_id, estimated_minutes);
     }
 
-    // Cancel restriction (kept)
+    // ✅ DELIVERED must go through capture+archive pipeline
+    if (normalized === "DELIVERED") {
+      req.body = {
+        ...(req.body || {}),
+        order_id,
+        delivered_by: delivered_by || "SYSTEM",
+        reason: finalReason || "",
+      };
+      return markOrderDelivered(req, res);
+    }
+
+    // Cancel restriction
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -923,16 +1038,18 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // ✅ PUSH customer (user_id) using your API
+    // ✅ PUSH customer
     try {
       const title = "Order Update";
       const bodyText =
-        `Your order ${order_id} has been ${normalized.toLowerCase().replace(/_/g, " ")}.` +
+        `Your order ${order_id} has been ${normalized
+          .toLowerCase()
+          .replace(/_/g, " ")}.` +
         (finalReason ? ` Reason: ${finalReason}` : "");
       await sendPushToUserId(user_id, { title, body: bodyText });
     } catch {}
 
-    // ✅ PUSH merchant(s) (business_id -> merchant user_id) using your API
+    // ✅ PUSH merchant(s)
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(business_ids);
@@ -946,7 +1063,7 @@ async function updateOrderStatus(req, res) {
       }
     } catch {}
 
-    // DB notify user (kept)
+    // DB notify user
     try {
       await Order.addUserOrderStatusNotification({
         user_id,
@@ -956,21 +1073,6 @@ async function updateOrderStatus(req, res) {
       });
     } catch (e) {
       console.error("[user notify failed]", { order_id, err: e?.message });
-    }
-
-    // extra fields (kept for your existing consumers)
-    if (normalized === "DELIVERED") {
-      const by =
-        String(delivered_by || "SYSTEM")
-          .trim()
-          .toUpperCase() || "SYSTEM";
-      return res.json({
-        success: true,
-        message: "Order delivered successfully.",
-        order_id,
-        status: "DELIVERED",
-        delivered_by: by,
-      });
     }
 
     if (normalized === "CANCELLED") {
@@ -1108,7 +1210,9 @@ async function cancelOrderByUser(req, res) {
     try {
       await sendPushToUserId(out.user_id, {
         title: "Order Update",
-        body: `Your order ${order_id} has been cancelled.${reason ? ` Reason: ${reason}` : ""}`,
+        body: `Your order ${order_id} has been cancelled.${
+          reason ? ` Reason: ${reason}` : ""
+        }`,
       });
     } catch {}
 
@@ -1139,6 +1243,79 @@ async function cancelOrderByUser(req, res) {
   }
 }
 
+/**
+ * POST/PATCH /orders/:order_id/delivered (or similar route)
+ * Runs: capture(WALLET only) + archive + delete, then wallet notifications + push
+ */
+async function markOrderDelivered(req, res) {
+  const order_id = String(req.params.order_id || req.body?.order_id || "")
+    .trim()
+    .toUpperCase();
+  const delivered_by = String(req.body?.delivered_by || "SYSTEM").trim();
+  const reason = String(req.body?.reason || "").trim();
+
+  if (!order_id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "order_id is required" });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    // 1) Model pipeline (captures + archives + deletes)
+    const result = await Order.completeAndArchiveDeliveredOrder(order_id, {
+      delivered_by,
+      reason,
+      capture_at: "DELIVERED",
+    });
+
+    if (!result?.ok) {
+      return res.status(400).json({
+        success: false,
+        message: result?.code || "Failed to mark delivered",
+        data: result || null,
+      });
+    }
+
+    // 2) Notifications AFTER delivered wallet capture
+    await conn.beginTransaction();
+    await safeNotifyWalletAndDelivery(conn, {
+      order_id,
+      user_id: result.user_id,
+      capture: result.capture,
+    });
+    await conn.commit();
+
+    // 3) Broadcast delivered (optional but useful; order is already deleted from main tables)
+    try {
+      broadcastOrderStatusToMany({
+        order_id,
+        user_id: result.user_id,
+        business_ids: result.business_ids || [],
+        status: "DELIVERED",
+      });
+    } catch {}
+
+    return res.json({
+      success: true,
+      message: "Order delivered successfully.",
+      data: result,
+    });
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    console.error("[markOrderDelivered]", e);
+    return res.status(500).json({
+      success: false,
+      message: "Technical error while marking delivered.",
+      error: e?.message,
+    });
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   uploadOrderImages,
   createOrder,
@@ -1152,4 +1329,5 @@ module.exports = {
   deleteOrder,
   getOrderStatusCountsByBusiness,
   cancelOrderByUser,
+  markOrderDelivered,
 };

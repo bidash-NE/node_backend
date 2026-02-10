@@ -799,7 +799,8 @@ async function captureOrderFunds(order_id) {
     );
     if (!order) throw new Error("Order not found for capture");
 
-    if (String(order.payment_method || "WALLET").toUpperCase() !== "WALLET") {
+    const pm = String(order.payment_method || "WALLET").toUpperCase();
+    if (pm !== "WALLET") {
       await conn.commit();
       return {
         captured: false,
@@ -864,7 +865,7 @@ async function captureOrderFunds(order_id) {
         toId: admin.wallet_id,
         amount: userFee,
         order_id,
-        note: `Platform fee (user 50%) for ${order_id}`,
+        note: `Platform fee (user 50%) for return ${order_id}`,
       });
     }
 
@@ -884,20 +885,50 @@ async function captureOrderFunds(order_id) {
        VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
       [
         order_id,
-        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
-        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
-        tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
+        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null, // buyer fee pair
+        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null, // merchant fee pair
+        tOrder ? `${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null, // buyer->merchant pair
       ],
     );
+
+    // ✅ balances AFTER capture (for notifications)
+    const [[b2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+      buyer.id,
+    ]);
+    const [[m2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+      merch.id,
+    ]);
+    const [[a2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+      admin.id,
+    ]);
 
     await conn.commit();
 
     return {
       captured: true,
-      user_id: order.user_id,
+      payment_method: "WALLET",
+      order_id,
+      user_id: Number(order.user_id),
+      business_id: Number(split.business_id),
+
       order_amount: baseToMerchant,
       platform_fee_user: userFee,
       platform_fee_merchant: merchFee,
+      merchant_net_amount: Number((baseToMerchant - merchFee).toFixed(2)),
+
+      buyer_wallet_id: buyer.wallet_id,
+      merchant_wallet_id: merch.wallet_id,
+      admin_wallet_id: admin.wallet_id,
+
+      buyer_balance_after: b2 ? Number(b2.amount) : null,
+      merchant_balance_after: m2 ? Number(m2.amount) : null,
+      admin_balance_after: a2 ? Number(a2.amount) : null,
+
+      transfers: {
+        order: tOrder || null, // {dr_txn_id, cr_txn_id, journal_id}
+        user_fee: tUserFee || null, // {dr_txn_id, cr_txn_id, journal_id}
+        merchant_fee: tMerchFee || null, // {dr_txn_id, cr_txn_id, journal_id}
+      },
     };
   } catch (e) {
     try {
@@ -1059,8 +1090,9 @@ async function captureOrderFundsWithConn(conn, order_id, prefetchedIds = []) {
   );
   if (!order) throw new Error("Order not found for capture");
 
-  if (String(order.payment_method || "").toUpperCase() !== "WALLET") {
-    return { captured: false, skipped: true, payment_method: "WALLET" };
+  const pm = String(order.payment_method || "").toUpperCase();
+  if (pm !== "WALLET") {
+    return { captured: false, skipped: true, payment_method: pm || "WALLET" };
   }
 
   const split = await computeBusinessSplit(order_id, conn);
@@ -1102,6 +1134,7 @@ async function captureOrderFundsWithConn(conn, order_id, prefetchedIds = []) {
     }
   }
 
+  // ✅ ids expected: 0=order, 1=user fee (optional), 2=merchant fee (optional)
   const ids0 = prefetchedIds?.[0];
   const ids1 = prefetchedIds?.[1];
   const ids2 = prefetchedIds?.[2];
@@ -1155,17 +1188,45 @@ async function captureOrderFundsWithConn(conn, order_id, prefetchedIds = []) {
     ],
   );
 
+  // ✅ balances AFTER capture (still inside same transaction)
+  const [[b2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+    buyer.id,
+  ]);
+  const [[m2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+    merch.id,
+  ]);
+  const [[a2]] = await conn.query(`SELECT amount FROM wallets WHERE id = ?`, [
+    admin.id,
+  ]);
+
   return {
     captured: true,
     payment_method: "WALLET",
-    user_id: order.user_id,
-    business_id: split.business_id,
+    order_id,
+    user_id: Number(order.user_id),
+    business_id: Number(split.business_id),
+
     order_amount: baseToMerchant,
     platform_fee_user: userFee,
     platform_fee_merchant: merchFee,
     merchant_net_amount: Number((baseToMerchant - merchFee).toFixed(2)),
+
+    buyer_wallet_id: buyer.wallet_id,
+    merchant_wallet_id: merch.wallet_id,
+    admin_wallet_id: admin.wallet_id,
+
+    buyer_balance_after: b2 ? Number(b2.amount) : null,
+    merchant_balance_after: m2 ? Number(m2.amount) : null,
+    admin_balance_after: a2 ? Number(a2.amount) : null,
+
+    transfers: {
+      order: tOrder || null,
+      user_fee: tUserFee || null,
+      merchant_fee: tMerchFee || null,
+    },
   };
 }
+
 
 async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds = []) {
   if (await captureExists(order_id, "COD_FEE", conn)) {
