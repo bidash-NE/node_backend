@@ -626,6 +626,20 @@ function parseDeliveryAddress(val) {
   }
 }
 
+// ✅ NEW (added, does not remove anything): parse delivery_photo_urls column safely
+function parsePhotoList(v) {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v.map(String).filter(Boolean);
+  const s = String(v).trim();
+  if (!s) return [];
+  try {
+    const arr = JSON.parse(s);
+    return Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
+  } catch {
+    return [s].filter(Boolean);
+  }
+}
+
 /* ================= CAPTURE HELPERS ================= */
 async function captureExists(order_id, capture_type, conn = null) {
   const dbh = conn || db;
@@ -890,6 +904,18 @@ async function captureOrderFunds(order_id) {
       ],
     );
 
+    // ✅ NEW (non-breaking): user notification after successful capture
+    try {
+      await addUserWalletDebitNotificationInternal(
+        order.user_id,
+        order_id,
+        baseToMerchant,
+        userFee,
+        "WALLET",
+        conn,
+      );
+    } catch {}
+
     await conn.commit();
 
     return {
@@ -1027,6 +1053,18 @@ async function captureOrderCODFee(order_id) {
       );
     }
 
+    // ✅ NEW (non-breaking): user notification after successful COD fee capture
+    try {
+      await addUserWalletDebitNotificationInternal(
+        order.user_id,
+        order_id,
+        0,
+        userFee,
+        "COD",
+        conn,
+      );
+    } catch {}
+
     await conn.commit();
     return {
       captured: true,
@@ -1155,6 +1193,18 @@ async function captureOrderFundsWithConn(conn, order_id, prefetchedIds = []) {
     ],
   );
 
+  // ✅ NEW (non-breaking): user notification after successful capture (inside same tx)
+  try {
+    await addUserWalletDebitNotificationInternal(
+      order.user_id,
+      order_id,
+      baseToMerchant,
+      userFee,
+      "WALLET",
+      conn,
+    );
+  } catch {}
+
   return {
     captured: true,
     payment_method: "WALLET",
@@ -1274,6 +1324,18 @@ async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds = []) {
      VALUES (?, 'COD_FEE', ?, ?, ?)`,
     [order_id, buyerPair, merchPair, adminRef],
   );
+
+  // ✅ NEW (non-breaking): user notification after successful COD fee capture (inside same tx)
+  try {
+    await addUserWalletDebitNotificationInternal(
+      order.user_id,
+      order_id,
+      0,
+      userFee,
+      "COD",
+      conn,
+    );
+  } catch {}
 
   return {
     captured: true,
@@ -2518,6 +2580,32 @@ Order.create = async (orderData) => {
 
   if (hasService) payload.service_type = serviceType;
 
+  // ✅ NEW (added): persist delivery_lat/lng if columns exist and provided (from delivery_address or direct)
+  if (cols.has("delivery_lat")) {
+    const lat =
+      orderData.delivery_lat ??
+      (orderData.delivery_address &&
+      typeof orderData.delivery_address === "object"
+        ? orderData.delivery_address.lat
+        : null);
+    payload.delivery_lat =
+      lat != null && lat !== "" && Number.isFinite(Number(lat))
+        ? Number(lat)
+        : null;
+  }
+  if (cols.has("delivery_lng")) {
+    const lng =
+      orderData.delivery_lng ??
+      (orderData.delivery_address &&
+      typeof orderData.delivery_address === "object"
+        ? orderData.delivery_address.lng
+        : null);
+    payload.delivery_lng =
+      lng != null && lng !== "" && Number.isFinite(Number(lng))
+        ? Number(lng)
+        : null;
+  }
+
   if (cols.has("delivery_floor_unit"))
     payload.delivery_floor_unit = orderData.delivery_floor_unit || null;
   if (cols.has("delivery_instruction_note"))
@@ -2872,19 +2960,6 @@ Order.findByUserIdForApp = async (user_id, service_type = null) => {
     }
   }
 
-  const parsePhotoList = (v) => {
-    if (v == null) return [];
-    if (Array.isArray(v)) return v.map(String).filter(Boolean);
-    const s = String(v).trim();
-    if (!s) return [];
-    try {
-      const arr = JSON.parse(s);
-      return Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
-    } catch {
-      return [s].filter(Boolean);
-    }
-  };
-
   const result = [];
 
   for (const o of orders) {
@@ -3132,6 +3207,7 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
       ${extras.hasInstr ? "o.delivery_instruction_note" : "NULL AS delivery_instruction_note"},
       ${extras.hasMode ? "o.delivery_special_mode" : "NULL AS delivery_special_mode"},
       ${extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"},
+      ${extras.hasPhotoList ? "o.delivery_photo_urls" : "NULL AS delivery_photo_urls"},
 
       o.note_for_restaurant,
       o.if_unavailable,
@@ -3197,7 +3273,17 @@ Order.findByBusinessGroupedByUser = async (business_id) => {
       deliverTo.delivery_floor_unit = r.delivery_floor_unit || null;
       deliverTo.delivery_instruction_note = r.delivery_instruction_note || null;
       deliverTo.delivery_special_mode = r.delivery_special_mode || null;
-      deliverTo.delivery_photo_url = r.delivery_photo_url || null;
+
+      // ✅ NEW (added): merge delivery_photo_urls + legacy delivery_photo_url like app response
+      const listFromCol = parsePhotoList(r.delivery_photo_urls);
+      const legacy = r.delivery_photo_url
+        ? String(r.delivery_photo_url).trim()
+        : "";
+      const merged = Array.from(
+        new Set([...listFromCol, ...(legacy ? [legacy] : [])]),
+      ).filter(Boolean);
+      deliverTo.delivery_photo_urls = merged;
+      deliverTo.delivery_photo_url = merged[0] || null;
 
       const orderObj = {
         order_id: r.order_id,

@@ -660,7 +660,15 @@ async function createOrder(req, res) {
     });
   } catch (err) {
     console.error("[createOrder ERROR]", err);
-    cleanupUploadedFiles();
+    try {
+      // best-effort cleanup
+      const files = Array.isArray(req.files) ? req.files : [];
+      for (const f of files) {
+        try {
+          if (f?.path && fs.existsSync(f.path)) fs.unlinkSync(f.path);
+        } catch {}
+      }
+    } catch {}
     return res.status(500).json({
       ok: false,
       message: "Unable to place order",
@@ -820,7 +828,6 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
  * ✅ FINAL: For CANCELLED => archive+delete
  * ✅ Backward compatible: if status=COMPLETED, treat as DELIVERED
  */
-// controllers/orderControllers.js
 async function updateOrderStatus(req, res) {
   try {
     const order_id = String(req.params.order_id || "").trim();
@@ -1118,12 +1125,118 @@ async function updateOrderStatus(req, res) {
     }
 
     /* =========================================================
-       CONFIRMED logic (keep yours)
+       ✅ CONFIRMED: capture BEFORE setting status=CONFIRMED
+       + apply unavailable item changes, final totals, ETA (kept compatible)
        ========================================================= */
+    // Apply final totals (if sent) for any status updates (safe, no schema assumption)
+    const patch = {};
+    const fTotal = numOrUndef(final_total_amount);
+    const fPlat = numOrUndef(final_platform_fee);
+    const fDisc = numOrUndef(final_discount_amount);
+    const fDel = numOrUndef(final_delivery_fee);
+    const fMerDel = numOrUndef(final_merchant_delivery_fee);
 
-    // ... keep your existing CONFIRMED + normal update logic here ...
-    // (unchanged from your current file)
-    // IMPORTANT: do NOT re-add another delivered/cancelled handling later
+    if (fTotal !== undefined) patch.total_amount = fTotal;
+    if (fPlat !== undefined) patch.platform_fee = fPlat;
+    if (fDisc !== undefined) patch.discount_amount = fDisc;
+    if (fDel !== undefined) patch.delivery_fee = fDel;
+    if (fMerDel !== undefined) patch.merchant_delivery_fee = fMerDel;
+
+    if (Object.keys(patch).length) {
+      try {
+        await Order.update(order_id, patch);
+      } catch (e) {
+        console.error("[updateOrderStatus totals update failed]", {
+          order_id,
+          err: e?.message,
+        });
+      }
+    }
+
+    // ETA update
+    if (estimated_minutes != null) {
+      try {
+        await updateEstimatedArrivalTime(order_id, estimated_minutes);
+      } catch {}
+    }
+
+    // Unavailable item changes (REMOVE/REPLACE) + notify user (best-effort)
+    if (changes && typeof changes === "object") {
+      try {
+        await Order.applyUnavailableItemChanges(order_id, changes);
+      } catch (e) {
+        console.error("[applyUnavailableItemChanges failed]", {
+          order_id,
+          err: e?.message,
+        });
+      }
+
+      try {
+        await Order.addUserUnavailableItemNotification({
+          user_id,
+          order_id,
+          changes,
+          final_total_amount: fTotal !== undefined ? fTotal : null,
+        });
+      } catch (e) {
+        console.error("[unavailable items notify user failed]", {
+          order_id,
+          user_id,
+          err: e?.message,
+        });
+      }
+    }
+
+    // CONFIRMED: capture first (as requested), then update status
+    if (normalized === "CONFIRMED") {
+      try {
+        const out = await Order.captureOnAccept(order_id);
+        // captureOnAccept returns ok/skipped; when it throws, we catch below
+        // If wallet/cod fee deducted, notify user (best-effort)
+        try {
+          if (out?.capture?.captured) {
+            await Order.addUserWalletDebitNotification({
+              user_id,
+              order_id,
+              order_amount: out.capture.order_amount || 0,
+              platform_fee:
+                Number(out.capture.platform_fee_user || 0) +
+                Number(out.capture.platform_fee_merchant || 0),
+              method: out.payment_method || payMethod || "WALLET",
+            });
+          }
+        } catch (e) {
+          console.error("[wallet debit notify failed]", {
+            order_id,
+            user_id,
+            err: e?.message,
+          });
+        }
+      } catch (e) {
+        const msg = String(e?.message || "");
+        if (msg.toLowerCase().includes("insufficient")) {
+          return res.status(400).json({
+            success: false,
+            code: "INSUFFICIENT_WALLET_BALANCE",
+            message:
+              "Cannot accept this order because the customer's wallet balance is insufficient.",
+            order_id,
+          });
+        }
+        console.error("[CONFIRMED capture failed]", { order_id, err: msg });
+        return res.status(500).json({
+          success: false,
+          code: "CAPTURE_FAILED",
+          message: "Unable to confirm order. Capture failed.",
+          error: msg,
+          order_id,
+        });
+      }
+    }
+
+    /* =========================================================
+       Normal status update (unchanged flow)
+       ========================================================= */
 
     const affected = await Order.updateStatus(
       order_id,
@@ -1163,6 +1276,8 @@ async function updateOrderStatus(req, res) {
     return res.json({
       success: true,
       message: "Order status updated successfully",
+      order_id,
+      status: normalized,
     });
   } catch (err) {
     console.error("[updateOrderStatus ERROR]", err);
