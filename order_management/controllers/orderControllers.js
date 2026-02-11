@@ -78,9 +78,8 @@ async function getMerchantUserIdsByBusinessIds(businessIds = []) {
 }
 
 /**
- * ✅ IMPORTANT (as per your screenshot)
- * Your push API expects:
- *   { user_id: <number>, title: <string>, body: <string> }
+ * ✅ IMPORTANT:
+ * Your push API expects: { user_id: <number>, title: <string>, body: <string> }
  */
 async function sendPushToUserId(user_id, { title, body }) {
   try {
@@ -110,7 +109,11 @@ async function sendPushToUserId(user_id, { title, body }) {
 /**
  * After DELIVERED capture, write DB notifications + send PUSH
  * - Customer: wallet debit (order amount + platform fee share)
- * - Merchant: wallet credit (net amount) + platform fee share
+ * - Merchant: wallet credit (order credited) + merchant platform fee debit
+ *
+ * ✅ FIXED:
+ * - Merchant now receives PUSH on delivered
+ * - Merchant message shows EXACT movements like wallet_transactions (credit first, then debit)
  */
 async function safeNotifyWalletAndDelivery(
   conn,
@@ -119,42 +122,57 @@ async function safeNotifyWalletAndDelivery(
   // customer wallet debit (DB + push)
   if (capture?.captured && user_id) {
     try {
-      await Order.addUserWalletDebitNotification({
-        user_id: Number(user_id),
-        order_id,
-        order_amount: Number(capture.order_amount || 0),
-        platform_fee: Number(capture.platform_fee_user || 0),
-        method: "WALLET",
-        conn,
-      });
+      const method = String(capture.payment_method || "WALLET").toUpperCase();
 
-      const orderAmt = Number(capture.order_amount || 0);
-      const feeAmt = Number(capture.platform_fee_user || 0);
+      // Only notify wallet debit when WALLET capture actually ran
+      if (method === "WALLET") {
+        await Order.addUserWalletDebitNotification({
+          user_id: Number(user_id),
+          order_id,
+          order_amount: Number(capture.order_amount || 0),
+          platform_fee: Number(capture.platform_fee_user || 0),
+          method: "WALLET",
+          conn,
+        });
 
-      const body =
-        `Order ${order_id} delivered. ` +
-        `Nu. ${orderAmt.toFixed(2)} deducted for order` +
-        (feeAmt > 0 ? ` and Nu. ${feeAmt.toFixed(2)} as platform fee.` : ".");
+        const orderAmt = Number(capture.order_amount || 0);
+        const feeAmt = Number(capture.platform_fee_user || 0);
 
-      await sendPushToUserId(Number(user_id), {
-        title: "Wallet deduction",
-        body,
-      });
+        const body =
+          `Order ${order_id} delivered. ` +
+          `Nu. ${orderAmt.toFixed(2)} deducted for order` +
+          (feeAmt > 0 ? ` and Nu. ${feeAmt.toFixed(2)} as platform fee.` : ".");
+
+        await sendPushToUserId(Number(user_id), {
+          title: "Wallet deduction",
+          body,
+        });
+      } else {
+        // If you later allow COD: you may still want an "Order delivered" push here
+        await sendPushToUserId(Number(user_id), {
+          title: "Order update",
+          body: `Order ${order_id} delivered.`,
+        });
+      }
     } catch (e) {
       console.error("[notify user wallet debit failed]", e?.message);
     }
   }
 
-  // merchant notification -> show EXACT wallet movements (credit then debit)
+  // merchant notification -> show EXACT wallet movements + DB + PUSH
   if (capture?.captured && capture?.business_id) {
     try {
       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
         conn,
         capture.business_id,
       );
+
       if (merchantUserId) {
-        const credited = Number(capture.order_amount || 0); // ✅ CREDIT shown in wallet txn
-        const debited = Number(capture.platform_fee_merchant || 0); // ✅ DEBIT shown in wallet txn
+        // ✅ match wallet_transactions:
+        // credit = buyer -> merchant (order_amount)
+        // debit  = merchant -> admin (platform_fee_merchant)
+        const credited = Number(capture.order_amount || 0);
+        const debited = Number(capture.platform_fee_merchant || 0);
 
         const parts = [];
         parts.push(`Order ${order_id} delivered.`);
@@ -169,7 +187,7 @@ async function safeNotifyWalletAndDelivery(
 
         await conn.query(
           `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
-         VALUES (?, 'wallet_credit', 'Wallet updated', ?, ?, 'unread', NOW())`,
+           VALUES (?, 'wallet_update', 'Wallet updated', ?, ?, 'unread', NOW())`,
           [
             merchantUserId,
             msg,
@@ -178,10 +196,18 @@ async function safeNotifyWalletAndDelivery(
               business_id: Number(capture.business_id),
               credited_order_amount: credited,
               debited_platform_fee_merchant: debited,
-              payment_method: "WALLET",
+              payment_method: String(
+                capture.payment_method || "WALLET",
+              ).toUpperCase(),
             }),
           ],
         );
+
+        // ✅ PUSH merchant (THIS is what was missing)
+        await sendPushToUserId(merchantUserId, {
+          title: "Wallet updated",
+          body: msg,
+        });
       }
     } catch (e) {
       console.error("[notify merchant wallet movement failed]", e?.message);
@@ -886,7 +912,7 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     const BHUTAN_OFFSET_HOURS = 6;
 
     const toBhutanParts = (d) => {
-      let hour24 = (d.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
+      const hour24 = (d.getUTCHours() + BHUTAN_OFFSET_HOURS) % 24;
       const minute = d.getUTCMinutes();
       const meridiem = hour24 >= 12 ? "PM" : "AM";
       const hour12 = hour24 % 12 || 12;
@@ -899,12 +925,10 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
     const sStr = `${s.hour12}:${String(s.minute).padStart(2, "0")}`;
     const eStr = `${e.hour12}:${String(e.minute).padStart(2, "0")}`;
 
-    let formattedRange;
-    if (s.meridiem === e.meridiem) {
-      formattedRange = `${sStr} - ${eStr} ${s.meridiem}`;
-    } else {
-      formattedRange = `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`;
-    }
+    const formattedRange =
+      s.meridiem === e.meridiem
+        ? `${sStr} - ${eStr} ${s.meridiem}`
+        : `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`;
 
     await db.query(
       `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
@@ -917,8 +941,7 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 
 /**
  * PUT/PATCH /orders/:order_id/status
- * ✅ Uses your push API (user_id based)
- * ✅ IMPORTANT: If status is DELIVERED, we route to markOrderDelivered to run capture+archive+delete pipeline.
+ * ✅ If status is DELIVERED, routes to markOrderDelivered to run capture+archive+delete pipeline.
  */
 async function updateOrderStatus(req, res) {
   try {
@@ -938,9 +961,7 @@ async function updateOrderStatus(req, res) {
 
     if (!ALLOWED_STATUSES.has(normalized)) {
       return res.status(400).json({
-        message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(
-          ", ",
-        )}`,
+        message: `Invalid status. Allowed: ${Array.from(ALLOWED_STATUSES).join(", ")}`,
         received: normalizedRaw,
         normalized,
       });
@@ -1008,7 +1029,7 @@ async function updateOrderStatus(req, res) {
     );
     const business_ids = bizRows
       .map((r) => Number(r.business_id))
-      .filter(Boolean);
+      .filter((n) => Number.isFinite(n) && n > 0);
 
     broadcastOrderStatusToMany({
       order_id,
@@ -1041,9 +1062,7 @@ async function updateOrderStatus(req, res) {
     try {
       const title = "Order Update";
       const bodyText =
-        `Your order ${order_id} has been ${normalized
-          .toLowerCase()
-          .replace(/_/g, " ")}.` +
+        `Your order ${order_id} has been ${normalized.toLowerCase().replace(/_/g, " ")}.` +
         (finalReason ? ` Reason: ${finalReason}` : "");
       await sendPushToUserId(user_id, { title, body: bodyText });
     } catch {}
@@ -1209,9 +1228,7 @@ async function cancelOrderByUser(req, res) {
     try {
       await sendPushToUserId(out.user_id, {
         title: "Order Update",
-        body: `Your order ${order_id} has been cancelled.${
-          reason ? ` Reason: ${reason}` : ""
-        }`,
+        body: `Your order ${order_id} has been cancelled.${reason ? ` Reason: ${reason}` : ""}`,
       });
     } catch {}
 
@@ -1244,7 +1261,11 @@ async function cancelOrderByUser(req, res) {
 
 /**
  * POST/PATCH /orders/:order_id/delivered (or similar route)
- * Runs: capture(WALLET only) + archive + delete, then wallet notifications + push
+ * Runs: capture + archive + delete, then wallet notifications + push
+ *
+ * ✅ FIXED:
+ * - do NOT start a transaction here (model already committed)
+ * - ensure merchant PUSH is sent inside safeNotifyWalletAndDelivery
  */
 async function markOrderDelivered(req, res) {
   const order_id = String(req.params.order_id || req.body?.order_id || "")
@@ -1277,15 +1298,14 @@ async function markOrderDelivered(req, res) {
     }
 
     // 2) Notifications AFTER delivered wallet capture
-    await conn.beginTransaction();
+    //    (no extra transaction needed)
     await safeNotifyWalletAndDelivery(conn, {
       order_id,
       user_id: result.user_id,
       capture: result.capture,
     });
-    await conn.commit();
 
-    // 3) Broadcast delivered (optional but useful; order is already deleted from main tables)
+    // 3) Broadcast delivered
     try {
       broadcastOrderStatusToMany({
         order_id,
@@ -1301,9 +1321,6 @@ async function markOrderDelivered(req, res) {
       data: result,
     });
   } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
     console.error("[markOrderDelivered]", e);
     return res.status(500).json({
       success: false,
