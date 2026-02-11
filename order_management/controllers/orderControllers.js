@@ -145,7 +145,7 @@ async function safeNotifyWalletAndDelivery(
     }
   }
 
-  // merchant wallet credit (DB + push)
+  // merchant notification -> show EXACT wallet movements (credit then debit)
   if (capture?.captured && capture?.business_id) {
     try {
       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
@@ -153,39 +153,38 @@ async function safeNotifyWalletAndDelivery(
         capture.business_id,
       );
       if (merchantUserId) {
-        const creditAmt = Number(capture.merchant_net_amount || 0);
-        const merchFee = Number(capture.platform_fee_merchant || 0);
+        const credited = Number(capture.order_amount || 0); // ✅ CREDIT shown in wallet txn
+        const debited = Number(capture.platform_fee_merchant || 0); // ✅ DEBIT shown in wallet txn
 
-        const msg =
-          `Order ${order_id} delivered. ` +
-          `Nu. ${creditAmt.toFixed(2)} credited to your wallet.` +
-          (merchFee > 0
-            ? ` (Platform fee share: Nu. ${merchFee.toFixed(2)})`
-            : "");
+        const parts = [];
+        parts.push(`Order ${order_id} delivered.`);
+        if (credited > 0)
+          parts.push(`Nu. ${credited.toFixed(2)} credited to your wallet.`);
+        if (debited > 0)
+          parts.push(
+            `Nu. ${debited.toFixed(2)} debited as platform fee (merchant share).`,
+          );
+
+        const msg = parts.join(" ");
 
         await conn.query(
           `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
-           VALUES (?, 'wallet_credit', 'Wallet credited', ?, ?, 'unread', NOW())`,
+         VALUES (?, 'wallet_credit', 'Wallet updated', ?, ?, 'unread', NOW())`,
           [
             merchantUserId,
             msg,
             JSON.stringify({
               order_id,
               business_id: Number(capture.business_id),
-              merchant_net_amount: creditAmt,
-              platform_fee_merchant: merchFee,
+              credited_order_amount: credited,
+              debited_platform_fee_merchant: debited,
               payment_method: "WALLET",
             }),
           ],
         );
-
-        await sendPushToUserId(merchantUserId, {
-          title: "Wallet credited",
-          body: msg,
-        });
       }
     } catch (e) {
-      console.error("[notify merchant wallet credit failed]", e?.message);
+      console.error("[notify merchant wallet movement failed]", e?.message);
     }
   }
 }
