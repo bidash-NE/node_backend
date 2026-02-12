@@ -1,6 +1,10 @@
 // controllers/orderControllers.js
+// ✅ Controller that DOES NOT use `Order.`
+// ✅ Imports functions directly from your /models/orders/* files
+// ✅ Uses: const db = require("../config/db");
+// ✅ Keeps: upload + notifications + push + wallet capture delivered pipeline
+
 const db = require("../config/db");
-const Order = require("../models/orderModels");
 const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
@@ -20,7 +24,84 @@ const EXPO_NOTIFICATION_URL =
   process.env.EXPO_NOTIFICATION_URL ||
   "https://grab.newedge.bt/expo/api/push/send";
 
-/* ======================== PUSH helpers ======================== */
+/* ============================================================
+   Import model functions directly
+   (Works whether modules export function directly or { fn } named)
+============================================================ */
+
+function pickFn(mod, name) {
+  if (!mod) return null;
+  if (typeof mod === "function") return mod; // module.exports = function
+  if (name && typeof mod[name] === "function") return mod[name]; // module.exports = { name(){} }
+  const first = Object.values(mod).find((v) => typeof v === "function");
+  return first || null;
+}
+
+/* ---------------- CRUD ---------------- */
+const _createMod = require("../models/orders/crud/create");
+const _findAllMod = require("../models/orders/crud/findAll");
+const _findByBusinessIdMod = require("../models/orders/crud/findByBusinessId");
+const _findByOrderIdGroupedMod = require("../models/orders/crud/findByOrderIdGrouped");
+const _findByUserIdForAppMod = require("../models/orders/crud/findByUserIdForApp");
+const _updateMod = require("../models/orders/crud/update");
+const _updateStatusMod = require("../models/orders/crud/updateStatus");
+const _deleteMod = require("../models/orders/crud/delete");
+const updateStatusWithUnavailable = require("../models/orders/crud/updateStatusWithUnavailable");
+const _getOrderStatusCountsByBusinessMod = require("../models/orders/crud/getOrderStatusCountsByBusiness");
+const _findByBusinessGroupedByUserMod = require("../models/orders/crud/findByBusinessGroupedByUser");
+
+const createDb = pickFn(_createMod, "create");
+const findAllDb = pickFn(_findAllMod, "findAll");
+const findByBusinessIdDb = pickFn(_findByBusinessIdMod, "findByBusinessId");
+const findByOrderIdGroupedDb = pickFn(
+  _findByOrderIdGroupedMod,
+  "findByOrderIdGrouped",
+);
+const findByUserIdForAppDb = pickFn(
+  _findByUserIdForAppMod,
+  "findByUserIdForApp",
+);
+const updateDb = pickFn(_updateMod, "update");
+const updateStatusDb = pickFn(_updateStatusMod, "updateStatus");
+const deleteDb =
+  pickFn(_deleteMod, "delete") ||
+  pickFn(_deleteMod, "del") ||
+  pickFn(_deleteMod, "remove");
+const getOrderStatusCountsByBusinessDb = pickFn(
+  _getOrderStatusCountsByBusinessMod,
+  "getOrderStatusCountsByBusiness",
+);
+const findByBusinessGroupedByUserDb = pickFn(
+  _findByBusinessGroupedByUserMod,
+  "findByBusinessGroupedByUser",
+);
+
+/* ---------------- pipelines / notifications / helpers ---------------- */
+const _helpersMod = require("../models/orders/helpers");
+const generateOrderId =
+  (typeof _helpersMod?.generateOrderId === "function" &&
+    _helpersMod.generateOrderId) ||
+  (typeof _helpersMod === "function" ? _helpersMod : null);
+
+const _archiveMod = require("../models/orders/orderArchivePipeline");
+const completeAndArchiveDeliveredOrder =
+  _archiveMod?.completeAndArchiveDeliveredOrder ||
+  pickFn(_archiveMod, "completeAndArchiveDeliveredOrder");
+const cancelAndArchiveOrder =
+  _archiveMod?.cancelAndArchiveOrder ||
+  pickFn(_archiveMod, "cancelAndArchiveOrder");
+
+const _notifMod = require("../models/orders/orderNotifications");
+const addUserOrderStatusNotification =
+  _notifMod?.addUserOrderStatusNotification ||
+  pickFn(_notifMod, "addUserOrderStatusNotification");
+const addUserWalletDebitNotification =
+  _notifMod?.addUserWalletDebitNotification ||
+  pickFn(_notifMod, "addUserWalletDebitNotification");
+
+/* ============================================================
+   PUSH helpers
+============================================================ */
 
 /**
  * If it's business_id -> get merchant user_id from merchant_business_details
@@ -56,11 +137,9 @@ async function getMerchantUserIdsByBusinessIds(businessIds = []) {
 
   try {
     const [rows] = await db.query(
-      `
-      SELECT DISTINCT user_id
-        FROM merchant_business_details
-       WHERE business_id IN (?)
-      `,
+      `SELECT DISTINCT user_id
+         FROM merchant_business_details
+        WHERE business_id IN (?)`,
       [ids],
     );
 
@@ -104,16 +183,108 @@ async function sendPushToUserId(user_id, { title, body }) {
   }
 }
 
-/* ======================== wallet+delivery notifications ======================== */
+/* ============================================================
+   wallet+delivery notifications
+============================================================ */
+
+/**
+ * Fallback: if capture doesn't include amounts (or is 0),
+ * compute from DB like before:
+ * - platform_fee_user = platform_fee * 0.5 (default)
+ * - order_amount = total_amount - platform_fee
+ */
+async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
+  const out = {
+    order_amount: Number(capture?.order_amount || 0),
+    platform_fee_user: Number(
+      capture?.platform_fee_user ??
+        capture?.platform_fee_user_share ??
+        capture?.platform_fee_user_amount ??
+        0,
+    ),
+    platform_fee_total: Number(
+      capture?.platform_fee ??
+        capture?.final_platform_fee ??
+        capture?.platform_fee_total ??
+        0,
+    ),
+    total_amount: Number(
+      capture?.total_amount ?? capture?.final_total_amount ?? 0,
+    ),
+  };
+
+  // If amounts already look valid, keep them
+  const looksValid =
+    Number.isFinite(out.order_amount) &&
+    out.order_amount > 0 &&
+    Number.isFinite(out.platform_fee_user) &&
+    out.platform_fee_user >= 0;
+
+  if (looksValid) return out;
+
+  try {
+    // Prefer archive table first (because delivered pipeline often deletes from orders)
+    let row = null;
+
+    try {
+      const [[r1]] = await conn.query(
+        `SELECT total_amount, platform_fee
+           FROM orders_archive
+          WHERE order_id = ?
+          LIMIT 1`,
+        [order_id],
+      );
+      if (r1) row = r1;
+    } catch {}
+
+    if (!row) {
+      const [[r2]] = await conn.query(
+        `SELECT total_amount, platform_fee
+           FROM orders
+          WHERE order_id = ?
+          LIMIT 1`,
+        [order_id],
+      );
+      if (r2) row = r2;
+    }
+
+    if (!row) return out;
+
+    const total_amount = Number(row.total_amount || 0);
+    const platform_fee_total = Number(row.platform_fee || 0);
+
+    const platform_fee_user = Number.isFinite(platform_fee_total)
+      ? Number((platform_fee_total * 0.5).toFixed(2))
+      : 0;
+
+    // Order amount excludes the FULL platform fee (because platform fee is charged separately)
+    const order_amount = Number.isFinite(total_amount)
+      ? Number((total_amount - platform_fee_total).toFixed(2))
+      : 0;
+
+    // Only override missing/zero values
+    if (!Number.isFinite(out.total_amount) || out.total_amount <= 0)
+      out.total_amount = total_amount;
+    if (!Number.isFinite(out.platform_fee_total) || out.platform_fee_total <= 0)
+      out.platform_fee_total = platform_fee_total;
+
+    if (!Number.isFinite(out.platform_fee_user) || out.platform_fee_user === 0)
+      out.platform_fee_user = platform_fee_user;
+
+    if (!Number.isFinite(out.order_amount) || out.order_amount === 0)
+      out.order_amount = order_amount;
+
+    return out;
+  } catch (e) {
+    console.error("[resolveUserDebitAmounts ERROR]", e?.message || e);
+    return out;
+  }
+}
 
 /**
  * After DELIVERED capture, write DB notifications + send PUSH
  * - Customer: wallet debit (order amount + platform fee share)
  * - Merchant: wallet credit (order credited) + merchant platform fee debit
- *
- * ✅ FIXED:
- * - Merchant now receives PUSH on delivered
- * - Merchant message shows EXACT movements like wallet_transactions (credit first, then debit)
  */
 async function safeNotifyWalletAndDelivery(
   conn,
@@ -124,31 +295,41 @@ async function safeNotifyWalletAndDelivery(
     try {
       const method = String(capture.payment_method || "WALLET").toUpperCase();
 
-      // Only notify wallet debit when WALLET capture actually ran
       if (method === "WALLET") {
-        await Order.addUserWalletDebitNotification({
-          user_id: Number(user_id),
-          order_id,
-          order_amount: Number(capture.order_amount || 0),
-          platform_fee: Number(capture.platform_fee_user || 0),
-          method: "WALLET",
+        const computed = await resolveUserDebitAmounts(
           conn,
-        });
+          order_id,
+          Number(user_id),
+          capture,
+        );
 
-        const orderAmt = Number(capture.order_amount || 0);
-        const feeAmt = Number(capture.platform_fee_user || 0);
+        const orderAmt = Number(computed.order_amount || 0);
+        const feeAmt = Number(computed.platform_fee_user || 0);
 
-        const body =
+        // DB notification (if function exists)
+        if (typeof addUserWalletDebitNotification === "function") {
+          await addUserWalletDebitNotification({
+            user_id: Number(user_id),
+            order_id,
+            order_amount: orderAmt,
+            platform_fee: feeAmt,
+            method: "WALLET",
+            conn,
+          });
+        }
+
+        const bodyText =
           `Order ${order_id} delivered. ` +
-          `Nu. ${orderAmt.toFixed(2)} deducted for order` +
-          (feeAmt > 0 ? ` and Nu. ${feeAmt.toFixed(2)} as platform fee.` : ".");
+          `Nu. ${Number(orderAmt || 0).toFixed(2)} deducted for order` +
+          (feeAmt > 0
+            ? ` and Nu. ${Number(feeAmt || 0).toFixed(2)} as platform fee.`
+            : ".");
 
         await sendPushToUserId(Number(user_id), {
           title: "Wallet deduction",
-          body,
+          body: bodyText,
         });
       } else {
-        // If you later allow COD: you may still want an "Order delivered" push here
         await sendPushToUserId(Number(user_id), {
           title: "Order update",
           body: `Order ${order_id} delivered.`,
@@ -159,7 +340,7 @@ async function safeNotifyWalletAndDelivery(
     }
   }
 
-  // merchant notification -> show EXACT wallet movements + DB + PUSH
+  // merchant notification -> show wallet movements + DB + PUSH
   if (capture?.captured && capture?.business_id) {
     try {
       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
@@ -168,9 +349,6 @@ async function safeNotifyWalletAndDelivery(
       );
 
       if (merchantUserId) {
-        // ✅ match wallet_transactions:
-        // credit = buyer -> merchant (order_amount)
-        // debit  = merchant -> admin (platform_fee_merchant)
         const credited = Number(capture.order_amount || 0);
         const debited = Number(capture.platform_fee_merchant || 0);
 
@@ -203,7 +381,6 @@ async function safeNotifyWalletAndDelivery(
           ],
         );
 
-        // ✅ PUSH merchant (THIS is what was missing)
         await sendPushToUserId(merchantUserId, {
           title: "Wallet updated",
           body: msg,
@@ -215,7 +392,9 @@ async function safeNotifyWalletAndDelivery(
   }
 }
 
-/* --------------------------- upload setup --------------------------- */
+/* ============================================================
+   upload setup
+============================================================ */
 
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
@@ -249,7 +428,6 @@ function guessExtFromMime(mime) {
   }
 }
 
-// Public URL prefix for returning uploaded images
 const PUBLIC_UPLOAD_BASE =
   (process.env.PUBLIC_UPLOAD_BASE || "/uploads").replace(/\/+$/, "") + "/";
 
@@ -258,7 +436,6 @@ function toPublicUploadUrl(absPath) {
   return `${PUBLIC_UPLOAD_BASE}${rel}`;
 }
 
-// Multer storage: /uploads/orders/<order_id>/...
 const storage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const orderId = String(req.body?.order_id || req.generated_order_id || "")
@@ -293,10 +470,11 @@ const upload = multer({
   },
 });
 
-// ✅ Use this in routes: router.post("/orders", uploadOrderImages, createOrder)
 const uploadOrderImages = upload.any();
 
-/* --------------------------- helpers --------------------------- */
+/* ============================================================
+   helpers
+============================================================ */
 
 const ALLOWED_STATUSES = new Set([
   "ASSIGNED",
@@ -316,25 +494,21 @@ function normalizeServiceType(v) {
     .toUpperCase();
   return s || null;
 }
-
 function normalizePaymentMethod(v) {
   const s = String(v || "")
     .trim()
     .toUpperCase();
   return s || null;
 }
-
 function normalizeFulfillment(v) {
   const s = String(v || "Delivery").trim();
   return s || "Delivery";
 }
-
 function normalizeSpecialMode(v) {
   const s = String(v || "")
     .trim()
     .toUpperCase();
   if (!s) return null;
-
   if (s === "DROP_OFF" || s === "DROPOFF" || s === "DROP") return "DROP_OFF";
   if (s === "MEET_UP" || s === "MEETUP" || s === "MEET") return "MEET_UP";
   return null;
@@ -389,7 +563,6 @@ function normalizeItemShape(raw = {}, idx = 0) {
 
   const quantity =
     it.quantity ?? it.qty ?? it.count ?? it.units ?? it.unit_count ?? null;
-
   const price =
     it.price ?? it.unit_price ?? it.unitPrice ?? it.rate ?? it.cost ?? null;
 
@@ -541,12 +714,10 @@ function dedupeStrings(arr) {
   return out;
 }
 
-/* --------------------------- controllers --------------------------- */
+/* ============================================================
+   controllers
+============================================================ */
 
-/**
- * POST /orders
- * router.post("/orders", uploadOrderImages, createOrder)
- */
 async function createOrder(req, res) {
   const safeUnlink = (p) => {
     try {
@@ -584,7 +755,6 @@ async function createOrder(req, res) {
       });
     }
 
-    // ✅ ONLY WALLET (COD/CARD removed)
     const payMethod = normalizePaymentMethod(payload.payment_method);
     if (!payMethod || payMethod !== "WALLET") {
       cleanupUploadedFiles();
@@ -598,7 +768,10 @@ async function createOrder(req, res) {
       normalizeItemShape(it, idx),
     );
 
-    const order_id = String(payload.order_id || Order.peekNewOrderId())
+    const order_id = String(
+      payload.order_id ||
+        (generateOrderId ? generateOrderId() : `ORD-${Date.now()}`),
+    )
       .trim()
       .toUpperCase();
     payload.order_id = order_id;
@@ -613,13 +786,11 @@ async function createOrder(req, res) {
       payload.floor_unit ??
       payload.floorUnit ??
       null;
-
     payload.delivery_instruction_note =
       payload.delivery_instruction_note ??
       payload.special_instructions ??
       payload.delivery_note ??
       null;
-
     payload.delivery_special_mode = normalizeSpecialMode(
       payload.delivery_special_mode ?? payload.special_mode,
     );
@@ -658,7 +829,7 @@ async function createOrder(req, res) {
     payload.delivery_photo_urls = allPhotos;
     payload.delivery_photo_url = allPhotos.length ? allPhotos[0] : null;
 
-    // ✅ wallet balance check on place order
+    // wallet balance check
     {
       const itemsSubtotal = normalizedItems.reduce(
         (s, it) =>
@@ -714,14 +885,28 @@ async function createOrder(req, res) {
       .trim()
       .toUpperCase();
 
-    const created_id = await Order.create({
-      ...payload,
-      service_type: serviceType,
-      payment_method: "WALLET",
-      fulfillment_type: fulfillment,
-      status,
-      items: normalizedItems,
-    });
+    if (typeof createDb !== "function") {
+      throw new Error("create() model function not found/exported.");
+    }
+
+    const created_id =
+      createDb.length >= 2
+        ? await createDb(db, {
+            ...payload,
+            service_type: serviceType,
+            payment_method: "WALLET",
+            fulfillment_type: fulfillment,
+            status,
+            items: normalizedItems,
+          })
+        : await createDb({
+            ...payload,
+            service_type: serviceType,
+            payment_method: "WALLET",
+            fulfillment_type: fulfillment,
+            status,
+            items: normalizedItems,
+          });
 
     // business ids
     const byBiz = new Map();
@@ -757,15 +942,15 @@ async function createOrder(req, res) {
       }
     }
 
-    // ✅ PUSH to merchant(s) by business_id
+    // PUSH merchants
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(businessIds);
       const title = `New order ${created_id}`;
-      const body = buildPreview(normalizedItems, payload.total_amount);
+      const bodyText = buildPreview(normalizedItems, payload.total_amount);
 
       for (const merchantUserId of merchantUserIds) {
-        await sendPushToUserId(merchantUserId, { title, body });
+        await sendPushToUserId(merchantUserId, { title, body: bodyText });
       }
     } catch (e) {
       console.error("[PUSH merchants new order FAILED]", e?.message || e);
@@ -798,24 +983,30 @@ async function createOrder(req, res) {
   }
 }
 
-/**
- * GET /orders
- */
 async function getOrders(_req, res) {
   try {
-    const orders = await Order.findAll();
+    if (typeof findAllDb !== "function")
+      throw new Error("findAll() model function not found/exported.");
+    const orders =
+      findAllDb.length >= 1 ? await findAllDb(db) : await findAllDb();
     res.json(orders);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 }
 
-/**
- * GET /orders/:order_id
- */
 async function getOrderById(req, res) {
   try {
-    const grouped = await Order.findByOrderIdGrouped(req.params.order_id);
+    if (typeof findByOrderIdGroupedDb !== "function")
+      throw new Error(
+        "findByOrderIdGrouped() model function not found/exported.",
+      );
+
+    const grouped =
+      findByOrderIdGroupedDb.length >= 2
+        ? await findByOrderIdGroupedDb(db, req.params.order_id)
+        : await findByOrderIdGroupedDb(req.params.order_id);
+
     if (!grouped.length)
       return res.status(404).json({ message: "Order not found" });
     res.json({ success: true, data: grouped });
@@ -824,36 +1015,40 @@ async function getOrderById(req, res) {
   }
 }
 
-/**
- * GET /orders/business/:business_id
- */
 async function getOrdersByBusinessId(req, res) {
   try {
-    const items = await Order.findByBusinessId(req.params.business_id);
+    if (typeof findByBusinessIdDb !== "function")
+      throw new Error("findByBusinessId() model function not found/exported.");
+
+    const items =
+      findByBusinessIdDb.length >= 2
+        ? await findByBusinessIdDb(db, req.params.business_id)
+        : await findByBusinessIdDb(req.params.business_id);
+
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 }
 
-/**
- * GET /orders/business/:business_id/grouped
- */
 async function getBusinessOrdersGroupedByUser(req, res) {
   try {
-    const data = await Order.findByBusinessGroupedByUser(
-      req.params.business_id,
-    );
+    if (typeof findByBusinessGroupedByUserDb !== "function")
+      throw new Error(
+        "findByBusinessGroupedByUser() model function not found/exported.",
+      );
+
+    const data =
+      findByBusinessGroupedByUserDb.length >= 2
+        ? await findByBusinessGroupedByUserDb(db, req.params.business_id)
+        : await findByBusinessGroupedByUserDb(req.params.business_id);
+
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 }
 
-/**
- * GET /users/:user_id/orders
- * Optional query: ?service_type=FOOD|MART
- */
 async function getOrdersForUser(req, res) {
   try {
     const userId = Number(req.params.user_id);
@@ -863,7 +1058,15 @@ async function getOrdersForUser(req, res) {
         .json({ success: false, message: "Invalid user_id" });
     }
 
-    let data = await Order.findByUserIdForApp(userId);
+    if (typeof findByUserIdForAppDb !== "function")
+      throw new Error(
+        "findByUserIdForApp() model function not found/exported.",
+      );
+
+    let data =
+      findByUserIdForAppDb.length >= 2
+        ? await findByUserIdForAppDb(db, userId)
+        : await findByUserIdForAppDb(userId);
 
     const qs = String(req.query?.service_type || "").trim();
     if (qs) {
@@ -885,12 +1088,16 @@ async function getOrdersForUser(req, res) {
   }
 }
 
-/**
- * PUT /orders/:order_id
- */
 async function updateOrder(req, res) {
   try {
-    const affectedRows = await Order.update(req.params.order_id, req.body);
+    if (typeof updateDb !== "function")
+      throw new Error("update() model function not found/exported.");
+
+    const affectedRows =
+      updateDb.length >= 3
+        ? await updateDb(db, req.params.order_id, req.body)
+        : await updateDb(req.params.order_id, req.body);
+
     if (!affectedRows)
       return res.status(404).json({ message: "Order not found" });
     res.json({ message: "Order updated successfully" });
@@ -940,13 +1147,13 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
 }
 
 /**
- * PUT/PATCH /orders/:order_id/status
- * ✅ If status is DELIVERED, routes to markOrderDelivered to run capture+archive+delete pipeline.
+ * PUT /orders/:order_id/status
  */
 async function updateOrderStatus(req, res) {
   try {
-    const order_id = String(req.params.order_id || "").trim();
-
+    const order_id = String(req.params.order_id || "")
+      .trim()
+      .toUpperCase();
     const body = req.body || {};
     const { status, reason, estimated_minutes, cancelled_by, delivered_by } =
       body;
@@ -967,7 +1174,6 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // load current order user_id + current status
     const [[row]] = await db.query(
       `SELECT user_id, status AS current_status
          FROM orders
@@ -982,12 +1188,15 @@ async function updateOrderStatus(req, res) {
     const current = String(row.current_status || "PENDING").toUpperCase();
     const finalReason = String(reason || "").trim();
 
-    // ETA update
-    if (estimated_minutes != null) {
-      await updateEstimatedArrivalTime(order_id, estimated_minutes);
-    }
+    const [bizRows] = await db.query(
+      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
+      [order_id],
+    );
+    const business_ids = bizRows
+      .map((r) => Number(r.business_id))
+      .filter((n) => Number.isFinite(n) && n > 0);
 
-    // ✅ DELIVERED must go through capture+archive pipeline
+    // DELIVERED pipeline
     if (normalized === "DELIVERED") {
       req.body = {
         ...(req.body || {}),
@@ -998,7 +1207,108 @@ async function updateOrderStatus(req, res) {
       return markOrderDelivered(req, res);
     }
 
-    // Cancel restriction
+    // CONFIRMED with unavailable changes
+    if (normalized === "CONFIRMED") {
+      const locked = new Set(["DELIVERED", "CANCELLED"]);
+      if (locked.has(current)) {
+        return res.status(400).json({
+          success: false,
+          message: `Order cannot be confirmed because it is already ${current}.`,
+        });
+      }
+
+      const result = await updateStatusWithUnavailable(order_id, {
+        status: "CONFIRMED",
+        reason: finalReason,
+        estimated_minutes: body.estimated_minutes ?? estimated_minutes,
+        final_total_amount: body.final_total_amount,
+        final_platform_fee: body.final_platform_fee,
+        final_discount_amount: body.final_discount_amount,
+        final_delivery_fee: body.final_delivery_fee,
+        final_merchant_delivery_fee: body.final_merchant_delivery_fee,
+        unavailable_changes:
+          body.unavailable_changes &&
+          typeof body.unavailable_changes === "object"
+            ? body.unavailable_changes
+            : { removed: [], replaced: [] },
+      });
+
+      if (!result?.ok) {
+        if (result?.code === "NOT_FOUND") {
+          return res
+            .status(404)
+            .json({ success: false, message: "Order not found" });
+        }
+        return res.status(400).json({
+          success: false,
+          message: result?.code || "Unable to confirm order",
+          data: result || null,
+        });
+      }
+
+      try {
+        broadcastOrderStatusToMany({
+          order_id,
+          user_id,
+          business_ids,
+          status: "CONFIRMED",
+        });
+      } catch {}
+
+      for (const business_id of business_ids) {
+        try {
+          await insertAndEmitNotification({
+            business_id,
+            user_id,
+            order_id,
+            type: "order:status",
+            title: `Order #${order_id} CONFIRMED`,
+            body_preview: result?.estimated_arrivial_time
+              ? `ETA: ${result.estimated_arrivial_time}`
+              : "Order accepted by merchant.",
+          });
+        } catch (e) {
+          console.error("[merchant notify failed]", {
+            order_id,
+            business_id,
+            err: e?.message,
+          });
+        }
+      }
+
+      try {
+        const eta = result?.estimated_arrivial_time
+          ? ` ETA: ${result.estimated_arrivial_time}`
+          : "";
+        await sendPushToUserId(user_id, {
+          title: "Order Update",
+          body: `Your order ${order_id} has been confirmed.${eta}`,
+        });
+      } catch {}
+
+      try {
+        if (typeof addUserOrderStatusNotification === "function") {
+          await addUserOrderStatusNotification({
+            user_id,
+            order_id,
+            status: "CONFIRMED",
+            reason: finalReason,
+          });
+        }
+      } catch (e) {
+        console.error("[user notify failed]", { order_id, err: e?.message });
+      }
+
+      return res.json({
+        success: true,
+        message: "Order confirmed successfully",
+        order_id,
+        status: "CONFIRMED",
+        data: result,
+      });
+    }
+
+    // CANCEL restriction
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -1015,21 +1325,20 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    const affected = await Order.updateStatus(
-      order_id,
-      normalized,
-      finalReason,
-    );
-    if (!affected) return res.status(404).json({ message: "Order not found" });
+    // ETA update
+    if (estimated_minutes != null) {
+      await updateEstimatedArrivalTime(order_id, estimated_minutes);
+    }
 
-    // business ids for broadcast + merchant push
-    const [bizRows] = await db.query(
-      `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
-      [order_id],
-    );
-    const business_ids = bizRows
-      .map((r) => Number(r.business_id))
-      .filter((n) => Number.isFinite(n) && n > 0);
+    if (typeof updateStatusDb !== "function")
+      throw new Error("updateStatus() model function not found/exported.");
+
+    const affected =
+      updateStatusDb.length >= 4
+        ? await updateStatusDb(db, order_id, normalized, finalReason)
+        : await updateStatusDb(order_id, normalized, finalReason);
+
+    if (!affected) return res.status(404).json({ message: "Order not found" });
 
     broadcastOrderStatusToMany({
       order_id,
@@ -1038,7 +1347,6 @@ async function updateOrderStatus(req, res) {
       status: normalized,
     });
 
-    // DB notify merchants
     for (const business_id of business_ids) {
       try {
         await insertAndEmitNotification({
@@ -1058,37 +1366,37 @@ async function updateOrderStatus(req, res) {
       }
     }
 
-    // ✅ PUSH customer
     try {
-      const title = "Order Update";
-      const bodyText =
-        `Your order ${order_id} has been ${normalized.toLowerCase().replace(/_/g, " ")}.` +
-        (finalReason ? ` Reason: ${finalReason}` : "");
-      await sendPushToUserId(user_id, { title, body: bodyText });
+      await sendPushToUserId(user_id, {
+        title: "Order Update",
+        body:
+          `Your order ${order_id} has been ${normalized.toLowerCase().replace(/_/g, " ")}.` +
+          (finalReason ? ` Reason: ${finalReason}` : ""),
+      });
     } catch {}
 
-    // ✅ PUSH merchant(s)
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(business_ids);
-      const title = "Order Update";
-      const bodyText =
-        `Order ${order_id} is now ${normalized}.` +
-        (finalReason ? ` Reason: ${finalReason}` : "");
-
       for (const merchantUserId of merchantUserIds) {
-        await sendPushToUserId(merchantUserId, { title, body: bodyText });
+        await sendPushToUserId(merchantUserId, {
+          title: "Order Update",
+          body:
+            `Order ${order_id} is now ${normalized}.` +
+            (finalReason ? ` Reason: ${finalReason}` : ""),
+        });
       }
     } catch {}
 
-    // DB notify user
     try {
-      await Order.addUserOrderStatusNotification({
-        user_id,
-        order_id,
-        status: normalized,
-        reason: finalReason,
-      });
+      if (typeof addUserOrderStatusNotification === "function") {
+        await addUserOrderStatusNotification({
+          user_id,
+          order_id,
+          status: normalized,
+          reason: finalReason,
+        });
+      }
     } catch (e) {
       console.error("[user notify failed]", { order_id, err: e?.message });
     }
@@ -1119,12 +1427,16 @@ async function updateOrderStatus(req, res) {
   }
 }
 
-/**
- * DELETE /orders/:order_id
- */
 async function deleteOrder(req, res) {
   try {
-    const affectedRows = await Order.delete(req.params.order_id);
+    if (typeof deleteDb !== "function")
+      throw new Error("delete() model function not found/exported.");
+
+    const affectedRows =
+      deleteDb.length >= 2
+        ? await deleteDb(db, req.params.order_id)
+        : await deleteDb(req.params.order_id);
+
     if (!affectedRows)
       return res.status(404).json({ message: "Order not found" });
     res.json({ message: "Order deleted successfully" });
@@ -1133,9 +1445,6 @@ async function deleteOrder(req, res) {
   }
 }
 
-/**
- * GET /orders/business/:business_id/status-counts
- */
 async function getOrderStatusCountsByBusiness(req, res) {
   try {
     const business_id = Number(req.params.business_id);
@@ -1143,7 +1452,16 @@ async function getOrderStatusCountsByBusiness(req, res) {
       return res.status(400).json({ message: "Invalid business_id" });
     }
 
-    const counts = await Order.getOrderStatusCountsByBusiness(business_id);
+    if (typeof getOrderStatusCountsByBusinessDb !== "function")
+      throw new Error(
+        "getOrderStatusCountsByBusiness() model function not found/exported.",
+      );
+
+    const counts =
+      getOrderStatusCountsByBusinessDb.length >= 2
+        ? await getOrderStatusCountsByBusinessDb(db, business_id)
+        : await getOrderStatusCountsByBusinessDb(business_id);
+
     return res.json(counts);
   } catch (err) {
     console.error("[getOrderStatusCountsByBusiness]", err.message);
@@ -1151,9 +1469,6 @@ async function getOrderStatusCountsByBusiness(req, res) {
   }
 }
 
-/**
- * PATCH /users/:user_id/orders/:order_id/cancel
- */
 async function cancelOrderByUser(req, res) {
   try {
     const user_id_param = Number(req.params.user_id);
@@ -1170,17 +1485,27 @@ async function cancelOrderByUser(req, res) {
         ? `Cancelled by customer: ${userReason}`
         : "Cancelled by customer before the store accepted the order.";
 
-    const out = await Order.cancelAndArchiveOrder(order_id, {
-      cancelled_by: "USER",
-      reason,
-      onlyIfStatus: "PENDING",
-      expectedUserId: user_id_param,
-    });
+    if (typeof cancelAndArchiveOrder !== "function")
+      throw new Error("cancelAndArchiveOrder() pipeline not found/exported.");
+
+    const out =
+      cancelAndArchiveOrder.length >= 3
+        ? await cancelAndArchiveOrder(db, order_id, {
+            cancelled_by: "USER",
+            reason,
+            onlyIfStatus: "PENDING",
+            expectedUserId: user_id_param,
+          })
+        : await cancelAndArchiveOrder(order_id, {
+            cancelled_by: "USER",
+            reason,
+            onlyIfStatus: "PENDING",
+            expectedUserId: user_id_param,
+          });
 
     if (!out?.ok) {
       if (out?.code === "NOT_FOUND")
         return res.status(404).json({ message: "Order not found" });
-
       if (out?.code === "FORBIDDEN")
         return res
           .status(403)
@@ -1224,7 +1549,6 @@ async function cancelOrderByUser(req, res) {
       }
     }
 
-    // ✅ PUSH customer
     try {
       await sendPushToUserId(out.user_id, {
         title: "Order Update",
@@ -1233,12 +1557,14 @@ async function cancelOrderByUser(req, res) {
     } catch {}
 
     try {
-      await Order.addUserOrderStatusNotification({
-        user_id: out.user_id,
-        order_id,
-        status: "CANCELLED",
-        reason,
-      });
+      if (typeof addUserOrderStatusNotification === "function") {
+        await addUserOrderStatusNotification({
+          user_id: out.user_id,
+          order_id,
+          status: "CANCELLED",
+          reason,
+        });
+      }
     } catch (e) {
       console.error("[cancelOrderByUser notify user failed]", {
         order_id,
@@ -1259,14 +1585,6 @@ async function cancelOrderByUser(req, res) {
   }
 }
 
-/**
- * POST/PATCH /orders/:order_id/delivered (or similar route)
- * Runs: capture + archive + delete, then wallet notifications + push
- *
- * ✅ FIXED:
- * - do NOT start a transaction here (model already committed)
- * - ensure merchant PUSH is sent inside safeNotifyWalletAndDelivery
- */
 async function markOrderDelivered(req, res) {
   const order_id = String(req.params.order_id || req.body?.order_id || "")
     .trim()
@@ -1282,12 +1600,23 @@ async function markOrderDelivered(req, res) {
 
   const conn = await db.getConnection();
   try {
-    // 1) Model pipeline (captures + archives + deletes)
-    const result = await Order.completeAndArchiveDeliveredOrder(order_id, {
-      delivered_by,
-      reason,
-      capture_at: "DELIVERED",
-    });
+    if (typeof completeAndArchiveDeliveredOrder !== "function")
+      throw new Error(
+        "completeAndArchiveDeliveredOrder() pipeline not found/exported.",
+      );
+
+    const result =
+      completeAndArchiveDeliveredOrder.length >= 3
+        ? await completeAndArchiveDeliveredOrder(conn, order_id, {
+            delivered_by,
+            reason,
+            capture_at: "DELIVERED",
+          })
+        : await completeAndArchiveDeliveredOrder(order_id, {
+            delivered_by,
+            reason,
+            capture_at: "DELIVERED",
+          });
 
     if (!result?.ok) {
       return res.status(400).json({
@@ -1296,16 +1625,14 @@ async function markOrderDelivered(req, res) {
         data: result || null,
       });
     }
+    // console.log("[DELIVERED RESULT.capture]", result?.capture);
 
-    // 2) Notifications AFTER delivered wallet capture
-    //    (no extra transaction needed)
     await safeNotifyWalletAndDelivery(conn, {
       order_id,
       user_id: result.user_id,
       capture: result.capture,
     });
 
-    // 3) Broadcast delivered
     try {
       broadcastOrderStatusToMany({
         order_id,
