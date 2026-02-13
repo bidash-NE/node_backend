@@ -50,7 +50,7 @@ async function getByWallet(req, res) {
       success: true,
       count: rows.length,
       next_cursor,
-      data: rows.map((r) => mapRowForWallet(r, wallet_id)), // r.remark is the direction
+      data: rows.map((r) => mapRowForWallet(r, wallet_id)),
     });
   } catch (e) {
     console.error("getByWallet error:", e);
@@ -58,7 +58,7 @@ async function getByWallet(req, res) {
   }
 }
 
-/* ---------- GET by user (NO reversal; same logic as wallet) ---------- */
+/* ---------- GET by user ---------- */
 async function getByUser(req, res) {
   try {
     const { user_id } = req.params;
@@ -87,7 +87,7 @@ async function getByUser(req, res) {
       success: true,
       count: rows.length,
       next_cursor,
-      data: rows.map((r) => mapRowForWallet(r, wallet_id)), // <- no reverse
+      data: rows.map((r) => mapRowForWallet(r, wallet_id)),
     });
   } catch (e) {
     console.error("getByUser error:", e);
