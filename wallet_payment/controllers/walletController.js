@@ -22,6 +22,9 @@ const SMS_API_URL = process.env.SMS_API_URL && process.env.SMS_API_URL.trim();
 const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
 const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
 
+/* ---------------- EXPO PUSH ENV ---------------- */
+const EXPO_NOTIFICATION_URL = (process.env.EXPO_NOTIFICATION_URL || "").trim();
+
 /* ---------- helpers ---------- */
 
 function mapLocalTimes(row) {
@@ -111,6 +114,51 @@ async function sendOtpSms({
     return JSON.parse(bodyText);
   } catch {
     return { ok: true, response: bodyText };
+  }
+}
+
+/* ==========================
+   ✅ EXPO PUSH (NEW)
+   Payload required by your Expo service:
+   { user_id, title, body }
+========================== */
+async function sendExpoNotification({ user_id, title, body }) {
+  if (!EXPO_NOTIFICATION_URL)
+    return {
+      ok: false,
+      skipped: true,
+      reason: "EXPO_NOTIFICATION_URL missing",
+    };
+
+  const uid = Number(user_id);
+  if (!Number.isFinite(uid) || uid <= 0)
+    return { ok: false, skipped: true, reason: "Invalid user_id" };
+
+  const payload = {
+    user_id: uid,
+    title: String(title || "").trim() || "Notification",
+    body: String(body || "").trim() || "",
+  };
+
+  try {
+    const resp = await fetch(EXPO_NOTIFICATION_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await resp.text();
+    if (!resp.ok) {
+      return { ok: false, status: resp.status, error: text };
+    }
+
+    try {
+      return { ok: true, data: JSON.parse(text) };
+    } catch {
+      return { ok: true, data: text };
+    }
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
@@ -516,7 +564,6 @@ async function forgotTPinRequest(req, res) {
       .toLowerCase();
     const userName = user.user_name || null;
 
-    // optional: basic email format check
     const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
     if (!isValidEmail) {
       return res.status(400).json({
@@ -525,7 +572,6 @@ async function forgotTPinRequest(req, res) {
       });
     }
 
-    // optional: resend cooldown 30s
     const rlKey = `tpin_reset_email_rl:${wallet.user_id}:${wallet.wallet_id}`;
     if (await redis.get(rlKey)) {
       return res.status(429).json({
@@ -537,7 +583,6 @@ async function forgotTPinRequest(req, res) {
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
 
-    // ✅ store OTP 5 mins (your message says 10 mins but your code uses 300)
     await redis.set(redisKey, otp, "EX", 300);
     await redis.set(rlKey, "1", "EX", 30);
 
@@ -686,7 +731,6 @@ async function forgotTPinRequestSms(req, res) {
     const otp = String(Math.floor(100000 + Math.random() * 900000));
     const redisKey = `tpin_reset_sms:${wallet.user_id}:${wallet.wallet_id}`;
 
-    // 10 minutes
     await redis.set(redisKey, otp, "EX", 300);
 
     await sendOtpSms({
@@ -797,10 +841,9 @@ async function userTransfer(req, res) {
       amount,
       note = "",
       t_pin,
-      biometric = false, // ✅ NEW
+      biometric = false,
     } = req.body || {};
 
-    // basic wallet validations
     if (!sender_wallet_id || !/^NET/i.test(sender_wallet_id)) {
       return res.status(400).json({
         success: false,
@@ -829,7 +872,6 @@ async function userTransfer(req, res) {
       });
     }
 
-    // ✅ biometric flag normalization
     const biometricOk =
       biometric === true || biometric === "true" || biometric === 1;
 
@@ -849,7 +891,7 @@ async function userTransfer(req, res) {
       });
     }
 
-    // ✅ If biometric is FALSE => verify T-PIN
+    // verify pin if not biometric
     if (!biometricOk) {
       const pinStr = String(t_pin || "").trim();
       if (!/^\d{4}$/.test(pinStr)) {
@@ -873,9 +915,6 @@ async function userTransfer(req, res) {
           message: "Invalid T-PIN.",
         });
       }
-    } else {
-      // ✅ biometric TRUE => skip pin verification (but still block if wallet is missing tpin? NO)
-      // Do nothing here intentionally.
     }
 
     // load recipient wallet
@@ -925,8 +964,49 @@ async function userTransfer(req, res) {
       purpose: note || "N/A",
       date: dateStr,
       time: timeStr,
-      biometric: biometricOk, // ✅ optional: return what was used
+      biometric: biometricOk,
     };
+
+    // ✅ NEW: send Expo push to BOTH sender and receiver
+    // Sender = debited, Receiver = credited
+    const amtStr = `Nu. ${Number(amount).toFixed(2)}`;
+    const jrn = journal_code || "N/A";
+    const tnx = primaryTxnId || "N/A";
+
+    const senderTitle = "Wallet Transfer - Debited";
+    const senderBody =
+      `Amount: ${amtStr} (DEBITED)\n` +
+      `Journal No: ${jrn}\n` +
+      `Txn ID: ${tnx}\n` +
+      `To: ${maskWallet(recipient_wallet_id)}` +
+      (note ? `\nNote: ${note}` : "");
+
+    const receiverTitle = "Wallet Transfer - Credited";
+    const receiverBody =
+      `Amount: ${amtStr} (CREDITED)\n` +
+      `Journal No: ${jrn}\n` +
+      `Txn ID: ${tnx}\n` +
+      `From: ${maskWallet(sender_wallet_id)}` +
+      (note ? `\nNote: ${note}` : "");
+
+    // fire-and-forget (do not fail transfer if notification fails)
+    Promise.allSettled([
+      sendExpoNotification({
+        user_id: senderWallet.user_id,
+        title: senderTitle,
+        body: senderBody,
+      }),
+      sendExpoNotification({
+        user_id: recipientWallet.user_id,
+        title: receiverTitle,
+        body: receiverBody,
+      }),
+    ]).then((r) => {
+      const s = r?.[0]?.status === "fulfilled" ? r[0].value : r?.[0]?.reason;
+      const rr = r?.[1]?.status === "fulfilled" ? r[1].value : r?.[1]?.reason;
+      console.log("[EXPO] sender:", s);
+      console.log("[EXPO] receiver:", rr);
+    });
 
     return res.json({
       success: true,
@@ -994,10 +1074,10 @@ module.exports = {
   adminTipTransfer: adminTipTransferHandler,
   setTPin,
   changeTPin,
-  forgotTPinRequest, // email send
-  forgotTPinVerify, // email verify
-  forgotTPinRequestSms, // ✅ sms send
-  forgotTPinVerifySms, // ✅ sms verify
+  forgotTPinRequest,
+  forgotTPinVerify,
+  forgotTPinRequestSms,
+  forgotTPinVerifySms,
   userTransfer,
   checkTPinByUserId,
   getUserNameByWalletId,

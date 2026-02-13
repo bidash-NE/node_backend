@@ -8,7 +8,7 @@ async function tableExists(table) {
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = ? 
       LIMIT 1`,
-    [table]
+    [table],
   );
   return rows.length > 0;
 }
@@ -22,7 +22,7 @@ async function columnExists(table, column) {
         AND TABLE_NAME = ? 
         AND COLUMN_NAME = ? 
       LIMIT 1`,
-    [table, column]
+    [table, column],
   );
   return rows.length > 0;
 }
@@ -36,7 +36,7 @@ async function ensureIndex(table, indexName, ddlSql) {
         AND TABLE_NAME = ? 
         AND INDEX_NAME = ? 
       LIMIT 1`,
-    [table, indexName]
+    [table, indexName],
   );
   if (!rows.length) {
     await db.query(ddlSql);
@@ -52,7 +52,7 @@ async function getNumericColumnMeta(table, column) {
         AND TABLE_NAME = ? 
         AND COLUMN_NAME = ? 
       LIMIT 1`,
-    [table, column]
+    [table, column],
   );
   return rows[0] || null;
 }
@@ -90,7 +90,7 @@ async function initWalletTables() {
     const meta = await getNumericColumnMeta("wallets", "amount");
     if (meta && (meta.DATA_TYPE !== "decimal" || meta.NUMERIC_SCALE !== 2)) {
       await db.query(
-        `ALTER TABLE wallets MODIFY amount DECIMAL(12,2) NOT NULL DEFAULT 0.00`
+        `ALTER TABLE wallets MODIFY amount DECIMAL(12,2) NOT NULL DEFAULT 0.00`,
       );
       console.log("🔧 Patched wallets.amount to DECIMAL(12,2)");
     }
@@ -128,14 +128,14 @@ async function initWalletTables() {
     console.log("✅ Created table: wallet_transactions");
   } else {
     console.log(
-      "ℹ️  wallet_transactions table already exists — skipped creation."
+      "ℹ️  wallet_transactions table already exists — skipped creation.",
     );
 
     // Ensure DECIMAL(12,2) for amount
     const meta = await getNumericColumnMeta("wallet_transactions", "amount");
     if (meta && (meta.DATA_TYPE !== "decimal" || meta.NUMERIC_SCALE !== 2)) {
       await db.query(
-        `ALTER TABLE wallet_transactions MODIFY amount DECIMAL(12,2) NOT NULL`
+        `ALTER TABLE wallet_transactions MODIFY amount DECIMAL(12,2) NOT NULL`,
       );
       console.log("🔧 Patched wallet_transactions.amount to DECIMAL(12,2)");
     }
@@ -143,7 +143,7 @@ async function initWalletTables() {
     // Ensure the generated column exists
     const hasActual = await columnExists(
       "wallet_transactions",
-      "actual_wallet_id"
+      "actual_wallet_id",
     );
     if (!hasActual) {
       await db.query(`
@@ -154,7 +154,7 @@ async function initWalletTables() {
           ) STORED
       `);
       console.log(
-        "🆕 Added generated column wallet_transactions.actual_wallet_id"
+        "🆕 Added generated column wallet_transactions.actual_wallet_id",
       );
     }
 
@@ -162,27 +162,27 @@ async function initWalletTables() {
     await ensureIndex(
       "wallet_transactions",
       "idx_journal_code",
-      "CREATE INDEX idx_journal_code ON wallet_transactions(journal_code)"
+      "CREATE INDEX idx_journal_code ON wallet_transactions(journal_code)",
     );
     await ensureIndex(
       "wallet_transactions",
       "idx_from",
-      "CREATE INDEX idx_from ON wallet_transactions(tnx_from)"
+      "CREATE INDEX idx_from ON wallet_transactions(tnx_from)",
     );
     await ensureIndex(
       "wallet_transactions",
       "idx_to",
-      "CREATE INDEX idx_to ON wallet_transactions(tnx_to)"
+      "CREATE INDEX idx_to ON wallet_transactions(tnx_to)",
     );
     await ensureIndex(
       "wallet_transactions",
       "idx_tx_created",
-      "CREATE INDEX idx_tx_created ON wallet_transactions(created_at)"
+      "CREATE INDEX idx_tx_created ON wallet_transactions(created_at)",
     );
     await ensureIndex(
       "wallet_transactions",
       "idx_actual_wallet",
-      "CREATE INDEX idx_actual_wallet ON wallet_transactions(actual_wallet_id, created_at)"
+      "CREATE INDEX idx_actual_wallet ON wallet_transactions(actual_wallet_id, created_at)",
     );
   }
 
