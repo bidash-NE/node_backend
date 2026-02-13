@@ -5,22 +5,17 @@ const db = require("../config/db");
  * Wallet ID format:
  *  - "TD" + 8 random digits
  *  - Example: TD12345678
- * Must be UNIQUE. We ensure by:
- *  1) generate candidate
- *  2) check DB for existence
- *  3) reserve it by inserting with wallet_id (UNIQUE constraint in table)
- *  4) retry on duplicate
+ * Must be UNIQUE.
  */
 
 function randDigits(len = 8) {
-  // digits only (00000000 - 99999999)
   let out = "";
   for (let i = 0; i < len; i++) out += Math.floor(Math.random() * 10);
   return out;
 }
 
 function makeWalletId(prefix = "TD") {
-  return `${prefix}${randDigits(8)}`; // TD + 8 digits
+  return `${prefix}${randDigits(8)}`;
 }
 
 async function userExists(conn, user_id) {
@@ -42,11 +37,14 @@ async function walletIdExists(conn, wallet_id) {
 async function generateUniqueWalletId(conn, prefix = "TD", maxTries = 50) {
   for (let i = 0; i < maxTries; i++) {
     const candidate = makeWalletId(prefix);
-    // fast pre-check to reduce duplicate insert errors
     const exists = await walletIdExists(conn, candidate);
     if (!exists) return candidate;
   }
   throw new Error("Failed to generate unique wallet_id. Please retry.");
+}
+
+function isWalletId(v) {
+  return /^TD\d{8}$/i.test(String(v || "").trim());
 }
 
 async function createWallet({ user_id, status = "ACTIVE" }) {
@@ -59,7 +57,6 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
       return { error: "USER_NOT_FOUND" };
     }
 
-    // prevent duplicate wallet per user
     const [existing] = await conn.query(
       "SELECT * FROM wallets WHERE user_id = ? FOR UPDATE",
       [user_id],
@@ -69,12 +66,9 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
       return { error: "WALLET_EXISTS", wallet: existing[0] };
     }
 
-    // create wallet with unique random wallet_id
-    // NOTE: wallets.wallet_id must be UNIQUE in schema (you already have UNIQUE)
     let insertedId = null;
     let wallet_id = null;
 
-    // Try insert with generated id; if collision happens, retry
     for (let attempt = 0; attempt < 50; attempt++) {
       wallet_id = await generateUniqueWalletId(conn, "TD", 10);
 
@@ -86,13 +80,11 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
         insertedId = ins.insertId;
         break;
       } catch (err) {
-        // ER_DUP_ENTRY for wallet_id UNIQUE
         if (
           err &&
           (err.code === "ER_DUP_ENTRY" ||
             String(err.message || "").includes("Duplicate"))
         ) {
-          // retry
           wallet_id = null;
           continue;
         }
@@ -123,21 +115,18 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
 }
 
 async function getWallet({ key }) {
-  const k = String(key);
-
-  // Accept both: TD12345678 OR numeric id
-  const isWalletId = /^[A-Za-z]{2}\d{8}$/.test(k);
+  const k = String(key).trim();
+  const byWalletId = isWalletId(k);
 
   const [rows] = await db.query(
-    isWalletId
+    byWalletId
       ? "SELECT * FROM wallets WHERE wallet_id = ?"
       : "SELECT * FROM wallets WHERE id = ?",
-    [isWalletId ? k : Number(k)],
+    [byWalletId ? k : Number(k)],
   );
   return rows[0] || null;
 }
 
-// ✅ get by user_id
 async function getWalletByUserId(user_id) {
   const [rows] = await db.query("SELECT * FROM wallets WHERE user_id = ?", [
     user_id,
@@ -164,14 +153,14 @@ async function listWallets({ limit = 50, offset = 0, status = null }) {
 }
 
 async function updateWalletStatus({ key, status }) {
-  const k = String(key);
-  const isWalletId = /^[A-Za-z]{2}\d{8}$/.test(k);
+  const k = String(key).trim();
+  const byWalletId = isWalletId(k);
 
   const [existing] = await db.query(
-    isWalletId
+    byWalletId
       ? "SELECT id FROM wallets WHERE wallet_id = ?"
       : "SELECT id FROM wallets WHERE id = ?",
-    [isWalletId ? k : Number(k)],
+    [byWalletId ? k : Number(k)],
   );
   if (!existing.length) return null;
 
@@ -179,6 +168,7 @@ async function updateWalletStatus({ key, status }) {
     status,
     existing[0].id,
   ]);
+
   const [rows] = await db.query("SELECT * FROM wallets WHERE id = ?", [
     existing[0].id,
   ]);
@@ -190,14 +180,14 @@ async function deleteWallet({ key }) {
   try {
     await conn.beginTransaction();
 
-    const k = String(key);
-    const isWalletId = /^[A-Za-z]{2}\d{8}$/.test(k);
+    const k = String(key).trim();
+    const byWalletId = isWalletId(k);
 
     const [wallet] = await conn.query(
-      isWalletId
+      byWalletId
         ? "SELECT id, wallet_id FROM wallets WHERE wallet_id = ?"
         : "SELECT id, wallet_id FROM wallets WHERE id = ?",
-      [isWalletId ? k : Number(k)],
+      [byWalletId ? k : Number(k)],
     );
 
     if (!wallet.length) {
@@ -208,7 +198,6 @@ async function deleteWallet({ key }) {
     const id = wallet[0].id;
     const wid = wallet[0].wallet_id;
 
-    // IMPORTANT: your wallet_transactions stores wallet_id strings (NET.../TD...) in tnx_from/tnx_to
     const [[cnt]] = await conn.query(
       "SELECT COUNT(1) AS c FROM wallet_transactions WHERE tnx_from = ? OR tnx_to = ?",
       [wid, wid],
@@ -233,17 +222,17 @@ async function deleteWallet({ key }) {
 }
 
 /**
- * ✅ Set / update encrypted T-PIN for a wallet
+ * Set / update encrypted T-PIN for a wallet
  */
 async function setWalletTPin({ key, t_pin_hash }) {
-  const k = String(key);
-  const isWalletId = /^[A-Za-z]{2}\d{8}$/.test(k);
+  const k = String(key).trim();
+  const byWalletId = isWalletId(k);
 
   const [existing] = await db.query(
-    isWalletId
+    byWalletId
       ? "SELECT id FROM wallets WHERE wallet_id = ?"
       : "SELECT id FROM wallets WHERE id = ?",
-    [isWalletId ? k : Number(k)],
+    [byWalletId ? k : Number(k)],
   );
   if (!existing.length) return null;
 

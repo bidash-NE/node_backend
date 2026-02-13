@@ -25,7 +25,9 @@ const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
 /* ---------------- EXPO PUSH ENV ---------------- */
 const EXPO_NOTIFICATION_URL = (process.env.EXPO_NOTIFICATION_URL || "").trim();
 
-/* ---------- helpers ---------- */
+/* =========================
+   HELPERS
+========================= */
 
 function mapLocalTimes(row) {
   if (!row) return row;
@@ -36,10 +38,10 @@ function mapLocalTimes(row) {
   };
 }
 
-// NET000069 -> NET*****69
+// TD12345678 -> TD*****78
 function maskWallet(walletId) {
   if (!walletId || walletId.length < 5) return walletId;
-  const prefix = walletId.slice(0, 3);
+  const prefix = walletId.slice(0, 2); // TD
   const last2 = walletId.slice(-2);
   const maskedMid = "*".repeat(walletId.length - prefix.length - 2);
   return prefix + maskedMid + last2;
@@ -88,7 +90,6 @@ async function sendOtpSms({
 }) {
   if (!SMS_API_KEY) throw new Error("SMS_API_KEY missing in env");
 
-  // ✅ Your requested format: title + message + advice (OTP only ONCE)
   const text =
     `${purposeTitle}\n\n` +
     `${otp}\n\n` +
@@ -109,7 +110,6 @@ async function sendOtpSms({
     throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
   }
 
-  // may be JSON or string
   try {
     return JSON.parse(bodyText);
   } catch {
@@ -118,8 +118,8 @@ async function sendOtpSms({
 }
 
 /* ==========================
-   ✅ EXPO PUSH (NEW)
-   Payload required by your Expo service:
+   EXPO PUSH
+   Payload required:
    { user_id, title, body }
 ========================== */
 async function sendExpoNotification({ user_id, title, body }) {
@@ -161,6 +161,14 @@ async function sendExpoNotification({ user_id, title, body }) {
     return { ok: false, error: e.message };
   }
 }
+
+function isValidWalletId(v) {
+  return /^TD\d{8}$/i.test(String(v || "").trim());
+}
+
+/* ==========================
+   CONTROLLERS
+========================== */
 
 /* ---------- CREATE ---------- */
 async function create(req, res) {
@@ -349,18 +357,22 @@ async function adminTipTransferHandler(req, res) {
       return res
         .status(400)
         .json({ success: false, message: "admin_name is required." });
-    if (!admin_wallet_id || !/^NET/i.test(admin_wallet_id))
+
+    if (!isValidWalletId(admin_wallet_id))
       return res
         .status(400)
         .json({ success: false, message: "Invalid admin_wallet_id." });
-    if (!user_wallet_id || !/^NET/i.test(user_wallet_id))
+
+    if (!isValidWalletId(user_wallet_id))
       return res
         .status(400)
         .json({ success: false, message: "Invalid user_wallet_id." });
+
     if (admin_wallet_id === user_wallet_id)
       return res
         .status(400)
         .json({ success: false, message: "Wallets must differ." });
+
     if (isNaN(amount) || Number(amount) <= 0)
       return res
         .status(400)
@@ -395,7 +407,7 @@ async function setTPin(req, res) {
     const { wallet_id } = req.params;
     const { t_pin } = req.body || {};
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -453,7 +465,7 @@ async function changeTPin(req, res) {
     const { wallet_id } = req.params;
     const { old_t_pin, new_t_pin } = req.body || {};
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -533,7 +545,7 @@ async function forgotTPinRequest(req, res) {
   try {
     const { wallet_id } = req.params;
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -614,7 +626,7 @@ async function forgotTPinVerify(req, res) {
     const { wallet_id } = req.params;
     const { otp, new_t_pin } = req.body || {};
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -686,14 +698,14 @@ async function forgotTPinVerify(req, res) {
 }
 
 /* =========================================================
-   ✅ NEW: FORGOT T-PIN (SMS): REQUEST OTP
+   FORGOT T-PIN (SMS): REQUEST OTP
    POST /wallet/:wallet_id/forgot-tpin-sms
 ========================================================= */
 async function forgotTPinRequestSms(req, res) {
   try {
     const { wallet_id } = req.params;
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -752,7 +764,7 @@ async function forgotTPinRequestSms(req, res) {
 }
 
 /* =========================================================
-   ✅ NEW: FORGOT T-PIN (SMS): VERIFY OTP & SET NEW T-PIN
+   FORGOT T-PIN (SMS): VERIFY OTP & SET NEW T-PIN
    POST /wallet/:wallet_id/forgot-tpin-sms/verify
    body: { otp, new_t_pin }
 ========================================================= */
@@ -761,7 +773,7 @@ async function forgotTPinVerifySms(req, res) {
     const { wallet_id } = req.params;
     const { otp, new_t_pin } = req.body || {};
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
@@ -844,21 +856,21 @@ async function userTransfer(req, res) {
       biometric = false,
     } = req.body || {};
 
-    if (!sender_wallet_id || !/^NET/i.test(sender_wallet_id)) {
+    if (!isValidWalletId(sender_wallet_id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid sender_wallet_id.",
       });
     }
 
-    if (!recipient_wallet_id || !/^NET/i.test(recipient_wallet_id)) {
+    if (!isValidWalletId(recipient_wallet_id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid recipient_wallet_id.",
       });
     }
 
-    if (sender_wallet_id === recipient_wallet_id) {
+    if (String(sender_wallet_id) === String(recipient_wallet_id)) {
       return res.status(400).json({
         success: false,
         message: "Sender and recipient wallet must be different.",
@@ -875,7 +887,6 @@ async function userTransfer(req, res) {
     const biometricOk =
       biometric === true || biometric === "true" || biometric === 1;
 
-    // load sender wallet
     const senderWallet = await getWallet({ key: sender_wallet_id });
     if (!senderWallet) {
       return res.status(404).json({
@@ -891,7 +902,6 @@ async function userTransfer(req, res) {
       });
     }
 
-    // verify pin if not biometric
     if (!biometricOk) {
       const pinStr = String(t_pin || "").trim();
       if (!/^\d{4}$/.test(pinStr)) {
@@ -917,7 +927,6 @@ async function userTransfer(req, res) {
       }
     }
 
-    // load recipient wallet
     const recipientWallet = await getWallet({ key: recipient_wallet_id });
     if (!recipientWallet) {
       return res.status(404).json({
@@ -933,7 +942,6 @@ async function userTransfer(req, res) {
       });
     }
 
-    // perform transfer (db transaction happens in model)
     const result = await userWalletTransfer({
       sender_wallet_id,
       recipient_wallet_id,
@@ -967,8 +975,7 @@ async function userTransfer(req, res) {
       biometric: biometricOk,
     };
 
-    // ✅ NEW: send Expo push to BOTH sender and receiver
-    // Sender = debited, Receiver = credited
+    // ✅ send Expo push to BOTH sender and receiver
     const amtStr = `Nu. ${Number(amount).toFixed(2)}`;
     const jrn = journal_code || "N/A";
     const tnx = primaryTxnId || "N/A";
@@ -989,7 +996,6 @@ async function userTransfer(req, res) {
       `From: ${maskWallet(sender_wallet_id)}` +
       (note ? `\nNote: ${note}` : "");
 
-    // fire-and-forget (do not fail transfer if notification fails)
     Promise.allSettled([
       sendExpoNotification({
         user_id: senderWallet.user_id,
@@ -1001,12 +1007,7 @@ async function userTransfer(req, res) {
         title: receiverTitle,
         body: receiverBody,
       }),
-    ]).then((r) => {
-      const s = r?.[0]?.status === "fulfilled" ? r[0].value : r?.[0]?.reason;
-      const rr = r?.[1]?.status === "fulfilled" ? r[1].value : r?.[1]?.reason;
-      console.log("[EXPO] sender:", s);
-      console.log("[EXPO] receiver:", rr);
-    });
+    ]).catch(() => {});
 
     return res.json({
       success: true,
@@ -1024,7 +1025,7 @@ async function getUserNameByWalletId(req, res) {
   try {
     const { wallet_id } = req.params;
 
-    if (!wallet_id || typeof wallet_id !== "string") {
+    if (!isValidWalletId(wallet_id)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid wallet_id." });
