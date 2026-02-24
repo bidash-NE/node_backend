@@ -242,7 +242,7 @@ jobs:
     needs: [changes, build]
     if: needs.changes.outputs.any == 'true'
     env:
-      KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      KUBECONFIG: /home/software/.kube/config
       NAMESPACE: prod
       DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
       SHA: ${{ github.sha }}
