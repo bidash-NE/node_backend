@@ -8,7 +8,6 @@ on:
       - "mart/**"
       - "merchant/**"
       - "order_management/**"
-      - "ride_management/**"
       - "driver/**"
       - "admin/**"
       - "Map_and_location_services/**"
@@ -31,7 +30,6 @@ jobs:
       mart: ${{ steps.filter.outputs.mart }}
       merchant: ${{ steps.filter.outputs.merchant }}
       order_management: ${{ steps.filter.outputs.order_management }}
-      ride_management: ${{ steps.filter.outputs.ride_management }}
       driver: ${{ steps.filter.outputs.driver }}
       admin: ${{ steps.filter.outputs.admin }}
       map_location: ${{ steps.filter.outputs.map_location }}
@@ -49,27 +47,25 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           filters: |
-            food:                 'food/**'
-            mart:                 'mart/**'
-            merchant:             'merchant/**'
-            order_management:     'order_management/**'
-            ride_management:      'ride_management/**'
-            driver:               'driver/**'
-            admin:                'admin/**'
-            map_location:         'Map_and_location_services/**'
-            wallet_payment:       'wallet_payment/**'
-            bfs_wallet_backend:   'bfs-wallet-backend/**'
-            grablike_backend:     'grablike-backend/**'
-            sms_gateway:          'sms-gateway-backend/**'
-            user_merchant_chat:   'user_merchant_chat/**'
-            expo_push_notification: 'expo_push_notification/**'   # ✅ NEW
-            k8s:                  'k8s/**'
+            food:                   'food/**'
+            mart:                   'mart/**'
+            merchant:               'merchant/**'
+            order_management:       'order_management/**'
+            driver:                 'driver/**'
+            admin:                  'admin/**'
+            map_location:           'Map_and_location_services/**'
+            wallet_payment:         'wallet_payment/**'
+            bfs_wallet_backend:     'bfs-wallet-backend/**'
+            grablike_backend:       'grablike-backend/**'
+            sms_gateway:            'sms-gateway-backend/**'
+            user_merchant_chat:     'user_merchant_chat/**'
+            expo_push_notification: 'expo_push_notification/**'
+            k8s:                    'k8s/**'
             any:
               - 'food/**'
               - 'mart/**'
               - 'merchant/**'
               - 'order_management/**'
-              - 'ride_management/**'
               - 'driver/**'
               - 'admin/**'
               - 'Map_and_location_services/**'
@@ -78,7 +74,7 @@ jobs:
               - 'grablike-backend/**'
               - 'sms-gateway-backend/**'
               - 'user_merchant_chat/**'
-              - 'expo_push_notification/**'                       # ✅ NEW
+              - 'expo_push_notification/**'
               - 'k8s/**'
 
   build:
@@ -134,16 +130,6 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:${{ github.sha }}
-
-      - name: Build & push Ride Management
-        if: needs.changes.outputs.ride_management == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: ./ride_management
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/superapp-ride-management:latest
-            ${{ secrets.DOCKER_USERNAME }}/superapp-ride-management:${{ github.sha }}
 
       - name: Build & push Driver
         if: needs.changes.outputs.driver == 'true'
@@ -225,7 +211,6 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:${{ github.sha }}
 
-      # ✅ NEW: Build & push Expo Push Notification Service
       - name: Build & push Expo Push Notification
         if: needs.changes.outputs.expo_push_notification == 'true'
         uses: docker/build-push-action@v6
@@ -250,7 +235,6 @@ jobs:
       MART_CHANGED: ${{ needs.changes.outputs.mart }}
       MERCHANT_CHANGED: ${{ needs.changes.outputs.merchant }}
       ORDER_CHANGED: ${{ needs.changes.outputs.order_management }}
-      RIDE_CHANGED: ${{ needs.changes.outputs.ride_management }}
       DRIVER_CHANGED: ${{ needs.changes.outputs.driver }}
       ADMIN_CHANGED: ${{ needs.changes.outputs.admin }}
       MAP_CHANGED: ${{ needs.changes.outputs.map_location }}
@@ -259,7 +243,7 @@ jobs:
       GRABLIKE_CHANGED: ${{ needs.changes.outputs.grablike_backend }}
       SMS_GATEWAY_CHANGED: ${{ needs.changes.outputs.sms_gateway }}
       USER_MERCHANT_CHAT_CHANGED: ${{ needs.changes.outputs.user_merchant_chat }}
-      EXPO_PUSH_NOTIFICATION_CHANGED: ${{ needs.changes.outputs.expo_push_notification }} # ✅ NEW
+      EXPO_PUSH_NOTIFICATION_CHANGED: ${{ needs.changes.outputs.expo_push_notification }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
     steps:
       - uses: actions/checkout@v4
@@ -305,9 +289,6 @@ jobs:
           if [ "${ORDER_CHANGED:-}" = "true" ]; then
             deploy_if_exists order-management order-management "${DOCKER_USER}/superapp-order-management:${SHA}"
           fi
-          if [ "${RIDE_CHANGED:-}" = "true" ]; then
-            deploy_if_exists ride-management ride-management "${DOCKER_USER}/superapp-ride-management:${SHA}"
-          fi
           if [ "${DRIVER_CHANGED:-}" = "true" ]; then
             deploy_if_exists driver driver "${DOCKER_USER}/superapp-driver:${SHA}"
           fi
@@ -333,11 +314,7 @@ jobs:
             deploy_if_exists user-merchant-chat user-merchant-chat "${DOCKER_USER}/superapp-user-merchant-chat:${SHA}"
           fi
 
-          # ✅ NEW: deploy expo push notification
           if [ "${EXPO_PUSH_NOTIFICATION_CHANGED:-}" = "true" ]; then
-            # IMPORTANT:
-            # - deployment name in k8s should be: expo-push-notification
-            # - container name in that deployment should be: expo-push-notification
             deploy_if_exists expo-push-notification expo-push-notification "${DOCKER_USER}/superapp-expo-push-notification:${SHA}"
           fi
 
