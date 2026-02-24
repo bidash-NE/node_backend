@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const path = require("path");
 require("dotenv").config();
 
 const rideTypeRoutes = require("./routes/rideTypeRoute");
@@ -76,7 +77,7 @@ async function startServer() {
     // ✅ Bind to 0.0.0.0 so it's accessible from other devices on LAN/WAN
 
     app.listen(PORT, "0.0.0.0", () =>
-      console.log(`🚀 Server running at port ${PORT}`)
+      console.log(`🚀 Server running at port ${PORT}`),
     );
   } catch (error) {
     console.error("❌ Failed to start server:", error);
