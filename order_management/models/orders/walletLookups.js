@@ -2,7 +2,7 @@
 const db = require("../../config/db");
 
 /* ======================= CONFIG ======================= */
-const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID || "NET000001";
+const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID;
 
 /* ================= WALLET LOOKUPS ================= */
 async function getBuyerWalletByUserId(user_id, conn = null) {
