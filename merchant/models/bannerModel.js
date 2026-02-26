@@ -2,8 +2,8 @@ const db = require("../config/db");
 const moment = require("moment-timezone");
 const axios = require("axios");
 
-const ADMIN_WALLET_ID = "NET000001";
-const ID_SERVICE_URL = "https://grab.newedge.bt/wallet"; // e.g., same service or dedicated ids service
+const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID; // This should be set in env vars; using a placeholder here
+const ID_SERVICE_URL = process.env.ID_SERVICE_URL; // e.g., same service or dedicated ids service
 
 const nowBT = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
@@ -37,7 +37,7 @@ async function assertBusinessExists(business_id) {
        FROM merchant_business_details
       WHERE business_id = ?
       LIMIT 1`,
-    [business_id]
+    [business_id],
   );
   if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
   return r[0]; // return row so we can use business_name
@@ -73,7 +73,7 @@ async function sweepExpiredBanners() {
      WHERE is_active = 1
        AND end_date IS NOT NULL
        AND end_date <= CURRENT_DATE()`,
-    [now]
+    [now],
   );
 }
 
@@ -89,7 +89,7 @@ async function _insertBanner(
     start_date = null,
     end_date = null,
     owner_type,
-  }
+  },
 ) {
   const bid = toBizId(business_id);
   const t = toStrOrNull(title);
@@ -116,7 +116,7 @@ async function _insertBanner(
       otype,
       now,
       now,
-    ]
+    ],
   );
   return res.insertId;
 }
@@ -125,7 +125,7 @@ async function _selectBanner(conn, id) {
   const [rows] = await conn.query(
     `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
        FROM business_banners WHERE id = ?`,
-    [id]
+    [id],
   );
   return rows[0] || null;
 }
@@ -144,7 +144,7 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
     // Lock payer wallet
     const [payerRows] = await conn.query(
       `SELECT id, wallet_id, amount, status FROM wallets WHERE user_id = ? LIMIT 1 FOR UPDATE`,
-      [payer_user_id]
+      [payer_user_id],
     );
     if (!payerRows.length) {
       await conn.rollback();
@@ -159,7 +159,7 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
     // Lock admin wallet
     const [adminRows] = await conn.query(
       `SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? LIMIT 1 FOR UPDATE`,
-      [ADMIN_WALLET_ID]
+      [ADMIN_WALLET_ID],
     );
     if (!adminRows.length) {
       await conn.rollback();
@@ -216,7 +216,7 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
       `INSERT INTO wallet_transactions
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'DR', ?, ?, ?)`,
-      [dr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now]
+      [dr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now],
     );
 
     // CR row — into admin from payer
@@ -224,7 +224,7 @@ async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
       `INSERT INTO wallet_transactions
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'CR', ?, ?, ?)`,
-      [cr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now]
+      [cr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now],
     );
 
     await conn.commit();
@@ -263,7 +263,7 @@ async function getBannerById(id) {
   const [rows] = await db.query(
     `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
        FROM business_banners WHERE id = ?`,
-    [id]
+    [id],
   );
   if (!rows.length)
     return { success: false, message: `Banner id ${id} not found.` };
@@ -291,7 +291,7 @@ async function listBanners({ business_id, active_only, owner_type } = {}) {
     where.push(
       "is_active = 1",
       "(start_date IS NULL OR CURRENT_DATE() >= start_date)",
-      "(end_date IS NULL OR CURRENT_DATE() <= end_date)"
+      "(end_date IS NULL OR CURRENT_DATE() <= end_date)",
     );
   }
   const [rows] = await db.query(
@@ -299,7 +299,7 @@ async function listBanners({ business_id, active_only, owner_type } = {}) {
        FROM business_banners ${
          where.length ? "WHERE " + where.join(" AND ") : ""
        } ORDER BY created_at DESC`,
-    params
+    params,
   );
   return { success: true, data: rows };
 }
@@ -316,9 +316,9 @@ async function listAllBannersForBusiness(business_id, owner_type) {
   const [rows] = await db.query(
     `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
        FROM business_banners WHERE ${where.join(
-         " AND "
+         " AND ",
        )} ORDER BY created_at DESC`,
-    params
+    params,
   );
   return { success: true, data: rows };
 }
@@ -339,9 +339,9 @@ async function listActiveByKind(owner_type, business_id) {
   const [rows] = await db.query(
     `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
        FROM business_banners WHERE ${where.join(
-         " AND "
+         " AND ",
        )} ORDER BY created_at DESC`,
-    params
+    params,
   );
   return { success: true, data: rows };
 }
@@ -377,7 +377,7 @@ async function updateBanner(id, fields, opts = {}) {
       const [curRows] = await conn.query(
         `SELECT id, business_id, start_date, end_date, is_active, owner_type, title, description, banner_image, created_at, updated_at
            FROM business_banners WHERE id = ? LIMIT 1 FOR UPDATE`,
-        [id]
+        [id],
       );
       if (!curRows.length) {
         await conn.rollback();
@@ -411,7 +411,7 @@ async function updateBanner(id, fields, opts = {}) {
       // Dates / active (these are the ones that trigger wallet logic)
       const newStart = Object.prototype.hasOwnProperty.call(
         fields,
-        "start_date"
+        "start_date",
       )
         ? fields.start_date
         : cur.start_date;
@@ -420,7 +420,7 @@ async function updateBanner(id, fields, opts = {}) {
         : cur.end_date;
       const newIsActive = Object.prototype.hasOwnProperty.call(
         fields,
-        "is_active"
+        "is_active",
       )
         ? Number(fields.is_active)
           ? 1
@@ -478,7 +478,7 @@ async function updateBanner(id, fields, opts = {}) {
       } else if (useAuto) {
         // Base price
         const [bp] = await conn.query(
-          `SELECT amount_per_day FROM banners_base_prices LIMIT 1 FOR UPDATE`
+          `SELECT amount_per_day FROM banners_base_prices LIMIT 1 FOR UPDATE`,
         );
         if (!bp.length) {
           await conn.rollback();
@@ -536,12 +536,12 @@ async function updateBanner(id, fields, opts = {}) {
           params.push(nowBT(), id);
           await conn.query(
             `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-            params
+            params,
           );
           const [afterRows] = await conn.query(
             `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
                FROM business_banners WHERE id = ?`,
-            [id]
+            [id],
           );
           await conn.commit();
           conn.release();
@@ -579,7 +579,7 @@ async function updateBanner(id, fields, opts = {}) {
       // Lock wallets
       const [payerRows] = await conn.query(
         `SELECT id, wallet_id, amount, status FROM wallets WHERE user_id = ? LIMIT 1 FOR UPDATE`,
-        [payer_user_id]
+        [payer_user_id],
       );
       if (!payerRows.length) {
         await conn.rollback();
@@ -593,7 +593,7 @@ async function updateBanner(id, fields, opts = {}) {
 
       const [adminRows] = await conn.query(
         `SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? LIMIT 1 FOR UPDATE`,
-        [ADMIN_WALLET_ID]
+        [ADMIN_WALLET_ID],
       );
       if (!adminRows.length) {
         await conn.rollback();
@@ -630,7 +630,7 @@ async function updateBanner(id, fields, opts = {}) {
       params.push(nowBT(), id);
       await conn.query(
         `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-        params
+        params,
       );
 
       // 2) Move balances
@@ -649,7 +649,7 @@ async function updateBanner(id, fields, opts = {}) {
       const business_name =
         biz.business_name || `business_id=${cur.business_id}`;
       const otypeForNote = toOwnerType(
-        fields.owner_type !== undefined ? fields.owner_type : cur.owner_type
+        fields.owner_type !== undefined ? fields.owner_type : cur.owner_type,
       );
       const note = `Banner Fee from ${business_name} (${otypeForNote})`;
 
@@ -666,7 +666,7 @@ async function updateBanner(id, fields, opts = {}) {
           note,
           now,
           now,
-        ]
+        ],
       );
       await conn.query(
         `INSERT INTO wallet_transactions
@@ -681,14 +681,14 @@ async function updateBanner(id, fields, opts = {}) {
           note,
           now,
           now,
-        ]
+        ],
       );
 
       // 4) Return the updated row
       const [afterRows] = await conn.query(
         `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
            FROM business_banners WHERE id = ?`,
-        [id]
+        [id],
       );
 
       await conn.commit();
@@ -725,7 +725,7 @@ async function updateBanner(id, fields, opts = {}) {
   // ---------- SIMPLE UPDATE (original behavior) ----------
   const [prev] = await db.query(
     `SELECT banner_image FROM business_banners WHERE id = ?`,
-    [id]
+    [id],
   );
   if (!prev.length)
     return { success: false, message: `Banner id ${id} not found.` };
@@ -771,7 +771,7 @@ async function updateBanner(id, fields, opts = {}) {
     const [cur] = await db.query(
       `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
          FROM business_banners WHERE id = ?`,
-      [id]
+      [id],
     );
     return { success: true, message: "No changes.", data: cur[0] };
   }
@@ -780,13 +780,13 @@ async function updateBanner(id, fields, opts = {}) {
   params.push(nowBT(), id);
   await db.query(
     `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-    params
+    params,
   );
 
   const [rows] = await db.query(
     `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
        FROM business_banners WHERE id = ?`,
-    [id]
+    [id],
   );
   return {
     success: true,
@@ -798,7 +798,7 @@ async function updateBanner(id, fields, opts = {}) {
 async function deleteBanner(id) {
   const [prev] = await db.query(
     `SELECT banner_image FROM business_banners WHERE id = ?`,
-    [id]
+    [id],
   );
   if (!prev.length)
     return { success: false, message: `Banner id ${id} not found.` };

@@ -11,7 +11,6 @@ import {
 import { initRideChat } from "./chat.js";
 import { computePlatformFeeAndGST } from "../services/pricing/rulesEngine.js";
 
-
 /* ---------------------- Dev logger ---------------------- */
 const dbg = (...args) => {
   if (process.env.NODE_ENV !== "production") console.log(...args);
@@ -38,7 +37,7 @@ const RATING_COLUMN = "rating";
 
 /* ---------------------- Wallet config ---------------------- */
 const PLATFORM_WALLET_ID = (
-  process.env.PLATFORM_WALLET_ID || "NET000001"
+  process.env.PLATFORM_WALLET_ID || "TD00000001"
 ).trim();
 const WALLET_TBL = "wallet_transactions";
 const WALLETS_TBL = "wallets";
@@ -113,7 +112,7 @@ function shouldProcessMove(
   ts,
   minMeters = 5,
   minMs = 1200,
-  forceEveryMs = 4500 // guarantee emit at least every 4.5s even if not moving
+  forceEveryMs = 4500, // guarantee emit at least every 4.5s even if not moving
 ) {
   const prev = lastLocByDriver.get(driverId);
 
@@ -128,7 +127,6 @@ function shouldProcessMove(
   }
   return false;
 }
-
 
 function shouldEmit(driverId, ts, minMs = EMIT_MIN_MS) {
   const prev = lastEmitAt.get(driverId) || 0;
@@ -165,7 +163,7 @@ async function getDeliveryTargetsForDriver(conn, driverId) {
       AND COALESCE(o.delivery_status, o.status) IN ('ASSIGNED','PICKED_UP','ON_ROAD') -- ✅ include ASSIGNED
       AND o.delivery_ride_id IS NOT NULL
     `,
-    [String(driverId)]
+    [String(driverId)],
   );
 
   const rideRooms = new Set();
@@ -173,7 +171,8 @@ async function getDeliveryTargetsForDriver(conn, driverId) {
   const merchantRooms = new Set();
 
   for (const r of rows || []) {
-    if (r?.delivery_ride_id) rideRooms.add(`ride:${String(r.delivery_ride_id)}`);
+    if (r?.delivery_ride_id)
+      rideRooms.add(`ride:${String(r.delivery_ride_id)}`);
     if (r?.order_id) orderRooms.add(`order:${String(r.order_id)}`);
     if (r?.business_id) merchantRooms.add(`merchant:${String(r.business_id)}`);
   }
@@ -185,7 +184,6 @@ async function getDeliveryTargetsForDriver(conn, driverId) {
     rows,
   };
 }
-
 
 function emitToTargets(io, driverId, loc, source, targets) {
   const totalRooms =
@@ -383,7 +381,7 @@ function hasForegroundConn(io, driverId) {
 async function getPassengerId(conn, request_id) {
   const [[row]] = await conn.query(
     `SELECT passenger_id FROM rides WHERE ride_id = ?`,
-    [request_id]
+    [request_id],
   );
   return row?.passenger_id ?? null;
 }
@@ -394,7 +392,7 @@ function logStage(io, request_id, stage, passenger_id) {
   console.log(
     `[stage emit] ride:${request_id} stage:${stage} roomSize:${size} to passenger:${
       passenger_id ?? "-"
-    }`
+    }`,
   );
 }
 
@@ -407,13 +405,13 @@ async function resolveDriverId(conn, incomingId) {
 
   const [[byDriverId]] = await conn.query(
     "SELECT driver_id FROM drivers WHERE driver_id = ? LIMIT 1",
-    [id]
+    [id],
   );
   if (byDriverId) return byDriverId.driver_id;
 
   const [[byUserId]] = await conn.query(
     "SELECT driver_id FROM drivers WHERE user_id = ? LIMIT 1",
-    [id]
+    [id],
   );
   return byUserId?.driver_id ?? null;
 }
@@ -435,7 +433,7 @@ async function emitPoolSummary(io, conn, rideId) {
     WHERE r.ride_id = ?
     GROUP BY r.ride_id
     `,
-    [rideId]
+    [rideId],
   );
 
   const [rows] = await conn.query(
@@ -452,7 +450,7 @@ async function emitPoolSummary(io, conn, rideId) {
     WHERE ride_id = ?
       AND status IN ('accepted','arrived_pickup','started','requested')
     `,
-    [rideId]
+    [rideId],
   );
 
   const sc = Number(sum?.seats_confirmed || 0);
@@ -475,7 +473,7 @@ async function emitPoolSummary(io, conn, rideId) {
 async function getDriverUserAndWallet(conn, driverId) {
   const [[row]] = await conn.query(
     `SELECT d.user_id FROM drivers d WHERE d.driver_id = ? LIMIT 1`,
-    [driverId]
+    [driverId],
   );
 
   const user_id = row?.user_id ? Number(row.user_id) : null;
@@ -483,7 +481,7 @@ async function getDriverUserAndWallet(conn, driverId) {
 
   const [[w]] = await conn.query(
     `SELECT wallet_id FROM ${WALLETS_TBL} WHERE user_id = ? LIMIT 1`,
-    [user_id]
+    [user_id],
   );
 
   return { user_id, wallet_id: w?.wallet_id || null };
@@ -496,7 +494,7 @@ async function getPassengerUserAndWallet(conn, passengerId) {
 
   const [[w]] = await conn.query(
     `SELECT wallet_id FROM ${WALLETS_TBL} WHERE user_id = ? LIMIT 1`,
-    [user_id]
+    [user_id],
   );
 
   return { user_id, wallet_id: w?.wallet_id || null };
@@ -515,11 +513,22 @@ function clampNote(s, max = 180) {
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 }
 
-async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, passenger_debit_nu, reason, meta }) {
+async function walletTransfer(
+  conn,
+  {
+    from_wallet,
+    to_wallet,
+    driver_credit_nu,
+    passenger_debit_nu,
+    reason,
+    meta,
+  },
+) {
   const driver_credit_str = asMoneyString(driver_credit_nu);
   const passenger_debit_str = asMoneyString(passenger_debit_nu);
   if (!driver_credit_str) return { ok: false, reason: "invalid_amount" };
-  if (Number(driver_credit_str) <= 0) return { ok: false, reason: "amount_not_positive" };
+  if (Number(driver_credit_str) <= 0)
+    return { ok: false, reason: "amount_not_positive" };
 
   const fromId = String(from_wallet).trim();
   const toId = String(to_wallet).trim();
@@ -531,22 +540,24 @@ async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, 
 
   const [[w1row]] = await conn.execute(
     `SELECT wallet_id, amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
-    [w1]
+    [w1],
   );
   const [[w2row]] = await conn.execute(
     `SELECT wallet_id, amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
-    [w2]
+    [w2],
   );
   if (!w1row || !w2row) return { ok: false, reason: "wallet_not_found" };
 
   // Ensure sender has balance
   const [[fromRow]] = await conn.execute(
     `SELECT amount FROM wallets WHERE wallet_id = ? FOR UPDATE`,
-    [fromId]
+    [fromId],
   );
   const fromBal = Number(fromRow?.amount ?? 0);
-  if (!Number.isFinite(fromBal)) return { ok: false, reason: "invalid_balance" };
-  if (fromBal < Number(driver_credit_str)) return { ok: false, reason: "insufficient_balance" };
+  if (!Number.isFinite(fromBal))
+    return { ok: false, reason: "invalid_balance" };
+  if (fromBal < Number(driver_credit_str))
+    return { ok: false, reason: "insufficient_balance" };
 
   console.log("Driver credit Str:", driver_credit_str);
   console.log("Passenger debit Str:", passenger_debit_str);
@@ -555,16 +566,17 @@ async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, 
     `UPDATE wallets
      SET amount = amount - ?
      WHERE wallet_id = ? AND amount >= ?`,
-    [passenger_debit_str, fromId, driver_credit_str]
+    [passenger_debit_str, fromId, driver_credit_str],
   );
-  if (!debit.affectedRows) return { ok: false, reason: "insufficient_balance_race" };
+  if (!debit.affectedRows)
+    return { ok: false, reason: "insufficient_balance_race" };
 
   // ✅ credit
   await conn.execute(
     `UPDATE wallets
      SET amount = amount + ?
      WHERE wallet_id = ?`,
-    [driver_credit_str, toId]
+    [driver_credit_str, toId],
   );
 
   // ✅ transaction ids must be UNIQUE (your DB enforces it)
@@ -583,7 +595,17 @@ async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, 
       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,?,?)
     `,
-    [txn_dr, journal_code, fromId, toId, passenger_debit_str, "DR", note, ts, ts]
+    [
+      txn_dr,
+      journal_code,
+      fromId,
+      toId,
+      passenger_debit_str,
+      "DR",
+      note,
+      ts,
+      ts,
+    ],
   );
 
   // Receiver row (CR)
@@ -593,7 +615,7 @@ async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, 
       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,?,?)
     `,
-    [txn_cr, journal_code, fromId, toId, driver_credit_str, "CR", note, ts, ts]
+    [txn_cr, journal_code, fromId, toId, driver_credit_str, "CR", note, ts, ts],
   );
 
   return {
@@ -603,8 +625,6 @@ async function walletTransfer(conn, { from_wallet, to_wallet, driver_credit_nu, 
     amount: Number(driver_credit_str),
   };
 }
-
-
 
 /* ========================================================================
    SOCKET BOOTSTRAP
@@ -706,7 +726,7 @@ export function initDriverSocket(io, mysqlPool) {
           socket.data.merchant_id = mid;
           socket.join(merchantRoom(mid));
         }
-      }
+      },
     );
 
     /* -------- Join / Leave order room -------- */
@@ -763,7 +783,7 @@ export function initDriverSocket(io, mysqlPool) {
           lat,
           lng,
         } = {},
-        ack
+        ack,
       ) => {
         const driver_id = socket.data.driver_id;
         if (!driver_id)
@@ -801,7 +821,7 @@ export function initDriverSocket(io, mysqlPool) {
           console.error("[driverOnline] error:", err);
           safeAck(ack, { ok: false, error: "Server error" });
         }
-      }
+      },
     );
 
     socket.on("driverOffline", async (_payload, ack) => {
@@ -811,7 +831,7 @@ export function initDriverSocket(io, mysqlPool) {
       try {
         await DriverOnlineSession.updateOne(
           { driver_id, ended_at: null },
-          { $set: { ended_at: new Date() } }
+          { $set: { ended_at: new Date() } },
         );
 
         try {
@@ -978,16 +998,16 @@ export function initDriverSocket(io, mysqlPool) {
 
     /* ===================== Core ride lifecycle ===================== */
     socket.on("jobAccept", (payload) =>
-      handleJobAccept({ io, socket, mysqlPool, payload })
+      handleJobAccept({ io, socket, mysqlPool, payload }),
     );
     socket.on("jobReject", (payload) =>
-      handleJobReject({ io, socket, mysqlPool, payload })
+      handleJobReject({ io, socket, mysqlPool, payload }),
     );
     socket.on("driverArrivedPickup", (payload) =>
-      handleDriverArrivedPickup({ io, socket, mysqlPool, payload })
+      handleDriverArrivedPickup({ io, socket, mysqlPool, payload }),
     );
     socket.on("driverStartTrip", (payload) =>
-      handleDriverStartTrip({ io, socket, mysqlPool, payload })
+      handleDriverStartTrip({ io, socket, mysqlPool, payload }),
     );
     socket.on("driverCompleteTrip", (payload) => {
       console.log("[evt recv] driverCompleteTrip", payload);
@@ -1024,7 +1044,7 @@ export function initDriverSocket(io, mysqlPool) {
           WHERE order_id = ?
           FOR UPDATE
           `,
-          [order_id]
+          [order_id],
         );
 
         if (!ord) {
@@ -1050,7 +1070,7 @@ export function initDriverSocket(io, mysqlPool) {
               delivered_at = NOW()
           WHERE order_id = ?
           `,
-          [order_id]
+          [order_id],
         );
 
         await conn.commit();
@@ -1100,7 +1120,7 @@ export function initDriverSocket(io, mysqlPool) {
           WHERE ride_id = ? AND booking_id = ?
           FOR UPDATE
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           if (!curBk) {
@@ -1125,13 +1145,13 @@ export function initDriverSocket(io, mysqlPool) {
               if (passenger_id)
                 io.to(passengerRoom(passenger_id)).emit(
                   "bookingStageUpdate",
-                  msg
+                  msg,
                 );
               return ok({ info: "idempotent" });
             }
             await conn.rollback();
             return fail(
-              `Not in a state that can arrive (current=${curBk.status})`
+              `Not in a state that can arrive (current=${curBk.status})`,
             );
           }
 
@@ -1141,7 +1161,7 @@ export function initDriverSocket(io, mysqlPool) {
           SET status='arrived_pickup', arrived_pickup_at=NOW()
           WHERE ride_id=? AND booking_id=?
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           const [rideLift] = await conn.execute(
@@ -1151,7 +1171,7 @@ export function initDriverSocket(io, mysqlPool) {
               arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
           WHERE ride_id=? AND status IN ('requested','accepted')
           `,
-            [rideId]
+            [rideId],
           );
 
           await emitPoolSummary(io, conn, rideId);
@@ -1191,7 +1211,7 @@ export function initDriverSocket(io, mysqlPool) {
             conn.release();
           } catch {}
         }
-      }
+      },
     );
 
     socket.on(
@@ -1222,7 +1242,7 @@ export function initDriverSocket(io, mysqlPool) {
           WHERE ride_id=? AND booking_id=?
           FOR UPDATE
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           if (!curBk) {
@@ -1245,7 +1265,7 @@ export function initDriverSocket(io, mysqlPool) {
             if (passenger_id)
               io.to(passengerRoom(passenger_id)).emit(
                 "bookingStageUpdate",
-                msg
+                msg,
               );
             return ok({ info: "idempotent" });
           }
@@ -1265,7 +1285,7 @@ export function initDriverSocket(io, mysqlPool) {
                 arrived_pickup_at = COALESCE(arrived_pickup_at, NOW())
             WHERE ride_id=? AND booking_id=?
             `,
-              [rideId, bkId]
+              [rideId, bkId],
             );
           }
 
@@ -1275,7 +1295,7 @@ export function initDriverSocket(io, mysqlPool) {
           SET status='started', started_at=NOW()
           WHERE ride_id=? AND booking_id=?
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           const [rideLift] = await conn.execute(
@@ -1285,7 +1305,7 @@ export function initDriverSocket(io, mysqlPool) {
               started_at = COALESCE(started_at, NOW())
           WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup')
           `,
-            [rideId]
+            [rideId],
           );
 
           await emitPoolSummary(io, conn, rideId);
@@ -1325,7 +1345,7 @@ export function initDriverSocket(io, mysqlPool) {
             conn.release();
           } catch {}
         }
-      }
+      },
     );
 
     socket.on(
@@ -1356,7 +1376,7 @@ export function initDriverSocket(io, mysqlPool) {
           WHERE ride_id=? AND booking_id=?
           FOR UPDATE
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           if (!curBk) {
@@ -1378,7 +1398,7 @@ export function initDriverSocket(io, mysqlPool) {
             if (passenger_id)
               io.to(passengerRoom(passenger_id)).emit(
                 "bookingStageUpdate",
-                msg
+                msg,
               );
             return ok({ info: "idempotent" });
           }
@@ -1386,7 +1406,7 @@ export function initDriverSocket(io, mysqlPool) {
           if (curBk.status !== "started") {
             await conn.rollback();
             return fail(
-              `Not in a state that can drop (current=${curBk.status})`
+              `Not in a state that can drop (current=${curBk.status})`,
             );
           }
 
@@ -1396,7 +1416,7 @@ export function initDriverSocket(io, mysqlPool) {
           SET status='completed', completed_at=NOW()
           WHERE ride_id=? AND booking_id=?
           `,
-            [rideId, bkId]
+            [rideId, bkId],
           );
 
           const [[pending]] = await conn.query(
@@ -1405,7 +1425,7 @@ export function initDriverSocket(io, mysqlPool) {
           FROM ride_bookings
           WHERE ride_id=? AND status IN ('requested','accepted','arrived_pickup','started')
           `,
-            [rideId]
+            [rideId],
           );
 
           const anyActive = Number(pending?.cnt || 0) > 0;
@@ -1444,7 +1464,7 @@ export function initDriverSocket(io, mysqlPool) {
             conn.release();
           } catch {}
         }
-      }
+      },
     );
 
     /* ===================== Matching compat ===================== */
@@ -1498,7 +1518,7 @@ export function initDriverSocket(io, mysqlPool) {
           try {
             await DriverOnlineSession.updateOne(
               { driver_id: id, ended_at: null },
-              { $set: { ended_at: new Date() } }
+              { $set: { ended_at: new Date() } },
             );
           } catch (e) {
             console.error("[disconnect] failed to close online session", e);
@@ -1562,7 +1582,7 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         WHERE ride_id = ?
           AND status IN ('offered_to_driver','requested')
         `,
-        [canonicalDriverId, request_id]
+        [canonicalDriverId, request_id],
       );
 
       // delivery: assign orders in batch
@@ -1579,11 +1599,11 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
             WHERE delivery_batch_id = ?
               AND (status = 'PENDING' OR delivery_status = 'PENDING')
             `,
-            [canonicalDriverId, request_id, batchIdNum]
+            [canonicalDriverId, request_id, batchIdNum],
           );
           console.log(
             "[jobAccept] delivery orders updated:",
-            deliveryRes.affectedRows
+            deliveryRes.affectedRows,
           );
         }
       }
@@ -1642,7 +1662,7 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         WHERE r.ride_id = ?
         LIMIT 1
         `,
-        [request_id]
+        [request_id],
       );
 
       await conn.commit();
@@ -1752,7 +1772,7 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
               WHERE ride_id = ?
                 AND status = 'accepted'
               `,
-              [request_id]
+              [request_id],
             );
             acceptedBookings = bkRows || [];
           } finally {
@@ -1854,7 +1874,7 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
           AND status = 'offered_to_driver'
           AND (offer_driver_id IS NULL OR offer_driver_id = ?)
         `,
-        [request_id, canonicalDriverId]
+        [request_id, canonicalDriverId],
       );
 
       if (!res || res.affectedRows === 0) {
@@ -1869,7 +1889,7 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
 
       const [[row]] = await conn.query(
         "SELECT passenger_id FROM rides WHERE ride_id = ?",
-        [request_id]
+        [request_id],
       );
 
       await conn.commit();
@@ -1926,7 +1946,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
 
     const [[cur]] = await conn.query(
       "SELECT status, trip_type FROM rides WHERE ride_id = ?",
-      [request_id]
+      [request_id],
     );
 
     const [res] = await conn.execute(
@@ -1937,7 +1957,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
       WHERE ride_id = ?
         AND status = 'accepted'
       `,
-      [request_id]
+      [request_id],
     );
 
     if (res.affectedRows === 0) {
@@ -1958,7 +1978,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
         WHERE ride_id = ?
           AND status IN ('requested','accepted')
         `,
-        [request_id]
+        [request_id],
       );
     }
 
@@ -1980,7 +2000,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
             AND delivery_ride_id = ?
             AND delivery_status = 'ASSIGNED'
           `,
-          [batchId, String(request_id)]
+          [batchId, String(request_id)],
         );
       } else {
         await conn.execute(
@@ -1991,13 +2011,13 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
           WHERE delivery_ride_id = ?
             AND delivery_status = 'ASSIGNED'
           `,
-          [String(request_id)]
+          [String(request_id)],
         );
       }
     } catch (e) {
       console.warn(
         "[driverArrivedPickup] orders PICKED_UP update skipped:",
-        e?.message || e
+        e?.message || e,
       );
     }
 
@@ -2090,7 +2110,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
 
     const [[cur]] = await conn.query(
       "SELECT status, trip_type, driver_id, passenger_id, pickup_place, dropoff_place FROM rides WHERE ride_id = ?",
-      [request_id]
+      [request_id],
     );
 
     const [res] = await conn.execute(
@@ -2101,7 +2121,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       WHERE ride_id = ?
         AND status = 'arrived_pickup'
       `,
-      [request_id]
+      [request_id],
     );
 
     if (res.affectedRows === 0) {
@@ -2122,7 +2142,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
         WHERE ride_id = ?
           AND status = 'arrived_pickup'
         `,
-        [request_id]
+        [request_id],
       );
     }
 
@@ -2145,7 +2165,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
             AND delivery_ride_id = ?
             AND delivery_status = 'PICKED_UP'
           `,
-          [batchId, String(request_id)]
+          [batchId, String(request_id)],
         );
       } else {
         await conn.execute(
@@ -2156,13 +2176,13 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
           WHERE delivery_ride_id = ?
             AND delivery_status = 'PICKED_UP'
           `,
-          [String(request_id)]
+          [String(request_id)],
         );
       }
     } catch (e) {
       console.warn(
         "[driverStartTrip] orders ON_ROAD update skipped:",
-        e?.message || e
+        e?.message || e,
       );
     }
 
@@ -2233,7 +2253,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
 
 async function postSettlementLines(
   conn,
-  { party_type, party_id, source_type, source_id, currency = "BTN", lines }
+  { party_type, party_id, source_type, source_id, currency = "BTN", lines },
 ) {
   if (!party_type || !party_id || !source_type || !source_id) {
     throw new Error("postSettlementLines: missing required fields");
@@ -2265,7 +2285,7 @@ async function postSettlementLines(
       source_type,
       source_id,
       ...cleanLines.map((l) => l.entry_type),
-    ]
+    ],
   );
 
   const oldMap = new Map();
@@ -2275,7 +2295,7 @@ async function postSettlementLines(
 
   const oldSum = cleanLines.reduce(
     (s, l) => s + (oldMap.get(l.entry_type) || 0),
-    0
+    0,
   );
   const newSum = cleanLines.reduce((s, l) => s + l.amount_cents, 0);
   const delta = newSum - oldSum;
@@ -2302,7 +2322,7 @@ async function postSettlementLines(
         l.amount_cents,
         currency,
         l.note,
-      ]
+      ],
     );
   }
 
@@ -2316,7 +2336,7 @@ async function postSettlementLines(
         balance_cents = balance_cents + VALUES(balance_cents),
         currency      = VALUES(currency)
       `,
-      [party_type, party_id, delta, currency]
+      [party_type, party_id, delta, currency],
     );
   }
 
@@ -2344,7 +2364,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     ------------------------------------------------- */
     const [[ride]] = await conn.query(
       `SELECT * FROM rides WHERE ride_id = ? FOR UPDATE`,
-      [request_id]
+      [request_id],
     );
 
     if (!ride) {
@@ -2385,7 +2405,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
           completed_at = NOW()
       WHERE ride_id = ?
       `,
-      [request_id]
+      [request_id],
     );
 
     if (ride.trip_type === "pool") {
@@ -2397,7 +2417,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         WHERE ride_id = ?
           AND status = 'started'
         `,
-        [request_id]
+        [request_id],
       );
     }
 
@@ -2437,7 +2457,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         SET points = COALESCE(points, 0) + ?
         WHERE user_id = ?
         `,
-        [LOYALTY_AWARD_POINTS, Number(ride.passenger_id)]
+        [LOYALTY_AWARD_POINTS, Number(ride.passenger_id)],
       );
     }
 
@@ -2467,7 +2487,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         driver_payout_cents,
         pfRule?.rule_id || null,
         taxRule?.tax_rule_id || null,
-      ]
+      ],
     );
 
     /* -------------------------------------------------
@@ -2491,7 +2511,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         0,
         0,
         "BTN",
-      ]
+      ],
     );
 
     /* -------------------------------------------------
@@ -2520,7 +2540,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         ride.currency || "BTN",
         pfRule?.rule_id || null,
         taxRule?.tax_rule_id || null,
-      ]
+      ],
     );
 
     /* -------------------------------------------------
@@ -2554,12 +2574,12 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
       [
         String(request_id),
         platform_fee_cents, // before tax
-        gst_cents,          // GST collected
+        gst_cents, // GST collected
         platform_fee_cents, // ✅ income (GST excluded)
         commission_type,
         commission_rate_bp,
         commission_fixed_cents,
-      ]
+      ],
     );
 
     /* -------------------------------------------------
@@ -2574,7 +2594,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
         ON DUPLICATE KEY UPDATE
           tax_amount_cents = VALUES(tax_amount_cents)
         `,
-        [Number(request_id), Number(gst_cents)]
+        [Number(request_id), Number(gst_cents)],
       );
     }
 
@@ -2619,12 +2639,12 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     if (isWallet && Number.isFinite(payoutNu) && payoutNu > 0) {
       const { wallet_id: driver_wallet } = await getDriverUserAndWallet(
         conn,
-        ride.driver_id
+        ride.driver_id,
       );
 
       const { wallet_id: passenger_wallet } = await getPassengerUserAndWallet(
         conn,
-        ride.passenger_id
+        ride.passenger_id,
       );
 
       if (driver_wallet && passenger_wallet) {
@@ -2633,7 +2653,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
           to_wallet: driver_wallet,
           driver_credit_nu: Number(pricing.amounts.driver_payout_nu).toFixed(2),
           passenger_debit_nu: Number(pricing.amounts.total_payable_nu).toFixed(
-            2
+            2,
           ),
           reason: "RIDE_PAYOUT",
           meta: {
@@ -2682,9 +2702,6 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
   }
 }
 
-
-
-
 /* ---------------- Merchant Notifiers ---------------- */
 
 async function emitMerchantDriverArrived({ io, conn, request_id }) {
@@ -2710,7 +2727,7 @@ async function emitMerchantDriverArrived({ io, conn, request_id }) {
       FROM orders
       WHERE delivery_batch_id = ?
       `,
-      [batch_id]
+      [batch_id],
     );
     businessRows = rows || [];
   } else {
@@ -2720,7 +2737,7 @@ async function emitMerchantDriverArrived({ io, conn, request_id }) {
       FROM orders
       WHERE delivery_ride_id = ?
       `,
-      [String(request_id)]
+      [String(request_id)],
     );
     businessRows = rows || [];
   }
@@ -2772,7 +2789,7 @@ async function emitMerchantOnRoad({ io, conn, request_id }) {
       FROM orders
       WHERE delivery_batch_id = ?
       `,
-      [batch_id]
+      [batch_id],
     );
     businessRows = rows || [];
   } else {
@@ -2782,7 +2799,7 @@ async function emitMerchantOnRoad({ io, conn, request_id }) {
       FROM orders
       WHERE delivery_ride_id = ?
       `,
-      [String(request_id)]
+      [String(request_id)],
     );
     businessRows = rows || [];
   }
@@ -2808,10 +2825,10 @@ async function emitMerchantOnRoad({ io, conn, request_id }) {
     console.log(
       `[notify->merchant] event=deliveryOnRoad room=${room} sockets=${roomSize(
         io,
-        room
+        room,
       )} orders=${orders.length} request_id=${request_id} batch_id=${
         batch_id ?? "-"
-      }`
+      }`,
     );
   });
 

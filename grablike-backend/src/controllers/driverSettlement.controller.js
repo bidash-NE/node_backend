@@ -23,8 +23,10 @@ const parseDate = (s) => {
 };
 
 const toCents = ({ amount_cents, amount_nu }) => {
-  if (Number.isFinite(Number(amount_cents))) return Math.trunc(Number(amount_cents));
-  if (Number.isFinite(Number(amount_nu))) return Math.round(Number(amount_nu) * 100);
+  if (Number.isFinite(Number(amount_cents)))
+    return Math.trunc(Number(amount_cents));
+  if (Number.isFinite(Number(amount_nu)))
+    return Math.round(Number(amount_nu) * 100);
   return null;
 };
 
@@ -41,7 +43,7 @@ const genId = (prefix) =>
  */
 async function postSettlementLines(
   conn,
-  { party_type, party_id, source_type, source_id, currency = "BTN", lines }
+  { party_type, party_id, source_type, source_id, currency = "BTN", lines },
 ) {
   const cleanLines = (Array.isArray(lines) ? lines : [])
     .map((l) => ({
@@ -63,13 +65,23 @@ async function postSettlementLines(
       AND entry_type IN (${cleanLines.map(() => "?").join(",")})
     FOR UPDATE
     `,
-    [party_type, party_id, source_type, source_id, ...cleanLines.map((l) => l.entry_type)]
+    [
+      party_type,
+      party_id,
+      source_type,
+      source_id,
+      ...cleanLines.map((l) => l.entry_type),
+    ],
   );
 
   const oldMap = new Map();
-  for (const r of existing) oldMap.set(String(r.entry_type), Number(r.amount_cents || 0));
+  for (const r of existing)
+    oldMap.set(String(r.entry_type), Number(r.amount_cents || 0));
 
-  const oldSum = cleanLines.reduce((s, l) => s + (oldMap.get(l.entry_type) || 0), 0);
+  const oldSum = cleanLines.reduce(
+    (s, l) => s + (oldMap.get(l.entry_type) || 0),
+    0,
+  );
   const newSum = cleanLines.reduce((s, l) => s + l.amount_cents, 0);
   const delta = newSum - oldSum;
 
@@ -85,7 +97,16 @@ async function postSettlementLines(
         currency     = VALUES(currency),
         note         = VALUES(note)
       `,
-      [party_type, party_id, source_type, source_id, l.entry_type, l.amount_cents, currency, l.note]
+      [
+        party_type,
+        party_id,
+        source_type,
+        source_id,
+        l.entry_type,
+        l.amount_cents,
+        currency,
+        l.note,
+      ],
     );
   }
 
@@ -98,7 +119,7 @@ async function postSettlementLines(
         balance_cents = balance_cents + VALUES(balance_cents),
         currency      = VALUES(currency)
       `,
-      [party_type, party_id, delta, currency]
+      [party_type, party_id, delta, currency],
     );
   }
 
@@ -108,7 +129,7 @@ async function postSettlementLines(
 /* ---------------- platform wallet helper ---------------- */
 async function getPlatformWalletId(conn) {
   // 1) env override (recommended)
-  const envId = process.env.PLATFORM_WALLET_ID || "NET000001";
+  const envId = process.env.PLATFORM_WALLET_ID || "TD00000001";
   if (envId && String(envId).trim()) return String(envId).trim();
 
   // 2) fallback DB lookup (ADJUST this WHERE to match your schema)
@@ -125,11 +146,13 @@ async function getPlatformWalletId(conn) {
        OR user_id=0
     ORDER BY created_at ASC
     LIMIT 1
-    `
+    `,
   );
 
   if (!row?.wallet_id) {
-    throw new Error("Platform wallet not configured. Set PLATFORM_WALLET_ID in .env");
+    throw new Error(
+      "Platform wallet not configured. Set PLATFORM_WALLET_ID in .env",
+    );
   }
   return String(row.wallet_id);
 }
@@ -152,7 +175,7 @@ export async function getDriverSettlementBalance(req, res) {
       WHERE party_type='DRIVER' AND party_id=?
       LIMIT 1
       `,
-      [driverId]
+      [driverId],
     );
 
     const balance_cents = Number(row?.balance_cents || 0);
@@ -201,7 +224,7 @@ export async function getDriverSettlementLedger(req, res) {
       WHERE party_type='DRIVER' AND party_id=?
       LIMIT 1
       `,
-      [driverId]
+      [driverId],
     );
 
     const current_balance_cents = Number(bal?.balance_cents || 0);
@@ -221,7 +244,7 @@ export async function getDriverSettlementLedger(req, res) {
 
     const [[cnt]] = await conn.query(
       `SELECT COUNT(*) AS total FROM settlement_ledger WHERE ${where.join(" AND ")}`,
-      params
+      params,
     );
 
     const [rows] = await conn.query(
@@ -234,7 +257,7 @@ export async function getDriverSettlementLedger(req, res) {
       ORDER BY created_at DESC, entry_id DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return res.json({
@@ -299,15 +322,21 @@ export async function postDriverSettlementPay(req, res) {
 
   const method = String(req.body?.method || "WALLET").toUpperCase();
   if (method !== "WALLET" && method !== "MANUAL") {
-    return res.status(400).json({ ok: false, error: "method must be WALLET or MANUAL" });
+    return res
+      .status(400)
+      .json({ ok: false, error: "method must be WALLET or MANUAL" });
   }
 
   const currency = "BTN";
   const note = req.body?.note ? String(req.body.note).slice(0, 200) : null;
-  const reference = req.body?.reference ? String(req.body.reference).slice(0, 120) : null;
+  const reference = req.body?.reference
+    ? String(req.body.reference).slice(0, 120)
+    : null;
 
   // ✅ idempotency key for safe retry
-  const source_id = String(req.body?.idempotency_key || reference || genId("PAY"));
+  const source_id = String(
+    req.body?.idempotency_key || reference || genId("PAY"),
+  );
 
   const entry_type = method === "WALLET" ? "WALLET_PAYMENT" : "MANUAL_PAYMENT";
 
@@ -324,7 +353,7 @@ export async function postDriverSettlementPay(req, res) {
       WHERE party_type='DRIVER' AND party_id=?
       FOR UPDATE
       `,
-      [driverId]
+      [driverId],
     );
 
     const dueCents = Number(acct?.balance_cents || 0);
@@ -339,7 +368,9 @@ export async function postDriverSettlementPay(req, res) {
 
     if (!Number.isFinite(payCents) || payCents <= 0) {
       await conn.rollback();
-      return res.status(400).json({ ok: false, error: "amount_cents/amount_nu must be > 0" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "amount_cents/amount_nu must be > 0" });
     }
 
     // ✅ never allow paying more than due
@@ -356,7 +387,7 @@ export async function postDriverSettlementPay(req, res) {
       LIMIT 1
       FOR UPDATE
       `,
-      [driverId, source_id, entry_type]
+      [driverId, source_id, entry_type],
     );
 
     if (existingPay) {
@@ -370,7 +401,7 @@ export async function postDriverSettlementPay(req, res) {
           WHERE party_type='DRIVER' AND party_id=?
           LIMIT 1
           `,
-          [driverId]
+          [driverId],
         );
 
         await conn.commit();
@@ -407,10 +438,15 @@ export async function postDriverSettlementPay(req, res) {
     let walletResult = { ok: false, reason: "not_wallet" };
 
     if (method === "WALLET") {
-      const { wallet_id: driver_wallet } = await getDriverUserAndWallet(conn, driverId);
+      const { wallet_id: driver_wallet } = await getDriverUserAndWallet(
+        conn,
+        driverId,
+      );
       if (!driver_wallet) {
         await conn.rollback();
-        return res.status(400).json({ ok: false, error: "Driver wallet missing" });
+        return res
+          .status(400)
+          .json({ ok: false, error: "Driver wallet missing" });
       }
 
       const platform_wallet = await getPlatformWalletId(conn);
@@ -423,7 +459,7 @@ export async function postDriverSettlementPay(req, res) {
 
         // ✅ keep your existing walletTransfer signature the same
         passenger_debit_nu: amtNu, // debit from driver wallet
-        driver_credit_nu: amtNu,   // credit to platform wallet
+        driver_credit_nu: amtNu, // credit to platform wallet
 
         reason: "DRIVER_SETTLEMENT",
         meta: {
@@ -451,7 +487,9 @@ export async function postDriverSettlementPay(req, res) {
       (reference ? `${reference}` : "Settlement payment") +
       (note ? ` | ${note}` : "") +
       (walletResult?.tx_id ? ` | tx=${walletResult.tx_id}` : "") +
-      (walletResult?.transaction_id ? ` | tx=${walletResult.transaction_id}` : "");
+      (walletResult?.transaction_id
+        ? ` | tx=${walletResult.transaction_id}`
+        : "");
 
     const result = await postSettlementLines(conn, {
       party_type: "DRIVER",
@@ -475,7 +513,7 @@ export async function postDriverSettlementPay(req, res) {
       WHERE party_type='DRIVER' AND party_id=?
       LIMIT 1
       `,
-      [driverId]
+      [driverId],
     );
 
     await conn.commit();
@@ -533,13 +571,17 @@ export async function postDriverSettlementAdjust(req, res) {
 
   const cents = toCents(req.body || {});
   if (cents == null || !Number.isFinite(cents) || cents === 0) {
-    return res.status(400).json({ ok: false, error: "amount_cents/amount_nu must be non-zero" });
+    return res
+      .status(400)
+      .json({ ok: false, error: "amount_cents/amount_nu must be non-zero" });
   }
 
   const currency = "BTN";
   const note = req.body?.note || null;
   const reference = req.body?.reference || null;
-  const source_id = String(req.body?.idempotency_key || req.body?.reference || genId("ADJ"));
+  const source_id = String(
+    req.body?.idempotency_key || req.body?.reference || genId("ADJ"),
+  );
 
   let conn;
   try {
@@ -602,12 +644,15 @@ export async function postDriverSettlementReverse(req, res) {
     return res.status(400).json({ ok: false, error: "Invalid driver id" });
   }
 
-  const entry_id = req.body?.entry_id != null ? Number(req.body.entry_id) : null;
+  const entry_id =
+    req.body?.entry_id != null ? Number(req.body.entry_id) : null;
   const source_type = req.body?.source_type
     ? String(req.body.source_type).toUpperCase()
     : null;
   const source_id = req.body?.source_id ? String(req.body.source_id) : null;
-  const entry_type = req.body?.entry_type ? String(req.body.entry_type).toUpperCase() : null;
+  const entry_type = req.body?.entry_type
+    ? String(req.body.entry_type).toUpperCase()
+    : null;
 
   if (!entry_id && !(source_type && source_id && entry_type)) {
     return res.status(400).json({
@@ -636,7 +681,7 @@ export async function postDriverSettlementReverse(req, res) {
         LIMIT 1
         FOR UPDATE
         `,
-        [driverId, entry_id]
+        [driverId, entry_id],
       );
       target = row;
     } else {
@@ -649,14 +694,16 @@ export async function postDriverSettlementReverse(req, res) {
         LIMIT 1
         FOR UPDATE
         `,
-        [driverId, source_type, source_id, entry_type]
+        [driverId, source_type, source_id, entry_type],
       );
       target = row;
     }
 
     if (!target) {
       await conn.rollback();
-      return res.status(404).json({ ok: false, error: "Target ledger entry not found" });
+      return res
+        .status(404)
+        .json({ ok: false, error: "Target ledger entry not found" });
     }
 
     const revSourceId = String(reference || `REV:${target.entry_id}`);
@@ -672,7 +719,8 @@ export async function postDriverSettlementReverse(req, res) {
         {
           entry_type: "REVERSAL",
           amount_cents: reverseAmount,
-          note: `Reverse entry_id=${target.entry_id}` + (note ? ` | ${note}` : ""),
+          note:
+            `Reverse entry_id=${target.entry_id}` + (note ? ` | ${note}` : ""),
         },
       ],
     });
@@ -779,7 +827,7 @@ export async function getAllDueSettlements(req, res) {
 
     const [[cnt]] = await conn.query(
       `SELECT COUNT(*) AS total FROM settlement_ledger WHERE ${where.join(" AND ")}`,
-      params
+      params,
     );
 
     const [rows] = await conn.query(
@@ -794,7 +842,7 @@ export async function getAllDueSettlements(req, res) {
       ORDER BY created_at DESC, entry_id DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return res.json({
@@ -878,7 +926,7 @@ export async function getDueSettlementsGroupedByDriver(req, res) {
       FROM settlement_ledger l
       WHERE ${where.join(" AND ")}
       `,
-      params
+      params,
     );
 
     const [rows] = await conn.query(
@@ -897,7 +945,7 @@ export async function getDueSettlementsGroupedByDriver(req, res) {
       ORDER BY total_due_cents DESC, last_due_at DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return res.json({
@@ -936,8 +984,6 @@ export async function getDueSettlementsGroupedByDriver(req, res) {
     } catch {}
   }
 }
-
-
 
 /* ---------------- GET all settled settlements (ledger) ---------------- */
 export async function getAllSettledSettlements(req, res) {
@@ -988,7 +1034,7 @@ export async function getAllSettledSettlements(req, res) {
 
     const [[cnt]] = await conn.query(
       `SELECT COUNT(*) AS total FROM settlement_ledger WHERE ${where.join(" AND ")}`,
-      params
+      params,
     );
 
     const [rows] = await conn.query(
@@ -1003,7 +1049,7 @@ export async function getAllSettledSettlements(req, res) {
       ORDER BY created_at DESC, entry_id DESC
       LIMIT ? OFFSET ?
       `,
-      [...params, limit, offset]
+      [...params, limit, offset],
     );
 
     return res.json({
@@ -1042,6 +1088,3 @@ export async function getAllSettledSettlements(req, res) {
     } catch {}
   }
 }
-
-
-

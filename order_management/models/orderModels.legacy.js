@@ -3,7 +3,7 @@
 // const axios = require("axios");
 
 // /* ======================= CONFIG ======================= */
-// const ADMIN_WALLET_ID = "NET000001";
+// const ADMIN_WALLET_ID = "TD00000001";
 // const PLATFORM_USER_SHARE = 0.5;
 // const PLATFORM_MERCHANT_SHARE = 0.5;
 
