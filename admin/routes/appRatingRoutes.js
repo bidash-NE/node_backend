@@ -108,10 +108,22 @@ router.delete(
 // Get single rating
 router.get("/:id", readLimiter, validateIdParam, getAppRatingByIdController);
 
-// Update rating
-router.put("/:id", writeLimiter, validateIdParam, updateAppRatingController);
+// Update rating (admin)
+router.put(
+  "/:id",
+  authUser,
+  writeLimiter,
+  validateIdParam,
+  updateAppRatingController,
+);
 
-// Delete rating
-router.delete("/:id", writeLimiter, validateIdParam, deleteAppRatingController);
+// Delete rating (admin)
+router.delete(
+  "/:id",
+  authUser,
+  writeLimiter,
+  validateIdParam,
+  deleteAppRatingController,
+);
 
 module.exports = router;
