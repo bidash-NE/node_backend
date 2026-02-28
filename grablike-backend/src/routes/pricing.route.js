@@ -1,6 +1,7 @@
 // src/routes/pricing.routes.js
 import { Router } from "express";
 import { computePlatformFeeAndGST } from "../services/pricing/rulesEngine.js";
+import { getVehicleTypeByServiceName } from "../utils/getVehicleTypeUsingServiceTypeName.js";
 
 const router = Router();
 
@@ -46,6 +47,11 @@ router.post("/quote", async (req, res) => {
     const channel = asLower(body.channel) || "app";
 
     const subtotal_cents = asInt(body.subtotal_cents);
+  
+    const offer_code = asStr(body.offer_code) || null;
+
+    const user_id = asStr(body.user_id) || null;
+
     const fare_after_discounts_cents =
       body.fare_after_discounts_cents === undefined
         ? undefined
@@ -66,18 +72,24 @@ router.post("/quote", async (req, res) => {
     if (!["instant", "pool", "scheduled"].includes(trip_type))
       return bad(res, "trip_type must be one of: instant, pool, scheduled");
 
+    const vehicleType = await getVehicleTypeByServiceName(service_type);
+    console.log("Service Type:", service_type, "Vehicle Type:", vehicleType);
+
     // engine call
     const out = await computePlatformFeeAndGST({
       country_code,
       city_id,
-      service_type,
+      service_type: vehicleType,
       trip_type,
       channel,
       subtotal_cents,
+      offer_code,
+      user_id,
       fare_after_discounts_cents,
       driver_take_home_base_cents,
       at, // optional datetime string
     });
+    console.log("Pricing engine output:", out);
 
     // recommended: ensure the response ALWAYS contains these (engine should do it)
     return res.json({

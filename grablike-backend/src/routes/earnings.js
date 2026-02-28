@@ -28,7 +28,7 @@ export function earningsRouter(mysqlPool) {
       const startDate = new Date(`${start}T00:00:00.000Z`);
       const endDate = new Date(`${end}T23:59:59.999Z`);
       const endPlusOne = new Date(
-        new Date(`${end}T00:00:00.000Z`).getTime() + 24 * 3600 * 1000
+        new Date(`${end}T00:00:00.000Z`).getTime() + 24 * 3600 * 1000,
       );
 
       // ---------- SUMMARY (uses v_driver_payouts.total_cents) ----------
@@ -45,7 +45,7 @@ export function earningsRouter(mysqlPool) {
             AND r.completed_at >= ?
             AND r.completed_at < DATE_ADD(?, INTERVAL 1 DAY)
         `,
-          [driver_id, start, end]
+          [driver_id, start, end],
         );
         return rows?.[0] || { earnings: 0, trips: 0 };
       });
@@ -72,7 +72,7 @@ export function earningsRouter(mysqlPool) {
           ORDER BY r.completed_at DESC
           LIMIT 200
         `,
-          [driver_id, start, end]
+          [driver_id, start, end],
         );
         return rows.map((r) => ({
           id: String(r.id),
@@ -193,7 +193,7 @@ export function earningsRouter(mysqlPool) {
 
       const onlineSeconds = Math.max(
         0,
-        Math.round(onlineAgg?.[0]?.total_seconds || 0)
+        Math.round(onlineAgg?.[0]?.total_seconds || 0),
       );
       const hours = Math.round((onlineSeconds / 3600) * 10) / 10;
 
@@ -363,53 +363,54 @@ export function earningsRouter(mysqlPool) {
       const { ride_id, driver_id, start, end } = req.query || {};
       const limit = Math.max(
         1,
-        Math.min(500, parseInt(req.query?.limit ?? "200", 10))
+        Math.min(500, parseInt(req.query?.limit ?? "200", 10)),
       );
       const offset = Math.max(0, parseInt(req.query?.offset ?? "0", 10));
       const hasDateFilter = !!(start && end);
 
       const selectCols = `
-  v.ride_id,
-  r.service_type,
-  r.trip_type,
-  r.requested_at,
-  r.accepted_at,
-  r.arrived_pickup_at,
-  r.started_at,
-  r.completed_at,
-  r.pickup_place,
-  r.dropoff_place,
-  r.distance_m,
-  r.duration_s,
+        v.ride_id,
+        r.service_type,
+        r.trip_type,
+        r.requested_at,
+        r.accepted_at,
+        r.arrived_pickup_at,
+        r.started_at,
+        r.completed_at,
+        r.pickup_place,
+        r.dropoff_place,
+        r.distance_m,
+        r.duration_s,
+        r.payment_method,
 
-  v.driver_id,
-  v.currency,
-  ROUND(v.total_cents/100, 2)        AS driver_take_home_nu,
-  ROUND(v.base_fare_cents/100, 2)    AS base_gross_nu,
-  ROUND(v.time_cents/100, 2)         AS time_gross_nu,
-  ROUND(v.tips_cents/100, 2)         AS tips_nu,
-  ROUND(v.platform_fee_cents/100, 2) AS platform_fee_nu,
-  ROUND(v.tax_cents/100, 2)          AS tax_nu,
+        v.driver_id,
+        v.currency,
+        ROUND(v.total_cents/100, 2)        AS driver_take_home_nu,
+        ROUND(v.base_fare_cents/100, 2)    AS base_gross_nu,
+        ROUND(v.time_cents/100, 2)         AS time_gross_nu,
+        ROUND(v.tips_cents/100, 2)         AS tips_nu,
+        ROUND(v.platform_fee_cents/100, 2) AS platform_fee_nu,
+        ROUND(v.tax_cents/100, 2)          AS tax_nu,
 
-  u.user_name  AS driver_name,
-  u.phone      AS driver_phone,
+        u.user_name  AS driver_name,
+        u.phone      AS driver_phone,
 
-  p.user_id     AS passenger_id,
-  p.user_name   AS passenger_name,
-  p.phone       AS passenger_phone,
+        p.user_id     AS passenger_id,
+        p.user_name   AS passenger_name,
+        p.phone       AS passenger_phone,
 
-  rr.rating     AS ride_rating,
-  rr.comment    AS ride_comments
-`;
+        rr.rating     AS ride_rating,
+        rr.comment    AS ride_comments
+      `;
 
       const fromSql = `
-  FROM v_driver_payouts v
-  JOIN rides r    ON r.ride_id = v.ride_id AND r.status = 'completed'
-  JOIN drivers d  ON d.driver_id = v.driver_id
-  JOIN users u    ON u.user_id = d.user_id AND u.is_active = 1
-  JOIN users p    ON p.user_id = r.passenger_id AND p.is_active = 1
-  LEFT JOIN ride_ratings rr ON rr.ride_id = r.ride_id
-`;
+        FROM v_driver_payouts v
+        JOIN rides r    ON r.ride_id = v.ride_id AND r.status = 'completed'
+        JOIN drivers d  ON d.driver_id = v.driver_id
+        JOIN users u    ON u.user_id = d.user_id AND u.is_active = 1
+        JOIN users p    ON p.user_id = r.passenger_id AND p.is_active = 1
+        LEFT JOIN ride_ratings rr ON rr.ride_id = r.ride_id
+      `;
 
       const where = [];
       const params = [];
@@ -431,18 +432,18 @@ export function earningsRouter(mysqlPool) {
       const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
       const sql = `
-  SELECT ${selectCols}
-  ${fromSql}
-  ${whereSql}
-  ORDER BY v.ride_id DESC
-  LIMIT ? OFFSET ?
-`;
+        SELECT ${selectCols}
+        ${fromSql}
+        ${whereSql}
+        ORDER BY v.ride_id DESC
+        LIMIT ? OFFSET ?
+      `;
 
       const countSql = `
-  SELECT COUNT(*) AS cnt
-  ${fromSql}
-  ${whereSql}
-`;
+        SELECT COUNT(*) AS cnt
+        ${fromSql}
+        ${whereSql}
+      `;
 
       const [countRows] = await mysqlPool.query(countSql, params);
       const total = Number(countRows?.[0]?.cnt || 0);
@@ -497,7 +498,7 @@ export function earningsRouter(mysqlPool) {
             tips_nu: Number(r.tips_nu),
             platform_fee_nu: Number(r.platform_fee_nu),
             tax_nu: Number(r.tax_nu),
-            payment_method: Number(r.payment_method), // Placeholder; extend v_driver_payouts if needed
+            payment_method: r.payment_method || "unknown", // Placeholder; extend v_driver_payouts if needed
           },
         })),
         meta: { limit, offset, count: total },
@@ -508,6 +509,5 @@ export function earningsRouter(mysqlPool) {
     }
   });
 
-  
   return router;
 }

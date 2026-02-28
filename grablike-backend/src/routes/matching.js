@@ -9,6 +9,7 @@ import {
 } from "../matching/redisKeys.js";
 import { getRedis } from "../matching/redis.js";
 import { applyCancellationPolicy } from "../services/cancellations.js";
+import { walletTransfer } from "../services/wallet/walletTransfer.js";
 
 const redis = getRedis();
 
@@ -24,7 +25,7 @@ export function makeMatchingRouter(io, mysqlPool) {
     try {
       console.log(
         "[/rides/match/request] req.body:",
-        JSON.stringify(req.body, null, 2)
+        JSON.stringify(req.body, null, 2),
       );
     } catch {}
 
@@ -59,7 +60,7 @@ export function makeMatchingRouter(io, mysqlPool) {
       trip_type: tripTypeRaw = "instant",
       pool_batch_id: poolBatchRaw = null,
       currency: currencyRaw = "BTN",
-      payment_method = null,
+      payment_method: payment_method,
       offer_code = null,
       seats: seatsRaw = 1,
 
@@ -106,22 +107,24 @@ export function makeMatchingRouter(io, mysqlPool) {
     const cityId = String(cityIdRaw || "thimphu").trim();
 
     /* -------------------- normalize trip_type -------------------- */
-    const booking_type =
-        ["SCHEDULED", "GROUP"].includes(String(bookingTypeRaw || "").toUpperCase())
-          ? String(bookingTypeRaw).toUpperCase()
-          : "INSTANT";
+    const booking_type = ["SCHEDULED", "GROUP"].includes(
+      String(bookingTypeRaw || "").toUpperCase(),
+    )
+      ? String(bookingTypeRaw).toUpperCase()
+      : "INSTANT";
 
-      const trip_type = (() => {
-        const direct = String(tripTypeRaw ?? "").trim().toLowerCase();
-        if (["instant", "scheduled", "pool", "group"].includes(direct)) return direct;
+    const trip_type = (() => {
+      const direct = String(tripTypeRaw ?? "")
+        .trim()
+        .toLowerCase();
+      if (["instant", "scheduled", "pool", "group"].includes(direct))
+        return direct;
 
-        // fallback from booking_type
-        if (booking_type === "SCHEDULED") return "scheduled";
-        if (booking_type === "GROUP") return "group";
-        return "instant";
-      })();
-
-
+      // fallback from booking_type
+      if (booking_type === "SCHEDULED") return "scheduled";
+      if (booking_type === "GROUP") return "group";
+      return "instant";
+    })();
 
     let scheduled_at = null; // JS Date or null
     if (booking_type === "SCHEDULED") {
@@ -181,8 +184,8 @@ export function makeMatchingRouter(io, mysqlPool) {
     const legacyFareUnits = Number.isFinite(Number(fareRaw))
       ? Number(fareRaw)
       : Number.isFinite(Number(baseFareUnitsRaw))
-      ? Number(baseFareUnitsRaw)
-      : null;
+        ? Number(baseFareUnitsRaw)
+        : null;
 
     const legacyFareCents = Number.isFinite(Number(fareCentsRaw))
       ? Number(fareCentsRaw)
@@ -199,19 +202,19 @@ export function makeMatchingRouter(io, mysqlPool) {
       subtotalFareCents != null
         ? subtotalFareCents
         : legacyFareCents != null
-        ? legacyFareCents
-        : legacyFareUnits != null
-        ? Math.round(legacyFareUnits * 100)
-        : null;
+          ? legacyFareCents
+          : legacyFareUnits != null
+            ? Math.round(legacyFareUnits * 100)
+            : null;
 
     const fare_cents =
       totalFareCents != null
         ? totalFareCents
         : legacyFareCents != null
-        ? legacyFareCents
-        : legacyFareUnits != null
-        ? Math.round(legacyFareUnits * 100)
-        : null;
+          ? legacyFareCents
+          : legacyFareUnits != null
+            ? Math.round(legacyFareUnits * 100)
+            : null;
 
     // If you require totals to exist (recommended)
     if (fare_cents == null) {
@@ -278,7 +281,7 @@ export function makeMatchingRouter(io, mysqlPool) {
           const [pbIns] = await conn.execute(
             `INSERT INTO pool_batches (city_id, service_type, status, created_at)
            VALUES (?, ?, 'forming', NOW())`,
-            [cityId, serviceType || service_code]
+            [cityId, serviceType || service_code],
           );
           pool_batch_id = Number(pbIns.insertId);
         }
@@ -300,8 +303,8 @@ export function makeMatchingRouter(io, mysqlPool) {
         distance_m, duration_s, currency,
         trip_type, pool_batch_id,
         fare_cents, base_fare_cents,
-        booking_type, scheduled_at
-      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        booking_type, scheduled_at, payment_method
+      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         [
           passenger_id,
@@ -322,7 +325,8 @@ export function makeMatchingRouter(io, mysqlPool) {
           base_fare_cents ?? null,
           booking_type,
           scheduled_at ? new Date(scheduled_at) : null,
-        ]
+          payment_method,
+        ],
       );
 
       const rideId = String(ins.insertId);
@@ -339,7 +343,7 @@ export function makeMatchingRouter(io, mysqlPool) {
             seats=VALUES(seats),
             updated_at=NOW()
           `,
-          [rideId, passenger_id, seats] // seats = host seats (usually 1)
+          [rideId, passenger_id, seats], // seats = host seats (usually 1)
         );
       }
 
@@ -358,7 +362,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         await conn.query(
           `INSERT INTO ride_waypoints (ride_id, order_index, lat, lng, address)
          VALUES ?`,
-          [values]
+          [values],
         );
       }
 
@@ -386,7 +390,7 @@ export function makeMatchingRouter(io, mysqlPool) {
             Number(dropoff[1]),
             fare_cents ?? 0,
             currency,
-          ]
+          ],
         );
         bookingId = String(insBk.insertId);
       }
@@ -460,6 +464,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         trip_type,
         pool_batch_id,
         booking_type,
+        payment_method,
         scheduled_at: scheduled_at ? scheduled_at.toISOString() : null,
         status: "requested",
       });
@@ -499,10 +504,10 @@ export function makeMatchingRouter(io, mysqlPool) {
       // 1) Lock the ride row
       const [rows] = await conn.query(
         `SELECT *
-           FROM rides
-          WHERE ride_id = ?
-          FOR UPDATE`,
-        [ride_id]
+         FROM rides
+        WHERE ride_id = ?
+        FOR UPDATE`,
+        [ride_id],
       );
 
       if (!rows || !rows.length) {
@@ -513,7 +518,6 @@ export function makeMatchingRouter(io, mysqlPool) {
       const ride = rows[0];
       const prevStatus = String(ride.status || "").toLowerCase();
 
-      // Only cancellable in "active" states
       const ACTIVE_STATES = [
         "requested",
         "offered_to_driver",
@@ -533,7 +537,9 @@ export function makeMatchingRouter(io, mysqlPool) {
       if (cancelled_by === "passenger") newStatus = "cancelled_rider";
       else if (cancelled_by === "driver") newStatus = "cancelled_driver";
 
-      // 3) Apply cancellation policy (for passenger late cancel)
+      // -----------------------------------------------------------------
+      // 3) CANCELLATION POLICY – FETCH RULES FROM DATABASE
+      // -----------------------------------------------------------------
       let policy = {
         applied: false,
         stage: null,
@@ -541,43 +547,258 @@ export function makeMatchingRouter(io, mysqlPool) {
         fee_cents: 0,
         driver_share_cents: 0,
         platform_share_cents: 0,
+        estimated_fare_cents: ride.fare_cents || 0,
       };
 
-      if (
-        cancelled_by === "passenger" &&
-        (prevStatus === "accepted" || prevStatus === "arrived_pickup")
-      ) {
-        try {
-          policy = await applyCancellationPolicy({
-            conn,
-            rideId: ride_id,
-            bookingId: null,
-          });
-        } catch (e) {
-          console.error(
-            "[/rides/match/cancel] applyCancellationPolicy error:",
-            e
+      const estimated_fare_cents = ride.fare_cents || 0;
+
+      // ----- Passenger Cancellation -----
+      if (cancelled_by === "passenger") {
+        // First, check if there's a free cancellation rule for this status
+        const [freeRules] = await conn.query(
+          `SELECT * FROM cancellation_rules
+         WHERE cancelled_by = ?
+           AND ride_status = ?
+           AND is_free = TRUE`,
+          [cancelled_by, prevStatus],
+        );
+
+        let isFreeCancellation = false;
+        if (freeRules.length > 0 && ride.accepted_at) {
+          const acceptedAt = new Date(ride.accepted_at);
+          const diffMinutes =
+            (now.getTime() - acceptedAt.getTime()) / 1000 / 60;
+          if (diffMinutes <= freeRules[0].grace_minutes) {
+            isFreeCancellation = true;
+            policy.applied = true;
+            policy.stage = freeRules[0].stage;
+            policy.rule_id = freeRules[0].rule_id;
+            // fee_cents remains 0, no transfer
+          }
+        }
+
+        // If not free, and we're in a fee‑eligible status, fetch the appropriate fee rule
+        if (
+          !isFreeCancellation &&
+          (prevStatus === "accepted" || prevStatus === "arrived_pickup")
+        ) {
+          const stage =
+            prevStatus === "arrived_pickup" ? "no_show" : "late_cancel";
+
+          const [ruleRows] = await conn.query(
+            `SELECT * FROM cancellation_rules
+           WHERE cancelled_by = ?
+             AND ride_status = ?
+             AND stage = ?`,
+            [cancelled_by, prevStatus, stage],
           );
-          // but still continue with cancellation
+
+          if (ruleRows.length === 0) {
+            throw new Error(
+              `No cancellation rule found for ${cancelled_by} / ${prevStatus} / ${stage}`,
+            );
+          }
+
+          const rule = ruleRows[0];
+          let fee_cents = Math.round(
+            estimated_fare_cents * (rule.fee_percent / 100),
+          );
+          fee_cents = Math.min(
+            Math.max(fee_cents, rule.min_fee_cents),
+            rule.max_fee_cents,
+          );
+
+          policy.applied = true;
+          policy.stage = rule.stage;
+          policy.rule_id = rule.rule_id;
+          policy.fee_cents = fee_cents;
+          policy.driver_share_cents = fee_cents; // 100% to driver
+          policy.platform_share_cents = 0;
+
+          // ----- Transfer passenger -> driver using walletTransfer -----
+          if (fee_cents > 0) {
+            if (!ride.driver_id) {
+              throw new Error(
+                "Cannot charge cancellation fee: no driver assigned",
+              );
+            }
+
+            // 1. Get passenger's wallet ID
+            const [passengerWalletRows] = await conn.query(
+              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
+              [ride.passenger_id],
+            );
+            if (!passengerWalletRows?.length)
+              throw new Error("Passenger wallet not found");
+            const passengerWalletId = passengerWalletRows[0].wallet_id;
+
+            // 2. Get driver's user_id from drivers table
+            const [driverUserRows] = await conn.query(
+              `SELECT user_id FROM drivers WHERE driver_id = ?`,
+              [ride.driver_id],
+            );
+            if (!driverUserRows?.length)
+              throw new Error("Driver user record not found");
+            const driverUserId = driverUserRows[0].user_id;
+
+            // 3. Get driver's wallet ID
+            const [driverWalletRows] = await conn.query(
+              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
+              [driverUserId],
+            );
+            if (!driverWalletRows?.length)
+              throw new Error("Driver wallet not found");
+            const driverWalletId = driverWalletRows[0].wallet_id;
+
+            const fee_nu = fee_cents / 100; // convert cents to Ngultrum
+
+            const payload = {
+              from_wallet: passengerWalletId,
+              to_wallet: driverWalletId,
+              driver_credit_nu: fee_nu,
+              passenger_debit_nu: fee_nu,
+              reason: "cancellation_fee",
+              meta: {
+                ride_id,
+                stage: policy.stage,
+                cancelled_by,
+              },
+            };
+            console.log(
+              "[/rides/match/cancel] walletTransfer payload:",
+              payload,
+            );
+
+            const transferResult = await walletTransfer(conn, payload);
+
+            if (!transferResult.ok) {
+              throw new Error(
+                `Wallet transfer failed: ${transferResult.reason}`,
+              );
+            }
+
+            policy.transaction_id_dr = transferResult.transaction_id_dr;
+            policy.transaction_id_cr = transferResult.transaction_id_cr;
+          }
         }
       }
 
+      // ----- Driver Cancellation (unjustified) -----
+      else if (cancelled_by === "driver") {
+        // ⚠️ Replace with your business logic to determine "unjustified"
+        const isUnjustified = true; // Example: always penalise unless reason is 'safety', etc.
+
+        if (
+          isUnjustified &&
+          (prevStatus === "accepted" || prevStatus === "arrived_pickup")
+        ) {
+          const stage =
+            prevStatus === "arrived_pickup" ? "driver_no_show" : "unjustified";
+
+          const [ruleRows] = await conn.query(
+            `SELECT * FROM cancellation_rules
+           WHERE cancelled_by = ?
+             AND ride_status = ?
+             AND stage = ?`,
+            [cancelled_by, prevStatus, stage],
+          );
+
+          if (ruleRows.length === 0) {
+            throw new Error(
+              `No cancellation rule found for ${cancelled_by} / ${prevStatus} / ${stage}`,
+            );
+          }
+
+          const rule = ruleRows[0];
+          let fee_cents = Math.round(
+            estimated_fare_cents * (rule.fee_percent / 100),
+          );
+          fee_cents = Math.min(
+            Math.max(fee_cents, rule.min_fee_cents),
+            rule.max_fee_cents,
+          );
+
+          policy.applied = true;
+          policy.stage = rule.stage;
+          policy.rule_id = rule.rule_id;
+          policy.fee_cents = fee_cents;
+          policy.driver_share_cents = 0;
+          policy.platform_share_cents = fee_cents;
+
+          // ----- Transfer driver -> system wallet using walletTransfer -----
+          if (fee_cents > 0 && ride.driver_id) {
+            // 1. Get driver's user_id from drivers table
+            const [driverUserRows] = await conn.query(
+              `SELECT user_id FROM drivers WHERE driver_id = ?`,
+              [ride.driver_id],
+            );
+            if (!driverUserRows?.length)
+              throw new Error("Driver user record not found");
+            const driverUserId = driverUserRows[0].user_id;
+
+            // 2. Get driver's wallet ID
+            const [driverWalletRows] = await conn.query(
+              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
+              [driverUserId],
+            );
+            if (!driverWalletRows?.length)
+              throw new Error("Driver wallet not found");
+            const driverWalletId = driverWalletRows[0].wallet_id;
+
+            const fee_nu = fee_cents / 100;
+            const SYSTEM_WALLET_ID = "TD00000001"; // Define your system wallet ID
+
+            const payload = {
+              from_wallet: driverWalletId,
+              to_wallet: SYSTEM_WALLET_ID,
+              driver_credit_nu: fee_nu,
+              passenger_debit_nu: fee_nu,
+              reason: "driver_penalty",
+              meta: {
+                ride_id,
+                stage: policy.stage,
+                cancelled_by,
+              },
+            };
+            console.log(
+              "[/rides/match/cancel] driver penalty walletTransfer payload:",
+              payload,
+            );
+
+            const transferResult = await walletTransfer(conn, payload);
+
+            if (!transferResult.ok) {
+              throw new Error(
+                `Driver penalty transfer failed: ${transferResult.reason}`,
+              );
+            }
+
+            policy.transaction_id_dr = transferResult.transaction_id_dr;
+            policy.transaction_id_cr = transferResult.transaction_id_cr;
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------
       // 4) Update ride as cancelled
+      // -----------------------------------------------------------------
       await conn.query(
         `UPDATE rides
-            SET status        = ?,
-                cancelled_at  = ?,
-                cancel_reason = ?
-          WHERE ride_id       = ?`,
-        [newStatus, now, reason || null, ride_id]
+          SET status        = ?,
+              cancelled_at  = ?,
+              cancel_reason = ?
+        WHERE ride_id       = ?`,
+        [newStatus, now, reason || null, ride_id],
       );
 
       await conn.commit();
 
+      // -----------------------------------------------------------------
+      // 5) Clean Redis (non‑critical, outside transaction)
+      // -----------------------------------------------------------------
       const driver_id = ride.driver_id ? Number(ride.driver_id) : null;
       const passenger_id = ride.passenger_id ? Number(ride.passenger_id) : null;
 
-      // 5) Clean Redis for driver current rides
       try {
         if (driver_id) {
           const dKey = currentRidesKey(String(driver_id));
@@ -586,11 +807,10 @@ export function makeMatchingRouter(io, mysqlPool) {
       } catch (e) {
         console.error(
           "[/rides/match/cancel] redis.hdel driver current ride error:",
-          e?.message || e
+          e?.message || e,
         );
       }
 
-      // 6) Clean Redis for passenger current ride
       try {
         if (passenger_id) {
           const pKey = currentPassengerRideKey(String(passenger_id));
@@ -599,11 +819,13 @@ export function makeMatchingRouter(io, mysqlPool) {
       } catch (e) {
         console.error(
           "[/rides/match/cancel] redis.del passenger current ride error:",
-          e?.message || e
+          e?.message || e,
         );
       }
 
-      // 7) Emit socket events to driver & passenger
+      // -----------------------------------------------------------------
+      // 6) Emit socket events
+      // -----------------------------------------------------------------
       const payload = {
         ride_id,
         request_id: ride_id,
@@ -619,7 +841,6 @@ export function makeMatchingRouter(io, mysqlPool) {
             .to(rideRoom(ride_id))
             .emit("rideCancelled", payload);
         } else {
-          // still notify ride room if driver left
           io.to(rideRoom(ride_id)).emit("rideCancelled", payload);
         }
 
@@ -631,7 +852,7 @@ export function makeMatchingRouter(io, mysqlPool) {
       } catch (e) {
         console.error(
           "[/rides/match/cancel] socket emit error:",
-          e?.message || e
+          e?.message || e,
         );
       }
 
@@ -677,7 +898,7 @@ export function makeMatchingRouter(io, mysqlPool) {
            JOIN rides r ON r.ride_id = rb.ride_id
           WHERE rb.booking_id = ? AND rb.ride_id = ?
           FOR UPDATE`,
-        [bookingId, rideId]
+        [bookingId, rideId],
       );
       if (!bk) {
         await conn.rollback();
@@ -708,7 +929,7 @@ export function makeMatchingRouter(io, mysqlPool) {
           by === "passenger" ? "cancelled_passenger" : "cancelled_system",
           reason,
           bookingId,
-        ]
+        ],
       );
 
       let policy = { applied: false };
@@ -738,13 +959,13 @@ export function makeMatchingRouter(io, mysqlPool) {
           await redis.del(pKey);
           console.log(
             "[/rides/match/cancel-booking] cleared passenger current ride key:",
-            pKey
+            pKey,
           );
         }
       } catch (e) {
         console.warn(
           "[/rides/match/cancel-booking] redis sync warn:",
-          e?.message
+          e?.message,
         );
       }
 
@@ -784,7 +1005,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         drivers.map(async (driverId) => {
           const details = await redis.hgetall(driverHash(driverId));
           return { driverId, ...details };
-        })
+        }),
       );
 
       return res.json({ drivers: driverDetails });
@@ -814,7 +1035,7 @@ export function makeMatchingRouter(io, mysqlPool) {
     try {
       console.log(
         "[/rides/match/broadcast-delivery] req.body:",
-        JSON.stringify(req.body, null, 2)
+        JSON.stringify(req.body, null, 2),
       );
     } catch {}
 
@@ -892,14 +1113,14 @@ export function makeMatchingRouter(io, mysqlPool) {
     const fareUnits = Number.isFinite(Number(fareRaw))
       ? Number(fareRaw)
       : Number.isFinite(Number(base_fare))
-      ? Number(base_fare)
-      : null;
+        ? Number(base_fare)
+        : null;
 
     const fareCents = Number.isFinite(Number(fareCentsRaw))
       ? Number(fareCentsRaw)
       : fareUnits != null
-      ? Math.round(fareUnits * 100)
-      : null;
+        ? Math.round(fareUnits * 100)
+        : null;
 
     // ---- Normalize drops (for BATCH jobs)
     let drops = [];
@@ -1006,8 +1227,8 @@ export function makeMatchingRouter(io, mysqlPool) {
           pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
           distance_m, duration_s, currency,
           trip_type, pool_batch_id,
-          fare_cents
-        ) VALUES (?, ?, 'requested', NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'instant', NULL, ?)
+          fare_cents, base_fare_cents, payment_method
+        ) VALUES (?, ?, 'requested', NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'instant', NULL, ?, ?, ?)
         `,
         [
           passenger_id,
@@ -1016,7 +1237,7 @@ export function makeMatchingRouter(io, mysqlPool) {
           // If BATCH and you want a friendly string, you can override dropoff_place as "Multiple stops"
           job_type === "BATCH"
             ? dropoff_place || "Multiple stops"
-            : dropoff_place ?? null,
+            : (dropoff_place ?? null),
           Number(pickup[0]),
           Number(pickup[1]),
           Number(dropoff[0]),
@@ -1025,7 +1246,9 @@ export function makeMatchingRouter(io, mysqlPool) {
           durInt,
           currency,
           fareCents,
-        ]
+          fareCents,
+          payment_method,
+        ],
       );
 
       const rideId = String(ins.insertId);
@@ -1041,7 +1264,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         ]);
         await conn.query(
           `INSERT INTO ride_waypoints (ride_id, order_index, lat, lng, address) VALUES ?`,
-          [values]
+          [values],
         );
       }
 
@@ -1053,7 +1276,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         cityId,
         service_code, // canonical for geo
         serviceType: serviceType || service_code,
-        trip_type : "instant",
+        trip_type: "instant",
         pickup,
         dropoff,
         pickup_place,

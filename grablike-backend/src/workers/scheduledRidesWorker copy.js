@@ -1,6 +1,5 @@
 // src/workers/scheduledRidesWorker.js
 import matcher from "../matching/matcher.js";
-import { sendBothNotifications } from "./notificationWorker.js"; // ✅ import stays
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const REMINDER_WINDOW_MINUTES = 15; // notify driver this many minutes before pickup
@@ -8,8 +7,8 @@ const REMINDER_WINDOW_MINUTES = 15; // notify driver this many minutes before pi
 /**
  * Scheduled rides worker (UTC-safe):
  * - Sends driver reminders for upcoming reserved rides
- * - Auto‑releases expired reservations (both 'scheduled' and 'offered_to_driver')
- * - Dispatches due rides with no active reservation
+ * - Auto‑releases expired reservations
+ * - Dispatches due rides
  */
 export function startScheduledRidesWorker({
   io,
@@ -18,11 +17,12 @@ export function startScheduledRidesWorker({
   batchSize = 25,
 }) {
   let stopped = false;
+
   console.log("[scheduledWorker] started");
 
   const run = async () => {
     while (!stopped) {
-      // ---------- STEP 1: Driver reminders (15 min before) ----------
+      // ---------- STEP 1: Driver reminders (upcoming reserved rides) ----------
       let reminderConn;
       try {
         reminderConn = await mysqlPool.getConnection();
@@ -30,78 +30,74 @@ export function startScheduledRidesWorker({
 
         const [reminderRows] = await reminderConn.query(
           `
-          SELECT
-            r.ride_id,
-            r.driver_id,
-            d.user_id,                     -- ✅ users.id for notification
-            r.scheduled_at,
-            r.dispatch_at,
-            r.pickup_place
-          FROM rides r
-          JOIN drivers d ON d.driver_id = r.driver_id
-          WHERE r.booking_type = 'SCHEDULED'
-            AND r.status = 'scheduled'
-            AND r.driver_id IS NOT NULL
-            AND r.offer_expire_at > UTC_TIMESTAMP()    -- reservation still valid
+          SELECT ride_id, driver_id, scheduled_at, dispatch_at, pickup_place
+          FROM rides
+          WHERE booking_type = 'SCHEDULED'
+            AND status = 'scheduled'
+            AND driver_id IS NOT NULL
+            AND offer_expire_at > UTC_TIMESTAMP()          -- still valid reservation
             AND (
-              (r.scheduled_at IS NOT NULL AND r.scheduled_at BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL ? MINUTE)
-              OR (r.dispatch_at IS NOT NULL AND r.dispatch_at BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL ? MINUTE)
+              (scheduled_at IS NOT NULL AND scheduled_at BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL ? MINUTE)
+              OR (dispatch_at IS NOT NULL AND dispatch_at BETWEEN UTC_TIMESTAMP() AND UTC_TIMESTAMP() + INTERVAL ? MINUTE)
             )
-            AND (r.driver_reminded_at IS NULL OR r.driver_reminded_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 HOUR))
+            AND (driver_reminded_at IS NULL OR driver_reminded_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 12 HOUR))  -- not reminded in last 12h
           `,
-          [REMINDER_WINDOW_MINUTES, REMINDER_WINDOW_MINUTES],
+          [REMINDER_WINDOW_MINUTES, REMINDER_WINDOW_MINUTES]
         );
 
         for (const ride of reminderRows) {
           const rideId = String(ride.ride_id);
-          const userId = String(ride.user_id); // ✅ CORRECT user account ID
-          const driverId = String(ride.driver_id); // for logging only
+          const driverId = String(ride.driver_id);
           const scheduledTime = ride.scheduled_at || ride.dispatch_at;
+          const formattedTime = scheduledTime
+            ? new Date(scheduledTime).toLocaleString('en-US', { hour: '2-digit', minute: '2-digit' })
+            : 'soon';
 
-          // 🔁 REPLACED: manual INSERT → reusable notifier (in-app + push)
-          await sendBothNotifications(reminderConn, {
-            user_id: userId,
-            type: "scheduled_ride_reminder",
-            title: "Upcoming Scheduled Ride",
-            message: `Your scheduled ride #${rideId} starts in ${REMINDER_WINDOW_MINUTES} minutes. Please be ready at ${ride.pickup_place || "the pickup location"}.`,
-            data: {
-              ride_id: rideId,
-              scheduled_at: ride.scheduled_at,
-              dispatch_at: ride.dispatch_at,
-              pickup_place: ride.pickup_place,
-            },
+          const notificationData = JSON.stringify({
+            ride_id: rideId,
+            scheduled_at: ride.scheduled_at,
+            dispatch_at: ride.dispatch_at,
+            pickup_place: ride.pickup_place,
           });
 
-          // ✅ Mark reminder sent (unchanged)
+          // Insert in‑app notification for the driver
           await reminderConn.query(
-            `UPDATE rides SET driver_reminded_at = UTC_TIMESTAMP() WHERE ride_id = ?`,
-            [ride.ride_id],
+            `INSERT INTO notifications
+              (user_id, type, title, message, data)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+              driverId,
+              'scheduled_ride_reminder',
+              'Upcoming Scheduled Ride',
+              `Your scheduled ride #${rideId} starts in ${REMINDER_WINDOW_MINUTES} minutes. Please be ready at ${ride.pickup_place || 'the pickup location'}.`,
+              notificationData,
+            ]
           );
 
-          console.log(
-            `[scheduledWorker] reminder sent to driver profile ${driverId} (user ${userId}) for ride ${rideId}`,
+          // Mark reminder sent
+          await reminderConn.query(
+            `UPDATE rides SET driver_reminded_at = UTC_TIMESTAMP() WHERE ride_id = ?`,
+            [ride.ride_id]
           );
+
+          console.log(`[scheduledWorker] reminder sent to driver ${driverId} for ride ${rideId}`);
         }
 
         await reminderConn.commit();
       } catch (e) {
-        try {
-          await reminderConn?.rollback();
-        } catch {}
-        console.error("[scheduledWorker] reminder error:", e);
+        try { await reminderConn?.rollback(); } catch {}
+        console.error('[scheduledWorker] reminder error:', e);
       } finally {
-        try {
-          reminderConn?.release();
-        } catch {}
+        try { reminderConn?.release(); } catch {}
       }
 
-      // ---------- STEP 2: Auto‑release expired reservations (both scheduled & offered) ----------
+      // ---------- STEP 2: Dispatch due rides (existing logic) ----------
       let dispatchConn;
       try {
         dispatchConn = await mysqlPool.getConnection();
         await dispatchConn.beginTransaction();
 
-        // 2a) Release expired offers for 'scheduled' rides
+        // 2a) Auto‑release expired reservations
         await dispatchConn.query(
           `
           UPDATE rides
@@ -114,27 +110,10 @@ export function startScheduledRidesWorker({
             AND driver_id IS NOT NULL
             AND offer_expire_at IS NOT NULL
             AND offer_expire_at <= UTC_TIMESTAMP()
-          `,
-        );
-
-        // 2b) Release expired offers for 'offered_to_driver' rides and reset status to 'scheduled'
-        await dispatchConn.query(
           `
-          UPDATE rides
-          SET status = 'scheduled',        -- ✅ back to scheduled for re‑dispatch
-              driver_id = NULL,
-              reserved_at = NULL,
-              reserved_confirmed_at = NULL,
-              offer_expire_at = NULL
-          WHERE booking_type = 'SCHEDULED'
-            AND status = 'offered_to_driver'
-            AND driver_id IS NOT NULL
-            AND offer_expire_at IS NOT NULL
-            AND offer_expire_at <= UTC_TIMESTAMP()
-          `,
         );
 
-        // ---------- STEP 3: Dispatch due rides (no active reservation) ----------
+        // 2b) Find rides due for dispatch (only those without active reservations)
         const [dueRows] = await dispatchConn.query(
           `
           SELECT ride_id
@@ -142,7 +121,7 @@ export function startScheduledRidesWorker({
           WHERE booking_type = 'SCHEDULED'
             AND status = 'scheduled'
             AND scheduled_at IS NOT NULL
-            AND (driver_id IS NULL OR offer_expire_at IS NULL OR offer_expire_at <= UTC_TIMESTAMP())
+            AND (driver_id IS NULL OR offer_expire_at IS NULL OR offer_expire_at <= UTC_TIMESTAMP())  -- no active reservation
             AND (
               (dispatch_at IS NOT NULL AND dispatch_at <= UTC_TIMESTAMP())
               OR (dispatch_at IS NULL AND scheduled_at <= UTC_TIMESTAMP())
@@ -151,7 +130,7 @@ export function startScheduledRidesWorker({
           LIMIT ?
           FOR UPDATE
           `,
-          [batchSize],
+          [batchSize]
         );
 
         if (!dueRows.length) {
@@ -162,7 +141,7 @@ export function startScheduledRidesWorker({
 
         const rideIds = dueRows.map((r) => Number(r.ride_id)).filter(Boolean);
 
-        // 3a) Claim rides: scheduled -> requested
+        // 2c) Claim rides: scheduled -> requested
         await dispatchConn.query(
           `
           UPDATE rides
@@ -171,38 +150,36 @@ export function startScheduledRidesWorker({
           WHERE ride_id IN (${rideIds.map(() => "?").join(",")})
             AND status = 'scheduled'
           `,
-          rideIds,
+          rideIds
         );
 
-        // 3b) Fetch full ride data (including timestamps for notifications if needed)
+        // 2d) Fetch full ride data (including timestamps for later use)
         const [rides] = await dispatchConn.query(
           `
           SELECT
-            r.ride_id,
-            r.passenger_id,
-            r.driver_id,
-            r.service_type,
-            s.code AS service_code,
-            r.pickup_place,
-            r.dropoff_place,
-            r.pickup_lat, pickup_lng,
-            r.dropoff_lat, dropoff_lng,
-            r.distance_m,
-            r.duration_s,
-            r.fare_cents,
-            r.currency,
-            r.trip_type,
-            r.pool_batch_id,
-            r.scheduled_at,
-            r.dispatch_at
-          FROM rides r
-          JOIN ride_types s ON s.name = r.service_type
+            ride_id,
+            passenger_id,
+            driver_id,
+            service_type,
+            pickup_place,
+            dropoff_place,
+            pickup_lat, pickup_lng,
+            dropoff_lat, dropoff_lng,
+            distance_m,
+            duration_s,
+            fare_cents,
+            currency,
+            trip_type,
+            pool_batch_id,
+            scheduled_at,
+            dispatch_at
+          FROM rides
           WHERE ride_id IN (${rideIds.map(() => "?").join(",")})
           `,
-          rideIds,
+          rideIds
         );
 
-        // 3c) Fetch waypoints
+        // 2e) Fetch waypoints
         const [wps] = await dispatchConn.query(
           `
           SELECT ride_id, order_index, lat, lng, address
@@ -210,11 +187,12 @@ export function startScheduledRidesWorker({
           WHERE ride_id IN (${rideIds.map(() => "?").join(",")})
           ORDER BY ride_id ASC, order_index ASC
           `,
-          rideIds,
+          rideIds
         );
 
         await dispatchConn.commit();
 
+        // Group waypoints
         const wpByRide = new Map();
         for (const w of wps) {
           const id = String(w.ride_id);
@@ -226,15 +204,18 @@ export function startScheduledRidesWorker({
           });
         }
 
-        // 3d) Dispatch each ride to the matcher
+        // 2f) Dispatch to matcher
         for (const r of rides) {
           const rideId = String(r.ride_id);
+
           const pickup = [Number(r.pickup_lat), Number(r.pickup_lng)];
           const dropoff = [Number(r.dropoff_lat), Number(r.dropoff_lng)];
+
           const fare_cents =
             r.fare_cents != null && r.fare_cents !== ""
               ? Number(r.fare_cents)
               : null;
+
           let payment_method = null;
           try {
             if (r.payment_method) {
@@ -256,7 +237,7 @@ export function startScheduledRidesWorker({
             await matcher.requestRide({
               io,
               cityId: "thimphu",
-              service_code: r.service_code,
+              service_code: r.service_type,
               serviceType: r.service_type,
               pickup,
               dropoff,
@@ -284,7 +265,7 @@ export function startScheduledRidesWorker({
             console.log(
               "[scheduledWorker] dispatched:",
               rideId,
-              preferred_driver_id ? `(preferred ${preferred_driver_id})` : "",
+              preferred_driver_id ? `(preferred ${preferred_driver_id})` : ""
             );
           } catch (e) {
             console.error("[scheduledWorker] matcher failed:", rideId, e);

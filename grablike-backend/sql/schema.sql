@@ -131,6 +131,8 @@ CREATE TABLE driver_earnings (
   CONSTRAINT fk_de_ride FOREIGN KEY (ride_id) REFERENCES rides(ride_id)
     ON UPDATE CASCADE ON DELETE RESTRICT
 );
+ALTER TABLE driver_earnings
+ADD COLUMN payment_method VARCHAR(20) NULL COMMENT 'Method used to pay the driver (e.g., cash, card, wallet)';
 
 -- Platform amounts per ride/driver (fees, taxes)
 CREATE TABLE platform_levies (
@@ -156,6 +158,8 @@ CREATE TABLE platform_levies (
   CONSTRAINT fk_pl_ride FOREIGN KEY (ride_id) REFERENCES rides(ride_id)
     ON UPDATE CASCADE ON DELETE RESTRICT
 );
+ALTER TABLE platform_levies
+ADD COLUMN payment_method VARCHAR(20) NULL;
 
 CREATE OR REPLACE VIEW v_driver_payouts AS
 SELECT

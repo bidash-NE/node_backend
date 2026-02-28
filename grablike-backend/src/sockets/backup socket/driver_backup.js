@@ -2583,6 +2583,67 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
 
 /* ---------------- Merchant Notifiers ---------------- */
 
+async function emitMerchantDriverAccepted({ io, conn, request_id }) {
+  const redis = getRedis();
+  let job_type = "SINGLE";
+  let batch_id = null;
+
+  try {
+    const h = await redis.hgetall(rideHash(String(request_id)));
+    if (h?.job_type) job_type = String(h.job_type).toUpperCase();
+    if (h?.batch_id != null && h.batch_id !== "") {
+      const bn = Number(h.batch_id);
+      if (Number.isFinite(bn)) batch_id = bn;
+    }
+  } catch {}
+
+  let businessRows = [];
+
+  if (batch_id != null) {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_batch_id = ?
+      `,
+      [batch_id],
+    );
+    businessRows = rows || [];
+  } else {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders WHERE delivery_ride_id = ?
+      `,
+      [String(request_id)],
+    );
+    businessRows = rows || [];
+  }
+
+  const businesses = [
+    ...new Set(businessRows.map((r) => r.business_id).filter(Boolean)),
+  ];
+
+  businesses.forEach((bid) => {
+    io.to(merchantRoom(String(bid))).emit("deliveryDriverAccepted", {
+      request_id: String(request_id),
+      batch_id,
+      job_type,
+      stage: "accepted",
+      orders: businessRows
+        .filter((r) => String(r.business_id) === String(bid))
+        .map((r) => r.order_id),
+    });
+  });
+
+  console.log("[merchant notify] driver accepted", {
+    request_id,
+    batch_id,
+    job_type,
+    businesses,
+  });
+}
+
 async function emitMerchantDriverArrived({ io, conn, request_id }) {
   const redis = getRedis();
   let job_type = "SINGLE";

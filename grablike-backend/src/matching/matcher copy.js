@@ -52,7 +52,7 @@ async function discoverCandidates({
   cityId,
   serviceType, // can be service_code
   pickup,
-  steps = [1000, 2000, 3000, 4000, 5000], // 1km → 5km
+  steps = [5000, 10000, 20000, 30000, 50000],
   count = 25,
 }) {
   const [lat, lng] = pickup;
@@ -73,13 +73,13 @@ async function discoverCandidates({
           "ASC",
           "COUNT",
           count,
-          "WITHCOORD",
+          "WITHCOORD"
         );
       } catch (e) {
         // Legacy Redis fallback
         console.warn(
           "[discoverCandidates] geosearch failed, fallback to georadius",
-          e.message,
+          e.message
         );
 
         const legacy = await redis.georadius(
@@ -91,7 +91,7 @@ async function discoverCandidates({
           "WITHCOORD",
           "ASC",
           "COUNT",
-          count,
+          count
         );
 
         res = legacy;
@@ -110,18 +110,127 @@ async function discoverCandidates({
   return [];
 }
 
-// ----- offerNext is kept as a stub for backward compatibility -----
+// ----- offerNext (sequential offer flow) -----
 async function offerNext(io, rideId, ttlSec = 15) {
-  console.warn("[matcher] offerNext is deprecated; broadcast mode active");
-  // No operation – sequential offers are no longer used
+  const state = await redis.hget(rideHash(rideId), "state");
+  if (state !== "searching") return;
+
+  const cur = await redis.get(rideCurrent(rideId));
+  if (cur) return;
+
+  const nextDriver = await redis.lpop(rideCand(rideId));
+  if (!nextDriver) {
+    await redis.hset(rideHash(rideId), { state: "no_drivers" });
+    io.to(`ride:${rideId}`).emit("ride:status", { state: "no_drivers" });
+    await offerAdapter.markNoDrivers({ rideId });
+    return;
+  }
+
+  await redis.set(rideCurrent(rideId), nextDriver, "EX", ttlSec);
+
+  const expireAt = new Date(Date.now() + ttlSec * 1000);
+  try {
+    await offerAdapter.setOffer({ rideId, driverId: nextDriver, expireAt });
+  } catch (e) {
+    console.warn("[matcher.setOffer] DB write failed:", e.message);
+  }
+
+  const ride = await redis.hgetall(rideHash(rideId));
+
+  // Normalize fare to units for emission
+  let fareOut;
+  if (ride.fare != null && ride.fare !== "") {
+    const n = Number(ride.fare);
+    if (Number.isFinite(n)) fareOut = n;
+  } else if (ride.fare_cents != null && ride.fare_cents !== "") {
+    const c = Number(ride.fare_cents);
+    if (Number.isFinite(c)) fareOut = c / 100;
+  } else if (ride.base_fare != null && ride.base_fare !== "") {
+    const b = Number(ride.base_fare);
+    if (Number.isFinite(b)) fareOut = b;
+  }
+
+  // Convert stored strings back to proper shapes
+  const pickupArr = ride.pickup ? JSON.parse(ride.pickup) : undefined;
+  const dropoffArr = ride.dropoff ? JSON.parse(ride.dropoff) : undefined;
+
+  let waypoints = [];
+  try {
+    waypoints = ride.waypoints_json ? JSON.parse(ride.waypoints_json) : [];
+  } catch {
+    waypoints = [];
+  }
+
+  const stops_count = Number(ride.stops_count || 0);
+
+  const job_type = ride.job_type || "SINGLE";
+  const batch_id =
+    ride.batch_id != null && ride.batch_id !== ""
+      ? Number(ride.batch_id)
+      : null;
+
+  io.to(`driver:${nextDriver}`).emit("jobRequest", {
+    request_id: rideId,
+    passenger_id: ride.passenger_id,
+
+    pickup: pickupArr,
+    dropoff: dropoffArr,
+    pickup_place: ride.pickup_place || "",
+    dropoff_place: ride.dropoff_place || "",
+
+    // NEW: stops
+    waypoints, // [{lat,lng,address}]
+    stops_count, // integer
+
+    // driver-facing summary
+    distance_m: Number(ride.distance_m || 0),
+    distance_km: Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10,
+    eta_min: Math.round(Number(ride.duration_s || 0) / 60),
+
+    // ✅ emit the real fare now
+    fare: fareOut ?? 0,
+
+    // meta
+    cityId: ride.cityId,
+    serviceType: ride.serviceType,
+    service_code: ride.service_code,
+    trip_type: ride.trip_type || "instant",
+    offer_code: ride.offer_code || null,
+    payment_method: ride.payment_method
+      ? JSON.parse(ride.payment_method)
+      : null,
+
+    // NEW: pool/meta passthroughs
+    booking_id: ride.booking_id || null,
+    seats: ride.seats ? Number(ride.seats) : undefined,
+
+    // NEW: delivery meta (normal rides will just be SINGLE / null)
+    job_type,
+    batch_id,
+  });
+
+  setTimeout(async () => {
+    const still = await redis.get(rideCurrent(rideId));
+    const st = await redis.hget(rideHash(rideId), "state");
+
+    if (st === "searching" && still === nextDriver) {
+      await redis.sadd(rideRejected(rideId), nextDriver);
+      await redis.del(rideCurrent(rideId));
+      await offerAdapter.reopenRequested({ rideId });
+
+      io.to(`driver:${nextDriver}`).emit("jobRequestCancelled", {
+        request_id: rideId,
+        reason: "timeout",
+      });
+
+      offerNext(io, rideId, ttlSec);
+    }
+  }, ttlSec * 1000);
 }
 
 // ----- matcher object -----
 export const matcher = {
-  /**
-   * Request a ride – now broadcasts to all nearby drivers at once.
-   * Stores ride details and emits jobRequest to every driver found within expanding radius.
-   */
+  // ✅ Accept fare / fare_cents + waypoints + seats + booking_id from caller and store as-is
   async requestRide({
     io,
     cityId,
@@ -142,60 +251,84 @@ export const matcher = {
     pool_batch_id,
     payment_method,
     offer_code,
+
+    // NEW:
     waypoints, // array of {lat,lng,address} or {latitude,longitude,address}
     seats, // for pool
     booking_id, // for pool
-    merchant_id, // optional for merchant-notify flows
+
+    // optional: for merchant-notify flows (normal rides can ignore)
+    merchant_id,
+
+    // optional meta, mostly used in delivery but harmless here
     job_type = "SINGLE",
     batch_id = null,
     preferred_driver_id = null,
   }) {
     const wps = normalizeWaypoints(waypoints);
 
-    // Store ride details with state "broadcasted"
     await redis.hset(rideHash(rideId), {
-      state: "broadcasted", // was "searching"
+      state: "searching",
+
       cityId: cityId || "thimphu",
+
+      // keep both: label + canonical code
       serviceType: serviceType || service_code,
       service_code: service_code || serviceType,
+
+      // store points as JSON strings
       pickup: JSON.stringify(pickup),
       dropoff: JSON.stringify(dropoff),
       pickup_place: pickup_place || "",
       dropoff_place: dropoff_place || "",
+
       distance_m: Number.isFinite(Number(distance_m)) ? Number(distance_m) : 0,
       duration_s: Number.isFinite(Number(duration_s)) ? Number(duration_s) : 0,
+
+      // ✅ store exactly what we received
       fare: fare != null ? String(fare) : "",
       fare_cents: fare_cents != null ? String(fare_cents) : "",
       base_fare: base_fare != null ? String(base_fare) : "",
+
       passenger_id: passenger_id || "",
       trip_type: trip_type || "instant",
       pool_batch_id: pool_batch_id || "",
+
       payment_method: payment_method ? JSON.stringify(payment_method) : "",
       offer_code: offer_code ?? "",
+
+      // merchant (optional, used for notifications)
       merchant_id: merchant_id != null ? String(merchant_id) : "",
+
+      // NEW: stops
       waypoints_json: wps.length ? JSON.stringify(wps) : "[]",
       stops_count: wps.length,
+
+      // NEW: pool additions
       seats:
         seats != null ? String(Math.max(1, Math.trunc(Number(seats)))) : "",
       booking_id: booking_id != null ? String(booking_id) : "",
+
+      // NEW: delivery meta (will usually be SINGLE / empty for normal rides)
       job_type: job_type || "SINGLE",
       batch_id: batch_id != null ? String(batch_id) : "",
     });
 
-    // Discover nearby drivers
+    // For discovery we use the canonical service_code as the geo key "serviceType"
     const candidates = await discoverCandidates({
       cityId,
       serviceType: service_code || serviceType,
       pickup,
     });
 
-    // Prioritize preferred driver if provided
+    // priority driver first (reserved driver)
     let finalCandidates = candidates;
     if (
       preferred_driver_id != null &&
       String(preferred_driver_id).trim() !== ""
     ) {
       const pref = String(preferred_driver_id);
+      // put preferred first even if not in nearby list
       const rest = candidates.filter((id) => String(id) !== pref);
       finalCandidates = [pref, ...rest];
     }
@@ -204,80 +337,21 @@ export const matcher = {
       await redis.hset(rideHash(rideId), { state: "no_drivers" });
       await offerAdapter.markNoDrivers({ rideId });
       console.log(
-        `[matcher.requestRide] rideId=${rideId} no drivers found, cancelling`,
+        `[matcher.requestRide] rideId=${rideId} no drivers found, cancelling`
       );
       return { rideId, state: "no_drivers" };
     }
 
-    // Broadcast to all drivers immediately (no sequential queue)
-    const ride = await redis.hgetall(rideHash(rideId));
+    const pipe = redis.multi();
+    finalCandidates.forEach((id) => pipe.rpush(rideCand(rideId), id));
+    await pipe.exec();
 
-    // Normalize fare for emission
-    let fareOut;
-    if (ride.fare != null && ride.fare !== "") {
-      const n = Number(ride.fare);
-      if (Number.isFinite(n)) fareOut = n;
-    } else if (ride.fare_cents != null && ride.fare_cents !== "") {
-      const c = Number(ride.fare_cents);
-      if (Number.isFinite(c)) fareOut = c / 100;
-    } else if (ride.base_fare != null && ride.base_fare !== "") {
-      const b = Number(ride.base_fare);
-      if (Number.isFinite(b)) fareOut = b;
-    }
-
-    // Parse stored fields
-    const pickupArr = ride.pickup ? JSON.parse(ride.pickup) : undefined;
-    const dropoffArr = ride.dropoff ? JSON.parse(ride.dropoff) : undefined;
-    let waypointsStored = [];
-    try {
-      waypointsStored = ride.waypoints_json
-        ? JSON.parse(ride.waypoints_json)
-        : [];
-    } catch {
-      waypointsStored = [];
-    }
-    const stops_count = Number(ride.stops_count || 0);
-    const jobType = ride.job_type || "SINGLE";
-    const batchId =
-      ride.batch_id != null && ride.batch_id !== ""
-        ? Number(ride.batch_id)
-        : null;
-
-    // Emit to every driver
-    finalCandidates.forEach((driverId) => {
-      io.to(`driver:${driverId}`).emit("jobRequest", {
-        request_id: rideId,
-        passenger_id: ride.passenger_id,
-        pickup: pickupArr,
-        dropoff: dropoffArr,
-        pickup_place: ride.pickup_place || "",
-        dropoff_place: ride.dropoff_place || "",
-        waypoints: waypointsStored,
-        stops_count,
-        distance_m: Number(ride.distance_m || 0),
-        distance_km:
-          Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10,
-        eta_min: Math.round(Number(ride.duration_s || 0) / 60),
-        fare: fareOut ?? 0,
-        cityId: ride.cityId,
-        serviceType: ride.serviceType,
-        service_code: ride.service_code,
-        trip_type: ride.trip_type || "instant",
-        offer_code: ride.offer_code || null,
-        payment_method: ride.payment_method
-          ? JSON.parse(ride.payment_method)
-          : null,
-        booking_id: ride.booking_id || null,
-        seats: ride.seats ? Number(ride.seats) : undefined,
-        job_type: jobType,
-        batch_id: batchId,
-      });
-    });
+    await offerNext(io, rideId);
 
     return {
       rideId,
-      state: "broadcasted",
-      candidates: finalCandidates.length,
+      state: "searching",
+      candidates: candidates.length,
       pickup,
       dropoff,
       pickup_place,
@@ -285,7 +359,7 @@ export const matcher = {
       distance_m,
       duration_s,
       fare,
-      payment_method,
+      // echo stops so caller can debug
       stops_count: wps.length,
     };
   },
@@ -402,8 +476,8 @@ export const matcher = {
       fare != null && Number(fare) >= 0
         ? Number(fare)
         : fare_cents != null
-          ? Number(fare_cents) / 100
-          : Number(base_fare || 0);
+        ? Number(fare_cents) / 100
+        : Number(base_fare || 0);
 
     // stops structure for the frontend driver app
     const stops = [
@@ -493,23 +567,23 @@ export const matcher = {
     return { count: targets.length, targets, state: "broadcasted" };
   },
 
-  /**
-   * Accept an offer – works for both broadcast and legacy sequential modes.
-   */
   async acceptOffer({ io, rideId, driverId }) {
     const rideKey = rideHash(rideId);
     const ride = await redis.hgetall(rideKey);
     const state = ride?.state || null;
 
+    // Two modes:
+    //  - normal (sequential)   → check rideCurrent
+    //  - broadcasted deliveries → first driver wins via Redis lock
     if (state === "broadcasted") {
       const lockKey = `ride:${rideId}:lock`;
       const lockRes = await redis.set(lockKey, driverId, "NX", "EX", 30);
       if (!lockRes) {
+        // someone else already accepted
         return { ok: false, reason: "already_taken" };
       }
       await redis.hset(rideKey, { state: "assigned", driver: driverId });
     } else {
-      // Fallback for any remaining sequential rides (should not happen now)
       const cur = await redis.get(rideCurrent(rideId));
       if (cur !== driverId) return { ok: false, reason: "not_current" };
       await redis.hset(rideKey, { state: "assigned", driver: driverId });
@@ -518,9 +592,11 @@ export const matcher = {
 
     await offerAdapter.finalizeOnAccept({ rideId });
 
+    // Notify passenger + driver (existing behaviour)
     io.to(`ride:${rideId}`).emit("match:found", { driverId });
     io.to(`driver:${driverId}`).emit("offer:confirmed", { request_id: rideId });
 
+    // NEW: notify merchant if present (for delivery-style flows)
     const merchantId = ride?.merchant_id || ride?.merchantId;
     if (merchantId) {
       const payload = {
@@ -533,42 +609,31 @@ export const matcher = {
         serviceType: ride?.serviceType || null,
       };
 
-      // call deliveryAccepted for merchant notification flows
       io.to(`merchant:${merchantId}`).emit("deliveryAccepted", payload);
       console.log(
         "[matcher.acceptOffer] notified merchant room:",
         `merchant:${merchantId}`,
         "payload:",
-        payload,
+        payload
       );
     }
 
     return { ok: true };
   },
 
-  /**
-   * Reject an offer – for broadcasted rides, we simply ignore (no further action).
-   */
   async rejectOffer({ io, rideId, driverId }) {
-    const rideKey = rideHash(rideId);
-    const ride = await redis.hgetall(rideKey);
-    const state = ride?.state;
-
-    // Broadcasted rides: rejection does not affect others
-    if (state === "broadcasted") {
-      // Optionally track rejection, but no need to call offerNext
-      return { ok: true };
-    }
-
-    // Legacy sequential mode (unused now, but kept for safety)
     await redis.sadd(rideRejected(rideId), driverId);
+
     const cur = await redis.get(rideCurrent(rideId));
     if (cur === driverId) await redis.del(rideCurrent(rideId));
+
     await offerAdapter.reopenRequested({ rideId });
+
     io.to(`driver:${driverId}`).emit("jobRequestCancelled", {
       request_id: rideId,
       reason: "reject",
     });
+
     await offerNext(io, rideId);
     return { ok: true };
   },

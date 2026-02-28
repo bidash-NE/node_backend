@@ -36,8 +36,7 @@ export function makeChatUploadRouter(publicBase = "grablike/uploads") {
   // POST /chat/upload  (form field: "file")
   router.post("/upload", upload.single("file"), (req, res) => {
     try {
-      if (!req.file)
-        return res.status(400).json({ ok: false, error: "no_file" });
+      if (!req.file) return res.status(400).json({ ok: false, error: "no_file" });
       const rel = path.posix.join("chat", req.file.filename);
       const url = `${publicBase.replace(/\/+$/, "")}/${rel}`; // e.g. /uploads/chat/xxx.jpg
       return res.json({ ok: true, url });

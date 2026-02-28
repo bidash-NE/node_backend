@@ -22,7 +22,7 @@ export const presence = {
     const member = toStr(driverId);
 
     // ✅ store geo + online sets under FULL serviceCode (e.g. D1234)
-    const codeKey = (serviceCode || serviceType || "default").toString();
+    const codeKey = (serviceCode || serviceType ).toString();
     const key = geoKey(cityId, codeKey);          // geo:drivers:city:thimphu:D1234
     const hkey = driverHash(member);
     const oset = onlineSet(cityId, codeKey);      // online:drivers:city:thimphu:D1234
@@ -80,8 +80,7 @@ export const presence = {
     const codeKey = (
       meta.serviceCode ||
       meta.service_code ||
-      serviceType ||
-      "default"
+      serviceType 
     ).toString();
 
     const key = geoKey(cityId, codeKey);
@@ -105,7 +104,7 @@ export const presence = {
     }
 
     const member = toStr(driverId);
-    const codeKey = (serviceCode || serviceType || "default").toString();
+    const codeKey = (serviceCode || serviceType).toString();
     const key = geoKey(cityId, codeKey);
     const hkey = driverHash(member);
 
