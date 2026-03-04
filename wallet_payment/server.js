@@ -15,7 +15,16 @@ const app = express();
 
 /* ─────────────────── Middleware ─────────────────── */
 app.use(helmet()); // Security headers
-app.use(cors({ origin: "*", methods: ["GET", "POST", "PUT", "DELETE"] }));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
+
+// make sure preflight always succeeds
+app.options("*", cors());
 app.use(express.json());
 app.use(morgan("dev"));
 app.set("trust proxy", 1);
