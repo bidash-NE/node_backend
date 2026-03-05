@@ -24,7 +24,7 @@ app.use(
 );
 
 // make sure preflight always succeeds
-app.options("*", cors());
+app.options(/.*/, cors());
 app.use(express.json());
 app.use(morgan("dev"));
 app.set("trust proxy", 1);
