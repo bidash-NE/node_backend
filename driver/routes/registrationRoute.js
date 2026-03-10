@@ -36,13 +36,13 @@ const registerLimiter = makeLimiter({
 });
 
 const loginLimiter = makeLimiter({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 2 * 60 * 1000, // 2 min
   max: 20,
   message: "Too many login attempts. Please try again later.",
 });
 
 const logoutLimiter = makeLimiter({
-  windowMs: 5 * 60 * 1000, // 5 min
+  windowMs: 2 * 60 * 1000, // 2 min
   max: 60,
   message: "Too many requests. Please slow down.",
 });
