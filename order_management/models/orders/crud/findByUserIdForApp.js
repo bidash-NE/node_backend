@@ -1,4 +1,3 @@
-// models/orders/crud/findByUserIdForApp.js
 const {
   db,
   ensureStatusReasonSupport,
@@ -9,9 +8,23 @@ const {
 } = require("../helpers");
 
 module.exports = async function findByUserIdForApp(
-  user_id,
-  service_type = null,
+  dbOrUserId,
+  maybeUserIdOrServiceType = null,
+  maybeServiceType = null,
 ) {
+  const conn =
+    dbOrUserId && typeof dbOrUserId.query === "function" ? dbOrUserId : db;
+
+  const user_id =
+    dbOrUserId && typeof dbOrUserId.query === "function"
+      ? Number(maybeUserIdOrServiceType)
+      : Number(dbOrUserId);
+
+  const service_type =
+    dbOrUserId && typeof dbOrUserId.query === "function"
+      ? maybeServiceType
+      : maybeUserIdOrServiceType;
+
   const hasReason = await ensureStatusReasonSupport();
   const hasService = await ensureServiceTypeSupport();
   const extras = await ensureDeliveryExtrasSupport();
@@ -23,7 +36,7 @@ module.exports = async function findByUserIdForApp(
     params.push(service_type);
   }
 
-  const [orders] = await db.query(
+  const [orders] = await conn.query(
     `
     SELECT
       o.order_id,
@@ -46,6 +59,10 @@ module.exports = async function findByUserIdForApp(
       ${extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"},
       ${extras.hasPhotoList ? "o.delivery_photo_urls" : "NULL AS delivery_photo_urls"},
 
+      o.delivery_batch_id,
+      o.delivery_ride_id,
+      o.delivery_driver_id,
+
       o.note_for_restaurant,
       o.if_unavailable,
       o.estimated_arrivial_time,
@@ -66,7 +83,7 @@ module.exports = async function findByUserIdForApp(
 
   const orderIds = orders.map((o) => o.order_id);
 
-  const [items] = await db.query(
+  const [items] = await conn.query(
     `
     SELECT
       order_id,
@@ -98,13 +115,12 @@ module.exports = async function findByUserIdForApp(
     if (Number.isFinite(bid) && bid > 0) businessIdsSet.add(bid);
   }
 
-  // business address/lat/lng lookup (safe)
   const businessMap = new Map();
   const bizIds = Array.from(businessIdsSet);
 
   if (bizIds.length) {
     try {
-      const [colsRows] = await db.query(
+      const [colsRows] = await conn.query(
         `
         SELECT COLUMN_NAME
           FROM INFORMATION_SCHEMA.COLUMNS
@@ -148,7 +164,7 @@ module.exports = async function findByUserIdForApp(
         ? `m.\`${lngCandidates[0]}\``
         : "NULL";
 
-      const [bizRows] = await db.query(
+      const [bizRows] = await conn.query(
         `
         SELECT
           m.business_id,
@@ -207,7 +223,7 @@ module.exports = async function findByUserIdForApp(
     let st = o.service_type || null;
     if (!st) {
       try {
-        st = await resolveOrderServiceType(o.order_id, db);
+        st = await resolveOrderServiceType(o.order_id, conn);
       } catch {}
     }
 
@@ -247,6 +263,12 @@ module.exports = async function findByUserIdForApp(
       updated_at: o.updated_at,
       if_unavailable: o.if_unavailable || null,
       estimated_arrivial_time: o.estimated_arrivial_time || null,
+
+      delivery_batch_id:
+        o.delivery_batch_id != null ? o.delivery_batch_id : null,
+      delivery_ride_id: o.delivery_ride_id != null ? o.delivery_ride_id : null,
+      delivery_driver_id:
+        o.delivery_driver_id != null ? o.delivery_driver_id : null,
 
       business_details: primaryBiz
         ? {

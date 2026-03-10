@@ -1058,16 +1058,6 @@ async function getOrdersForUser(req, res) {
         .json({ success: false, message: "Invalid user_id" });
     }
 
-    if (typeof findByUserIdForAppDb !== "function")
-      throw new Error(
-        "findByUserIdForApp() model function not found/exported.",
-      );
-
-    let data =
-      findByUserIdForAppDb.length >= 2
-        ? await findByUserIdForAppDb(db, userId)
-        : await findByUserIdForAppDb(userId);
-
     const qs = String(req.query?.service_type || "").trim();
     if (qs) {
       const st = qs.toUpperCase();
@@ -1077,9 +1067,32 @@ async function getOrdersForUser(req, res) {
           message: "Invalid service_type filter. Allowed: FOOD, MART",
         });
       }
-      data = Array.isArray(data)
-        ? data.filter((o) => String(o.service_type || "").toUpperCase() === st)
-        : [];
+    }
+
+    if (typeof findByUserIdForAppDb !== "function")
+      throw new Error(
+        "findByUserIdForApp() model function not found/exported.",
+      );
+
+    let data;
+    if (findByUserIdForAppDb.length >= 3) {
+      data = await findByUserIdForAppDb(
+        db,
+        userId,
+        qs ? qs.toUpperCase() : null,
+      );
+    } else if (findByUserIdForAppDb.length >= 2) {
+      data = await findByUserIdForAppDb(userId, qs ? qs.toUpperCase() : null);
+    } else {
+      data = await findByUserIdForAppDb(userId);
+      if (qs) {
+        const st = qs.toUpperCase();
+        data = Array.isArray(data)
+          ? data.filter(
+              (o) => String(o.service_type || "").toUpperCase() === st,
+            )
+          : [];
+      }
     }
 
     res.json({ success: true, data });
