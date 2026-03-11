@@ -10,7 +10,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
   const router = express.Router();
 
   // GET driver details using driverId /api/driver_id?driverId=12
-  router.get("/:driver_id", async (req, res) => {
+  router.get("/driver_id", async (req, res) => {
     try {
       const raw = req.query.driverId;
       const driverId = Number(raw);
@@ -58,7 +58,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
     }
   });
   // GET /api/driver-id?userId=123
-  router.get("/:driver-id", async (req, res) => {
+  router.get("/driver-id", async (req, res) => {
     try {
       const raw = req.query.userId;
       const userId = Number(raw);
