@@ -38,7 +38,7 @@ const RATING_COLUMN = "rating";
 
 /* ---------------------- Wallet config ---------------------- */
 const PLATFORM_WALLET_ID = (
-  process.env.PLATFORM_WALLET_ID || "TD00000001"
+  process.env.PLATFORM_WALLET_ID || "NET000001"
 ).trim();
 const WALLET_TBL = "wallet_transactions";
 const WALLETS_TBL = "wallets";
@@ -2202,6 +2202,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       const cM = await mysqlPool.getConnection();
       try {
         await emitMerchantOnRoad({ io, conn: cM, request_id });
+        await emitPassengerOnRoad({ io, conn: cM, request_id });
       } finally {
         cM.release();
       }
@@ -2900,4 +2901,83 @@ async function emitMerchantOnRoad({ io, conn, request_id }) {
     job_type,
     businesses,
   });
+}
+
+async function emitMerchantDelivered({ io, conn, request_id }) {
+  const redis = getRedis();
+  let job_type = "SINGLE";
+  let batch_id = null;
+
+  try {
+    const h = await redis.hgetall(rideHash(String(request_id)));
+    if (h?.job_type) job_type = String(h.job_type).toUpperCase();
+    if (h?.batch_id != null && h.batch_id !== "") {
+      const bn = Number(h.batch_id);
+      if (Number.isFinite(bn)) batch_id = bn;
+    }
+  } catch {}
+
+  let businessRows = [];
+
+  if (batch_id != null) {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders
+      WHERE delivery_batch_id = ?
+      `,
+      [batch_id],
+    );
+    businessRows = rows || [];
+  } else {
+    const [rows] = await conn.query(
+      `
+      SELECT DISTINCT business_id, order_id
+      FROM orders WHERE delivery_ride_id = ?
+      `,
+      [String(request_id)],
+    );
+    businessRows = rows || [];
+  }
+
+  const businesses = [
+    ...new Set(businessRows.map((r) => r.business_id).filter(Boolean)),
+  ];
+
+  businesses.forEach((bid) => {
+    io.to(merchantRoom(String(bid))).emit("deliveryDelivered", {
+      request_id: String(request_id),
+      batch_id,
+      job_type,
+      stage: "delivered",
+      orders: businessRows
+        .filter((r) => String(r.business_id) === String(bid))
+        .map((r) => r.order_id),
+    });
+  });
+
+  console.log("[merchant notify] delivered", {
+    request_id,
+    batch_id,
+    job_type,
+    businesses,
+  });
+}
+
+async function emitPassengerOnRoad({ io, conn, request_id }) {
+  try {
+    const [[ride]] = await conn.query(
+      `SELECT passenger_id, batch_id FROM orders WHERE delivery_ride_id = ?`,
+      [request_id],
+    );
+
+    if (ride?.passenger_id) {
+      io.to(passengerRoom(ride.passenger_id)).emit("onRoad", {
+        request_id,
+        batch_id: ride.batch_id, // now included
+      });
+    }
+  } catch (error) {
+    console.error("Failed to emit passenger onRoad event:", error);
+  }
 }
