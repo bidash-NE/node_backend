@@ -670,22 +670,44 @@ async function completeAndArchiveDeliveredOrder(
     }
 
     // merchant_earnings snapshot (safe + idempotent)
+    // merchant_earnings snapshot (safe + idempotent)
     try {
       const deliveredAt = order?.delivered_at
         ? new Date(order.delivered_at)
         : new Date();
+
       const primaryBiz = items?.[0]?.business_id
         ? Number(items[0].business_id)
         : null;
+
       if (primaryBiz) {
+        const totalAmount = Number(order?.total_amount || 0);
+        const platformFeeTotal = Number(order?.platform_fee || 0);
+
+        const USER_SHARE = Number(process.env.PLATFORM_USER_SHARE ?? 0.5);
+        const safeUserShare =
+          Number.isFinite(USER_SHARE) && USER_SHARE >= 0 && USER_SHARE <= 1
+            ? USER_SHARE
+            : 0.5;
+
+        const platform_fee_user = Number(
+          (platformFeeTotal * safeUserShare).toFixed(2),
+        );
+
+        const merchantEarningAmount = Number(
+          (totalAmount - platform_fee_user).toFixed(2),
+        );
+
         await insertMerchantEarningWithConn(conn, {
           business_id: primaryBiz,
           order_id,
-          total_amount: 0,
+          total_amount: merchantEarningAmount > 0 ? merchantEarningAmount : 0,
           dateObj: deliveredAt,
         });
       }
-    } catch {}
+    } catch (e) {
+      console.error("[merchant_earnings insert failed]", e?.message || e);
+    }
 
     // food_mart_revenue snapshot (safe + idempotent)
     try {
