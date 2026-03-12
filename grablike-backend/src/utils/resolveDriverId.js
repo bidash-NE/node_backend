@@ -78,23 +78,46 @@ export async function resolveDriverDetailsFromOrderBatchedIds(db, { batchId }) {
       conn = await db.getConnection(); // assume it's a pool
     }
 
-    const [[row]] = await conn.query(
-      `SELECT o.delivery_driver_id, d.user_id FROM orders o
-       JOIN drivers d ON d.driver_id = o.delivery_driver_id
-       WHERE o.batch_id = ? LIMIT 1`,
+    // First, get the driver_id from the orders table for this batch
+    // Use LIMIT 1 because all orders in a batch share the same driver
+    const [[orderRow]] = await conn.query(
+      `SELECT delivery_driver_id FROM orders WHERE batch_id = ? LIMIT 1`,
       [batchId],
     );
 
-    if (!row) return null;
+    if (!orderRow || !orderRow.delivery_driver_id) return null;
 
-    const [[userDetails]] = await conn.query(
-      "SELECT * FROM users WHERE user_id = ? LIMIT 1",
-      [row.user_id],
+    const driverId = orderRow.delivery_driver_id;
+
+    // Get driver and user details, plus average rating and count
+    const [[driverInfo]] = await conn.query(
+      `SELECT 
+          d.driver_id,
+          d.user_id,
+          u.*,
+          (SELECT ROUND(AVG(rating), 1) FROM ride_ratings WHERE driver_id = d.driver_id) AS avg_rating,
+          (SELECT COUNT(*) FROM ride_ratings WHERE driver_id = d.driver_id) AS rating_count
+       FROM drivers d
+       JOIN users u ON u.user_id = d.user_id
+       WHERE d.driver_id = ?`,
+      [driverId],
     );
 
+    if (!driverInfo) return null;
+
+    // Return user details and rating info (rename avg_rating to rating for consistency)
     return {
-      driver_id: String(row.delivery_driver_id),
-      user_details: userDetails,
+      driver_id: String(driverInfo.driver_id),
+      user_details: {
+        ...driverInfo,
+        // Remove fields that are not part of user table if necessary
+        driver_id: undefined,
+        user_id: driverInfo.user_id,
+        avg_rating: undefined, // we'll add rating below
+        rating_count: undefined,
+      },
+      rating: driverInfo.avg_rating,
+      rating_count: driverInfo.rating_count,
     };
   } finally {
     // Only release if we acquired the connection ourselves

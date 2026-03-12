@@ -223,6 +223,9 @@ export default function makeDriverLookupRouter(mysqlPool) {
         return res.json({
           ok: true,
           details: result.user_details || null,
+          driver_id: result.driver_id,
+          rating: result.rating,
+          comment: result.comment,
         });
       } finally {
         try {
