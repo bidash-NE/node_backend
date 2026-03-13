@@ -125,10 +125,7 @@ export function makeChatListRouter(mysqlPool) {
    */
   router.get("/rides/driver/chat-list", async (req, res) => {
     const driverId = Number(req.query.driver_id || 0);
-    const limit = Math.min(
-      200,
-      Math.max(1, Number(req.query.limit || 50))
-    );
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
 
     if (!driverId) {
       return res.status(400).json({
@@ -158,7 +155,7 @@ export function makeChatListRouter(mysqlPool) {
         ORDER BY COALESCE(completed_at, started_at, accepted_at, requested_at) DESC
         LIMIT ?
       `,
-        [driverId, limit]
+        [driverId, limit],
       );
 
       const threads = [];
@@ -198,49 +195,41 @@ export function makeChatListRouter(mysqlPool) {
    */
   router.get("/rides/passenger/chat-list", async (req, res) => {
     const passengerId = Number(req.query.passenger_id || 0);
-    const limit = Math.min(
-      200,
-      Math.max(1, Number(req.query.limit || 50))
-    );
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
 
     if (!passengerId) {
-      return res.status(400).json({
-        ok: false,
-        error: "passenger_id_required",
-      });
+      return res
+        .status(400)
+        .json({ ok: false, error: "passenger_id_required" });
     }
 
     let conn;
     try {
       conn = await mysqlPool.getConnection();
 
-      // Pull recent rides for this passenger
       const [rows] = await conn.query(
         `
-        SELECT
-          ride_id,
-          driver_id,
-          passenger_id,
-          requested_at,
-          accepted_at,
-          arrived_pickup_at,
-          started_at,
-          completed_at
-        FROM rides
-        WHERE passenger_id = ?
-        ORDER BY COALESCE(completed_at, started_at, accepted_at, requested_at) DESC
-        LIMIT ?
+      SELECT DISTINCT
+        r.ride_id,
+        r.driver_id,
+        r.passenger_id,
+        r.requested_at,
+        r.accepted_at,
+        r.arrived_pickup_at,
+        r.started_at,
+        r.completed_at
+      FROM rides r
+      LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
+      WHERE r.passenger_id = ? OR o.user_id = ?
+      ORDER BY COALESCE(r.completed_at, r.started_at, r.accepted_at, r.requested_at) DESC
+      LIMIT ?
       `,
-        [passengerId, limit]
+        [passengerId, passengerId, limit],
       );
 
       const threads = [];
       for (const row of rows) {
-        const summary = await buildThreadSummary(
-          row,
-          "passenger",
-          passengerId
-        );
+        const summary = await buildThreadSummary(row, "passenger", passengerId);
         if (summary) threads.push(summary);
       }
 
@@ -258,10 +247,7 @@ export function makeChatListRouter(mysqlPool) {
       });
     } catch (e) {
       console.error("[chatList ERROR] /rides/passenger/chat-list", e);
-      return res.status(500).json({
-        ok: false,
-        error: "server_error",
-      });
+      return res.status(500).json({ ok: false, error: "server_error" });
     } finally {
       try {
         conn?.release();
@@ -274,10 +260,7 @@ export function makeChatListRouter(mysqlPool) {
    */
   router.get("/rides/merchant/chat-list", async (req, res) => {
     const merchantId = Number(req.query.merchant_id || 0);
-    const limit = Math.min(
-      200,
-      Math.max(1, Number(req.query.limit || 50))
-    );
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
 
     if (!merchantId) {
       return res.status(400).json({
@@ -307,7 +290,7 @@ export function makeChatListRouter(mysqlPool) {
         ORDER BY COALESCE(r.completed_at, r.started_at, r.accepted_at, r.requested_at) DESC
         LIMIT ?
       `,
-        [merchantId, limit]
+        [merchantId, limit],
       );
 
       const threads = [];
