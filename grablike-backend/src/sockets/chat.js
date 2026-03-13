@@ -72,13 +72,12 @@ function logEmit(io, room, evt, payload, extra = "") {
 async function ensureRideMembership(mysqlPool, rideId, socket) {
   const conn = await mysqlPool.getConnection();
   try {
-    // Query to get driver_id, all passenger_ids (from orders.user_id),
-    // and all merchant_ids (from orders.business_id) for this ride.
+    // Correct query: merchant_ids come from orders.business_id, not rides.passenger_id
     const [[row]] = await conn.query(
       `SELECT 
           r.driver_id,
           GROUP_CONCAT(DISTINCT o.user_id) AS passenger_ids,
-          GROUP_CONCAT(DISTINCT r.passenger_id) AS merchant_ids
+          GROUP_CONCAT(DISTINCT o.business_id) AS merchant_ids
        FROM rides r
        LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
        WHERE r.ride_id = ?
@@ -120,11 +119,11 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
         ok: true,
         role: "driver",
         selfId,
-        otherId: null, // no single other – multiple participants
+        otherId: null,
       };
     }
 
-    // --- Passenger check (customer) ---
+    // --- Passenger check (customer from orders) ---
     if (role === "passenger") {
       const allowedPassengerIds = (row.passenger_ids || "")
         .split(",")
@@ -145,7 +144,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
       };
     }
 
-    // --- Merchant check ---
+    // --- Merchant check (business from orders) ---
     if (role === "merchant") {
       const allowedMerchantIds = (row.merchant_ids || "")
         .split(",")
