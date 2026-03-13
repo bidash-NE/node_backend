@@ -72,63 +72,96 @@ function logEmit(io, room, evt, payload, extra = "") {
 async function ensureRideMembership(mysqlPool, rideId, socket) {
   const conn = await mysqlPool.getConnection();
   try {
+    // Query to get driver_id, all passenger_ids (from orders.user_id),
+    // and all merchant_ids (from orders.business_id) for this ride.
     const [[row]] = await conn.query(
-      `SELECT r.driver_id, r.passenger_id, MAX(o.business_id) AS merchant_id
+      `SELECT 
+          r.driver_id,
+          GROUP_CONCAT(DISTINCT o.user_id) AS passenger_ids,
+          GROUP_CONCAT(DISTINCT r.passenger_id) AS merchant_ids
        FROM rides r
        LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
        WHERE r.ride_id = ?
-       GROUP BY r.driver_id, r.passenger_id`,
+       GROUP BY r.driver_id`,
       [rideId],
     );
-    if (!row) return { ok: false, reason: "ride_not_found" };
+
+    if (!row) {
+      console.warn(`[chat SEC] ride:${rideId} not found`);
+      return { ok: false, reason: "ride_not_found" };
+    }
 
     const role = socket.data?.role;
+    const selfIdRaw =
+      role === "driver"
+        ? socket.data?.driver_id
+        : role === "passenger"
+          ? socket.data?.passenger_id
+          : role === "merchant"
+            ? socket.data?.merchant_id
+            : null;
+
+    if (!selfIdRaw) {
+      console.warn(`[chat SEC] ride:${rideId} missing selfId for role ${role}`);
+      return { ok: false, reason: "missing_identity" };
+    }
+
+    const selfId = Number(selfIdRaw);
+
+    // --- Driver check ---
     if (role === "driver") {
-      const did = Number(socket.data?.driver_id);
-      if (!did || Number(row.driver_id) !== did) {
+      if (!selfId || Number(row.driver_id) !== selfId) {
         console.warn(
-          `[chat SEC] ride:${rideId} not_member_driver (did=${did}, row.did=${row.driver_id})`,
+          `[chat SEC] ride:${rideId} not_member_driver (did=${selfId}, expected=${row.driver_id})`,
         );
         return { ok: false, reason: "not_member_driver" };
       }
       return {
         ok: true,
         role: "driver",
-        selfId: did,
-        otherId: Number(row.passenger_id) || null,
+        selfId,
+        otherId: null, // no single other – multiple participants
       };
     }
+
+    // --- Passenger check (customer) ---
     if (role === "passenger") {
-      const pid = String(socket.data?.passenger_id);
-      const allowedIds = (row.passenger_ids || "")
+      const allowedPassengerIds = (row.passenger_ids || "")
         .split(",")
-        .map((id) => id.trim());
-      if (!pid || !allowedIds.includes(pid)) {
+        .map((id) => Number(id.trim()))
+        .filter((id) => !isNaN(id));
+
+      if (!allowedPassengerIds.includes(selfId)) {
         console.warn(
-          `[chat SEC] ride:${rideId} not_member_passenger (pid=${pid}, allowed=${allowedIds})`,
+          `[chat SEC] ride:${rideId} not_member_passenger (pid=${selfId}, allowed=${allowedPassengerIds})`,
         );
         return { ok: false, reason: "not_member_passenger" };
       }
       return {
         ok: true,
         role: "passenger",
-        selfId: pid,
+        selfId,
         otherId: Number(row.driver_id) || null,
       };
     }
 
+    // --- Merchant check ---
     if (role === "merchant") {
-      const mid = String(socket.data?.merchant_id);
-      const allowedIds = (row.merchant_ids || "")
+      const allowedMerchantIds = (row.merchant_ids || "")
         .split(",")
-        .map((id) => id.trim());
-      if (!mid || !allowedIds.includes(mid)) {
+        .map((id) => Number(id.trim()))
+        .filter((id) => !isNaN(id));
+
+      if (!allowedMerchantIds.includes(selfId)) {
+        console.warn(
+          `[chat SEC] ride:${rideId} not_member_merchant (mid=${selfId}, allowed=${allowedMerchantIds})`,
+        );
         return { ok: false, reason: "not_member_merchant" };
       }
       return {
         ok: true,
         role: "merchant",
-        selfId: mid,
+        selfId,
         otherId: Number(row.driver_id) || null,
       };
     }
@@ -138,9 +171,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
     );
     return { ok: false, reason: "unknown_role" };
   } finally {
-    try {
-      conn.release();
-    } catch {}
+    conn.release();
   }
 }
 
