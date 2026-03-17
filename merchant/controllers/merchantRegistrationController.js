@@ -171,7 +171,6 @@ async function updateMerchant(req, res) {
       return res.status(400).json({ error: "Invalid businessId" });
     }
 
-    // Fetch the current details of the business
     const [rows] = await db.query(
       `SELECT license_image, business_logo FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
       [business_id],
@@ -185,7 +184,6 @@ async function updateMerchant(req, res) {
     const f = req.files || {};
     const b = req.body || {};
 
-    // Handle file paths (license_image, business_logo)
     const newLicenseImage = f.license_image?.[0]
       ? toRelPath(f.license_image[0])
       : fromBodyToStoredPath(b.license_image);
@@ -193,7 +191,6 @@ async function updateMerchant(req, res) {
       ? toRelPath(f.business_logo[0])
       : fromBodyToStoredPath(b.business_logo);
 
-    // Prepare the update payload
     const updatePayload = {};
     [
       "business_name",
@@ -203,8 +200,8 @@ async function updateMerchant(req, res) {
       "owner_type",
       "opening_time",
       "closing_time",
-      "special_celebration", // Include special_celebration in the update payload
-      "special_celebration_discount_percentage", // Include special_celebration_discount_percentage in the update payload
+      "special_celebration",
+      "special_celebration_discount_percentage",
     ].forEach((k) => {
       if (b[k] !== undefined)
         updatePayload[k] =
@@ -224,20 +221,28 @@ async function updateMerchant(req, res) {
       updatePayload.longitude = b.longitude === "" ? null : Number(b.longitude);
     }
 
-    // 🔹 allow merchant to update min_amount_for_fd
-    // empty string => 0 (feature off)
-    if (typeof b.min_amount_for_fd !== "undefined") {
-      const raw = String(b.min_amount_for_fd).trim();
-      updatePayload.min_amount_for_fd = raw === "" ? 0 : Number(raw);
-    }
-
-    // Holidays field (passed as a comma-separated string or an array)
+    // Handle holidays field (array of days)
     if (b.holidays !== undefined) {
-      updatePayload.holidays = Array.isArray(b.holidays)
-        ? b.holidays
-        : String(b.holidays)
-            .split(",")
-            .map((s) => s.trim());
+      // Validate holidays field as an array of valid days
+      const validDays = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+      ];
+      let holidays = [];
+      if (Array.isArray(b.holidays)) {
+        holidays = b.holidays.filter((day) => validDays.includes(day)); // Filter valid days
+      } else if (typeof b.holidays === "string") {
+        holidays = b.holidays
+          .split(",")
+          .map((s) => s.trim())
+          .filter((day) => validDays.includes(day)); // Filter valid days from comma-separated string
+      }
+      updatePayload.holidays = JSON.stringify(holidays); // Store as a valid JSON string
     }
 
     if (b.business_type_ids !== undefined)
@@ -254,7 +259,6 @@ async function updateMerchant(req, res) {
     // Update the merchant details in the database
     const out = await updateMerchantDetailsModel(business_id, updatePayload);
 
-    // Delete replaced images from the file system
     const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
     const isUploadsPath = (p) =>
       typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
