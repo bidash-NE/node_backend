@@ -171,18 +171,21 @@ async function updateMerchant(req, res) {
       return res.status(400).json({ error: "Invalid businessId" });
     }
 
+    // Fetch the current details of the business
     const [rows] = await db.query(
       `SELECT license_image, business_logo FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
       [business_id],
     );
     if (!rows.length)
       return res.status(404).json({ error: "Business not found" });
+
     const oldLicense = rows[0].license_image || null;
     const oldLogo = rows[0].business_logo || null;
 
     const f = req.files || {};
     const b = req.body || {};
 
+    // Handle file paths (license_image, business_logo)
     const newLicenseImage = f.license_image?.[0]
       ? toRelPath(f.license_image[0])
       : fromBodyToStoredPath(b.license_image);
@@ -190,6 +193,7 @@ async function updateMerchant(req, res) {
       ? toRelPath(f.business_logo[0])
       : fromBodyToStoredPath(b.business_logo);
 
+    // Prepare the update payload
     const updatePayload = {};
     [
       "business_name",
@@ -227,11 +231,15 @@ async function updateMerchant(req, res) {
       updatePayload.min_amount_for_fd = raw === "" ? 0 : Number(raw);
     }
 
+    // Holidays field (passed as a comma-separated string or an array)
     if (b.holidays !== undefined) {
       updatePayload.holidays = Array.isArray(b.holidays)
         ? b.holidays
-        : String(b.holidays);
+        : String(b.holidays)
+            .split(",")
+            .map((s) => s.trim());
     }
+
     if (b.business_type_ids !== undefined)
       updatePayload.business_type_ids = b.business_type_ids;
     if (b.business_types !== undefined) {
@@ -243,9 +251,10 @@ async function updateMerchant(req, res) {
             .filter(Boolean);
     }
 
+    // Update the merchant details in the database
     const out = await updateMerchantDetailsModel(business_id, updatePayload);
 
-    // delete replaced images
+    // Delete replaced images from the file system
     const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
     const isUploadsPath = (p) =>
       typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));

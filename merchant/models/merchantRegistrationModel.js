@@ -21,7 +21,7 @@ async function mapTypeNamesToIds(names) {
   const [rows] = await db.query(
     `SELECT id, name FROM business_types
        WHERE LOWER(name) IN (${trimmed.map(() => "LOWER(?)").join(",")})`,
-    trimmed
+    trimmed,
   );
   return rows.map((r) => r.id);
 }
@@ -32,7 +32,7 @@ async function filterValidTypeIds(typeIds) {
     `SELECT id FROM business_types WHERE id IN (${typeIds
       .map(() => "?")
       .join(",")})`,
-    typeIds
+    typeIds,
   );
   const valid = new Set(rows.map((r) => r.id));
   return typeIds.filter((id) => valid.has(id));
@@ -101,20 +101,20 @@ async function registerMerchantModel(data) {
     }
     if (!incomingIds.length)
       throw new Error(
-        "At least one business type is required (provide business_type_ids)."
+        "At least one business type is required (provide business_type_ids).",
       );
 
     // Duplicate checks
     const [emailDup] = await conn.query(
       `SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`,
-      [email]
+      [email],
     );
     if (emailDup.length)
       throw new Error("Email already exists. Please use another email.");
 
     const [phoneDup] = await conn.query(
       `SELECT user_id FROM users WHERE phone = ? LIMIT 1`,
-      [phone]
+      [phone],
     );
     if (phoneDup.length)
       throw new Error("Phone number already exists. Please use another phone.");
@@ -131,11 +131,11 @@ async function registerMerchantModel(data) {
          AND LOWER(TRIM(mbd.owner_type)) = LOWER(TRIM(?))
        LIMIT 1
       `,
-      [user_name, role, ownerType]
+      [user_name, role, ownerType],
     );
     if (scopedUserDup.length) {
       throw new Error(
-        "Username already exists for this owner type. Choose another username or change owner_type."
+        "Username already exists for this owner type. Choose another username or change owner_type.",
       );
     }
 
@@ -144,7 +144,7 @@ async function registerMerchantModel(data) {
     const [uRes] = await conn.query(
       `INSERT INTO users (user_name, email, phone, cid, password_hash, role, is_active)
        VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [user_name, email, phone, cidStr, password_hash, role]
+      [user_name, email, phone, cidStr, password_hash, role],
     );
     const user_id = uRes.insertId;
 
@@ -177,7 +177,7 @@ async function registerMerchantModel(data) {
         minFD,
         special_celebration || null, // Ensure to include special_celebration
         special_celebration_discount_percentage || null, // Ensure to include special_celebration_discount_percentage
-      ]
+      ],
     );
     const business_id = mbdRes.insertId;
 
@@ -187,7 +187,7 @@ async function registerMerchantModel(data) {
     const values = validTypeIds.map((tid) => [business_id, tid]);
     await conn.query(
       `INSERT INTO merchant_business_types (business_id, business_type_id) VALUES ?`,
-      [values]
+      [values],
     );
 
     // Bank details
@@ -201,7 +201,7 @@ async function registerMerchantModel(data) {
         account_holder_name,
         account_number,
         bank_qr_code_image || null,
-      ]
+      ],
     );
 
     await conn.commit();
@@ -226,14 +226,17 @@ async function updateMerchantDetailsModel(business_id, data) {
   const conn = await db.getConnection();
   await conn.beginTransaction();
   try {
+    // Check if the business exists
     const [exists] = await conn.query(
       `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-      [business_id]
+      [business_id],
     );
     if (!exists.length) throw new Error("Business not found");
 
     const sets = [];
     const params = [];
+
+    // Helper to conditionally add columns to the update query
     const setIfProvided = (col, val, tx = (v) => v) => {
       if (val !== undefined) {
         sets.push(`${col} = ?`);
@@ -246,17 +249,17 @@ async function updateMerchantDetailsModel(business_id, data) {
     setIfProvided("business_license_number", data.business_license_number);
     setIfProvided("license_image", data.license_image);
     setIfProvided("latitude", data.latitude, (v) =>
-      v === "" || v === null ? null : Number(v)
+      v === "" || v === null ? null : Number(v),
     );
     setIfProvided("longitude", data.longitude, (v) =>
-      v === "" || v === null ? null : Number(v)
+      v === "" || v === null ? null : Number(v),
     );
     setIfProvided("address", data.address);
     setIfProvided("business_logo", data.business_logo);
     setIfProvided("delivery_option", data.delivery_option);
     setIfProvided(
       "owner_type",
-      data.owner_type ? String(data.owner_type).toLowerCase() : undefined
+      data.owner_type ? String(data.owner_type).toLowerCase() : undefined,
     );
     setIfProvided("opening_time", data.opening_time);
     setIfProvided("closing_time", data.closing_time);
@@ -265,46 +268,41 @@ async function updateMerchantDetailsModel(business_id, data) {
     setIfProvided("special_celebration", data.special_celebration);
     setIfProvided(
       "special_celebration_discount_percentage",
-      data.special_celebration_discount_percentage
+      data.special_celebration_discount_percentage,
     );
 
-    // 🔹 update free-delivery threshold (0 = disabled)
+    // Update free-delivery threshold (0 = disabled)
     setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (v) => {
       if (v === "" || v == null) return 0;
       return Number(v);
     });
 
+    // Handle holidays field (array of days)
     if (data.holidays !== undefined) {
       let arr = [];
-      if (Array.isArray(data.holidays)) arr = data.holidays;
-      else if (typeof data.holidays === "string") {
-        try {
-          const maybe = JSON.parse(data.holidays);
-          arr = Array.isArray(maybe)
-            ? maybe
-            : String(data.holidays)
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-        } catch {
-          arr = String(data.holidays)
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-        }
+      if (Array.isArray(data.holidays)) {
+        arr = data.holidays; // If holidays is already an array
+      } else if (typeof data.holidays === "string") {
+        // If holidays is a string, split by commas and trim spaces
+        arr = String(data.holidays)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
       }
       sets.push(`holidays = ?`);
-      params.push(JSON.stringify(arr));
+      params.push(JSON.stringify(arr)); // Convert array to JSON string
     }
 
+    // Execute the update query
     if (sets.length) {
       const sql = `UPDATE merchant_business_details SET ${sets.join(
-        ", "
+        ", ",
       )}, updated_at = CURRENT_TIMESTAMP WHERE business_id = ?`;
       params.push(business_id);
       await conn.query(sql, params);
     }
 
+    // Update business type associations
     let incomingIds = toIdArray(data.business_type_ids);
     if (
       !incomingIds.length &&
@@ -321,13 +319,13 @@ async function updateMerchantDetailsModel(business_id, data) {
       const validIds = await filterValidTypeIds(incomingIds);
       await conn.query(
         `DELETE FROM merchant_business_types WHERE business_id = ?`,
-        [business_id]
+        [business_id],
       );
       if (validIds.length) {
         const values = validIds.map((tid) => [business_id, tid]);
         await conn.query(
           `INSERT INTO merchant_business_types (business_id, business_type_id) VALUES ?`,
-          [values]
+          [values],
         );
       }
     }
@@ -357,7 +355,7 @@ async function findCandidatesByEmail(email) {
      WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
      ORDER BY user_id DESC
     `,
-    [em]
+    [em],
   );
   return rows || [];
 }
@@ -393,7 +391,7 @@ async function getOwnersByKind(kind) {
           AND LOWER(bt.types) = ?
      )
      ORDER BY mbd.business_name ASC`,
-    [k]
+    [k],
   );
 
   if (!bizRows.length) return [];
@@ -409,7 +407,7 @@ async function getOwnersByKind(kind) {
       WHERE mbt.business_id IN (${ph})
         AND LOWER(bt.types) = ?
       ORDER BY bt.name ASC`,
-    [...ids, k]
+    [...ids, k],
   );
 
   const typesByBiz = new Map();
@@ -430,7 +428,7 @@ async function getOwnersByKind(kind) {
      FROM ${ratingsTable}
      WHERE business_id IN (${ph})
      GROUP BY business_id`,
-    ids
+    ids,
   );
 
   const ratingsByBiz = new Map();
