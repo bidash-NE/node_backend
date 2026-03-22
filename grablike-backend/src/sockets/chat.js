@@ -76,7 +76,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
     const [[row]] = await conn.query(
       `SELECT 
           r.driver_id,
-          GROUP_CONCAT(DISTINCT o.user_id) AS passenger_ids,
+          GROUP_CONCAT(DISTINCT r.passenger_id) AS passenger_ids,
           GROUP_CONCAT(DISTINCT o.business_id) AS merchant_ids
        FROM rides r
        LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
@@ -129,6 +129,8 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
         .split(",")
         .map((id) => Number(id.trim()))
         .filter((id) => !isNaN(id));
+
+      console.log("allowedPassenger: ", allowedPassengerIds);
 
       if (!allowedPassengerIds.includes(selfId)) {
         console.warn(
