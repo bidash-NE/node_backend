@@ -16,17 +16,14 @@ app.set("trust proxy", 1); // if behind proxy (k8s / nginx)
 
 // ✅ Proper CORS Configuration
 const corsOptions = {
-  origin: "*", // 🔥 change to frontend domain in production
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], // ✅ PATCH added
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true,
 };
 
-// Apply CORS
 app.use(cors(corsOptions));
 
-// ✅ Handle preflight explicitly (VERY IMPORTANT)
-app.options("*", cors(corsOptions));
+// ✅ FIXED VERSION (no crash)
 
 // Body parser
 app.use(express.json());
