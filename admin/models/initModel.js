@@ -141,17 +141,45 @@ async function initAdminLogsTable() {
       DEFAULT CHARSET=utf8mb4
       COLLATE=utf8mb4_unicode_ci;
   `;
+  /* =======================================================
+   6. CONTACT / INQUIRY TABLE (from "Send us a message")
+======================================================= */
+  const sqlContactMessages = `
+  CREATE TABLE IF NOT EXISTS contact_messages (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
+    full_name       VARCHAR(255) NOT NULL,
+
+    contact_type    ENUM('email','phone') NOT NULL DEFAULT 'email',
+    contact_value   VARCHAR(255) NOT NULL,   -- email or phone
+
+    user_type       VARCHAR(100) DEFAULT NULL, 
+    -- e.g. Merchant / business owner, Driver, Customer
+
+    message         TEXT NOT NULL,
+
+    status          ENUM('new','read','replied') DEFAULT 'new',
+
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (id),
+    KEY idx_contact_type (contact_type),
+    KEY idx_user_type (user_type),
+    KEY idx_status (status),
+    KEY idx_created_at (created_at)
+  ) ENGINE=InnoDB
+    DEFAULT CHARSET=utf8mb4
+    COLLATE=utf8mb4_unicode_ci;
+`;
   try {
     await db.query(sqlLogs);
     await db.query(sqlCollaborators);
     await db.query(sqlNotifications);
     await db.query(sqlAppRatings);
     await db.query(sqlPointConversionRule);
-
-    console.log(
-      "✔️ admin_logs, admin_collaborators, system_notifications, app_ratings, and point_conversion_rule tables are ready"
-    );
+    await db.query(sqlContactMessages);
+    console.log("✔️ All admin tables + contact_messages table are ready");
   } catch (err) {
     console.error("❌ Error initializing admin tables:", err);
   }

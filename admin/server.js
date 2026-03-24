@@ -34,6 +34,7 @@ const systemNotificationRoute = require("./routes/systemNotificationRoute");
 const appRatingRoutes = require("./routes/appRatingRoutes");
 const pointSystemRoutes = require("./routes/pointSystemRoutes");
 const userPointConversionRoutes = require("./routes/userPointConversionRoutes");
+const contactRoutes = require("./routes/contactMessageRoutes");
 
 // User point conversion routes
 
@@ -45,7 +46,7 @@ app.use("/api/app-ratings", appRatingRoutes);
 app.use("/api/admin-collaborators", adminCollaboratorRoutes); // 👈 NEW
 app.use("/api/points", pointSystemRoutes);
 app.use("/api/user", userPointConversionRoutes);
-
+app.use("/api/contact-messages", contactRoutes);
 // Healthcheck
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
