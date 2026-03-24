@@ -17,7 +17,7 @@ const app = express();
 const corsOptions = {
   origin: "*", // 🔥 change to your frontend domain in production
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-api-key"], // ✅ FIX
 };
 
 // Apply CORS globally
