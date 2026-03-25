@@ -9,6 +9,11 @@ import {
   driverHash,
 } from "./redisKeys.js";
 import { presence } from "./presence.js";
+import {
+  getPushTokensByDriverIds,
+  getPushTokensByUserIds,
+} from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 const getRedis =
   redisMod.getRedis ?? (redisMod.default && redisMod.default.getRedis);
@@ -490,6 +495,34 @@ export const matcher = {
       });
     }
 
+    // ----- PUSH NOTIFICATIONS FOR DRIVERS -----
+    if (targets.length) {
+      // Fetch push tokens for all driver IDs
+      const pushTokens = await getPushTokensByDriverIds(targets);
+      if (pushTokens.length) {
+        const notificationMessage = {
+          title: "New Ride Request",
+          body: `Pickup: ${pickup_place || "Your location"} – ${Math.round(
+            (distance_m || 0) / 1000,
+          )} km`,
+          data: {
+            type: "ride_request",
+            rideId,
+            pickup: JSON.stringify(pickup),
+            dropoff: JSON.stringify(dropoff),
+            fare: fareOut,
+            // Include any other data needed to open the ride screen
+          },
+        };
+        sendPushToTokens(pushTokens, notificationMessage).catch((err) => {
+          console.error(
+            "[matcher.broadcastRide] Push notification error:",
+            err,
+          );
+        });
+      }
+    }
+
     return { count: targets.length, targets, state: "broadcasted" };
   },
 
@@ -541,6 +574,26 @@ export const matcher = {
         "payload:",
         payload,
       );
+    }
+
+    // ----- PUSH NOTIFICATION FOR PASSENGER -----
+    const passengerId = ride?.passenger_id;
+    if (passengerId) {
+      const passengerTokens = await getPushTokensByUserIds([passengerId]);
+      if (passengerTokens.length) {
+        const notificationMessage = {
+          title: "Ride Accepted",
+          body: `Driver ${driverId} is on the way to pick you up.`,
+          data: {
+            type: "ride_accepted",
+            rideId,
+            driverId,
+          },
+        };
+        sendPushToTokens(passengerTokens, notificationMessage).catch((err) => {
+          console.error("[matcher.acceptOffer] Passenger push error:", err);
+        });
+      }
     }
 
     return { ok: true };
