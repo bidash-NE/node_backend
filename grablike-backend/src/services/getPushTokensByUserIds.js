@@ -30,7 +30,7 @@ export async function getPushTokensByUserIds(userIds) {
   const placeholders = userIds.map(() => "?").join(",");
   const sql = `
     SELECT device_id
-    FROM user_devices
+    FROM all_device_ids
     WHERE user_id IN (${placeholders})
       AND device_id IS NOT NULL
       AND device_id != ''
