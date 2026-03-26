@@ -1,5 +1,5 @@
 // src/db/mysql.js
-import { mysqlPool } from "./mysql.js";
+import { mysqlPool } from "../db/mysql.js";
 
 /**
  * Get user IDs for a list of driver IDs.
