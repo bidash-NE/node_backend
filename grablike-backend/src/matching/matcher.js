@@ -9,10 +9,7 @@ import {
   driverHash,
 } from "./redisKeys.js";
 import { presence } from "./presence.js";
-import {
-  getPushTokensByDriverIds,
-  getPushTokensByUserIds,
-} from "../services/getPushTokensByUserIds.js";
+import { getPushTokensByDriverIds, getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
 import { sendPushToTokens } from "../services/push.js";
 
 const getRedis =
@@ -126,6 +123,7 @@ export const matcher = {
   /**
    * Request a ride – now broadcasts to all nearby drivers at once.
    * Stores ride details and emits jobRequest to every driver found within expanding radius.
+   * Also sends push notifications to all those drivers.
    */
   async requestRide({
     io,
@@ -228,6 +226,8 @@ export const matcher = {
     } else if (ride.base_fare != null && ride.base_fare !== "") {
       const b = Number(ride.base_fare);
       if (Number.isFinite(b)) fareOut = b;
+    } else {
+      fareOut = 0;
     }
 
     // Parse stored fields
@@ -248,7 +248,7 @@ export const matcher = {
         ? Number(ride.batch_id)
         : null;
 
-    // Emit to every driver
+    // Emit to every driver via Socket.IO
     finalCandidates.forEach((driverId) => {
       io.to(`driver:${driverId}`).emit("jobRequest", {
         request_id: rideId,
@@ -279,6 +279,31 @@ export const matcher = {
       });
     });
 
+    // ---- PUSH NOTIFICATIONS FOR DRIVERS (added) ----
+    if (finalCandidates.length) {
+      const distanceKm = Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10;
+      const pushTokens = await getPushTokensByDriverIds(finalCandidates);
+      console.log("[matcher.requestRide] Push tokens for drivers:", pushTokens);
+
+      if (pushTokens.length) {
+        const notificationMessage = {
+          title: "New Ride Request",
+          body: `Pickup: ${ride.pickup_place || "Your location"} – ${distanceKm} km`,
+          data: {
+            type: "ride_request",
+            rideId,
+            pickup: ride.pickup,        // JSON string; app can parse
+            dropoff: ride.dropoff,
+            fare: fareOut,
+            // Include any other data needed to open the ride screen
+          },
+        };
+        sendPushToTokens(pushTokens, notificationMessage).catch((err) => {
+          console.error("[matcher.requestRide] Push notification error:", err);
+        });
+      }
+    }
+
     return {
       rideId,
       state: "broadcasted",
@@ -301,6 +326,8 @@ export const matcher = {
    *   job_type = "SINGLE" | "BATCH"
    *   batch_id = BIGINT or null
    *   drops[] = multiple customer orders for batch jobs
+   *
+   * Also sends push notifications to drivers.
    */
   async broadcastRide({
     io,
@@ -450,7 +477,7 @@ export const matcher = {
     }
 
     // ------------------------------------
-    // Send to each driver
+    // Send to each driver (Socket.IO)
     // ------------------------------------
     const targets = [];
 
@@ -497,16 +524,16 @@ export const matcher = {
 
     // ----- PUSH NOTIFICATIONS FOR DRIVERS -----
     if (targets.length) {
-      console.log("Target Drivers: ", targets);
       // Fetch push tokens for all driver IDs
       const pushTokens = await getPushTokensByDriverIds(targets);
-      console.log("Driver Push tokens: ", pushTokens);
+      console.log("[matcher.broadcastRide] Push tokens for drivers:", pushTokens);
+
       if (pushTokens.length) {
         const notificationMessage = {
           title: "New Ride Request",
-          body: `Pickup: ${pickup_place || "Your location"} – ${Math.round(
-            (distance_m || 0) / 1000,
-          )} km`,
+          body: `Pickup: ${pickup_place || "Your location"} – ${
+            Math.round((distance_m || 0) / 1000)
+          } km`,
           data: {
             type: "ride_request",
             rideId,
@@ -517,10 +544,7 @@ export const matcher = {
           },
         };
         sendPushToTokens(pushTokens, notificationMessage).catch((err) => {
-          console.error(
-            "[matcher.broadcastRide] Push notification error:",
-            err,
-          );
+          console.error("[matcher.broadcastRide] Push notification error:", err);
         });
       }
     }
@@ -530,6 +554,7 @@ export const matcher = {
 
   /**
    * Accept an offer – works for both broadcast and legacy sequential modes.
+   * Sends push notification to passenger when ride is accepted.
    */
   async acceptOffer({ io, rideId, driverId }) {
     const rideKey = rideHash(rideId);
