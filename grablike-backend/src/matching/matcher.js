@@ -497,8 +497,10 @@ export const matcher = {
 
     // ----- PUSH NOTIFICATIONS FOR DRIVERS -----
     if (targets.length) {
+      console.log("Target Drivers: ", targets);
       // Fetch push tokens for all driver IDs
       const pushTokens = await getPushTokensByDriverIds(targets);
+      console.log("Driver Push tokens: ", pushTokens);
       if (pushTokens.length) {
         const notificationMessage = {
           title: "New Ride Request",
