@@ -51,6 +51,7 @@ import pricingRoutes from "./routes/pricing.route.js";
 import financeRoutes from "./routes/finance.routes.js";
 import refundRoutes from "./routes/refund.routes.js";
 import driverSettlementRoutes from "./routes/drivers.settlement.routes.js";
+import makeCustomerLookupRouter from "./routes/customerLookUp.js";
 
 const app = express();
 
@@ -80,6 +81,7 @@ app.use("/api", ridesTypesRouter);
 app.use("/api/rides/locations", locationsRouter);
 app.use("/api/places", places);
 app.use("/api", makeDriverLookupRouter(mysqlPool));
+app.use("/api", makeCustomerLookupRouter(mysqlPool));
 app.use("/api/tips", tipsRouter(mysqlPool));
 app.use("/api", userDetailsLookup(mysqlPool));
 app.use("/driver/delivery", driverDeliveryRoutes);
