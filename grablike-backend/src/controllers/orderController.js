@@ -1,6 +1,8 @@
 // src/controllers/orderController.js
 import { getPool } from "../config/mysql.js";
 import { attachOrderToBatch, recomputeBatchStatus } from "../services/deliveryBatchService.js";
+import { getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 /**
  * Create order for FOOD or MART.
@@ -150,6 +152,19 @@ export async function createOrder(req, res) {
     const batchId = await attachOrderToBatch(svcType, orderId);
     if (batchId) {
       await recomputeBatchStatus(batchId);
+    }
+
+    // Push to customer confirming order placement
+    if (user_id) {
+      getPushTokensByUserIds([user_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Order Placed",
+            body: "Your order has been placed and is being prepared.",
+            data: { type: "order_placed", order_id: orderId, batch_id: batchId },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
     }
 
     return res.json({

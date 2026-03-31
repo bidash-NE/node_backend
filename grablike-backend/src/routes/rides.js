@@ -1,6 +1,8 @@
 import express from "express";
 import { withConn } from "../db/mysql.js";
 import { computeFareCents } from "../utils/fare.js";
+import { getPushTokensByUserIds, getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 export const ridesRouter = express.Router();
 
@@ -35,8 +37,21 @@ ridesRouter.post("/driver/ride/:id/accept", async (req, res) => {
         );
       }
       await conn.commit();
-      return { status: 200, body: { ok: true } };
+      return { status: 200, body: { ok: true }, passenger_id: ride.passenger_id };
     });
+
+    if (result.status === 200 && result.passenger_id) {
+      getPushTokensByUserIds([result.passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Driver Accepted",
+            body: "Your driver is on the way to pick you up.",
+            data: { type: "ride_accepted", ride_id: id, driver_id: String(driver_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     return res.status(result.status).json(result.body);
   } catch (e) {
     console.error(e);
@@ -48,12 +63,30 @@ ridesRouter.post("/driver/ride/:id/accept", async (req, res) => {
 ridesRouter.post("/driver/ride/:id/arrived", async (req, res) => {
   const { id } = req.params;
   try {
-    await withConn(async (conn) => {
-      await conn.query(
+    const passenger_id = await withConn(async (conn) => {
+      const [upd] = await conn.query(
         "UPDATE rides SET status='arrived_pickup', arrived_pickup_at=UTC_TIMESTAMP() WHERE ride_id=? AND status IN ('accepted','arrived_pickup')",
         [id]
       );
+      if (upd.affectedRows > 0) {
+        const [[ride]] = await conn.query("SELECT passenger_id FROM rides WHERE ride_id=?", [id]);
+        return ride?.passenger_id ?? null;
+      }
+      return null;
     });
+
+    if (passenger_id) {
+      getPushTokensByUserIds([passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Driver Arrived",
+            body: "Your driver has arrived at the pickup point.",
+            data: { type: "driver_arrived", ride_id: id },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -65,12 +98,30 @@ ridesRouter.post("/driver/ride/:id/arrived", async (req, res) => {
 ridesRouter.post("/driver/ride/:id/start", async (req, res) => {
   const { id } = req.params;
   try {
-    await withConn(async (conn) => {
-      await conn.query(
+    const passenger_id = await withConn(async (conn) => {
+      const [upd] = await conn.query(
         "UPDATE rides SET status='started', started_at=UTC_TIMESTAMP() WHERE ride_id=? AND status IN ('arrived_pickup','started')",
         [id]
       );
+      if (upd.affectedRows > 0) {
+        const [[ride]] = await conn.query("SELECT passenger_id FROM rides WHERE ride_id=?", [id]);
+        return ride?.passenger_id ?? null;
+      }
+      return null;
     });
+
+    if (passenger_id) {
+      getPushTokensByUserIds([passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Trip Started",
+            body: "Your trip is underway. Hang tight!",
+            data: { type: "trip_started", ride_id: id },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -81,6 +132,7 @@ ridesRouter.post("/driver/ride/:id/start", async (req, res) => {
 // Complete trip (compute a dummy fare and upsert earnings)
 ridesRouter.post("/driver/ride/:id/complete", async (req, res) => {
   const { id } = req.params;
+  let driverIdForPush, passengerIdForPush, earningsCentsForPush;
   try {
     await withConn(async (conn) => {
       await conn.beginTransaction();
@@ -118,7 +170,38 @@ ridesRouter.post("/driver/ride/:id/complete", async (req, res) => {
         cents.other_adj_cents, cents.platform_fee_cents, cents.tax_cents
       ]);
       await conn.commit();
+      driverIdForPush = ride.driver_id;
+      passengerIdForPush = ride.passenger_id;
+      earningsCentsForPush = cents;
     });
+
+    if (passengerIdForPush) {
+      getPushTokensByUserIds([passengerIdForPush]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "You've Arrived",
+            body: "Your trip has been completed. Thank you for riding!",
+            data: { type: "trip_completed", ride_id: id },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    if (driverIdForPush) {
+      const driverEarned = earningsCentsForPush
+        ? ((earningsCentsForPush.base_cents + earningsCentsForPush.distance_cents + earningsCentsForPush.time_cents) / 100).toFixed(2)
+        : "0.00";
+      getPushTokensByDriverIds([driverIdForPush]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Trip Completed",
+            body: `Trip complete! You earned Nu ${driverEarned}.`,
+            data: { type: "trip_completed", ride_id: id },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);

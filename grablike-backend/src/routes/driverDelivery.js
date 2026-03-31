@@ -3,7 +3,9 @@ import express from "express";
 import matcher from "../matching/matcher.js";
 import { rideHash } from "../matching/redisKeys.js";
 import * as redisMod from "../matching/redis.js";
-import { mysqlPool } from "../db/mysql.js"; // 👈 use your pool
+import { mysqlPool } from "../db/mysql.js";
+import { getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 const getRedis =
   redisMod.getRedis ?? (redisMod.default && redisMod.default.getRedis);
@@ -197,6 +199,24 @@ router.post("/pickup", async (req, res) => {
     if (job_type === "BATCH" && batch_id) {
       try {
         await markBatchPickedUp(batch_id);
+
+        // Push to all customers in this batch: order is on the way
+        const [batchOrders] = await mysqlPool.query(
+          `SELECT DISTINCT user_id FROM orders WHERE delivery_batch_id = ? AND user_id IS NOT NULL`,
+          [batch_id]
+        );
+        const customerIds = batchOrders.map((r) => r.user_id).filter(Boolean);
+        if (customerIds.length) {
+          getPushTokensByUserIds(customerIds).then((tokens) => {
+            if (tokens.length) {
+              sendPushToTokens(tokens, {
+                title: "Order On The Way",
+                body: "Your order has been picked up and is on the way!",
+                data: { type: "order_picked_up", ride_id: String(rideId), batch_id },
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
       } catch (e) {
         console.error(
           "[driverDelivery.pickup] markBatchPickedUp error:",
@@ -261,6 +281,27 @@ router.post("/deliver", async (req, res) => {
         "[driverDelivery.deliver] markOrderDelivered error:",
         e?.message || e
       );
+    }
+
+    // Push to the customer that their order was delivered
+    try {
+      const [[orderRow]] = await mysqlPool.query(
+        `SELECT user_id FROM orders WHERE order_id = ? LIMIT 1`,
+        [String(orderId)]
+      );
+      if (orderRow?.user_id) {
+        getPushTokensByUserIds([orderRow.user_id]).then((tokens) => {
+          if (tokens.length) {
+            sendPushToTokens(tokens, {
+              title: "Order Delivered",
+              body: "Your order has been delivered. Enjoy!",
+              data: { type: "order_delivered", order_id: String(orderId), ride_id: String(rideId) },
+            }).catch(() => {});
+          }
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.warn("[driverDelivery.deliver] push notify error:", e?.message || e);
     }
 
     const io = req.app.get("io");
@@ -445,7 +486,7 @@ router.post("/drop-stage", async (req, res) => {
 
     const [[order]] = await conn.query(
       `
-      SELECT order_id, status, delivery_status, delivery_ride_id, delivery_driver_id, business_id
+      SELECT order_id, status, delivery_status, delivery_ride_id, delivery_driver_id, business_id, user_id
         FROM orders
        WHERE order_id = ?
        LIMIT 1
@@ -528,6 +569,19 @@ router.post("/drop-stage", async (req, res) => {
       }
     } catch (e) {
       console.warn("[notify] drop-stage notify error:", e?.message || e);
+    }
+
+    // Push to customer when their order is delivered
+    if (newStatus === "DELIVERED" && order?.user_id) {
+      getPushTokensByUserIds([order.user_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Order Delivered",
+            body: "Your order has been delivered. Enjoy!",
+            data: { type: "order_delivered", order_id: String(order_id), delivery_ride_id: String(delivery_ride_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
     }
 
     return res.json({
