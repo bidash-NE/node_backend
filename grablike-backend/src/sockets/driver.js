@@ -1125,11 +1125,12 @@ export function initDriverSocket(io, mysqlPool) {
                 stage: "arrived_pickup",
               };
               io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
-              if (passenger_id)
-                io.to(passengerRoom(passenger_id)).emit(
-                  "bookingStageUpdate",
-                  msg,
-                );
+              if (passenger_id) {
+                io.to(passengerRoom(passenger_id)).emit("bookingStageUpdate", msg);
+                getPushTokensByUserIds([passenger_id]).then((tokens) => {
+                  if (tokens.length) sendPushToTokens(tokens, { title: "Driver Arrived", body: "Your driver has arrived at your pickup point.", data: { type: "driver_arrived", ride_id: String(rideId), booking_id: String(bkId) } }).catch(() => {});
+                }).catch(() => {});
+              }
               return ok({ info: "idempotent" });
             }
             await conn.rollback();
@@ -1179,8 +1180,19 @@ export function initDriverSocket(io, mysqlPool) {
             stage: "arrived_pickup",
           };
           io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
-          if (passenger_id)
+          if (passenger_id) {
             io.to(passengerRoom(passenger_id)).emit("bookingStageUpdate", msg);
+
+            getPushTokensByUserIds([passenger_id]).then((tokens) => {
+              if (tokens.length) {
+                sendPushToTokens(tokens, {
+                  title: "Driver Arrived",
+                  body: "Your driver has arrived at your pickup point.",
+                  data: { type: "driver_arrived", ride_id: String(rideId), booking_id: String(bkId) },
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+          }
 
           ok();
         } catch (e) {
@@ -1313,8 +1325,19 @@ export function initDriverSocket(io, mysqlPool) {
             stage: "started",
           };
           io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
-          if (passenger_id)
+          if (passenger_id) {
             io.to(passengerRoom(passenger_id)).emit("bookingStageUpdate", msg);
+
+            getPushTokensByUserIds([passenger_id]).then((tokens) => {
+              if (tokens.length) {
+                sendPushToTokens(tokens, {
+                  title: "Trip Started",
+                  body: "You're on board! Your trip is now underway.",
+                  data: { type: "trip_started", ride_id: String(rideId), booking_id: String(bkId) },
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+          }
 
           ok();
         } catch (e) {
@@ -1422,8 +1445,19 @@ export function initDriverSocket(io, mysqlPool) {
             stage: "completed",
           };
           io.to(rideRoom(rideId)).emit("bookingStageUpdate", msg);
-          if (passenger_id)
+          if (passenger_id) {
             io.to(passengerRoom(passenger_id)).emit("bookingStageUpdate", msg);
+
+            getPushTokensByUserIds([passenger_id]).then((tokens) => {
+              if (tokens.length) {
+                sendPushToTokens(tokens, {
+                  title: "You've Arrived",
+                  body: "You have been dropped off. Thank you for riding!",
+                  data: { type: "trip_completed", ride_id: String(rideId), booking_id: String(bkId) },
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+          }
 
           if (!anyActive) {
             handleDriverCompleteTrip({
