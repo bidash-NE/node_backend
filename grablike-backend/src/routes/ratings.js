@@ -1,5 +1,7 @@
 import express from "express";
 import { withConn } from "../db/mysql.js";
+import { getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 /**
  * Factory: returns a router (keeps signature consistent with earningsRouter(mysqlPool))
@@ -131,6 +133,18 @@ export function ratingsRouter(mysqlPool) {
       if (!result.ok && result.code === "INVALID_RIDE") {
         return res.status(400).json({ message: "Ride not found for driver or not completed" });
       }
+
+      // Push to driver: new rating received
+      const stars = "★".repeat(Number(rating)) + "☆".repeat(5 - Number(rating));
+      getPushTokensByDriverIds([driver_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "New Rating",
+            body: `You received a ${rating}-star rating ${stars} for your trip.`,
+            data: { type: "new_rating", ride_id: String(ride_id), rating: Number(rating) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
 
       res.json({ ok: true });
     } catch (e) {

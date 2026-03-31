@@ -1,4 +1,6 @@
 import express from "express";
+import { getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 /* ========= Reuse your existing env + tables ========= */
 const WALLET_TBL = "wallet_transactions";
@@ -427,6 +429,17 @@ export default function tipsRouter(mysqlPool, io) {
       const tip_id = tipRes.insertId;
 
       await conn.commit();
+
+      // Push to driver: tip received
+      getPushTokensByDriverIds([driver_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "You Got a Tip!",
+            body: `You received a Nu ${Number(amount_nu).toFixed(2)} tip. Thank you!`,
+            data: { type: "tip_received", ride_id: String(ride_id), amount_nu: Number(amount_nu) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
 
       // Socket notifies (best-effort)
       try {

@@ -1,5 +1,7 @@
 // src/controllers/refund.controller.js
 import { withConn } from "../db/mysql.js";
+import { getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 export async function refundRide(req, res) {
   const { ride_id, reason = "ADMIN_REFUND" } = req.body;
@@ -61,11 +63,26 @@ export async function refundRide(req, res) {
       await conn.commit();
 
       return {
+        passenger_id: ride.passenger_id,
         platform_fee_refund_nu: pricing.platform_fee_cents / 100,
         gst_refund_nu: pricing.gst_cents / 100,
         reason,
       };
     });
+
+    // Push to passenger about the refund
+    if (result?.passenger_id) {
+      const refundNu = ((result.platform_fee_refund_nu || 0) + (result.gst_refund_nu || 0)).toFixed(2);
+      getPushTokensByUserIds([result.passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Ride Refunded",
+            body: `Your ride #${ride_id} has been refunded. Nu ${refundNu} will be returned to your account.`,
+            data: { type: "ride_refunded", ride_id: String(ride_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
 
     res.json({ ok: true, ride_id, refunded: true });
   } catch (e) {
