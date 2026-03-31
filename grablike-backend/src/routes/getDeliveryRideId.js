@@ -17,7 +17,7 @@ getDeliveryRideId.get("/ride-by-order", async (req, res) => {
   try {
     const result = await withConn(async (conn) => {
       const [[row]] = await conn.query(
-        `SELECT order_id, delivery_ride_id, delivery_batch_id
+        `SELECT order_id, delivery_ride_id, delivery_batch_id, delivery_driver_id
          FROM orders
          WHERE order_id = ?
          LIMIT 1`,
