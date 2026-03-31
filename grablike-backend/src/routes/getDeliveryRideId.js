@@ -38,6 +38,7 @@ getDeliveryRideId.get("/ride-by-order", async (req, res) => {
           ok: true,
           order_id: String(row.order_id),
           delivery_ride_id: String(row.delivery_ride_id),
+          delivery_driver_id: row.delivery_driver_id ? String(row.delivery_driver_id) : null,
           delivery_batch_id: row.delivery_batch_id ? String(row.delivery_batch_id) : null,
         },
       };
