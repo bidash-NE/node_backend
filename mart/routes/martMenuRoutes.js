@@ -80,7 +80,7 @@ router.get("/", readLimiter, listMartMenuCtrl);
 // All by business
 router.get(
   "/business/:business_id",
-  readLimiter,
+  // readLimiter,
   validateBusinessIdParam,
   listMartMenuByBusinessCtrl,
 );
