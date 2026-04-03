@@ -101,7 +101,6 @@ router.put(
 // ✅ Get merchant business
 router.get(
   "/merchant-business/:business_id",
-  readLimiter,
   validateBusinessIdParam,
   getMerchantBusiness,
 );

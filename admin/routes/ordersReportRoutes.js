@@ -21,10 +21,10 @@ const reportLimiter = rateLimit({
     }),
 });
 
-router.get("/food-orders", reportLimiter, getFoodOrdersReport);
-router.get("/mart-orders", reportLimiter, getMartOrdersReport);
+router.get("/food-orders", getFoodOrdersReport);
+router.get("/mart-orders", getMartOrdersReport);
 
 // ✅ NOW reads from food_mart_revenue table
-router.get("/food-mart-revenue", reportLimiter, getFoodMartRevenueReport);
+router.get("/food-mart-revenue", getFoodMartRevenueReport);
 
 module.exports = router;

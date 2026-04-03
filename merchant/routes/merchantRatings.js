@@ -151,7 +151,6 @@ const validateRatingTypeParam = (req, res, next) => {
  */
 router.get(
   "/ratings/:business_id",
-  ratingsListLimiter,
   validateBusinessIdParam,
   getBusinessRatingsAutoCtrl,
 );
@@ -213,7 +212,6 @@ router.post(
 
 router.get(
   "/ratings/:type/:rating_id/replies",
-  ratingsListLimiter,
   validateRatingTypeParam,
   validateRatingIdParam,
   listRatingRepliesCtrl,

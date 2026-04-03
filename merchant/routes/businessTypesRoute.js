@@ -72,15 +72,10 @@ const validateIdParam = (req, res, next) => {
 /* ---------------- routes ---------------- */
 
 // list/get
-router.get("/business-types", readLimiter, listBusinessTypes);
-router.get(
-  "/business-types/:id",
-  readLimiter,
-  validateIdParam,
-  getBusinessType,
-);
-router.get("/business-types/type/food", readLimiter, listFoodBusinessTypes);
-router.get("/business-types/type/mart", readLimiter, listMartBusinessTypes);
+router.get("/business-types", listBusinessTypes);
+router.get("/business-types/:id", validateIdParam, getBusinessType);
+router.get("/business-types/type/food", listFoodBusinessTypes);
+router.get("/business-types/type/mart", listMartBusinessTypes);
 
 // create/update with image upload (field name: "image")
 // ✅ limiter BEFORE upload middleware (so blocked requests don’t parse files)

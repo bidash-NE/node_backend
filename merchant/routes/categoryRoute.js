@@ -90,7 +90,7 @@ const validateBusinessIdParam = (req, res, next) => {
 // IMPORTANT: keep the more specific route BEFORE "/:kind"
 router.get(
   "/business/:businessId",
-  readLimiter,
+
   validateBusinessIdParam,
   getCategoriesForBusinessCtrl,
 );
@@ -124,14 +124,9 @@ router.delete(
 );
 
 // FETCH BY business_type (within kind) — query param ?business_type=food|mart (defaults to :kind)
-router.get(
-  "/:kind/by-type",
-  validateKindParam,
-  readLimiter,
-  listByBusinessTypeCtrl,
-);
+router.get("/:kind/by-type", validateKindParam, listByBusinessTypeCtrl);
 
 // FETCH ALL (by kind)
-router.get("/:kind", validateKindParam, readLimiter, listCategoriesCtrl);
+router.get("/:kind", validateKindParam, listCategoriesCtrl);
 
 module.exports = router;

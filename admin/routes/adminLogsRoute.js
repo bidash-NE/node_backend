@@ -17,6 +17,6 @@ const logsLimiter = rateLimit({
 });
 
 // GET /api/admin-logs
-router.get("/", logsLimiter, getAdminLogs);
+router.get("/", getAdminLogs);
 
 module.exports = router;

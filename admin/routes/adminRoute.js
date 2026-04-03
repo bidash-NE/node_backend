@@ -32,14 +32,10 @@ const validateUserIdParam = (req, res, next) => {
 };
 
 // Lists
-router.get("/users", adminReadLimiter, adminController.getAllNormalUsers);
-router.get("/drivers", adminReadLimiter, adminController.getAllDrivers);
-router.get("/admins", adminReadLimiter, adminController.getAllAdmins);
-router.get(
-  "/merchants",
-  adminReadLimiter,
-  adminController.getAllMerchantsWithDetails,
-);
+router.get("/users", adminController.getAllNormalUsers);
+router.get("/drivers", adminController.getAllDrivers);
+router.get("/admins", adminController.getAllAdmins);
+router.get("/merchants", adminController.getAllMerchantsWithDetails);
 
 // Mutations
 router.post(

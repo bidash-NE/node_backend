@@ -62,24 +62,14 @@ const validateReportIdParam = (req, res, next) => {
 router.post("/", writeLimiter, createAppRatingController);
 
 // List ratings
-router.get("/", readLimiter, listAppRatingsController);
+router.get("/", listAppRatingsController);
 
 // Summary stats
-router.get("/summary", readLimiter, getAppRatingSummaryController);
+router.get("/summary", getAppRatingSummaryController);
 
 // Reports (admin)
-router.get(
-  "/reports/comments",
-  authUser,
-  readLimiter,
-  listReportedCommentsController,
-);
-router.get(
-  "/reports/replies",
-  authUser,
-  readLimiter,
-  listReportedRepliesController,
-);
+router.get("/reports/comments", authUser, listReportedCommentsController);
+router.get("/reports/replies", authUser, listReportedRepliesController);
 
 router.post(
   "/reports/:report_id/ignore",
@@ -106,7 +96,7 @@ router.delete(
 );
 
 // Get single rating
-router.get("/:id", readLimiter, validateIdParam, getAppRatingByIdController);
+router.get("/:id", validateIdParam, getAppRatingByIdController);
 
 // Update rating (admin)
 router.put(

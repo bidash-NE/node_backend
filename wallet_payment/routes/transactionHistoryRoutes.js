@@ -64,15 +64,15 @@ const getAllLimiter = makeLimiter({
 // GET /transactions/wallet/NET000004?limit=50&cursor=...&start=...&end=...&direction=CR|DR&journal=...&q=...
 router.get(
   "/wallet/:wallet_id",
-  txnReadLimiter,
+
   validWalletId,
   ctrl.getByWallet,
 );
 
 // GET /transactions/user/123?...
-router.get("/user/:user_id", txnReadLimiter, validUserId, ctrl.getByUser);
+router.get("/user/:user_id", validUserId, ctrl.getByUser);
 
 // GET /transactions/getall?limit=...  (Consider admin-only)
-router.get("/getall", getAllLimiter, ctrl.getAll);
+router.get("/getall", ctrl.getAll);
 
 module.exports = router;

@@ -42,7 +42,7 @@ const passwordLimiter = makeLimiter({
 });
 
 // Get profile
-router.get("/:user_id", readLimiter, validUserId, profileController.getProfile);
+router.get("/:user_id", validUserId, profileController.getProfile);
 
 // Update profile (with optional image)
 // ✅ limiter BEFORE upload middleware

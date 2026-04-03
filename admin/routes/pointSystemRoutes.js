@@ -28,17 +28,11 @@ const adminWriteLimiter = makeLimiter({
 });
 
 /* POINT EARNING RULES */
-router.get(
-  "/point-system",
-  adminOnly,
-  adminReadLimiter,
-  pointSystemController.getAllPointRules,
-);
+router.get("/point-system", adminOnly, pointSystemController.getAllPointRules);
 
 router.get(
   "/point-system/:id",
   adminOnly,
-  adminReadLimiter,
   pointSystemController.getPointRuleById,
 );
 
@@ -67,7 +61,6 @@ router.delete(
 router.get(
   "/point-conversion-rule",
   adminOnly,
-  adminReadLimiter,
   pointSystemController.getPointConversionRule,
 );
 

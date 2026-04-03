@@ -92,16 +92,15 @@ router.post("/", writeLimiter, uploadBannerImage(), createBannerCtrl);
  *  - GET /api/banners/food?business_id=(optional)
  *  - GET /api/banners/mart?business_id=(optional)
  */
-router.get("/food", readLimiter, listActiveFoodCtrl);
-router.get("/mart", readLimiter, listActiveMartCtrl);
-router.get("/base-price", readLimiter, getBannerBasePriceCtrl);
+router.get("/food", listActiveFoodCtrl);
+router.get("/mart", listActiveMartCtrl);
+router.get("/base-price", getBannerBasePriceCtrl);
 
 /**
  * By business: fetch ALL banners (active + inactive), optional ?owner_type=food|mart
  */
 router.get(
   "/business/:business_id",
-  businessReadLimiter,
   validateBusinessIdParam,
   listAllBannersByBusinessCtrl,
 );
@@ -109,10 +108,10 @@ router.get(
 /**
  * Generic list (admin/debug) — supports ?business_id=&active_only=1&owner_type=food|mart
  */
-router.get("/", readLimiter, listBannersCtrl);
+router.get("/", listBannersCtrl);
 
 // Single banner (no active filter)
-router.get("/:id", readLimiter, validateIdParam, getBannerCtrl);
+router.get("/:id", validateIdParam, getBannerCtrl);
 
 // Update (supports image replacement / clearing)
 router.put(

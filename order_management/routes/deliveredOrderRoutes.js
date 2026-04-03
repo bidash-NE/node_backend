@@ -67,7 +67,7 @@ function validOrderId(req, res, next) {
 }
 
 // GET delivered orders by user
-router.get("/:user_id", readLimiter, validUserId, listDeliveredOrders);
+router.get("/:user_id", validUserId, listDeliveredOrders);
 
 // DELETE ONE delivered order by user (items cascade)
 router.delete(

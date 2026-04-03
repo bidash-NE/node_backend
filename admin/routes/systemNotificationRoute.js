@@ -41,7 +41,7 @@ const createLimiter = makeLimiter({
 
 // Existing
 router.post("/", createLimiter, createSystemNotification);
-router.get("/all", readLimiter, getAllSystemNotificationsController);
+router.get("/all", getAllSystemNotificationsController);
 
 // Send to ONE user
 router.post("/user/sms", sendLimiter, sendSmsToSingleUser);
@@ -50,11 +50,10 @@ router.post("/user/email", sendLimiter, sendEmailToSingleUser);
 // Fetch single-user logs
 router.get(
   "/user/logs/:target_user_id",
-  readLimiter,
   getSingleUserDeliveryLogsByUserIdController,
 );
 
 // keep this LAST
-router.get("/:userId", readLimiter, getSystemNotificationsByUser);
+router.get("/:userId", getSystemNotificationsByUser);
 
 module.exports = router;

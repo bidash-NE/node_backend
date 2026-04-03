@@ -72,7 +72,7 @@ const validNotificationId = (req, res, next) => {
  * List notifications for a user (with pagination and unread filter)
  * GET /api/notifications/user/:userId?limit=50&offset=0&unreadOnly=true
  */
-router.get("/user/:userId", readLimiter, validUserId, listByUserId);
+router.get("/user/:userId", validUserId, listByUserId);
 
 /**
  * Mark all notifications for a user as read
@@ -89,7 +89,7 @@ router.patch(
  * Get a single notification by id
  * GET /api/notifications/:notificationId
  */
-router.get("/:notificationId", readLimiter, validNotificationId, getOne);
+router.get("/:notificationId", validNotificationId, getOne);
 
 /**
  * Mark a single notification as read

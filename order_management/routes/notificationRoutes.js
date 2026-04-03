@@ -76,12 +76,7 @@ const validNotificationId = (req, res, next) => {
  * List notifications for a business (with pagination and unread filter)
  * GET /api/notifications/business/:businessId?limit=50&offset=0&unreadOnly=true
  */
-router.get(
-  "/business/:businessId",
-  readLimiter,
-  validBusinessId,
-  listByBusinessId,
-);
+router.get("/business/:businessId", validBusinessId, listByBusinessId);
 
 /**
  * Mark all notifications for a business as read
@@ -98,7 +93,7 @@ router.patch(
  * Get a single notification by id
  * GET /api/notifications/:notificationId
  */
-router.get("/:notificationId", readLimiter, validNotificationId, getOne);
+router.get("/:notificationId", validNotificationId, getOne);
 
 /**
  * Mark a single notification as read

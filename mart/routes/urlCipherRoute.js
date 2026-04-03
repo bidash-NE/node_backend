@@ -49,6 +49,6 @@ const openLimiter = makeLimiter({
 router.post("/", createLimiter, createEncryptedUrlController);
 
 // Open token (GET proxy)
-router.get("/:token", openLimiter, openEncryptedUrlController);
+router.get("/:token", openEncryptedUrlController);
 
 module.exports = router;

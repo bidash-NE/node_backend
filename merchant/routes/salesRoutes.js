@@ -46,11 +46,6 @@ const salesReadLimiter = makeLimiter({
 });
 
 // GET /api/sales/today/:business_id
-router.get(
-  "/today/:business_id",
-  salesReadLimiter,
-  validateBusinessIdParam,
-  getTodaySales,
-);
+router.get("/today/:business_id", validateBusinessIdParam, getTodaySales);
 
 module.exports = router;

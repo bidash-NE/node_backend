@@ -75,7 +75,7 @@ const validMenuIdParam = (req, res, next) => {
 router.post("/add", cartWriteLimiter, addToCart);
 
 // Get cart by user_id (expects ?user_id=... in query)
-router.get("/get", cartReadLimiter, validQueryUserId, getCart);
+router.get("/get", validQueryUserId, getCart);
 
 // Update quantity of a cart item
 router.put("/update", cartWriteLimiter, updateCart);

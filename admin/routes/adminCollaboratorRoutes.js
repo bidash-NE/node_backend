@@ -35,8 +35,8 @@ const validateIdParam = (req, res, next) => {
 };
 
 // Public routes
-router.get("/", publicReadLimiter, ctrl.list);
-router.get("/:id", publicReadLimiter, validateIdParam, ctrl.getOne);
+router.get("/", ctrl.list);
+router.get("/:id", validateIdParam, ctrl.getOne);
 
 // Protected routes (still rate-limit, even if controller checks auth JSON)
 router.post("/", adminWriteLimiter, ctrl.create);

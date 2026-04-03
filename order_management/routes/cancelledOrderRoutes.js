@@ -60,7 +60,6 @@ const validOrderId = (req, res, next) => {
 /* Fetch cancelled orders by user */
 router.get(
   "/users/:user_id/cancelled-orders",
-  readLimiter,
   validUserId,
   ctrl.getCancelledOrdersByUser,
 );
