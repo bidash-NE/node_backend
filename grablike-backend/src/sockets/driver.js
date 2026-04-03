@@ -463,7 +463,7 @@ async function emitPoolSummary(io, conn, rideId) {
   );
 
   const sc = Number(sum?.seats_confirmed || 0);
-  const capacitySafe = Math.max(3, sc);
+ const capacitySafe = Math.max(Number(sum?.capacity_seats || 2), sc);
 
   io.to(rideRoom(rideId)).emit("poolSummary", {
     request_id: String(rideId),
