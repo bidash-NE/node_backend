@@ -80,7 +80,7 @@ async function fetchDrivers() {
       // basic driver info
       const [driverRows] = await pool.query(
         `SELECT driver_id, license_number FROM drivers WHERE user_id = ?`,
-        [user.user_id]
+        [user.user_id],
       );
 
       const driverInfo = driverRows[0] || {};
@@ -91,8 +91,8 @@ async function fetchDrivers() {
       let vehicles = [];
       if (driver_id) {
         const [vehicleRows] = await pool.query(
-          `SELECT vehicle_id, make, color, license_plate FROM driver_vehicles WHERE driver_id = ?`,
-          [driver_id]
+          `SELECT vehicle_id, make, color, license_plate, vehicle_type FROM driver_vehicles WHERE driver_id = ?`,
+          [driver_id],
         );
         vehicles = vehicleRows;
       }
@@ -107,7 +107,7 @@ async function fetchDrivers() {
             FROM ride_ratings
             WHERE driver_id = ?
           `,
-          [driver_id]
+          [driver_id],
         );
 
         if (ratingRow && ratingRow.avg_rating !== null) {
@@ -131,7 +131,7 @@ async function fetchDrivers() {
         vehicles,
         avg_rating, // driver average rating
       };
-    })
+    }),
   );
 
   return detailedDrivers;
@@ -226,7 +226,7 @@ async function deactivateUser(user_id, actorUserId = null, adminName = null) {
 
     const [[user]] = await conn.query(
       `SELECT user_id, user_name, is_active FROM users WHERE user_id = ?`,
-      [user_id]
+      [user_id],
     );
     if (!user) {
       await conn.rollback();
@@ -240,7 +240,7 @@ async function deactivateUser(user_id, actorUserId = null, adminName = null) {
 
     const [res] = await conn.query(
       `UPDATE users SET is_active = 0 WHERE user_id = ?`,
-      [user_id]
+      [user_id],
     );
 
     if (res.affectedRows > 0) {
@@ -248,7 +248,7 @@ async function deactivateUser(user_id, actorUserId = null, adminName = null) {
         conn,
         actorUserId,
         adminName,
-        `Deactivated user "${user.user_name}" (id: ${user_id})`
+        `Deactivated user "${user.user_name}" (id: ${user_id})`,
       );
     }
 
@@ -269,7 +269,7 @@ async function activateUser(user_id, actorUserId = null, adminName = null) {
 
     const [[user]] = await conn.query(
       `SELECT user_id, user_name, is_active FROM users WHERE user_id = ?`,
-      [user_id]
+      [user_id],
     );
     if (!user) {
       await conn.rollback();
@@ -283,7 +283,7 @@ async function activateUser(user_id, actorUserId = null, adminName = null) {
 
     const [res] = await conn.query(
       `UPDATE users SET is_active = 1 WHERE user_id = ?`,
-      [user_id]
+      [user_id],
     );
 
     if (res.affectedRows > 0) {
@@ -291,7 +291,7 @@ async function activateUser(user_id, actorUserId = null, adminName = null) {
         conn,
         actorUserId,
         adminName,
-        `Activated user "${user.user_name}" (id: ${user_id})`
+        `Activated user "${user.user_name}" (id: ${user_id})`,
       );
     }
 
@@ -312,7 +312,7 @@ async function deleteUser(user_id, actorUserId = null, adminName = null) {
 
     const [[user]] = await conn.query(
       `SELECT user_id, user_name FROM users WHERE user_id = ?`,
-      [user_id]
+      [user_id],
     );
     if (!user) {
       await conn.rollback();
@@ -328,7 +328,7 @@ async function deleteUser(user_id, actorUserId = null, adminName = null) {
         conn,
         actorUserId,
         adminName,
-        `Deleted user "${user.user_name}" (id: ${user_id})`
+        `Deleted user "${user.user_name}" (id: ${user_id})`,
       );
     }
 
