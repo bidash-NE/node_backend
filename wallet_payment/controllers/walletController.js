@@ -351,8 +351,10 @@ async function adminTipTransferHandler(req, res) {
       user_wallet_id,
       amount,
       note = "",
+      t_pin, // T-PIN sent for verification
     } = req.body || {};
 
+    // 1. Validate input fields
     if (!admin_name || admin_name.trim().length < 2)
       return res
         .status(400)
@@ -378,6 +380,37 @@ async function adminTipTransferHandler(req, res) {
         .status(400)
         .json({ success: false, message: "amount must be positive (Nu)." });
 
+    // 2. Fetch admin wallet details
+    const adminWallet = await getWallet({ key: admin_wallet_id });
+    if (!adminWallet)
+      return res
+        .status(404)
+        .json({ success: false, message: "Admin wallet not found." });
+
+    // 3. Verify T-PIN for admin wallet
+    if (adminWallet.status === "ACTIVE" && adminWallet.t_pin) {
+      const pinStr = String(t_pin || "").trim();
+      if (!/^\d{4}$/.test(pinStr)) {
+        return res.status(400).json({
+          success: false,
+          message: "T-PIN must be a 4-digit numeric code.",
+        });
+      }
+
+      const isValidPin = await bcrypt.compare(pinStr, adminWallet.t_pin);
+      if (!isValidPin) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid T-PIN." });
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Admin wallet is not active or does not have a T-PIN set.",
+      });
+    }
+
+    // 4. Proceed with the admin tip transfer logic
     const result = await adminTipTransfer({
       admin_name: admin_name.trim(),
       admin_wallet_id,
@@ -397,10 +430,10 @@ async function adminTipTransferHandler(req, res) {
       data: result,
     });
   } catch (e) {
+    console.error("Error in adminTipTransfer:", e);
     res.status(500).json({ success: false, message: e.message });
   }
 }
-
 /* ---------- SET / CREATE T-PIN ---------- */
 async function setTPin(req, res) {
   try {
