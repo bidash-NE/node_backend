@@ -356,7 +356,7 @@ export async function computePlatformFeeAndGST(input) {
         // If offer is invalid, we can either ignore it (proceed without discount) or throw.
         // For a quote, we probably want to return an error so the frontend can inform the user.
         console.log(err);
-        throw new Error(`This offer is only applicable for ${service_type}.`);
+        throw new Error(err);
       }
     }
 
