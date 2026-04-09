@@ -639,12 +639,20 @@ exports.cancelScheduledOrder = async (req, res) => {
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
-    const { status } = req.body; // ACCEPTED or REJECTED
+    const { status, reason } = req.body; // 👈 add reason
 
     if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
         message: "Invalid jobId or status (ACCEPTED / REJECTED required)",
+      });
+    }
+
+    // ❗ reason required if rejected
+    if (status === "REJECTED" && (!reason || !reason.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Reason is required when rejecting a scheduled order",
       });
     }
 
@@ -661,15 +669,7 @@ exports.updateScheduledOrderStatus = async (req, res) => {
       });
     }
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        message: "Corrupted data",
-      });
-    }
+    let data = JSON.parse(raw);
 
     // ❗ prevent double action
     if (data.order_payload?.status !== "PENDING") {
@@ -681,6 +681,17 @@ exports.updateScheduledOrderStatus = async (req, res) => {
 
     // ✅ update status
     data.order_payload.status = status;
+
+    // ✅ store reason only if rejected
+    if (status === "REJECTED") {
+      data.order_payload.rejection_reason = reason.trim();
+      data.order_payload.rejected_at = new Date().toISOString();
+    }
+
+    if (status === "ACCEPTED") {
+      data.order_payload.accepted_at = new Date().toISOString();
+    }
+
     data.updated_at = new Date().toISOString();
 
     await redis.set(jobKey, JSON.stringify(data));
@@ -690,6 +701,7 @@ exports.updateScheduledOrderStatus = async (req, res) => {
       message: `Scheduled order ${status.toLowerCase()}`,
       job_id: jobId,
       status,
+      ...(status === "REJECTED" && { reason }),
     });
   } catch (err) {
     console.error("updateScheduledOrderStatus error:", err);
