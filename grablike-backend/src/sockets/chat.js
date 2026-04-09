@@ -150,7 +150,7 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
       const inRideParticipants = allowedRideParticipants.includes(selfId);
 
 
-      if (!inRides && !inOrders && inRideParticipants) {
+      if (!inRides && !inOrders && !inRideParticipants) {
         console.warn(
           `[chat SEC] ride:${rideId} not_member_passenger (pid=${selfId}, rides=${allowedPassengerIds}, orders=${allowedCustomerIds}, rideParticipants=${allowedRideParticipants})`
         );
