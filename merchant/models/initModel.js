@@ -149,32 +149,33 @@ async function ensureMerchantBusinessDetailsTable() {
   const table = "merchant_business_details";
   if (!(await tableExists(table))) {
     await db.query(`
-      CREATE TABLE ${table} (
-        business_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        user_id BIGINT UNSIGNED NOT NULL,
-        owner_type VARCHAR(50),
-        business_name VARCHAR(255) NOT NULL,
-        business_license_number VARCHAR(100),
-        license_image VARCHAR(255),
-        latitude DECIMAL(10,7),
-        longitude DECIMAL(10,7),
-        address TEXT,
-        business_logo VARCHAR(255),
-        delivery_option VARCHAR(50),
-        min_amount_for_fd DECIMAL(10,2) DEFAULT NULL,
-        complementary VARCHAR(100),
-        complementary_details TEXT,
-        opening_time TIME,
-        closing_time TIME,
-        holidays JSON,
-        special_celebration VARCHAR(255) DEFAULT NULL,  -- NEW COLUMN ADDED
-        special_celebration_discount_percentage DECIMAL(5,2) DEFAULT 0,  -- NEW COLUMN ADDED
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (business_id),
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    `);
+  CREATE TABLE ${table} (
+    business_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    owner_type VARCHAR(50),
+    business_name VARCHAR(255) NOT NULL,
+    business_license_number VARCHAR(100),
+    license_image VARCHAR(255),
+    latitude DECIMAL(10,7),
+    longitude DECIMAL(10,7),
+    address TEXT,
+    business_logo VARCHAR(255),
+    delivery_option VARCHAR(50),
+    min_amount_for_fd DECIMAL(10,2) DEFAULT NULL,
+    complementary VARCHAR(100),
+    complementary_details TEXT,
+    opening_time TIME,
+    closing_time TIME,
+    kitchen_closing_time TIME DEFAULT NULL,  -- ✅ NEW COLUMN
+    holidays JSON,
+    special_celebration VARCHAR(255) DEFAULT NULL,
+    special_celebration_discount_percentage DECIMAL(5,2) DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (business_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`);
   } else {
     // Add the new columns if they don't exist already
     const columnExistsCheck1 = await columnExists(table, "special_celebration");

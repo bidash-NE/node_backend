@@ -263,7 +263,7 @@ async function updateMerchantDetailsModel(business_id, data) {
     );
     setIfProvided("opening_time", data.opening_time);
     setIfProvided("closing_time", data.closing_time);
-
+    setIfProvided("kitchen_closing_time", data.kitchen_closing_time);
     // Handle new special_celebration and special_celebration_discount_percentage fields
     setIfProvided("special_celebration", data.special_celebration);
     setIfProvided(

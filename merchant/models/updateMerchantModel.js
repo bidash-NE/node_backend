@@ -14,10 +14,11 @@ async function updateMerchantBusinessDetails(business_id, updateFields) {
     "complementary_details",
     "opening_time",
     "closing_time",
+    "kitchen_closing_time", // ✅ ADD THIS LINE
     "holidays",
     "special_celebration",
     "special_celebration_discount_percentage",
-    "min_amount_for_fd", // ✅ NEW
+    "min_amount_for_fd",
   ];
 
   const setClause = [];

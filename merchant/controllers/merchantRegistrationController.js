@@ -192,6 +192,7 @@ async function updateMerchant(req, res) {
       : fromBodyToStoredPath(b.business_logo);
 
     const updatePayload = {};
+
     [
       "business_name",
       "business_license_number",
@@ -200,30 +201,34 @@ async function updateMerchant(req, res) {
       "owner_type",
       "opening_time",
       "closing_time",
+      "kitchen_closing_time", // ✅ ADDED HERE
       "special_celebration",
       "special_celebration_discount_percentage",
     ].forEach((k) => {
-      if (b[k] !== undefined)
+      if (b[k] !== undefined) {
         updatePayload[k] =
           k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
+      }
     });
 
     if (b.license_image !== undefined || f.license_image?.length) {
       updatePayload.license_image = newLicenseImage;
     }
+
     if (b.business_logo !== undefined || f.business_logo?.length) {
       updatePayload.business_logo = newBusinessLogo;
     }
+
     if (typeof b.latitude !== "undefined") {
       updatePayload.latitude = b.latitude === "" ? null : Number(b.latitude);
     }
+
     if (typeof b.longitude !== "undefined") {
       updatePayload.longitude = b.longitude === "" ? null : Number(b.longitude);
     }
 
-    // Handle holidays field (array of days)
+    // Handle holidays field
     if (b.holidays !== undefined) {
-      // Validate holidays field as an array of valid days
       const validDays = [
         "Sunday",
         "Monday",
@@ -233,20 +238,24 @@ async function updateMerchant(req, res) {
         "Friday",
         "Saturday",
       ];
+
       let holidays = [];
+
       if (Array.isArray(b.holidays)) {
-        holidays = b.holidays.filter((day) => validDays.includes(day)); // Filter valid days
+        holidays = b.holidays.filter((day) => validDays.includes(day));
       } else if (typeof b.holidays === "string") {
         holidays = b.holidays
           .split(",")
           .map((s) => s.trim())
-          .filter((day) => validDays.includes(day)); // Filter valid days from comma-separated string
+          .filter((day) => validDays.includes(day));
       }
-      updatePayload.holidays = JSON.stringify(holidays); // Store as a valid JSON string
+
+      updatePayload.holidays = JSON.stringify(holidays);
     }
 
     if (b.business_type_ids !== undefined)
       updatePayload.business_type_ids = b.business_type_ids;
+
     if (b.business_types !== undefined) {
       updatePayload.business_types = Array.isArray(b.business_types)
         ? b.business_types
@@ -256,22 +265,28 @@ async function updateMerchant(req, res) {
             .filter(Boolean);
     }
 
-    // Update the merchant details in the database
+    // 🔥 Call model update
     const out = await updateMerchantDetailsModel(business_id, updatePayload);
 
     const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+
     const isUploadsPath = (p) =>
       typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
+
     const toAbsPath = (webPath) =>
       path.join(process.cwd(), webPath.replace(/^\//, ""));
 
     const deleteIfReplaced = (oldPath, newPath) => {
       if (!oldPath || !newPath) return;
+
       const oldNorm = String(oldPath).trim();
       const newNorm = String(newPath).trim();
+
       if (!oldNorm || !isUploadsPath(oldNorm) || oldNorm === newNorm) return;
+
       const abs = toAbsPath(oldNorm);
       if (!abs.startsWith(UPLOAD_ROOT)) return;
+
       fs.stat(abs, (err, st) => {
         if (err || !st?.isFile()) return;
         fs.unlink(abs, () => {});
@@ -280,6 +295,7 @@ async function updateMerchant(req, res) {
 
     if (updatePayload.license_image)
       deleteIfReplaced(oldLicense, updatePayload.license_image);
+
     if (updatePayload.business_logo)
       deleteIfReplaced(oldLogo, updatePayload.business_logo);
 
@@ -289,7 +305,9 @@ async function updateMerchant(req, res) {
     });
   } catch (err) {
     console.error("updateMerchant error:", err);
+
     const isClientErr = /not found|invalid/i.test(err.message || "");
+
     return res
       .status(isClientErr ? 404 : 500)
       .json({ error: err.message || "Update failed" });
