@@ -159,7 +159,7 @@ function normalizeCreateOrderPayload(raw = {}) {
         (Number(p.delivery_fee) || 0) +
         (Number(p.platform_fee) || 0) -
         (Number(p.discount_amount) || 0)
-      ).toFixed(2)
+      ).toFixed(2),
     );
   } else {
     p.total_amount = Number(p.total_amount);
@@ -217,13 +217,13 @@ async function createOrderFromScheduledPayload(orderPayload) {
               : payloadToSend.delivery_photo_url || null,
         },
         null,
-        2
-      )
+        2,
+      ),
     );
 
     console.log(
       "[SCHED] sending payload:",
-      JSON.stringify(payloadToSend, null, 2)
+      JSON.stringify(payloadToSend, null, 2),
     );
 
     const response = await axios.post(ORDER_CREATE_URL, payloadToSend, {
@@ -242,7 +242,7 @@ async function createOrderFromScheduledPayload(orderPayload) {
     if (!orderId) {
       console.warn(
         "[SCHED] Order created but order_id not found in response:",
-        data
+        data,
       );
     }
 
@@ -259,7 +259,7 @@ async function createOrderFromScheduledPayload(orderPayload) {
     // show what we sent
     console.error(
       "[SCHED] Sent payload keys:",
-      Object.keys(payloadToSend || {})
+      Object.keys(payloadToSend || {}),
     );
 
     throw err;
@@ -271,7 +271,7 @@ async function createOrderFromScheduledPayload(orderPayload) {
 async function insertNotificationForScheduledOrder(
   userId,
   orderId,
-  scheduledAt
+  scheduledAt,
 ) {
   try {
     const dateObj = new Date(scheduledAt);
@@ -338,7 +338,7 @@ async function tryClaimJob(jobId) {
     lockValue,
     "NX",
     "EX",
-    LOCK_TTL_SECONDS
+    LOCK_TTL_SECONDS,
   );
   if (result === "OK") return true;
 
@@ -354,7 +354,7 @@ async function tryClaimJob(jobId) {
       lockValue,
       "NX",
       "EX",
-      LOCK_TTL_SECONDS
+      LOCK_TTL_SECONDS,
     );
     if (retry === "OK") return true;
   }
@@ -375,7 +375,7 @@ async function markFailed(jobId, errMessage, errBody = null) {
     failedKey,
     JSON.stringify(payload),
     "EX",
-    ATTEMPT_TTL_SECONDS
+    ATTEMPT_TTL_SECONDS,
   );
 }
 
@@ -393,14 +393,14 @@ async function failAndMaybeStopRetry(jobId, err) {
       buildErrorKey(jobId),
       String(err.message).slice(0, 1000),
       "EX",
-      ATTEMPT_TTL_SECONDS
+      ATTEMPT_TTL_SECONDS,
     );
     await markFailed(jobId, err.message, body);
 
     // remove from queue so it stops spamming
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
     console.error(
-      `[SCHED] job ${jobId} marked FAILED due to HTTP 400 (payload/validation).`
+      `[SCHED] job ${jobId} marked FAILED due to HTTP 400 (payload/validation).`,
     );
     return;
   }
@@ -410,7 +410,7 @@ async function failAndMaybeStopRetry(jobId, err) {
     buildErrorKey(jobId),
     String(err.message).slice(0, 1000),
     "EX",
-    ATTEMPT_TTL_SECONDS
+    ATTEMPT_TTL_SECONDS,
   );
 
   if (attempts >= MAX_ATTEMPTS) {
@@ -423,7 +423,7 @@ async function failAndMaybeStopRetry(jobId, err) {
   // let it retry later (do NOT remove from ZSET)
   await redis.del(buildLockKey(jobId));
   console.warn(
-    `[SCHED] job ${jobId} will retry later. attempts=${attempts}/${MAX_ATTEMPTS}`
+    `[SCHED] job ${jobId} will retry later. attempts=${attempts}/${MAX_ATTEMPTS}`,
   );
 }
 
@@ -443,8 +443,35 @@ async function processJob(jobId) {
     if (!order_payload)
       throw new Error("Missing order_payload in scheduled job");
 
-    // force PENDING
-    order_payload.status = "PENDING";
+    // ✅ IMPORTANT: check status BEFORE processing
+    const status = order_payload?.status || "PENDING";
+
+    // ❌ If rejected → DO NOT PROCESS
+    if (status === "REJECTED") {
+      console.log(`[SCHED] ❌ job ${jobId} skipped (REJECTED)`);
+
+      // just remove from queue (cleanup will also handle it anyway)
+      await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+
+      return;
+    }
+
+    // ❌ If still pending → wait for merchant
+    if (status === "PENDING") {
+      console.log(`[SCHED] ⏳ job ${jobId} waiting for merchant action`);
+      await redis.del(buildLockKey(jobId)); // release lock
+      return;
+    }
+
+    // ✅ Only ACCEPTED → create order
+    if (status !== "ACCEPTED") {
+      console.log(`[SCHED] ⚠️ Unknown status for ${jobId}: ${status}`);
+      await redis.del(buildLockKey(jobId));
+      return;
+    }
+
+    // ✅ Now process
+    order_payload.status = "PENDING"; // reset for order table
 
     const orderId = await createOrderFromScheduledPayload(order_payload);
 
@@ -453,7 +480,7 @@ async function processJob(jobId) {
       await insertNotificationForScheduledOrder(
         data.user_id,
         orderId,
-        data.scheduled_at_local || data.scheduled_at
+        data.scheduled_at_local || data.scheduled_at,
       );
     }
 
@@ -468,7 +495,7 @@ async function processJob(jobId) {
       .exec();
 
     console.log(
-      `[SCHED] ✅ job ${jobId} processed. Order ID: ${orderId || "N/A"}`
+      `[SCHED] ✅ job ${jobId} processed. Order ID: ${orderId || "N/A"}`,
     );
   } catch (err) {
     console.error(`[SCHED] Error processing ${jobId}:`, err.message);

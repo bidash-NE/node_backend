@@ -321,7 +321,7 @@ exports.listScheduledOrders = async (req, res) => {
       );
     }
 
-    // -------- build response with per-item item_image + top-level item_images list --------
+    // -------- build response --------
     const enriched = list.map((job) => {
       const business = businessData.get(Number(job.business_id)) || {};
       const businessLogo = business.business_logo || null;
@@ -349,8 +349,13 @@ exports.listScheduledOrders = async (req, res) => {
         return { ...it, item_image: itemImage };
       });
 
-      // list of images (one per item, preserves item order, may include nulls)
       const itemImages = enrichedItems.map((it) => it.item_image || null);
+
+      // ✅ extract status info
+      const status = job?.order_payload?.status || "PENDING";
+      const rejectionReason = job?.order_payload?.rejection_reason || null;
+      const rejectedAt = job?.order_payload?.rejected_at || null;
+      const acceptedAt = job?.order_payload?.accepted_at || null;
 
       return {
         job_id: job.job_id,
@@ -370,8 +375,15 @@ exports.listScheduledOrders = async (req, res) => {
 
         order_payload: {
           ...job.order_payload,
+
+          // ✅ explicitly include status fields
+          status,
+          rejection_reason: rejectionReason,
+          rejected_at: rejectedAt,
+          accepted_at: acceptedAt,
+
           items: enrichedItems,
-          item_images: itemImages, // ✅ requested: list of item images (matches items order)
+          item_images: itemImages,
         },
       };
     });
@@ -424,7 +436,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
     }
 
-    // -------- collect menu ids by service type for bulk lookup --------
+    // -------- collect menu ids --------
     const foodMenuIds = new Set();
     const martMenuIds = new Set();
 
@@ -452,9 +464,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       const ids = [...foodMenuIds];
       const placeholders = ids.map(() => "?").join(",");
       const [rows] = await db.query(
-        `SELECT id, item_image
-           FROM food_menu
-          WHERE id IN (${placeholders})`,
+        `SELECT id, item_image FROM food_menu WHERE id IN (${placeholders})`,
         ids,
       );
       rows.forEach((r) =>
@@ -466,9 +476,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       const ids = [...martMenuIds];
       const placeholders = ids.map(() => "?").join(",");
       const [rows] = await db.query(
-        `SELECT id, item_image
-           FROM mart_menu
-          WHERE id IN (${placeholders})`,
+        `SELECT id, item_image FROM mart_menu WHERE id IN (${placeholders})`,
         ids,
       );
       rows.forEach((r) =>
@@ -508,6 +516,12 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
 
       const itemImages = enrichedItems.map((it) => it.item_image || null);
 
+      // ✅ status extraction
+      const status = job?.order_payload?.status || "PENDING";
+      const rejectionReason = job?.order_payload?.rejection_reason || null;
+      const rejectedAt = job?.order_payload?.rejected_at || null;
+      const acceptedAt = job?.order_payload?.accepted_at || null;
+
       return {
         job_id: job.job_id,
         user_id: job.user_id,
@@ -525,8 +539,15 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
 
         order_payload: {
           ...job.order_payload,
+
+          // ✅ added fields
+          status,
+          rejection_reason: rejectionReason,
+          rejected_at: rejectedAt,
+          accepted_at: acceptedAt,
+
           items: enrichedItems,
-          item_images: itemImages, // ✅ list of item images in the same order as items
+          item_images: itemImages,
         },
       };
     });
@@ -659,6 +680,11 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     const redis = require("../config/redis");
     const { buildJobKey } = require("../models/scheduledOrderModel");
 
+    // ✅ ADDED: notification service
+    const {
+      sendUserNotification,
+    } = require("../services/expoNotificationService");
+
     const jobKey = buildJobKey(jobId);
     const raw = await redis.get(jobKey);
 
@@ -682,14 +708,32 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     // ✅ update status
     data.order_payload.status = status;
 
+    const userId = data.user_id;
+
     // ✅ store reason only if rejected
     if (status === "REJECTED") {
-      data.order_payload.rejection_reason = reason.trim();
+      const cleanReason = reason.trim();
+
+      data.order_payload.rejection_reason = cleanReason;
       data.order_payload.rejected_at = new Date().toISOString();
+
+      // ✅ SEND NOTIFICATION (REJECTED)
+      await sendUserNotification({
+        user_id: userId,
+        title: "Order Rejected",
+        body: `Your scheduled order has been rejected. Reason: ${cleanReason}. This order will be automatically removed after 30 minutes.`,
+      });
     }
 
     if (status === "ACCEPTED") {
       data.order_payload.accepted_at = new Date().toISOString();
+
+      // ✅ SEND NOTIFICATION (ACCEPTED)
+      await sendUserNotification({
+        user_id: userId,
+        title: "Order Accepted",
+        body: `Your scheduled order has been accepted and will be processed at the scheduled time.`,
+      });
     }
 
     data.updated_at = new Date().toISOString();

@@ -25,6 +25,11 @@ const {
   startPendingOrderAutoCanceller,
 } = require("./services/autoCancelPendingOrders");
 
+// ✅ ADDED: cleanup service
+const {
+  cleanupRejectedScheduledOrders,
+} = require("./services/scheduledOrderCleanupService");
+
 dotenv.config();
 
 const app = express();
@@ -128,6 +133,18 @@ const server = http.createServer(app);
       intervalMs: 60_000,
       batchSize: 50,
     });
+
+    // ✅ ADDED: auto cleanup rejected scheduled orders (every 5 minutes)
+    setInterval(
+      () => {
+        cleanupRejectedScheduledOrders();
+      },
+      5 * 60 * 1000,
+    );
+
+    console.log(
+      "🧹 Rejected scheduled orders cleanup started (5 min interval)",
+    );
 
     const PORT = Number(process.env.PORT || 1001);
     server.listen(PORT, "0.0.0.0", () => {
