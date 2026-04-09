@@ -8,6 +8,7 @@ const {
   listScheduledOrders,
   cancelScheduledOrder,
   listScheduledOrdersByBusiness,
+  updateScheduledOrderStatus,
 } = require("../controllers/scheduledOrdersController");
 
 const { uploadDeliveryPhotos } = require("../middleware/uploadDeliveryPhoto");
@@ -46,4 +47,9 @@ router.get(
 // CANCEL one scheduled order
 router.delete("/scheduled-orders/:user_id/:jobId", cancelScheduledOrder);
 
+// ACCEPT scheduled order
+router.patch("/scheduled-orders/:jobId/accept", updateScheduledOrderStatus);
+
+// REJECT scheduled order
+router.patch("/scheduled-orders/:jobId/reject", updateScheduledOrderStatus);
 module.exports = router;

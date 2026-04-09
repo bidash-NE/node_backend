@@ -302,7 +302,9 @@ exports.listScheduledOrders = async (req, res) => {
           WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) => foodImageById.set(Number(r.id), r.item_image || null));
+      rows.forEach((r) =>
+        foodImageById.set(Number(r.id), r.item_image || null),
+      );
     }
 
     if (martMenuIds.size) {
@@ -314,7 +316,9 @@ exports.listScheduledOrders = async (req, res) => {
           WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) => martImageById.set(Number(r.id), r.item_image || null));
+      rows.forEach((r) =>
+        martImageById.set(Number(r.id), r.item_image || null),
+      );
     }
 
     // -------- build response with per-item item_image + top-level item_images list --------
@@ -336,8 +340,10 @@ exports.listScheduledOrders = async (req, res) => {
         let itemImage = null;
 
         if (Number.isFinite(mid) && mid > 0) {
-          if (serviceType === "FOOD") itemImage = foodImageById.get(mid) || null;
-          else if (serviceType === "MART") itemImage = martImageById.get(mid) || null;
+          if (serviceType === "FOOD")
+            itemImage = foodImageById.get(mid) || null;
+          else if (serviceType === "MART")
+            itemImage = martImageById.get(mid) || null;
         }
 
         return { ...it, item_image: itemImage };
@@ -451,7 +457,9 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
           WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) => foodImageById.set(Number(r.id), r.item_image || null));
+      rows.forEach((r) =>
+        foodImageById.set(Number(r.id), r.item_image || null),
+      );
     }
 
     if (martMenuIds.size) {
@@ -463,7 +471,9 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
           WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) => martImageById.set(Number(r.id), r.item_image || null));
+      rows.forEach((r) =>
+        martImageById.set(Number(r.id), r.item_image || null),
+      );
     }
 
     // -------- sort + map --------
@@ -487,8 +497,10 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
         let itemImage = null;
 
         if (Number.isFinite(mid) && mid > 0) {
-          if (serviceType === "FOOD") itemImage = foodImageById.get(mid) || null;
-          else if (serviceType === "MART") itemImage = martImageById.get(mid) || null;
+          if (serviceType === "FOOD")
+            itemImage = foodImageById.get(mid) || null;
+          else if (serviceType === "MART")
+            itemImage = martImageById.get(mid) || null;
         }
 
         return { ...it, item_image: itemImage };
@@ -528,7 +540,6 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   }
 };
-
 
 // controllers/scheduledOrdersController.js
 // ✅ Replace your existing exports.cancelScheduledOrder with this one
@@ -621,6 +632,70 @@ exports.cancelScheduledOrder = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+    });
+  }
+};
+
+exports.updateScheduledOrderStatus = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const { status } = req.body; // ACCEPTED or REJECTED
+
+    if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid jobId or status (ACCEPTED / REJECTED required)",
+      });
+    }
+
+    const redis = require("../config/redis");
+    const { buildJobKey } = require("../models/scheduledOrderModel");
+
+    const jobKey = buildJobKey(jobId);
+    const raw = await redis.get(jobKey);
+
+    if (!raw) {
+      return res.status(404).json({
+        success: false,
+        message: "Scheduled order not found",
+      });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        message: "Corrupted data",
+      });
+    }
+
+    // ❗ prevent double action
+    if (data.order_payload?.status !== "PENDING") {
+      return res.status(400).json({
+        success: false,
+        message: `Order already ${data.order_payload.status}`,
+      });
+    }
+
+    // ✅ update status
+    data.order_payload.status = status;
+    data.updated_at = new Date().toISOString();
+
+    await redis.set(jobKey, JSON.stringify(data));
+
+    return res.json({
+      success: true,
+      message: `Scheduled order ${status.toLowerCase()}`,
+      job_id: jobId,
+      status,
+    });
+  } catch (err) {
+    console.error("updateScheduledOrderStatus error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
     });
   }
 };
