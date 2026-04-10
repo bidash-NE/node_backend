@@ -80,6 +80,20 @@ async function adminTipTransfer({
       [user_wallet_id]
     );
 
+    const user_id = userW.user_id;
+
+    const [rows] = await conn.query(
+      `SELECT driver_id FROM drivers WHERE user_id = ?`, [user_id]
+    );
+
+    if (rows.length === 0) {
+      // handle case where no driver found for this user_id
+      console.error('Driver not found');
+      return;
+    }
+
+    const driver_id = rows[0].driver_id;
+
     // 3️⃣ Validate wallets
     if (!adminW) {
       await conn.rollback();
@@ -154,6 +168,7 @@ async function adminTipTransfer({
       `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
       `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
       (note ? ` | ${note}` : "");
+
     await conn.query(
       `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
       [userW.user_id, adminUser.user_name, activity]
@@ -167,6 +182,11 @@ async function adminTipTransfer({
     const [[userNew]] = await conn.query("SELECT * FROM wallets WHERE id = ?", [
       userW.id,
     ]);
+
+    // update payment_status in ride_ratings table 
+    await conn.query(
+      `UPDATE ride_ratings SET payment_status = 1 WHERE driver_id = ? AND payment_status = 0;`, [driver_id]
+    );
 
     await conn.commit();
 
