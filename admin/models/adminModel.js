@@ -102,10 +102,10 @@ async function fetchDrivers() {
       if (driver_id) {
         const [[ratingRow]] = await pool.query(
           `
-            SELECT 
-              AVG(rating) AS avg_rating
+            SELECT AVG(rating) AS avg_rating
             FROM ride_ratings
             WHERE driver_id = ?
+              AND payment_status = 0;
           `,
           [driver_id],
         );
