@@ -47,10 +47,7 @@ router.post("/quote", async (req, res) => {
     const channel = asLower(body.channel) || "app";
 
     const subtotal_cents = asInt(body.subtotal_cents);
-    const trip_category  = asLower(body.trip_category) || null; // "inter_city" | "intra_city"
-    const from_location  = asStr(body.from_location)   || null;
-    const to_location    = asStr(body.to_location)     || null;
-
+  
     const offer_code = asStr(body.offer_code) || null;
 
     const user_id = asStr(body.user_id) || null;
@@ -69,13 +66,8 @@ router.post("/quote", async (req, res) => {
 
     // ---- validations ----
     if (!service_type) return bad(res, "service_type is required");
-
-    if (!trip_category && (!subtotal_cents || subtotal_cents < 0))
+    if (!subtotal_cents || subtotal_cents < 0)
       return bad(res, "subtotal_cents must be a positive integer (in cents)");
-    if (trip_category && !["inter_city", "intra_city"].includes(trip_category))
-      return bad(res, "trip_category must be inter_city or intra_city");
-    if (trip_category && (!from_location || !to_location))
-      return bad(res, "from_location and to_location are required when trip_category is set");
 
     if (!["instant", "pool", "scheduled"].includes(trip_type))
       return bad(res, "trip_type must be one of: instant, pool, scheduled");
@@ -95,9 +87,6 @@ router.post("/quote", async (req, res) => {
       user_id,
       fare_after_discounts_cents,
       driver_take_home_base_cents,
-      trip_category,
-      from_location,
-      to_location,
       at, // optional datetime string
     });
     console.log("Pricing engine output:", out);
