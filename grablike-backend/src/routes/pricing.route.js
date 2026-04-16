@@ -120,7 +120,7 @@ router.post("/quote", async (req, res) => {
     // If your rules engine throws structured errors, map them here:
     // e.g. e.statusCode, e.code, e.message
     const msg = e?.message || "Pricing engine error";
-    const status = e?.statusCode && Number.isFinite(e.statusCode) ? e.statusCode : 500;
+    const status = (e?.status || e?.statusCode) && Number.isFinite(e.status || e.statusCode) ? (e.status || e.statusCode) : 500;
 
     return res.status(status).json({
       success: false,
