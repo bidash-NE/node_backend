@@ -78,9 +78,11 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
           r.driver_id,
           GROUP_CONCAT(DISTINCT r.passenger_id) AS passenger_ids,
           GROUP_CONCAT(DISTINCT o.user_id) AS customer_ids, 
+          GROUP_CONCAT(DISTINCT rp.user_id) AS ride_participants,
           GROUP_CONCAT(DISTINCT o.business_id) AS merchant_ids
        FROM rides r
        LEFT JOIN orders o ON o.delivery_ride_id = r.ride_id
+       LEFT JOIN ride_participants rp ON rp.ride_id = r.ride_id
        WHERE r.ride_id = ?
        GROUP BY r.driver_id`,
       [rideId]
@@ -132,16 +134,25 @@ async function ensureRideMembership(mysqlPool, rideId, socket) {
         .split(",")
         .map(id => Number(id.trim()))
         .filter(id => !isNaN(id));
+      
+      const allowedRideParticipants = (row.ride_participants || "")
+        .split(",")
+        .map(id => Number(id.trim()))
+        .filter(id => !isNaN(id));
+      
 
       console.log("allowedPassengerIds (rides):", allowedPassengerIds);
       console.log("allowedCustomerIds (orders):", allowedCustomerIds);
+      console.log("allowedRideParticipants (ride_participants):", allowedRideParticipants);
 
       const inRides = allowedPassengerIds.includes(selfId);
       const inOrders = allowedCustomerIds.includes(selfId);
+      const inRideParticipants = allowedRideParticipants.includes(selfId);
 
-      if (!inRides && !inOrders) {
+
+      if (!inRides && !inOrders && !inRideParticipants) {
         console.warn(
-          `[chat SEC] ride:${rideId} not_member_passenger (pid=${selfId}, rides=${allowedPassengerIds}, orders=${allowedCustomerIds})`
+          `[chat SEC] ride:${rideId} not_member_passenger (pid=${selfId}, rides=${allowedPassengerIds}, orders=${allowedCustomerIds}, rideParticipants=${allowedRideParticipants})`
         );
         return { ok: false, reason: "not_member_passenger" };
       }

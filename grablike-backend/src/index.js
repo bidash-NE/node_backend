@@ -47,10 +47,12 @@ import { getBatchAndRideId } from "./routes/getBatchId&RideId.js";
 import taxRulesRoutes from "./routes/taxRules.routes.js";
 import platformFeeRulesRoutes from "./routes/platformFeeRules.route.js";
 import pricingRoutes from "./routes/pricing.route.js";
+import faresRoutes from "./routes/fares.route.js";
 // finance routes
 import financeRoutes from "./routes/finance.routes.js";
 import refundRoutes from "./routes/refund.routes.js";
 import driverSettlementRoutes from "./routes/drivers.settlement.routes.js";
+
 import makeCustomerLookupRouter from "./routes/customerLookUp.js";
 import makeMerchantLookupRouter from "./routes/merchantLookUp.js";
 
@@ -98,6 +100,7 @@ app.use('/admin/offers', adminOfferRoutes);
 app.use("/tax-rules", taxRulesRoutes);
 app.use("/platform-fee-rules", platformFeeRulesRoutes);
 app.use("/pricing", pricingRoutes);
+app.use("/fares", faresRoutes);
 
 // finance routes
 app.use("/finance", financeRoutes);
