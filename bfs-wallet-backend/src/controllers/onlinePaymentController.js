@@ -7,8 +7,9 @@ const {
 
 async function initPaymentHandler(req, res, next) {
   try {
-    const { amount, email, description } = req.body;
+    const { userId, amount, email, description } = req.body;
     const data = await initPayment({
+      userId,
       amount: Number(amount),
       email,
       description: description || "Online payment",
