@@ -1,52 +1,10 @@
-// models/ordersReportModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
-// Adjust these if your actual names differ:
-const MERCHANT_TABLE = "merchant_business_details";
-const OWNER_TYPE_COL = "owner_type";
-
-// ✅ These 2 are important for your other tables
-const CANCELLED_TIME_COL = "cancelled_at"; // in cancelled_orders
-const DELIVERED_TIME_COL = "delivered_at"; // in delivered_orders
-
-// ✅ NEW revenue snapshot table
-const REVENUE_TABLE = "food_mart_revenue";
-
-// Optional debug logs
 const REPORT_DEBUG =
   String(process.env.REPORT_DEBUG || "").toLowerCase() === "true";
 
 function dlog(enabled, ...args) {
   if (enabled) console.log(...args);
-}
-
-/* ========================= helpers ========================= */
-
-async function tableExists(table) {
-  const [rows] = await db.query(
-    `
-    SELECT 1
-      FROM INFORMATION_SCHEMA.TABLES
-     WHERE TABLE_SCHEMA = DATABASE()
-       AND TABLE_NAME = ?
-     LIMIT 1
-  `,
-    [table],
-  );
-  return rows.length > 0;
-}
-
-async function getTableColumns(table) {
-  const [rows] = await db.query(
-    `
-    SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-     WHERE TABLE_SCHEMA = DATABASE()
-       AND TABLE_NAME = ?
-  `,
-    [table],
-  );
-  return new Set(rows.map((r) => String(r.COLUMN_NAME)));
 }
 
 function safeParseJson(v) {
@@ -61,166 +19,30 @@ function safeParseJson(v) {
   }
 }
 
-/* ============================================================
-   ORDERS REPORT (UNCHANGED) — orders + cancelled + delivered
-   ============================================================ */
-
-/**
- * Builds "one row per order" report SQL for a given source table pair.
- */
-function buildSourceReportSQL({
-  sourceLabel,
-  ordersTable,
-  itemsTable,
-  placedAtCol,
-  statusFallback,
-  ownerTypeNorm,
-  businessIds = [],
-  userId,
-  status,
-  dateFrom,
-  dateTo,
-  limit,
-  offset,
-}) {
-  const where = [];
-  const params = [];
-
-  // owner type filter
-  where.push(`LOWER(mbd.${OWNER_TYPE_COL}) = ?`);
-  params.push(ownerTypeNorm);
-
-  if (businessIds.length) {
-    where.push(`ai_order.business_id IN (${businessIds.map(() => "?").join(",")})`);
-    params.push(...businessIds);
-  }
-
-  if (userId) {
-    where.push(`o.user_id = ?`);
-    params.push(userId);
-  }
-
-  const statusExpr = statusFallback
-    ? `COALESCE(o.status, '${statusFallback}')`
-    : `o.status`;
-
-  if (status) {
-    where.push(`UPPER(${statusExpr}) = ?`);
-    params.push(String(status).toUpperCase());
-  }
-
-  if (dateFrom) {
-    where.push(`o.${placedAtCol} >= ?`);
-    params.push(`${dateFrom} 00:00:00`);
-  }
-  if (dateTo) {
-    where.push(`o.${placedAtCol} < DATE_ADD(?, INTERVAL 1 DAY)`);
-    params.push(`${dateTo} 00:00:00`);
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  const sql = `
-    SELECT
-      '${sourceLabel}' AS source,
-      o.order_id AS Order_ID,
-      COALESCE(NULLIF(TRIM(u.user_name), ''), CONCAT('User ', o.user_id)) AS Customer_Name,
-      COALESCE(
-        NULLIF(TRIM(ai_order.business_name), ''),
-        NULLIF(TRIM(mbd.business_name), ''),
-        CONCAT('Business ', ai_order.business_id)
-      ) AS Business_Name,
-      ai_order.items_name AS Items_Name,
-      ai_order.total_quantity AS Total_Quantity,
-      COALESCE(o.total_amount, 0) AS Total_Amount,
-      o.payment_method AS Payment,
-      ${statusExpr} AS Status,
-      o.${placedAtCol} AS Placed_At
-    FROM \`${ordersTable}\` o
-    JOIN (
-      SELECT
-        item_qty.order_id AS order_id,
-        MAX(item_qty.business_id) AS business_id,
-        MAX(item_qty.business_name) AS business_name,
-        GROUP_CONCAT(
-          CONCAT(item_qty.item_name, ' x', item_qty.qty)
-          ORDER BY item_qty.item_name
-          SEPARATOR ', '
-        ) AS items_name,
-        SUM(item_qty.qty) AS total_quantity
-      FROM (
-        SELECT
-          i.order_id AS order_id,
-          i.business_id AS business_id,
-          i.business_name AS business_name,
-          i.item_name AS item_name,
-          SUM(i.quantity) AS qty
-        FROM \`${itemsTable}\` i
-        GROUP BY i.order_id, i.business_id, i.business_name, i.item_name
-      ) item_qty
-      GROUP BY item_qty.order_id
-    ) ai_order ON ai_order.order_id = o.order_id
-    LEFT JOIN users u ON u.user_id = o.user_id
-    JOIN \`${MERCHANT_TABLE}\` mbd ON mbd.business_id = ai_order.business_id
-    ${whereSql}
-    ORDER BY o.${placedAtCol} DESC
-    LIMIT ? OFFSET ?;
-  `;
-
-  const paramsWithLimit = [...params, Number(limit), Number(offset)];
-  return { sql, params: paramsWithLimit };
+function round4(n) {
+  return Math.round((Number(n || 0) + Number.EPSILON) * 10000) / 10000;
 }
 
-async function runSource({
-  debug,
-  ownerTypeNorm,
-  businessIds,
-  userId,
-  status,
-  dateFrom,
-  dateTo,
-  limit,
-  offset,
-  sourceLabel,
-  ordersTable,
-  itemsTable,
-  placedAtCol,
-  statusFallback,
-}) {
-  const { sql, params } = buildSourceReportSQL({
-    sourceLabel,
-    ordersTable,
-    itemsTable,
-    placedAtCol,
-    statusFallback,
-    ownerTypeNorm,
-    businessIds,
-    userId,
-    status,
-    dateFrom,
-    dateTo,
-    limit,
-    offset,
+/* ============================================================
+   ORDERS REPORT - Fixed Version
+   ============================================================ */
+
+async function getUsers(userIds) {
+  const users = await prisma.users.findMany({
+    where: {
+      user_id: { in: userIds },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+    },
   });
 
-  dlog(debug, `\n[REPORT] SOURCE=${sourceLabel}`);
-  dlog(debug, sql);
-  dlog(debug, params);
-
-  const [rows] = await db.query(sql, params);
-
-  return rows.map((r) => ({
-    Order_ID: r.Order_ID,
-    Customer_Name: r.Customer_Name,
-    Business_Name: r.Business_Name,
-    Items_Name: r.Items_Name,
-    Total_Quantity: Number(r.Total_Quantity || 0),
-    Total_Amount: Number(r.Total_Amount || 0),
-    Payment: r.Payment,
-    Status: r.Status,
-    Placed_At: r.Placed_At,
-    source: r.source,
-  }));
+  const map = {};
+  users.forEach((u) => {
+    map[Number(u.user_id)] = u.user_name;
+  });
+  return map;
 }
 
 async function fetchOrdersReportByOwnerType({
@@ -242,77 +64,235 @@ async function fetchOrdersReportByOwnerType({
 
   const L = Math.min(Math.max(Number(limit), 1), 500);
   const O = Math.max(Number(offset), 0);
-
-  const perSourceLimit = Math.min(5000, Math.max((L + O) * 30, 500));
-  const perSourceOffset = 0;
-
   const dbg = Boolean(debug) || REPORT_DEBUG;
 
-  const [ordersRows, cancelledRows, deliveredRows] = await Promise.all([
-    runSource({
-      debug: dbg,
-      ownerTypeNorm,
-      businessIds,
-      userId,
-      status,
-      dateFrom,
-      dateTo,
-      limit: perSourceLimit,
-      offset: perSourceOffset,
-      sourceLabel: "orders",
-      ordersTable: "orders",
-      itemsTable: "order_items",
-      placedAtCol: "created_at",
-      statusFallback: null,
-    }),
-    runSource({
-      debug: dbg,
-      ownerTypeNorm,
-      businessIds,
-      userId,
-      status,
-      dateFrom,
-      dateTo,
-      limit: perSourceLimit,
-      offset: perSourceOffset,
-      sourceLabel: "cancelled",
-      ordersTable: "cancelled_orders",
-      itemsTable: "cancelled_order_items",
-      placedAtCol: CANCELLED_TIME_COL,
-      statusFallback: "CANCELLED",
-    }),
-    runSource({
-      debug: dbg,
-      ownerTypeNorm,
-      businessIds,
-      userId,
-      status,
-      dateFrom,
-      dateTo,
-      limit: perSourceLimit,
-      offset: perSourceOffset,
-      sourceLabel: "delivered",
-      ordersTable: "delivered_orders",
-      itemsTable: "delivered_order_items",
-      placedAtCol: DELIVERED_TIME_COL,
-      statusFallback: "DELIVERED",
-    }),
-  ]);
+  // Get merchant business IDs for the owner type
+  const merchantWhere = { owner_type: ownerTypeNorm };
+  if (businessIds.length) {
+    merchantWhere.business_id = { in: businessIds };
+  }
 
-  const all = [...ordersRows, ...cancelledRows, ...deliveredRows].sort(
-    (a, b) => {
-      const ta = a.Placed_At ? new Date(a.Placed_At).getTime() : 0;
-      const tb = b.Placed_At ? new Date(b.Placed_At).getTime() : 0;
-      return tb - ta;
+  const merchants = await prisma.merchant_business_details.findMany({
+    where: merchantWhere,
+    select: { business_id: true, business_name: true },
+  });
+
+  const merchantBusinessIds = merchants.map((m) => Number(m.business_id));
+  const merchantNameMap = {};
+  merchants.forEach((m) => {
+    merchantNameMap[Number(m.business_id)] = m.business_name;
+  });
+
+  if (merchantBusinessIds.length === 0) {
+    return [];
+  }
+
+  // Build where conditions for orders
+  const orderWhere = {
+    business_id: { in: merchantBusinessIds },
+    ...(userId && { user_id: userId }),
+    ...(dateFrom && { created_at: { gte: new Date(`${dateFrom} 00:00:00`) } }),
+    ...(dateTo && { created_at: { lt: new Date(`${dateTo} 00:00:00`) } }),
+  };
+
+  if (status) {
+    orderWhere.status = status;
+  }
+
+  // Fetch orders with their items
+  const orders = await prisma.orders.findMany({
+    where: orderWhere,
+    include: {
+      order_items: true,
     },
-  );
+    orderBy: { created_at: "desc" },
+  });
 
+  // For cancelled orders, we need to filter by business_id through their items
+  const cancelledWhere = {
+    ...(userId && { user_id: userId }),
+    ...(dateFrom && {
+      cancelled_at: { gte: new Date(`${dateFrom} 00:00:00`) },
+    }),
+    ...(dateTo && { cancelled_at: { lt: new Date(`${dateTo} 00:00:00`) } }),
+  };
+
+  let cancelledOrders = await prisma.cancelled_orders.findMany({
+    where: cancelledWhere,
+    include: {
+      cancelled_order_items: true,
+    },
+    orderBy: { cancelled_at: "desc" },
+  });
+
+  // Filter cancelled orders by business_id through their items
+  if (merchantBusinessIds.length) {
+    cancelledOrders = cancelledOrders.filter((order) =>
+      order.cancelled_order_items.some((item) =>
+        merchantBusinessIds.includes(Number(item.business_id)),
+      ),
+    );
+  }
+
+  // For delivered orders, filter by business_id through their items
+  const deliveredWhere = {
+    ...(userId && { user_id: userId }),
+    ...(dateFrom && {
+      delivered_at: { gte: new Date(`${dateFrom} 00:00:00`) },
+    }),
+    ...(dateTo && { delivered_at: { lt: new Date(`${dateTo} 00:00:00`) } }),
+  };
+
+  let deliveredOrders = await prisma.delivered_orders.findMany({
+    where: deliveredWhere,
+    include: {
+      delivered_order_items: true,
+    },
+    orderBy: { delivered_at: "desc" },
+  });
+
+  // Filter delivered orders by business_id through their items
+  if (merchantBusinessIds.length) {
+    deliveredOrders = deliveredOrders.filter((order) =>
+      order.delivered_order_items.some((item) =>
+        merchantBusinessIds.includes(Number(item.business_id)),
+      ),
+    );
+  }
+
+  // Get user names
+  const allUserIds = [
+    ...new Set(
+      [
+        ...orders.map((o) => o.user_id),
+        ...cancelledOrders.map((c) => c.user_id),
+        ...deliveredOrders.map((d) => d.user_id),
+      ].filter(Boolean),
+    ),
+  ];
+
+  const userNames = await getUsers(allUserIds);
+
+  // Process orders
+  const processedOrders = orders.map((order) => {
+    const items = order.order_items;
+    const itemsByName = {};
+    let totalQuantity = 0;
+
+    items.forEach((item) => {
+      itemsByName[item.item_name] =
+        (itemsByName[item.item_name] || 0) + item.quantity;
+      totalQuantity += item.quantity;
+    });
+
+    const itemsName = Object.entries(itemsByName)
+      .map(([name, qty]) => `${name} x${qty}`)
+      .join(", ");
+
+    // Get business name from items or merchant map
+    const businessName =
+      items[0]?.business_name ||
+      merchantNameMap[order.business_id] ||
+      `Business ${order.business_id}`;
+
+    return {
+      Order_ID: order.order_id,
+      Customer_Name: userNames[order.user_id] || `User ${order.user_id}`,
+      Business_Name: businessName,
+      Items_Name: itemsName,
+      Total_Quantity: totalQuantity,
+      Total_Amount: Number(order.total_amount || 0),
+      Payment: order.payment_method,
+      Status: order.status || "PENDING",
+      Placed_At: order.created_at,
+    };
+  });
+
+  // Process cancelled orders
+  const processedCancelled = cancelledOrders.map((order) => {
+    const items = order.cancelled_order_items;
+    const itemsByName = {};
+    let totalQuantity = 0;
+
+    items.forEach((item) => {
+      itemsByName[item.item_name] =
+        (itemsByName[item.item_name] || 0) + item.quantity;
+      totalQuantity += item.quantity;
+    });
+
+    const itemsName = Object.entries(itemsByName)
+      .map(([name, qty]) => `${name} x${qty}`)
+      .join(", ");
+
+    const businessName =
+      items[0]?.business_name ||
+      `Business ${items[0]?.business_id || "Unknown"}`;
+
+    return {
+      Order_ID: order.order_id,
+      Customer_Name: userNames[order.user_id] || `User ${order.user_id}`,
+      Business_Name: businessName,
+      Items_Name: itemsName,
+      Total_Quantity: totalQuantity,
+      Total_Amount: Number(order.total_amount || 0),
+      Payment: order.payment_method,
+      Status: "CANCELLED",
+      Placed_At: order.cancelled_at,
+    };
+  });
+
+  // Process delivered orders
+  const processedDelivered = deliveredOrders.map((order) => {
+    const items = order.delivered_order_items;
+    const itemsByName = {};
+    let totalQuantity = 0;
+
+    items.forEach((item) => {
+      itemsByName[item.item_name] =
+        (itemsByName[item.item_name] || 0) + item.quantity;
+      totalQuantity += item.quantity;
+    });
+
+    const itemsName = Object.entries(itemsByName)
+      .map(([name, qty]) => `${name} x${qty}`)
+      .join(", ");
+
+    const businessName =
+      items[0]?.business_name ||
+      `Business ${items[0]?.business_id || "Unknown"}`;
+
+    return {
+      Order_ID: order.order_id,
+      Customer_Name: userNames[order.user_id] || `User ${order.user_id}`,
+      Business_Name: businessName,
+      Items_Name: itemsName,
+      Total_Quantity: totalQuantity,
+      Total_Amount: Number(order.total_amount || 0),
+      Payment: order.payment_method,
+      Status: "DELIVERED",
+      Placed_At: order.delivered_at,
+    };
+  });
+
+  // Combine and sort
+  const all = [
+    ...processedOrders,
+    ...processedCancelled,
+    ...processedDelivered,
+  ].sort((a, b) => {
+    const ta = a.Placed_At ? new Date(a.Placed_At).getTime() : 0;
+    const tb = b.Placed_At ? new Date(b.Placed_At).getTime() : 0;
+    return tb - ta;
+  });
+
+  // Paginate
   const page = all.slice(O, O + L);
-  return page.map(({ source, ...rest }) => rest);
+
+  return page;
 }
 
 /* ============================================================
-   ✅ REVENUE REPORT (UPDATED) — reads from food_mart_revenue
+   REVENUE REPORT
    ============================================================ */
 
 async function fetchFoodMartRevenueReport({
@@ -325,91 +305,40 @@ async function fetchFoodMartRevenueReport({
 }) {
   const dbg = Boolean(debug) || REPORT_DEBUG;
 
-  // Match your example precision (e.g., 0.9975, 0.0525)
-  const round4 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 10000) / 10000;
+  // Build where conditions
+  const where = {};
 
-  // If table not created yet, return empty (so API doesn't crash)
-  const hasRevenueTable = await tableExists(REVENUE_TABLE);
-  if (!hasRevenueTable) {
-    dlog(dbg, `[REVENUE] Table ${REVENUE_TABLE} not found. Returning empty.`);
-    return [];
+  if (businessIds.length) {
+    where.business_id = { in: businessIds.map((id) => Number(id)) };
   }
 
-  const cols = await getTableColumns(REVENUE_TABLE);
-
-  const c = (name, fallbackSql = "NULL") =>
-    cols.has(name) ? `r.\`${name}\`` : fallbackSql;
-
-  const hasPlatformFeeCol = cols.has("platform_fee");
-  const hasRevenueEarnedCol = cols.has("revenue_earned");
-
-  const placedAtExpr = cols.has("placed_at")
-    ? "r.`placed_at`"
-    : cols.has("created_at")
-      ? "r.`created_at`"
-      : "NULL";
-
-  const where = [];
-  const params = [];
-
-  if (cols.has("owner_type")) {
-    where.push(`UPPER(r.\`owner_type\`) IN ('FOOD','MART')`);
+  if (userId) {
+    where.user_id = Number(userId);
   }
 
-  if (businessIds.length && cols.has("business_id")) {
-    where.push(`r.\`business_id\` IN (${businessIds.map(() => "?").join(",")})`);
-    params.push(...businessIds);
+  if (status) {
+    where.status = status;
   }
 
-  if (userId && cols.has("user_id")) {
-    where.push(`r.\`user_id\` = ?`);
-    params.push(userId);
+  if (dateFrom) {
+    where.placed_at = { gte: new Date(`${dateFrom} 00:00:00`) };
   }
 
-  if (status && cols.has("status")) {
-    where.push(`UPPER(r.\`status\`) = ?`);
-    params.push(String(status).toUpperCase());
+  if (dateTo) {
+    where.placed_at = {
+      ...where.placed_at,
+      lt: new Date(`${dateTo} 00:00:00`),
+    };
   }
 
-  if (dateFrom && placedAtExpr !== "NULL") {
-    where.push(`${placedAtExpr} >= ?`);
-    params.push(`${dateFrom} 00:00:00`);
-  }
+  // Fetch revenue records
+  const revenues = await prisma.food_mart_revenue.findMany({
+    where,
+    orderBy: { placed_at: "desc" },
+  });
 
-  if (dateTo && placedAtExpr !== "NULL") {
-    where.push(`${placedAtExpr} < DATE_ADD(?, INTERVAL 1 DAY)`);
-    params.push(`${dateTo} 00:00:00`);
-  }
-
-  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-  // ✅ No LIMIT/OFFSET — fetch all
-  const sql = `
-    SELECT
-      ${c("order_id", "r.\`order_id\`")} AS order_id,
-      ${c("owner_type", "NULL")} AS owner_type,
-      ${c("platform_fee", "0")} AS platform_fee,
-      ${c("revenue_earned", c("platform_fee", "0"))} AS revenue_earned,
-      ${c("total_amount", "0")} AS total_amount,
-      ${c("details_json", "NULL")} AS details_json,
-      ${placedAtExpr} AS placed_at
-    FROM \`${REVENUE_TABLE}\` r
-    ${whereSql}
-    ORDER BY
-      ${placedAtExpr !== "NULL" ? `${placedAtExpr} DESC` : "1"} ${
-        cols.has("created_at") ? ", r.\`created_at\` DESC" : ""
-      };
-  `;
-
-  dlog(dbg, `\n[REVENUE] SQL:\n${sql}`);
-  dlog(dbg, `[REVENUE] params:`, params);
-
-  const [rows] = await db.query(sql, params);
-
-  return rows.map((r) => {
-    const ownerTypeLabel = String(r.owner_type || "").toUpperCase();
+  return revenues.map((r) => {
     const totalAmount = Number(r.total_amount || 0);
-
     let details = safeParseJson(r.details_json);
 
     if (!details) {
@@ -418,7 +347,7 @@ async function fetchFoodMartRevenueReport({
           id: r.order_id,
           status: status || null,
           placed_at: r.placed_at || null,
-          owner_type: ownerTypeLabel || null,
+          owner_type: r.owner_type || null,
           source: "food_mart_revenue",
         },
         amounts: {
@@ -430,41 +359,30 @@ async function fetchFoodMartRevenueReport({
       };
     }
 
-    if (!details.amounts || typeof details.amounts !== "object") details.amounts = {};
+    if (!details.amounts || typeof details.amounts !== "object") {
+      details.amounts = {};
+    }
 
-    // ✅ YOUR REQUIRED FORMAT:
-    // revenue_earned = GROSS (before GST split)
-    // tax = 5% of revenue_earned
-    // platform_fee = NET (revenue_earned - tax)
-    //
-    // Prefer DB revenue_earned as gross, else fall back to DB platform_fee or details
-    const grossRevenueEarned =
-      hasRevenueEarnedCol
-        ? Number(r.revenue_earned || 0)
-        : hasPlatformFeeCol
-          ? Number(r.platform_fee || 0)
-          : Number(details?.amounts?.revenue_earned ?? details?.amounts?.platform_fee ?? 0);
-
+    const grossRevenueEarned = Number(r.revenue_earned || r.platform_fee || 0);
     const gstTax = round4(grossRevenueEarned * 0.05);
     const netPlatformFee = round4(grossRevenueEarned - gstTax);
 
-    // enforce amounts shape exactly as you want
-    details.amounts.total_amount = Number(details.amounts.total_amount ?? totalAmount) || totalAmount;
+    details.amounts.total_amount =
+      Number(details.amounts.total_amount ?? totalAmount) || totalAmount;
     details.amounts.revenue_earned = round4(grossRevenueEarned);
     details.amounts.tax = gstTax;
     details.amounts.platform_fee = netPlatformFee;
 
     return {
       order_id: r.order_id,
-      owner_type: ownerTypeLabel,
-      platform_fee: netPlatformFee,             // NET
-      revenue_earned: round4(grossRevenueEarned), // GROSS
+      owner_type: r.owner_type ? r.owner_type.toUpperCase() : "",
+      platform_fee: netPlatformFee,
+      revenue_earned: round4(grossRevenueEarned),
       total_amount: totalAmount,
       details,
     };
   });
 }
-
 
 module.exports = {
   fetchOrdersReportByOwnerType,

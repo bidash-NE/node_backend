@@ -1,5 +1,42 @@
-// controllers/ordersReportController.js
+const { prisma } = require("../lib/prisma.js");
 const Reports = require("../models/ordersReportModel");
+const { addLog } = require("../models/adminlogModel");
+
+async function requireAdmin(req) {
+  const admin_user_id = req.user?.user_id;
+
+  if (!admin_user_id) {
+    const e = new Error("Authentication required");
+    e.status = 401;
+    throw e;
+  }
+
+  const actor = await prisma.users.findFirst({
+    where: {
+      user_id: Number(admin_user_id),
+      role: {
+        in: ["admin", "superadmin", "super admin"],
+      },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      role: true,
+    },
+  });
+
+  if (!actor) {
+    const e = new Error("Forbidden: Admin or Super Admin required");
+    e.status = 403;
+    throw e;
+  }
+
+  return {
+    user_id: Number(actor.user_id),
+    admin_name: actor.user_name || "ADMIN",
+    role: actor.role,
+  };
+}
 
 function parseQuery(req) {
   const {
@@ -38,6 +75,7 @@ function parseQuery(req) {
 
 exports.getFoodOrdersReport = async (req, res) => {
   try {
+    await requireAdmin(req);
     const args = parseQuery(req);
     const rows = await Reports.fetchOrdersReportByOwnerType({
       ...args,
@@ -46,12 +84,15 @@ exports.getFoodOrdersReport = async (req, res) => {
     res.json({ count: rows.length, data: rows });
   } catch (err) {
     console.error("[getFoodOrdersReport] Error:", err);
-    res.status(500).json({ error: "Failed to fetch food orders report" });
+    res
+      .status(err.status || 500)
+      .json({ error: err.message || "Failed to fetch food orders report" });
   }
 };
 
 exports.getMartOrdersReport = async (req, res) => {
   try {
+    await requireAdmin(req);
     const args = parseQuery(req);
     const rows = await Reports.fetchOrdersReportByOwnerType({
       ...args,
@@ -60,20 +101,22 @@ exports.getMartOrdersReport = async (req, res) => {
     res.json({ count: rows.length, data: rows });
   } catch (err) {
     console.error("[getMartOrdersReport] Error:", err);
-    res.status(500).json({ error: "Failed to fetch mart orders report" });
+    res
+      .status(err.status || 500)
+      .json({ error: err.message || "Failed to fetch mart orders report" });
   }
 };
 
-// ✅ NOW reads from food_mart_revenue table
 exports.getFoodMartRevenueReport = async (req, res) => {
   try {
+    await requireAdmin(req);
     const args = parseQuery(req);
     const rows = await Reports.fetchFoodMartRevenueReport(args);
     res.json({ count: rows.length, data: rows });
   } catch (err) {
     console.error("[getFoodMartRevenueReport] Error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch food & mart revenue report" });
+    res.status(err.status || 500).json({
+      error: err.message || "Failed to fetch food & mart revenue report",
+    });
   }
 };

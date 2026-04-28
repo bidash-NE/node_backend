@@ -1,18 +1,34 @@
-// controllers/adminCollaboratorController.js
+const { prisma } = require("../lib/prisma.js");
 const Collab = require("../models/adminCollaboratorModel");
 const { addLog } = require("../models/adminlogModel");
-const { findPrivilegedByIdAndName } = require("../models/userModel");
 
-// ─────────── AUTH HELPER ───────────
+// ─────────── AUTH HELPER USING BEARER TOKEN ───────────
 async function requireAdmin(req) {
-  const { auth } = req.body || {};
-  if (!auth || !auth.user_id || !auth.admin_name) {
-    const e = new Error("Missing admin credentials");
+  // Get user_id from token (set by auth middleware)
+  const admin_user_id = req.user?.user_id;
+
+  if (!admin_user_id) {
+    const e = new Error("Authentication required");
     e.status = 401;
     throw e;
   }
 
-  const actor = await findPrivilegedByIdAndName(auth.user_id, auth.admin_name);
+  // Find user with admin or superadmin role using Prisma
+  const actor = await prisma.users.findFirst({
+    where: {
+      user_id: Number(admin_user_id),
+      role: {
+        in: ["admin", "superadmin", "super admin"],
+      },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      email: true,
+      role: true,
+    },
+  });
+
   if (!actor) {
     const e = new Error("Forbidden: Admin or Super Admin required");
     e.status = 403;
@@ -20,8 +36,8 @@ async function requireAdmin(req) {
   }
 
   return {
-    user_id: actor.user_id,
-    admin_name: actor.user_name || actor.email || auth.admin_name,
+    user_id: Number(actor.user_id),
+    admin_name: actor.user_name || actor.email || "ADMIN",
     role: actor.role,
   };
 }
@@ -29,7 +45,7 @@ async function requireAdmin(req) {
 // ─────────── LOG FORMATTER ───────────
 function formatLog(action, table, id, fields) {
   const parts = Object.entries(fields).map(
-    ([k, v]) => `${k}="${v ?? "(null)"}"`
+    ([k, v]) => `${k}="${v ?? "(null)"}"`,
   );
   return `${action} ${table}: id=${id} (${parts.join(", ")})`;
 }
@@ -63,27 +79,29 @@ exports.create = async (req, res) => {
           email: data.email,
           service: data.service,
           role: data.role,
-        }
+        },
       ),
     });
 
     res.status(201).json({ success: true, data });
   } catch (err) {
+    console.error("Create collaborator error:", err);
     res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };
 
-// ─────────── LIST (PUBLIC) ───────────
+// ─────────── LIST (PUBLIC - No auth required) ───────────
 exports.list = async (_req, res) => {
   try {
     const data = await Collab.list();
     res.json({ success: true, data: data.data, total: data.total });
   } catch (err) {
+    console.error("List collaborators error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
-// ─────────── GET ONE (PUBLIC) ───────────
+// ─────────── GET ONE (PUBLIC - No auth required) ───────────
 exports.getOne = async (req, res) => {
   try {
     const id = req.params.id;
@@ -96,6 +114,7 @@ exports.getOne = async (req, res) => {
 
     res.json({ success: true, data });
   } catch (err) {
+    console.error("Get collaborator error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -135,17 +154,22 @@ exports.update = async (req, res) => {
     ]) {
       const oldVal = before[k];
       const newVal = after[k];
-      changes[k] = oldVal === newVal ? "(unchanged)" : newVal ?? "(null)";
+      if (oldVal !== newVal) {
+        changes[k] = newVal ?? "(null)";
+      }
     }
 
-    await addLog({
-      user_id: admin.user_id,
-      admin_name: admin.admin_name,
-      activity: formatLog("UPDATE", "admin_collaborators", id, changes),
-    });
+    if (Object.keys(changes).length > 0) {
+      await addLog({
+        user_id: admin.user_id,
+        admin_name: admin.admin_name,
+        activity: formatLog("UPDATE", "admin_collaborators", id, changes),
+      });
+    }
 
     res.json({ success: true, data: after });
   } catch (err) {
+    console.error("Update collaborator error:", err);
     res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };
@@ -180,6 +204,7 @@ exports.remove = async (req, res) => {
 
     res.json({ success: true, deleted: true });
   } catch (err) {
+    console.error("Delete collaborator error:", err);
     res.status(err.status || 500).json({ success: false, error: err.message });
   }
 };

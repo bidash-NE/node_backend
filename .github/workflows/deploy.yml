@@ -10,6 +10,11 @@ on:
       - "order_management/**"
       - "driver/**"
       - "admin/**"
+      - "lib/**"
+      - "prisma/**"
+      - "generated/**"
+      - "package.json"
+      - "package-lock.json"
       - "Map_and_location_services/**"
       - "wallet_payment/**"
       - "bfs-wallet-backend/**"
@@ -54,7 +59,13 @@ jobs:
             merchant:               'merchant/**'
             order_management:       'order_management/**'
             driver:                 'driver/**'
-            admin:                  'admin/**'
+            admin:
+              - 'admin/**'
+              - 'lib/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
             map_location:           'Map_and_location_services/**'
             wallet_payment:         'wallet_payment/**'
             bfs_wallet_backend:     'bfs-wallet-backend/**'
@@ -71,6 +82,11 @@ jobs:
               - 'order_management/**'
               - 'driver/**'
               - 'admin/**'
+              - 'lib/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
               - 'Map_and_location_services/**'
               - 'wallet_payment/**'
               - 'bfs-wallet-backend/**'
@@ -89,6 +105,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -104,6 +123,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-food:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-food:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Mart
         if: needs.changes.outputs.mart == 'true'
@@ -114,6 +135,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-mart:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-mart:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Merchant
         if: needs.changes.outputs.merchant == 'true'
@@ -124,6 +147,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-merchant:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-merchant:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Order Management
         if: needs.changes.outputs.order_management == 'true'
@@ -134,6 +159,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Driver
         if: needs.changes.outputs.driver == 'true'
@@ -144,16 +171,21 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-driver:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-driver:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Admin
         if: needs.changes.outputs.admin == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./admin
+          context: .
+          file: ./admin/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-admin:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-admin:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Map & Location Services
         if: needs.changes.outputs.map_location == 'true'
@@ -164,6 +196,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-map-location-services:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Wallet Payment
         if: needs.changes.outputs.wallet_payment == 'true'
@@ -174,6 +208,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push BFS Wallet Backend
         if: needs.changes.outputs.bfs_wallet_backend == 'true'
@@ -184,6 +220,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-bfs-wallet-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-bfs-wallet-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Grablike Backend
         if: needs.changes.outputs.grablike_backend == 'true'
@@ -194,6 +232,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-grablike-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-grablike-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push SMS Gateway Backend
         if: needs.changes.outputs.sms_gateway == 'true'
@@ -204,6 +244,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-sms-gateway-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push User Merchant Chat
         if: needs.changes.outputs.user_merchant_chat == 'true'
@@ -214,6 +256,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Expo Push Notification
         if: needs.changes.outputs.expo_push_notification == 'true'
@@ -224,6 +268,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build & push Events Backend
         if: needs.changes.outputs.events_backend == 'true'
@@ -234,6 +280,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-events-backend:latest
             ${{ secrets.DOCKER_USERNAME }}/superapp-events-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     name: Deploy changed services to k3s (prod)

@@ -1,4 +1,3 @@
-// controllers/adminController.js
 const adminModel = require("../models/adminModel");
 
 // helpers to extract acting admin for logs
@@ -6,6 +5,7 @@ function toIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
 function getActor(req) {
   return {
     user_id:
@@ -66,7 +66,7 @@ exports.getAllAdmins = async (_req, res) => {
   }
 };
 
-// Merchants + business details + profile image (business_logo)
+// Merchants
 exports.getAllMerchantsWithDetails = async (_req, res) => {
   try {
     const merchants = await adminModel.fetchMerchantsWithBusiness();
@@ -91,7 +91,7 @@ exports.deactivateUser = async (req, res) => {
     const result = await adminModel.deactivateUser(
       user_id,
       actor.user_id,
-      actor.admin_name
+      actor.admin_name,
     );
 
     if (result.notFound)
@@ -119,7 +119,7 @@ exports.activateUser = async (req, res) => {
     const result = await adminModel.activateUser(
       user_id,
       actor.user_id,
-      actor.admin_name
+      actor.admin_name,
     );
 
     if (result.notFound)
@@ -145,7 +145,7 @@ exports.deleteUser = async (req, res) => {
     const result = await adminModel.deleteUser(
       user_id,
       actor.user_id,
-      actor.admin_name
+      actor.admin_name,
     );
 
     if (result.notFound)

@@ -1,11 +1,10 @@
-// services/smsNotificationService.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 const SMS_BULK_URL = process.env.SMS_BULK_URL;
 const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
 const SMS_FROM = process.env.SMS_FROM.trim();
 
-const MAX_BULK = Number(process.env.SMS_BULK_MAX || 50); // gateway default cap
+const MAX_BULK = Number(process.env.SMS_BULK_MAX || 50);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,26 +34,35 @@ function normalizeBhutanNumberForSms(input) {
 }
 
 /**
- * Fetch phones for roles from users table.
+ * Fetch phones for roles from users table using Prisma.
  * Uses ONLY users.phone.
  */
 async function getPhonesForRoles(roles = []) {
   if (!roles.length) return [];
 
-  const placeholders = roles.map(() => "?").join(",");
-  const sql = `
-    SELECT user_id, user_name, phone
-    FROM users
-    WHERE role IN (${placeholders})
-      AND phone IS NOT NULL
-      AND phone <> ""
-  `;
-
-  const [rows] = await db.query(sql, roles);
+  // ✅ Using Prisma to fetch users by roles
+  const users = await prisma.users.findMany({
+    where: {
+      role: {
+        in: roles,
+      },
+      phone: {
+        not: null,
+      },
+      NOT: {
+        phone: "",
+      },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      phone: true,
+    },
+  });
 
   const phones = [];
-  for (const r of rows) {
-    const normalized = normalizeBhutanNumberForSms(r.phone);
+  for (const user of users) {
+    const normalized = normalizeBhutanNumberForSms(user.phone);
     if (normalized) phones.push(normalized);
   }
 
@@ -68,17 +76,17 @@ async function getPhonesForRoles(roles = []) {
  */
 async function sendNotificationSmsBulk({ title, message, roles, recipients }) {
   const text = `${String(title || "").trim()}\n${String(
-    message || ""
+    message || "",
   ).trim()}`.trim();
 
-  // ✅ Build phone list either from explicit recipients OR roles lookup
+  // Build phone list either from explicit recipients OR roles lookup
   let phones = [];
 
   if (Array.isArray(recipients) && recipients.length > 0) {
     phones = Array.from(
       new Set(
-        recipients.map((p) => normalizeBhutanNumberForSms(p)).filter(Boolean)
-      )
+        recipients.map((p) => normalizeBhutanNumberForSms(p)).filter(Boolean),
+      ),
     );
   } else {
     if (!Array.isArray(roles) || !roles.length) {

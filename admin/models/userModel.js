@@ -1,5 +1,4 @@
-// models/userModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 /**
  * Verify (user_id, admin_name) belongs to an admin/superadmin.
@@ -8,19 +7,30 @@ const db = require("../config/db");
 async function findPrivilegedByIdAndName(user_id, admin_name) {
   const roles = ["admin", "superadmin", "super admin", "super-admin"];
 
-  const [rows] = await db.query(
-    `
-    SELECT user_id, user_name, email, role
-      FROM users
-     WHERE user_id = ?
-       AND (user_name = ? OR email = ?)
-       AND role IN (${roles.map(() => "?").join(",")})
-     LIMIT 1
-    `,
-    [user_id, admin_name, admin_name, ...roles]
-  );
+  const user = await prisma.users.findFirst({
+    where: {
+      user_id: Number(user_id),
+      OR: [{ user_name: admin_name }, { email: admin_name }],
+      role: {
+        in: roles,
+      },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      email: true,
+      role: true,
+    },
+  });
 
-  return rows[0] || null;
+  if (!user) return null;
+
+  return {
+    user_id: Number(user.user_id),
+    user_name: user.user_name,
+    email: user.email,
+    role: user.role,
+  };
 }
 
 module.exports = { findPrivilegedByIdAndName };

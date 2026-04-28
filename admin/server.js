@@ -5,7 +5,7 @@ const cors = require("cors");
 
 dotenv.config();
 
-const { initAdminLogsTable } = require("./models/initModel.js");
+const { prisma } = require("./lib/prisma.js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,8 +22,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// ✅ FIXED VERSION (no crash)
 
 // Body parser
 app.use(express.json());
@@ -67,16 +65,25 @@ app.use("/api", (_req, res) =>
 // ───────────────────────── Startup ─────────────────────────
 async function start() {
   try {
-    await initAdminLogsTable();
+    // Test Prisma connection on startup
+    await prisma.$connect();
+    console.log("✅ Prisma connected to database");
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`🚀 Server running at port ${PORT}`);
     });
   } catch (err) {
-    console.error("❌ Startup failed:", err);
+    console.error("❌ Database connection failed:", err);
     process.exit(1);
   }
 }
+
+// Graceful shutdown - disconnect Prisma
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received, closing server...");
+  await prisma.$disconnect();
+  process.exit(0);
+});
 
 // Global error handlers
 process.on("unhandledRejection", (reason) => {

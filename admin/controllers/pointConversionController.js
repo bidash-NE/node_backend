@@ -1,4 +1,3 @@
-// controllers/pointConversionController.js
 const pointConversionModel = require("../models/pointConversionModel");
 
 // POST /api/user/points/convert
@@ -27,17 +26,8 @@ exports.convertPointsToWallet = async (req, res) => {
 
     const result = await pointConversionModel.convertPointsToWallet(
       userId,
-      pointsToConvert
+      pointsToConvert,
     );
-
-    // result:
-    // {
-    //   points_converted,
-    //   wallet_amount,
-    //   transaction_id,   // ✅ only user-side ID
-    //   journal_code,
-    //   calculation: {...}
-    // }
 
     return res.status(200).json({
       success: true,
@@ -45,7 +35,7 @@ exports.convertPointsToWallet = async (req, res) => {
       data: {
         points_converted: result.points_converted,
         wallet_amount: result.wallet_amount,
-        transaction_id: result.transaction_id, // ✅ single ID
+        transaction_id: result.transaction_id,
         journal_code: result.journal_code,
         calculation: result.calculation,
       },

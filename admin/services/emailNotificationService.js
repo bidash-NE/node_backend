@@ -1,6 +1,5 @@
-// services/emailNotificationService.js
 const nodemailer = require("nodemailer");
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 const {
   SMTP_HOST = "",
@@ -9,13 +8,12 @@ const {
   SMTP_PASS = "",
   SMTP_FROM = "",
   SMTP_INSECURE_TLS = "false",
-  EMAIL_CONCURRENCY = "10", // ✅ tune this (10–20 recommended for Gmail)
+  EMAIL_CONCURRENCY = "10",
 
-  // ✅ Optional (for nicer/professional emails)
   BRAND_NAME = "TabDhey",
-  SUPPORT_EMAIL = "", // e.g. support@tabdhey.bt
-  APP_URL = "", // e.g. https://tabdhey.bt (adds button)
-  BRAND_COLOR = "#0b7a3b", // header/button color
+  SUPPORT_EMAIL = "",
+  APP_URL = "",
+  BRAND_COLOR = "#0b7a3b",
 } = process.env;
 
 const host = String(SMTP_HOST).trim();
@@ -40,8 +38,8 @@ const transporter = isConfigured
       secure: port === 465,
       auth: { user, pass },
       requireTLS: port === 587,
-      pool: true, // ✅ reuse connections
-      maxConnections: 5, // ✅ keep small for Gmail
+      pool: true,
+      maxConnections: 5,
       maxMessages: Infinity,
       ...(insecureTls ? { tls: { rejectUnauthorized: false } } : {}),
       logger: false,
@@ -72,7 +70,7 @@ async function sendNotificationEmails({
   title,
   message,
   roles,
-  recipients, // ✅ NEW (optional)
+  recipients,
 }) {
   const brandName = String(BRAND_NAME || "TabDhey").trim();
   const safeTitle = String(title || "System Notification").trim();
@@ -85,11 +83,10 @@ async function sendNotificationEmails({
     );
   }
 
-  // ✅ Build recipient list either from explicit recipients OR roles lookup
+  // Build recipient list either from explicit recipients OR roles lookup
   let users = [];
 
   if (Array.isArray(recipients) && recipients.length > 0) {
-    // normalize + unique
     const uniq = Array.from(
       new Set(
         recipients
@@ -113,25 +110,35 @@ async function sendNotificationEmails({
       return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
     }
 
-    const placeholders = roles.map(() => "?").join(",");
-    const sql = `
-      SELECT user_id, user_name, email
-      FROM users
-      WHERE role IN (${placeholders})
-        AND email IS NOT NULL
-        AND TRIM(email) <> ""
-    `;
-
-    const [dbUsers] = await db.query(
-      sql,
-      roles.map((r) => String(r).trim()),
-    );
+    // ✅ Using Prisma to fetch users by roles
+    const dbUsers = await prisma.users.findMany({
+      where: {
+        role: {
+          in: roles.map((r) => String(r).trim()),
+        },
+        email: {
+          not: null,
+        },
+        NOT: {
+          email: "",
+        },
+      },
+      select: {
+        user_id: true,
+        user_name: true,
+        email: true,
+      },
+    });
 
     if (!dbUsers.length) {
       return { sent: 0, failed: 0, skipped: 0, total: 0, failures: [] };
     }
 
-    users = dbUsers;
+    users = dbUsers.map((user) => ({
+      user_id: Number(user.user_id),
+      user_name: user.user_name,
+      email: user.email,
+    }));
   }
 
   const concurrency = Math.max(
@@ -162,7 +169,6 @@ async function sendNotificationEmails({
       };
     }
 
-    // ✅ Professional plain text
     const text = `
 ${brandName} Notification
 
@@ -179,13 +185,11 @@ ${brandName}${supportEmail ? `\n${supportEmail}` : ""}${appUrl ? `\n${appUrl}` :
 ${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
 `.trim();
 
-    // ✅ Professional HTML
     const html = `
 <div style="margin:0;padding:0;background:#f6f8fb;">
   <div style="max-width:640px;margin:0 auto;padding:24px 16px;">
     <div style="background:#ffffff;border:1px solid #e6eaf0;border-radius:12px;overflow:hidden;">
       
-      <!-- Header -->
       <div style="padding:18px 22px;background:${escapeHtml(brandColor)};">
         <div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#ffffff;font-weight:700;">
           ${escapeHtml(brandName)}
@@ -195,7 +199,6 @@ ${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
         </div>
       </div>
 
-      <!-- Body -->
       <div style="padding:22px;">
         <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;line-height:1.6;">
           <p style="margin:0 0 12px 0;">Hello ${escapeHtml(greetingName)},</p>
@@ -249,7 +252,6 @@ ${notificationId ? `\nReference ID: ${String(notificationId)}` : ""}
         </div>
       </div>
 
-      <!-- Footer -->
       <div style="padding:14px 22px;background:#f9fafb;border-top:1px solid #e6eaf0;">
         <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#6b7280;">
           © ${year} ${escapeHtml(brandName)}. All rights reserved.
