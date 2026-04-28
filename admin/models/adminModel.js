@@ -1,122 +1,136 @@
-// models/adminModel.js
-const pool = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 // ===== helpers =====
 function toDbIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+
 function toDbStrOrNull(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s.length ? s : null;
 }
 
-/**
- * IMPORTANT:
- * For TIMESTAMP columns, always insert UTC at the DB layer.
- * MySQL will convert to the client's/session time zone on SELECT.
- */
 async function logAdmin(conn, actorUserId, adminName, activity) {
-  const sql = `
-    INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
-    VALUES (?, ?, ?, UTC_TIMESTAMP())
-  `;
-  await conn.query(sql, [
-    toDbIntOrNull(actorUserId),
-    toDbStrOrNull(adminName),
-    toDbStrOrNull(activity),
-  ]);
-}
+  try {
+    const logData = {
+      admin_name: toDbStrOrNull(adminName),
+      activity: toDbStrOrNull(activity),
+      created_at: new Date(),
+    };
 
-// ===== existing + updated queries =====
+    if (actorUserId && actorUserId > 0) {
+      logData.users = {
+        connect: { user_id: Number(actorUserId) },
+      };
+    }
+
+    await prisma.admin_logs.create({
+      data: logData,
+    });
+  } catch (error) {
+    console.error("Error logging admin action:", error);
+  }
+}
 
 // ✅ Users (role='user') + wallet_id + points
 async function fetchUsersByRole() {
-  const sql = `
-    SELECT 
-      u.user_id,
-      u.user_name,
-      u.email,
-      u.phone,
-      u.is_verified,
-      u.is_active,
-      u.role,
-      u.profile_image,
-      u.points,
-      w.wallet_id
-    FROM users u
-    LEFT JOIN wallets w ON w.user_id = u.user_id
-    WHERE u.role = 'user'
-    ORDER BY u.user_name ASC
-  `;
-  const [rows] = await pool.query(sql);
-  return rows;
+  const users = await prisma.users.findMany({
+    where: {
+      role: "user",
+    },
+    include: {
+      wallet: true,
+    },
+    orderBy: {
+      user_name: "asc",
+    },
+  });
+
+  return users.map((user) => ({
+    user_id: Number(user.user_id),
+    user_name: user.user_name,
+    email: user.email,
+    phone: user.phone,
+    is_verified: user.is_verified,
+    is_active: user.is_active,
+    role: user.role,
+    profile_image: user.profile_image,
+    points: Number(user.points ?? 0),
+    wallet_id: user.wallet?.wallet_id || null,
+  }));
 }
 
 // ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating + points
+// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating + points
 async function fetchDrivers() {
-  const userQuery = `
-    SELECT 
-      u.user_id,
-      u.user_name,
-      u.email,
-      u.phone,
-      u.is_verified,
-      u.is_active,
-      u.role,
-      u.profile_image,
-      u.points,
-      w.wallet_id
-    FROM users u
-    LEFT JOIN wallets w ON w.user_id = u.user_id
-    WHERE u.role = 'driver'
-    ORDER BY u.user_name ASC
-  `;
-  const [users] = await pool.query(userQuery);
+  const users = await prisma.users.findMany({
+    where: {
+      role: "driver",
+    },
+    include: {
+      wallet: true,
+      drivers: true,
+    },
+    orderBy: {
+      user_name: "asc",
+    },
+  });
 
   const detailedDrivers = await Promise.all(
     users.map(async (user) => {
-      // basic driver info
-      const [driverRows] = await pool.query(
-        `SELECT driver_id, license_number FROM drivers WHERE user_id = ?`,
-        [user.user_id],
-      );
+      const driverInfo = user.drivers;
+      const driver_id = driverInfo?.driver_id
+        ? Number(driverInfo.driver_id)
+        : null;
+      const license_number = driverInfo?.license_number || null;
 
-      const driverInfo = driverRows[0] || {};
-      const driver_id = driverInfo.driver_id || null;
-      const license_number = driverInfo.license_number || null;
-
-      // vehicles
+      // Get vehicles using raw SQL to avoid features column issue
       let vehicles = [];
       if (driver_id) {
-        const [vehicleRows] = await pool.query(
-          `SELECT vehicle_id, make, color, license_plate, vehicle_type FROM driver_vehicles WHERE driver_id = ?`,
-          [driver_id],
-        );
-        vehicles = vehicleRows;
+        const vehicleRows = await prisma.$queryRaw`
+          SELECT 
+            vehicle_id, 
+            make, 
+            color, 
+            license_plate, 
+            vehicle_type,
+            features
+          FROM driver_vehicles 
+          WHERE driver_id = ${driver_id}
+        `;
+
+        vehicles = vehicleRows.map((v) => ({
+          vehicle_id: Number(v.vehicle_id),
+          make: v.make,
+          color: v.color,
+          license_plate: v.license_plate,
+          vehicle_type: v.vehicle_type,
+          features: v.features || null,
+        }));
       }
 
-      // average rating from ride_ratings
+      // Get average rating using Prisma
       let avg_rating = null;
       if (driver_id) {
-        const [[ratingRow]] = await pool.query(
-          `
-            SELECT AVG(rating) AS avg_rating
-            FROM ride_ratings
-            WHERE driver_id = ?
-              AND payment_status = 0;
-          `,
-          [driver_id],
-        );
+        const ratings = await prisma.ride_ratings.aggregate({
+          where: {
+            driver_id: driver_id,
+            payment_status: true,
+          },
+          _avg: {
+            rating: true,
+          },
+        });
 
-        if (ratingRow && ratingRow.avg_rating !== null) {
-          avg_rating = Number(ratingRow.avg_rating);
+        if (ratings._avg.rating !== null) {
+          avg_rating = Number(ratings._avg.rating);
         }
       }
 
       return {
-        user_id: user.user_id,
+        user_id: Number(user.user_id),
         user_name: user.user_name,
         email: user.email,
         phone: user.phone,
@@ -124,12 +138,12 @@ async function fetchDrivers() {
         is_active: user.is_active,
         role: user.role,
         profile_image: user.profile_image || null,
-        wallet_id: user.wallet_id || null,
+        wallet_id: user.wallet?.wallet_id || null,
         points: Number(user.points ?? 0),
-        driver_id,
-        license_number,
-        vehicles,
-        avg_rating, // driver average rating
+        driver_id: driver_id,
+        license_number: license_number,
+        vehicles: vehicles,
+        avg_rating: avg_rating,
       };
     }),
   );
@@ -139,206 +153,205 @@ async function fetchDrivers() {
 
 // ✅ Admins (role in 'admin','superadmin') + wallet_id + points
 async function fetchAdmins() {
-  const sql = `
-    SELECT 
-      u.user_id,
-      u.user_name,
-      u.email,
-      u.phone,
-      u.is_active,
-      u.role,
-      u.profile_image,
-      u.points,
-      w.wallet_id
-    FROM users u
-    LEFT JOIN wallets w ON w.user_id = u.user_id
-    WHERE u.role IN ('admin', 'superadmin')
-    ORDER BY u.user_name ASC
-  `;
-  const [rows] = await pool.query(sql);
-  return rows;
+  const admins = await prisma.users.findMany({
+    where: {
+      role: {
+        in: ["admin", "superadmin"],
+      },
+    },
+    include: {
+      wallet: true,
+    },
+    orderBy: {
+      user_name: "asc",
+    },
+  });
+
+  return admins.map((admin) => ({
+    user_id: Number(admin.user_id),
+    user_name: admin.user_name,
+    email: admin.email,
+    phone: admin.phone,
+    is_active: admin.is_active,
+    role: admin.role,
+    profile_image: admin.profile_image,
+    points: Number(admin.points ?? 0),
+    wallet_id: admin.wallet?.wallet_id || null,
+  }));
 }
 
 // ✅ Merchants with business details + wallet_id + average_rating + points
-// (uses business_logo as profile_image fallback)
 async function fetchMerchantsWithBusiness() {
-  const sql = `
-    SELECT
-      u.user_id,
-      u.user_name,
-      u.email,
-      u.phone,
-      u.is_verified,
-      u.is_active,
-      u.role,
-      COALESCE(u.profile_image, mbd.business_logo) AS profile_image,
-      u.points,
-      w.wallet_id,
-      mbd.business_id,
-      mbd.business_name,
-      mbd.owner_type,
-      mbd.business_logo,
-      mbd.opening_time,
-      mbd.closing_time,
-      mbd.address,
-      mbd.created_at AS business_created_at,
-      mbd.updated_at AS business_updated_at,
-      r.avg_rating AS average_rating
-    FROM users u
-    JOIN merchant_business_details mbd
-      ON mbd.user_id = u.user_id
-    LEFT JOIN wallets w 
-      ON w.user_id = u.user_id
-    LEFT JOIN (
-      -- mart ratings
-      SELECT
-        'mart' AS owner_type,
-        business_id,
-        AVG(rating) AS avg_rating
-      FROM mart_ratings
-      GROUP BY business_id
+  const merchants = await prisma.users.findMany({
+    where: {
+      role: "merchant",
+    },
+    include: {
+      wallet: true,
+      merchant_business_details: true,
+    },
+    orderBy: {
+      user_name: "asc",
+    },
+  });
 
-      UNION ALL
+  const merchantsWithDetails = await Promise.all(
+    merchants.map(async (merchant) => {
+      const business = merchant.merchant_business_details[0] || {};
+      const ownerType = business.owner_type;
+      const businessId = business.business_id
+        ? Number(business.business_id)
+        : null;
 
-      -- food ratings
-      SELECT
-        'food' AS owner_type,
-        business_id,
-        AVG(rating) AS avg_rating
-      FROM food_ratings
-      GROUP BY business_id
-    ) r
-      ON r.owner_type = mbd.owner_type
-     AND r.business_id = mbd.business_id
-    WHERE u.role = 'merchant'
-    ORDER BY mbd.created_at DESC, u.user_name ASC
-  `;
-  const [rows] = await pool.query(sql);
-  return rows;
+      // Get average rating based on owner_type using Prisma
+      let avg_rating = null;
+      if (businessId && ownerType) {
+        if (ownerType === "mart") {
+          const ratings = await prisma.mart_ratings.aggregate({
+            where: { business_id: businessId },
+            _avg: { rating: true },
+          });
+          if (ratings._avg.rating !== null) {
+            avg_rating = Number(ratings._avg.rating);
+          }
+        } else if (ownerType === "food") {
+          const ratings = await prisma.food_ratings.aggregate({
+            where: { business_id: businessId },
+            _avg: { rating: true },
+          });
+          if (ratings._avg.rating !== null) {
+            avg_rating = Number(ratings._avg.rating);
+          }
+        }
+      }
+
+      return {
+        user_id: Number(merchant.user_id),
+        user_name: merchant.user_name,
+        email: merchant.email,
+        phone: merchant.phone,
+        is_verified: merchant.is_verified,
+        is_active: merchant.is_active,
+        role: merchant.role,
+        profile_image: merchant.profile_image || business.business_logo,
+        points: Number(merchant.points ?? 0),
+        wallet_id: merchant.wallet?.wallet_id || null,
+        business_id: businessId,
+        business_name: business.business_name,
+        owner_type: business.owner_type,
+        business_logo: business.business_logo,
+        opening_time: business.opening_time,
+        closing_time: business.closing_time,
+        address: business.address,
+        business_created_at: business.created_at,
+        business_updated_at: business.updated_at,
+        average_rating: avg_rating,
+      };
+    }),
+  );
+
+  return merchantsWithDetails;
 }
 
 // ===== admin ops =====
-
 async function deactivateUser(user_id, actorUserId = null, adminName = null) {
-  const conn = await pool.getConnection();
   try {
-    await conn.beginTransaction();
+    const user = await prisma.users.findUnique({
+      where: { user_id: Number(user_id) },
+      select: { user_id: true, user_name: true, is_active: true },
+    });
 
-    const [[user]] = await conn.query(
-      `SELECT user_id, user_name, is_active FROM users WHERE user_id = ?`,
-      [user_id],
-    );
     if (!user) {
-      await conn.rollback();
       return { notFound: true };
     }
 
-    if (Number(user.is_active) === 0) {
-      await conn.commit();
+    if (user.is_active === false) {
       return { updated: false, already: "deactivated" };
     }
 
-    const [res] = await conn.query(
-      `UPDATE users SET is_active = 0 WHERE user_id = ?`,
-      [user_id],
+    await prisma.users.update({
+      where: { user_id: Number(user_id) },
+      data: { is_active: false },
+    });
+
+    await logAdmin(
+      null,
+      actorUserId,
+      adminName,
+      `Deactivated user "${user.user_name}" (id: ${user_id})`,
     );
 
-    if (res.affectedRows > 0) {
-      await logAdmin(
-        conn,
-        actorUserId,
-        adminName,
-        `Deactivated user "${user.user_name}" (id: ${user_id})`,
-      );
-    }
-
-    await conn.commit();
     return { updated: true };
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
+  } catch (error) {
+    console.error("Deactivate user error:", error);
+    throw error;
   }
 }
 
 async function activateUser(user_id, actorUserId = null, adminName = null) {
-  const conn = await pool.getConnection();
   try {
-    await conn.beginTransaction();
+    const user = await prisma.users.findUnique({
+      where: { user_id: Number(user_id) },
+      select: { user_id: true, user_name: true, is_active: true },
+    });
 
-    const [[user]] = await conn.query(
-      `SELECT user_id, user_name, is_active FROM users WHERE user_id = ?`,
-      [user_id],
-    );
     if (!user) {
-      await conn.rollback();
       return { notFound: true };
     }
 
-    if (Number(user.is_active) === 1) {
-      await conn.commit();
+    if (user.is_active === true) {
       return { updated: false, already: "active" };
     }
 
-    const [res] = await conn.query(
-      `UPDATE users SET is_active = 1 WHERE user_id = ?`,
-      [user_id],
+    await prisma.users.update({
+      where: { user_id: Number(user_id) },
+      data: { is_active: true },
+    });
+
+    await logAdmin(
+      null,
+      actorUserId,
+      adminName,
+      `Activated user "${user.user_name}" (id: ${user_id})`,
     );
 
-    if (res.affectedRows > 0) {
-      await logAdmin(
-        conn,
-        actorUserId,
-        adminName,
-        `Activated user "${user.user_name}" (id: ${user_id})`,
-      );
-    }
-
-    await conn.commit();
     return { updated: true };
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
+  } catch (error) {
+    console.error("Activate user error:", error);
+    throw error;
   }
 }
 
 async function deleteUser(user_id, actorUserId = null, adminName = null) {
-  const conn = await pool.getConnection();
   try {
-    await conn.beginTransaction();
+    const user = await prisma.users.findUnique({
+      where: { user_id: Number(user_id) },
+      select: { user_id: true, user_name: true },
+    });
 
-    const [[user]] = await conn.query(
-      `SELECT user_id, user_name FROM users WHERE user_id = ?`,
-      [user_id],
-    );
     if (!user) {
-      await conn.rollback();
       return { notFound: true };
     }
 
-    const [res] = await conn.query(`DELETE FROM users WHERE user_id = ?`, [
-      user_id,
-    ]);
+    await prisma.users.delete({
+      where: { user_id: Number(user_id) },
+    });
 
-    if (res.affectedRows > 0) {
-      await logAdmin(
-        conn,
-        actorUserId,
-        adminName,
-        `Deleted user "${user.user_name}" (id: ${user_id})`,
-      );
-    }
+    await logAdmin(
+      null,
+      actorUserId,
+      adminName,
+      `Deleted user "${user.user_name}" (id: ${user_id})`,
+    );
 
-    await conn.commit();
     return { deleted: true };
-  } catch (e) {
-    await conn.rollback();
-    throw e;
-  } finally {
-    conn.release();
+  } catch (error) {
+    if (error.code === "P2003") {
+      const customError = new Error("ER_ROW_IS_REFERENCED_2");
+      customError.code = "ER_ROW_IS_REFERENCED_2";
+      throw customError;
+    }
+    throw error;
   }
 }
 

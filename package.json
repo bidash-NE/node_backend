@@ -24,11 +24,17 @@
     "start:all": "concurrently -k --names \"driver,location,ride,admin,merchant,food,mart\" -c \"cyan,magenta,green,yellow,blue,white,gray\" \"npm -w driver run dev\" \"npm -w map_and_location_services run dev\" \"npm -w ride_management run dev\" \"npm -w admin run dev\" \"npm -w merchant run dev\" \"npm -w food run dev\" \"npm -w mart run dev\" \"npm -w order_management run dev\""
   },
   "devDependencies": {
-    "concurrently": "^9.2.0"
+    "@types/node": "^25.6.0",
+    "concurrently": "^9.2.0",
+    "prisma": "^7.7.0"
   },
   "dependencies": {
+    "@prisma/adapter-mariadb": "^7.7.0",
+    "@prisma/client": "^7.7.0",
     "bcryptjs": "^3.0.3",
-    "moment-timezone": "^0.6.0"
+    "dotenv": "^17.4.2",
+    "moment-timezone": "^0.6.0",
+    "mysql2": "^3.22.1"
   },
   "main": "index.js",
   "keywords": [],

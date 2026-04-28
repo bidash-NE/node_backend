@@ -1,5 +1,4 @@
-// models/pointSystemModel.js
-const pool = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 /* =======================================================
    POINT EARNING RULES (existing)
@@ -8,51 +7,44 @@ const pool = require("../config/db");
 
 /**
  * Get all point rules
- * @param {boolean} onlyActive - if true, filter by is_active = 1
+ * @param {boolean} onlyActive - if true, filter by is_active = true
  */
 async function getAllPointRules(onlyActive = false) {
-  let sql = `
-    SELECT 
-      point_id,
-      min_amount_per_point,
-      point_to_award,
-      is_active,
-      created_at,
-      updated_at
-    FROM point_system
-  `;
-  const params = [];
+  const where = onlyActive ? { is_active: true } : {};
 
-  if (onlyActive) {
-    sql += " WHERE is_active = 1";
-  }
+  const rows = await prisma.point_system.findMany({
+    where,
+    orderBy: { created_at: "desc" },
+  });
 
-  sql += " ORDER BY created_at DESC";
-
-  const [rows] = await pool.query(sql, params);
-  return rows;
+  return rows.map((row) => ({
+    point_id: Number(row.point_id),
+    min_amount_per_point: Number(row.min_amount_per_point),
+    point_to_award: Number(row.point_to_award),
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
 }
 
 /**
  * Get single point rule by id
  */
 async function getPointRuleById(point_id) {
-  const [rows] = await pool.query(
-    `
-    SELECT 
-      point_id,
-      min_amount_per_point,
-      point_to_award,
-      is_active,
-      created_at,
-      updated_at
-    FROM point_system
-    WHERE point_id = ?
-    LIMIT 1
-    `,
-    [point_id]
-  );
-  return rows[0] || null;
+  const row = await prisma.point_system.findUnique({
+    where: { point_id: Number(point_id) },
+  });
+
+  if (!row) return null;
+
+  return {
+    point_id: Number(row.point_id),
+    min_amount_per_point: Number(row.min_amount_per_point),
+    point_to_award: Number(row.point_to_award),
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 /**
@@ -61,24 +53,26 @@ async function getPointRuleById(point_id) {
 async function createPointRule({
   min_amount_per_point,
   point_to_award,
-  is_active = 1,
+  is_active = true,
 }) {
-  const [result] = await pool.query(
-    `
-    INSERT INTO point_system (
-      min_amount_per_point,
-      point_to_award,
-      is_active,
-      created_at,
-      updated_at
-    )
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `,
-    [min_amount_per_point, point_to_award, is_active ? 1 : 0]
-  );
+  const result = await prisma.point_system.create({
+    data: {
+      min_amount_per_point: min_amount_per_point,
+      point_to_award: point_to_award,
+      is_active: is_active,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+  });
 
-  const insertedId = result.insertId;
-  return await getPointRuleById(insertedId);
+  return {
+    point_id: Number(result.point_id),
+    min_amount_per_point: Number(result.min_amount_per_point),
+    point_to_award: Number(result.point_to_award),
+    is_active: result.is_active,
+    created_at: result.created_at,
+    updated_at: result.updated_at,
+  };
 }
 
 /**
@@ -86,57 +80,65 @@ async function createPointRule({
  */
 async function updatePointRule(
   point_id,
-  { min_amount_per_point, point_to_award, is_active }
+  { min_amount_per_point, point_to_award, is_active },
 ) {
-  const fields = [];
-  const values = [];
+  const data = {};
 
   if (min_amount_per_point !== undefined) {
-    fields.push("min_amount_per_point = ?");
-    values.push(min_amount_per_point);
+    data.min_amount_per_point = min_amount_per_point;
   }
 
   if (point_to_award !== undefined) {
-    fields.push("point_to_award = ?");
-    values.push(point_to_award);
+    data.point_to_award = point_to_award;
   }
 
   if (is_active !== undefined) {
-    fields.push("is_active = ?");
-    values.push(is_active ? 1 : 0);
+    data.is_active = is_active;
   }
 
-  if (fields.length === 0) {
-    // nothing to update
+  if (Object.keys(data).length === 0) {
     return await getPointRuleById(point_id);
   }
 
-  const sql = `
-    UPDATE point_system
-    SET ${fields.join(", ")}, updated_at = CURRENT_TIMESTAMP
-    WHERE point_id = ?
-  `;
-  values.push(point_id);
+  data.updated_at = new Date();
 
-  const [result] = await pool.query(sql, values);
+  try {
+    const result = await prisma.point_system.update({
+      where: { point_id: Number(point_id) },
+      data,
+    });
 
-  if (result.affectedRows === 0) {
-    return null;
+    return {
+      point_id: Number(result.point_id),
+      min_amount_per_point: Number(result.min_amount_per_point),
+      point_to_award: Number(result.point_to_award),
+      is_active: result.is_active,
+      created_at: result.created_at,
+      updated_at: result.updated_at,
+    };
+  } catch (error) {
+    if (error.code === "P2025") {
+      return null;
+    }
+    throw error;
   }
-
-  return await getPointRuleById(point_id);
 }
 
 /**
  * Delete a point earning rule by id
  */
 async function deletePointRule(point_id) {
-  const [result] = await pool.query(
-    `DELETE FROM point_system WHERE point_id = ?`,
-    [point_id]
-  );
-
-  return result.affectedRows > 0;
+  try {
+    await prisma.point_system.delete({
+      where: { point_id: Number(point_id) },
+    });
+    return true;
+  } catch (error) {
+    if (error.code === "P2025") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 /* =======================================================
@@ -155,21 +157,20 @@ async function deletePointRule(point_id) {
  * Get the single point conversion rule (id = 1)
  */
 async function getPointConversionRule() {
-  const [rows] = await pool.query(
-    `
-    SELECT
-      id,
-      points_required,
-      wallet_amount,
-      is_active,
-      created_at,
-      updated_at
-    FROM point_conversion_rule
-    WHERE id = 1
-    LIMIT 1
-    `
-  );
-  return rows[0] || null;
+  const row = await prisma.point_conversion_rule.findUnique({
+    where: { id: 1 },
+  });
+
+  if (!row) return null;
+
+  return {
+    id: Number(row.id),
+    points_required: Number(row.points_required),
+    wallet_amount: Number(row.wallet_amount),
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 /**
@@ -179,7 +180,7 @@ async function getPointConversionRule() {
 async function createPointConversionRule({
   points_required,
   wallet_amount,
-  is_active = 1,
+  is_active = true,
 }) {
   // Check if a rule already exists
   const existing = await getPointConversionRule();
@@ -187,26 +188,25 @@ async function createPointConversionRule({
     return null; // signal "rule already exists"
   }
 
-  const [result] = await pool.query(
-    `
-    INSERT INTO point_conversion_rule (
-      id,
-      points_required,
-      wallet_amount,
-      is_active,
-      created_at,
-      updated_at
-    )
-    VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `,
-    [points_required, wallet_amount, is_active ? 1 : 0]
-  );
+  const result = await prisma.point_conversion_rule.create({
+    data: {
+      id: 1,
+      points_required: points_required,
+      wallet_amount: wallet_amount,
+      is_active: is_active,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+  });
 
-  if (result.affectedRows === 0) {
-    return null;
-  }
-
-  return await getPointConversionRule();
+  return {
+    id: Number(result.id),
+    points_required: Number(result.points_required),
+    wallet_amount: Number(result.wallet_amount),
+    is_active: result.is_active,
+    created_at: result.created_at,
+    updated_at: result.updated_at,
+  };
 }
 
 /**
@@ -218,52 +218,63 @@ async function updatePointConversionRule({
   wallet_amount,
   is_active,
 }) {
-  const fields = [];
-  const values = [];
+  const data = {};
 
   if (points_required !== undefined) {
-    fields.push("points_required = ?");
-    values.push(points_required);
+    data.points_required = points_required;
   }
 
   if (wallet_amount !== undefined) {
-    fields.push("wallet_amount = ?");
-    values.push(wallet_amount);
+    data.wallet_amount = wallet_amount;
   }
 
   if (is_active !== undefined) {
-    fields.push("is_active = ?");
-    values.push(is_active ? 1 : 0);
+    data.is_active = is_active;
   }
 
-  if (fields.length === 0) {
-    // nothing to update, just return current rule
+  if (Object.keys(data).length === 0) {
     return await getPointConversionRule();
   }
 
-  const sql = `
-    UPDATE point_conversion_rule
-    SET ${fields.join(", ")}, updated_at = CURRENT_TIMESTAMP
-    WHERE id = 1
-  `;
+  data.updated_at = new Date();
 
-  const [result] = await pool.query(sql, values);
+  try {
+    const result = await prisma.point_conversion_rule.update({
+      where: { id: 1 },
+      data,
+    });
 
-  if (result.affectedRows === 0) {
-    return null;
+    return {
+      id: Number(result.id),
+      points_required: Number(result.points_required),
+      wallet_amount: Number(result.wallet_amount),
+      is_active: result.is_active,
+      created_at: result.created_at,
+      updated_at: result.updated_at,
+    };
+  } catch (error) {
+    if (error.code === "P2025") {
+      return null;
+    }
+    throw error;
   }
-
-  return await getPointConversionRule();
 }
 
 /**
  * Delete the conversion rule (id = 1)
  */
 async function deletePointConversionRule() {
-  const [result] = await pool.query(
-    `DELETE FROM point_conversion_rule WHERE id = 1`
-  );
-  return result.affectedRows > 0;
+  try {
+    await prisma.point_conversion_rule.delete({
+      where: { id: 1 },
+    });
+    return true;
+  } catch (error) {
+    if (error.code === "P2025") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 module.exports = {

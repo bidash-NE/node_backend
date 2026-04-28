@@ -1,4 +1,4 @@
-// controllers/systemNotificationController.js
+const { prisma } = require("../lib/prisma.js");
 const {
   insertSystemNotification,
   getAllSystemNotifications,
@@ -14,7 +14,7 @@ const {
   sendNotificationSmsBulk,
 } = require("../services/smsNotificationService");
 
-// ✅ Redis log model
+// Redis log model (unchanged)
 const {
   createDeliveryLog,
   listSingleUserLogsByTargetUserId,
@@ -27,6 +27,7 @@ function validateTitleMessage(title, message) {
   }
   return null;
 }
+
 function pickActor(body = {}) {
   return {
     createdBy: body.user_id || null,
@@ -35,7 +36,7 @@ function pickActor(body = {}) {
 }
 
 /* ======================================================
-   ✅ Send EMAIL to SINGLE user
+   Send EMAIL to SINGLE user
 ====================================================== */
 async function sendEmailToSingleUser(req, res) {
   try {
@@ -85,7 +86,6 @@ async function sendEmailToSingleUser(req, res) {
         emailSummary.failures[0]?.reason) ||
       "";
 
-    // ✅ store ONLY as context="single"
     await createDeliveryLog({
       channel: "email",
       target_user_id: Number(target_user_id),
@@ -115,6 +115,7 @@ async function sendEmailToSingleUser(req, res) {
       email_summary: emailSummary,
     });
   } catch (err) {
+    console.error("Send email error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
@@ -124,7 +125,7 @@ async function sendEmailToSingleUser(req, res) {
 }
 
 /* ======================================================
-   ✅ Send SMS to SINGLE user
+   Send SMS to SINGLE user
 ====================================================== */
 async function sendSmsToSingleUser(req, res) {
   try {
@@ -198,6 +199,7 @@ async function sendSmsToSingleUser(req, res) {
       sms_summary: smsSummary,
     });
   } catch (err) {
+    console.error("Send SMS error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
@@ -207,8 +209,7 @@ async function sendSmsToSingleUser(req, res) {
 }
 
 /* ======================================================
-   ✅ NEW: Fetch ONLY single-user logs by target_user_id
-   GET /api/system-notifications/user/logs/:target_user_id?page=1&limit=20
+   Fetch single-user delivery logs by target_user_id
 ====================================================== */
 async function getSingleUserDeliveryLogsByUserIdController(req, res) {
   try {
@@ -227,6 +228,7 @@ async function getSingleUserDeliveryLogsByUserIdController(req, res) {
       meta: out.meta,
     });
   } catch (err) {
+    console.error("Get delivery logs error:", err);
     return res.status(400).json({
       success: false,
       message: err?.message || "Failed to fetch single-user delivery logs.",
@@ -235,8 +237,7 @@ async function getSingleUserDeliveryLogsByUserIdController(req, res) {
 }
 
 /* ======================================================
-   EXISTING: Create notification to roles (in_app/email/sms)
-   (no change needed; your choice whether to log bulk)
+   Create notification to roles (in_app/email/sms)
 ====================================================== */
 async function createSystemNotification(req, res) {
   try {
@@ -308,7 +309,7 @@ async function createSystemNotification(req, res) {
         user_id: createdBy,
         admin_name: adminName,
         activity: `Created IN_APP notification #${notificationId} - "${String(
-          title
+          title,
         ).trim()}" for roles [${roles.join(", ")}]`,
       });
     }
@@ -338,8 +339,6 @@ async function createSystemNotification(req, res) {
         admin_name: adminName,
         activity: logMessage,
       });
-
-      // (optional) if you don't want bulk stored in redis, REMOVE any bulk createDeliveryLog calls elsewhere
     }
 
     if (wantsSms) {
@@ -363,8 +362,6 @@ async function createSystemNotification(req, res) {
         admin_name: adminName,
         activity: logMessage,
       });
-
-      // (optional) if you don't want bulk stored in redis, REMOVE any bulk createDeliveryLog calls elsewhere
     }
 
     return res.status(201).json({
@@ -375,6 +372,7 @@ async function createSystemNotification(req, res) {
       sms_summary: smsSummary,
     });
   } catch (err) {
+    console.error("Create notification error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
@@ -384,7 +382,7 @@ async function createSystemNotification(req, res) {
 }
 
 /* ======================================================
-   EXISTING: Fetch all IN_APP notifications (admin)
+   Fetch all IN_APP notifications (admin)
 ====================================================== */
 async function getAllSystemNotificationsController(req, res) {
   try {
@@ -395,6 +393,7 @@ async function getAllSystemNotificationsController(req, res) {
       notifications,
     });
   } catch (err) {
+    console.error("Get all notifications error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
@@ -404,7 +403,7 @@ async function getAllSystemNotificationsController(req, res) {
 }
 
 /* ======================================================
-   EXISTING: Fetch notifications visible to user by role
+   Fetch notifications visible to user by role
 ====================================================== */
 async function getSystemNotificationsByUser(req, res) {
   try {
@@ -426,6 +425,7 @@ async function getSystemNotificationsByUser(req, res) {
       notifications,
     });
   } catch (err) {
+    console.error("Get user notifications error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
@@ -440,7 +440,5 @@ module.exports = {
   getSystemNotificationsByUser,
   sendSmsToSingleUser,
   sendEmailToSingleUser,
-
-  // ✅ NEW
   getSingleUserDeliveryLogsByUserIdController,
 };

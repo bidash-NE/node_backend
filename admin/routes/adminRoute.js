@@ -31,6 +31,9 @@ const validateUserIdParam = (req, res, next) => {
   return res.status(400).json({ success: false, message: "Invalid user_id" });
 };
 
+// Add this near your other GET routes
+// router.get("/admins-prisma", adminController.getAllAdminsPrisma);
+
 // Lists
 router.get("/users", adminController.getAllNormalUsers);
 router.get("/drivers", adminController.getAllDrivers);
@@ -56,5 +59,4 @@ router.delete(
   validateUserIdParam,
   adminController.deleteUser,
 );
-
 module.exports = router;

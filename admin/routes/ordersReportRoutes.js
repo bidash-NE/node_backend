@@ -1,7 +1,7 @@
-// routes/ordersReportRoutes.js
 const express = require("express");
 const router = express.Router();
 const rateLimit = require("express-rate-limit");
+const authUser = require("../middleware/auth");
 
 const {
   getFoodOrdersReport,
@@ -21,10 +21,14 @@ const reportLimiter = rateLimit({
     }),
 });
 
-router.get("/food-orders", getFoodOrdersReport);
-router.get("/mart-orders", getMartOrdersReport);
-
-// ✅ NOW reads from food_mart_revenue table
-router.get("/food-mart-revenue", getFoodMartRevenueReport);
+// All report endpoints require admin authentication
+router.get("/food-orders", authUser, reportLimiter, getFoodOrdersReport);
+router.get("/mart-orders", authUser, reportLimiter, getMartOrdersReport);
+router.get(
+  "/food-mart-revenue",
+  authUser,
+  reportLimiter,
+  getFoodMartRevenueReport,
+);
 
 module.exports = router;

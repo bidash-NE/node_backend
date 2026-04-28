@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const rateLimit = require("express-rate-limit");
+const adminAuth = require("../middleware/adminAuth");
 
 const {
   createSystemNotification,
@@ -39,21 +40,34 @@ const createLimiter = makeLimiter({
   message: "Too many requests. Please try again later.",
 });
 
-// Existing
-router.post("/", createLimiter, createSystemNotification);
-router.get("/all", getAllSystemNotificationsController);
+/* ======================================================
+   ADMIN ROUTES (require Admin Bearer Token)
+   POST, PUT, DELETE endpoints only
+======================================================= */
 
-// Send to ONE user
-router.post("/user/sms", sendLimiter, sendSmsToSingleUser);
-router.post("/user/email", sendLimiter, sendEmailToSingleUser);
+// Create notification (admin only)
+router.post("/", adminAuth, createLimiter, createSystemNotification);
 
-// Fetch single-user logs
+// Get all in_app notifications (public)
+router.get("/all", readLimiter, getAllSystemNotificationsController);
+
+// Send to ONE user (admin only)
+router.post("/user/sms", adminAuth, sendLimiter, sendSmsToSingleUser);
+router.post("/user/email", adminAuth, sendLimiter, sendEmailToSingleUser);
+
+// Fetch single-user logs (admin only)
 router.get(
   "/user/logs/:target_user_id",
+  adminAuth,
+  readLimiter,
   getSingleUserDeliveryLogsByUserIdController,
 );
 
-// keep this LAST
-router.get("/:userId", getSystemNotificationsByUser);
+/* ======================================================
+   USER ROUTE (public - no token needed)
+   User is identified by userId in URL
+   keep this LAST
+======================================================= */
+router.get("/:userId", readLimiter, getSystemNotificationsByUser);
 
 module.exports = router;

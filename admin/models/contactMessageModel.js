@@ -1,82 +1,101 @@
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 /* =======================================================
    CREATE MESSAGE
 ======================================================= */
 async function createMessage(data) {
-  const sql = `
-    INSERT INTO contact_messages
-    (full_name, contact_type, contact_value, user_type, message)
-    VALUES (?, ?, ?, ?, ?)
-  `;
+  const result = await prisma.contact_messages.create({
+    data: {
+      full_name: data.full_name,
+      contact_type: data.contact_type,
+      contact_value: data.contact_value,
+      user_type: data.user_type || null,
+      message: data.message,
+      status: "new", // default status
+      created_at: new Date(),
+    },
+  });
 
-  const values = [
-    data.full_name,
-    data.contact_type,
-    data.contact_value,
-    data.user_type || null,
-    data.message,
-  ];
-
-  const [result] = await db.query(sql, values);
-  return result.insertId;
+  return {
+    id: Number(result.id),
+  };
 }
 
 /* =======================================================
    GET ALL MESSAGES (WITH FILTERS)
 ======================================================= */
 async function getAllMessages(filters = {}) {
-  let sql = `SELECT * FROM contact_messages WHERE 1=1`;
-  const params = [];
+  const where = {};
 
   if (filters.status) {
-    sql += ` AND status = ?`;
-    params.push(filters.status);
+    where.status = filters.status;
   }
 
   if (filters.user_type) {
-    sql += ` AND user_type = ?`;
-    params.push(filters.user_type);
+    where.user_type = filters.user_type;
   }
 
-  sql += ` ORDER BY created_at DESC`;
+  const rows = await prisma.contact_messages.findMany({
+    where,
+    orderBy: {
+      created_at: "desc",
+    },
+  });
 
-  const [rows] = await db.query(sql, params);
-  return rows;
+  // Convert BigInt to Number
+  return rows.map((row) => ({
+    ...row,
+    id: Number(row.id),
+  }));
 }
 
 /* =======================================================
    GET MESSAGE BY ID
 ======================================================= */
 async function getMessageById(id) {
-  const [rows] = await db.query(`SELECT * FROM contact_messages WHERE id = ?`, [
-    id,
-  ]);
-  return rows[0];
+  const result = await prisma.contact_messages.findUnique({
+    where: { id: Number(id) },
+  });
+
+  if (!result) return null;
+
+  return {
+    ...result,
+    id: Number(result.id),
+  };
 }
 
 /* =======================================================
    UPDATE STATUS
 ======================================================= */
 async function updateMessageStatus(id, status) {
-  const sql = `
-    UPDATE contact_messages
-    SET status = ?
-    WHERE id = ?
-  `;
+  const result = await prisma.contact_messages.update({
+    where: { id: Number(id) },
+    data: {
+      status: status,
+      updated_at: new Date(),
+    },
+  });
 
-  const [result] = await db.query(sql, [status, id]);
-  return result.affectedRows;
+  return result ? 1 : 0;
 }
 
 /* =======================================================
    DELETE MESSAGE
 ======================================================= */
 async function deleteMessage(id) {
-  const [result] = await db.query(`DELETE FROM contact_messages WHERE id = ?`, [
-    id,
-  ]);
-  return result.affectedRows;
+  try {
+    const result = await prisma.contact_messages.delete({
+      where: { id: Number(id) },
+    });
+    return 1;
+  } catch (error) {
+    // If record doesn't exist, return 0
+    if (error.code === "P2025") {
+      return 0;
+    }
+    throw error;
+  }
 }
 
 module.exports = {

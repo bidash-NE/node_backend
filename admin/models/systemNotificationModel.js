@@ -1,5 +1,4 @@
-// models/systemNotificationModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 /**
  * Insert a new IN_APP system notification.
@@ -17,45 +16,41 @@ async function insertSystemNotification(data) {
   const status = "sent";
   const sentAt = new Date();
 
-  const sql = `
-    INSERT INTO system_notifications
-      (title, message, delivery_channels, target_audience,
-       created_by, sent_at, status)
-    VALUES (?, ?, CAST(? AS JSON), CAST(? AS JSON), ?, ?, ?)
-  `;
+  const result = await prisma.system_notifications.create({
+    data: {
+      title: title,
+      message: message,
+      delivery_channels: JSON.stringify(deliveryChannels),
+      target_audience: JSON.stringify(targetAudience),
+      created_by: createdBy ? Number(createdBy) : null,
+      sent_at: sentAt,
+      status: status,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+  });
 
-  const [result] = await db.query(sql, [
-    title,
-    message,
-    JSON.stringify(deliveryChannels),
-    JSON.stringify(targetAudience),
-    createdBy,
-    sentAt,
-    status,
-  ]);
-
-  return result.insertId;
+  return Number(result.id);
 }
 
 /**
  * Fetch all IN_APP notifications (for admin view).
  */
 async function getAllSystemNotifications() {
-  const sql = `
-    SELECT
-      id,
-      title,
-      message,
-      delivery_channels,
-      target_audience,
-      status,
-      sent_at,
-      created_at
-    FROM system_notifications
-    ORDER BY created_at DESC, id DESC
-  `;
-  const [rows] = await db.query(sql);
-  return rows;
+  const rows = await prisma.system_notifications.findMany({
+    orderBy: [{ created_at: "desc" }, { id: "desc" }],
+  });
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    title: row.title,
+    message: row.message,
+    delivery_channels: row.delivery_channels,
+    target_audience: row.target_audience,
+    status: row.status,
+    sent_at: row.sent_at,
+    created_at: row.created_at,
+  }));
 }
 
 /**
@@ -65,43 +60,64 @@ async function getAllSystemNotifications() {
 async function getNotificationsForUserRole(userId) {
   if (!userId) return [];
 
-  const sqlRole = `SELECT role FROM users WHERE user_id = ? LIMIT 1`;
-  const [roleRows] = await db.query(sqlRole, [userId]);
-  if (!roleRows.length) return [];
+  // Get user role
+  const user = await prisma.users.findUnique({
+    where: { user_id: Number(userId) },
+    select: { role: true },
+  });
 
-  const role = roleRows[0].role;
+  if (!user) return [];
 
-  const sql = `
-    SELECT
-      id,
-      title,
-      message,
-      status,
-      created_at
-    FROM system_notifications
-    WHERE JSON_CONTAINS(target_audience, JSON_QUOTE(?))
-      AND status = 'sent'
-    ORDER BY created_at DESC
-  `;
+  const role = user.role;
 
-  const [rows] = await db.query(sql, [role]);
-  return rows;
+  // Fetch notifications that target this role
+  const rows = await prisma.system_notifications.findMany({
+    where: {
+      status: "sent",
+      target_audience: {
+        contains: JSON.stringify(role),
+      },
+    },
+    orderBy: {
+      created_at: "desc",
+    },
+  });
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    title: row.title,
+    message: row.message,
+    status: row.status,
+    created_at: row.created_at,
+  }));
 }
 
-/* ======================================================
-   ✅ Fetch email + phone for a user_id (single user send)
-====================================================== */
+/**
+ * Fetch email + phone for a user_id (single user send)
+ */
 async function getUserContactById(userId) {
   if (!userId) return null;
 
-  const sql = `
-    SELECT user_id, user_name, email, phone, role
-    FROM users
-    WHERE user_id = ?
-    LIMIT 1
-  `;
-  const [rows] = await db.query(sql, [Number(userId)]);
-  return rows.length ? rows[0] : null;
+  const user = await prisma.users.findUnique({
+    where: { user_id: Number(userId) },
+    select: {
+      user_id: true,
+      user_name: true,
+      email: true,
+      phone: true,
+      role: true,
+    },
+  });
+
+  if (!user) return null;
+
+  return {
+    user_id: Number(user.user_id),
+    user_name: user.user_name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+  };
 }
 
 module.exports = {

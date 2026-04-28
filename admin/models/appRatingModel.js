@@ -1,5 +1,4 @@
-// models/appRatingModel.js ✅ ADMIN SIDE (FULL)
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 const { getRedis } = require("../config/redis");
 
 const redis = getRedis();
@@ -15,7 +14,6 @@ async function rCall(obj, candidates, ...args) {
   throw new Error(`Redis client missing method: ${candidates[0]}`);
 }
 
-// node-redis v4 uses camelCase, ioredis uses lowercase
 const R = {
   zrevrange: (key, start, stop) =>
     rCall(redis, ["zrevrange", "zRevRange"], key, start, stop),
@@ -28,25 +26,28 @@ const R = {
   del: (key) => rCall(redis, ["del"], key),
   multi: () => {
     if (redis && typeof redis.multi === "function") return redis.multi();
-    if (redis && typeof redis.multi === "function") return redis.multi();
     throw new Error("Redis client missing multi()");
   },
 };
 
-// exec() differs:
-// - ioredis: returns [[err,val], ...]
-// - node-redis v4: returns [val, val, ...]
 function normalizeExecResult(execRes) {
   if (!Array.isArray(execRes)) return [];
   if (execRes.length && Array.isArray(execRes[0]) && execRes[0].length === 2) {
-    // ioredis style
     return execRes;
   }
-  // node-redis style: wrap as [null,val]
   return execRes.map((v) => [null, v]);
 }
 
-/* ---------------- existing app rating model ---------------- */
+function toInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n));
+}
+
+/* ---------------- Pure Prisma App Rating Functions ---------------- */
 
 async function createAppRating({
   user_id = null,
@@ -59,45 +60,41 @@ async function createAppRating({
   device_model = null,
   network_type = null,
 }) {
-  const sql = `
-    INSERT INTO app_ratings (
-      user_id,
-      role,
-      rating,
-      comment,
-      platform,
-      os_version,
-      app_version,
-      device_model,
-      network_type
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  const result = await prisma.app_ratings.create({
+    data: {
+      user_id: user_id ? Number(user_id) : null,
+      role: role,
+      rating: rating,
+      comment: comment,
+      platform: platform,
+      os_version: os_version,
+      app_version: app_version,
+      device_model: device_model,
+      network_type: network_type,
+      created_at: new Date(),
+    },
+  });
 
-  const params = [
-    user_id,
-    role,
-    rating,
-    comment,
-    platform,
-    os_version,
-    app_version,
-    device_model,
-    network_type,
-  ];
-
-  const [result] = await db.query(sql, params);
-  const insertId = result.insertId;
-
-  const [rows] = await db.query(`SELECT * FROM app_ratings WHERE id = ?`, [
-    insertId,
-  ]);
-  return rows[0] || null;
+  // Convert BigInt to Number
+  return {
+    ...result,
+    id: Number(result.id),
+    user_id: result.user_id ? Number(result.user_id) : null,
+  };
 }
 
 async function getAppRatingById(id) {
-  const [rows] = await db.query(`SELECT * FROM app_ratings WHERE id = ?`, [id]);
-  return rows[0] || null;
+  const result = await prisma.app_ratings.findUnique({
+    where: { id: Number(id) },
+  });
+
+  if (!result) return null;
+
+  return {
+    ...result,
+    id: Number(result.id),
+    user_id: result.user_id ? Number(result.user_id) : null,
+  };
 }
 
 async function listAppRatings(filters = {}) {
@@ -110,151 +107,139 @@ async function listAppRatings(filters = {}) {
     offset = 0,
   } = filters;
 
-  let sql = `
-    SELECT *
-    FROM app_ratings
-    WHERE 1=1
-  `;
-  const params = [];
+  const where = {};
 
   if (minRating != null) {
-    sql += ` AND rating >= ?`;
-    params.push(minRating);
+    where.rating = { gte: minRating };
   }
   if (maxRating != null) {
-    sql += ` AND rating <= ?`;
-    params.push(maxRating);
+    where.rating = { ...where.rating, lte: maxRating };
   }
   if (platform) {
-    sql += ` AND platform = ?`;
-    params.push(platform);
+    where.platform = platform;
   }
   if (appVersion) {
-    sql += ` AND app_version = ?`;
-    params.push(appVersion);
+    where.app_version = appVersion;
   }
 
-  sql += `
-    ORDER BY created_at DESC
-    LIMIT ?
-    OFFSET ?
-  `;
-  params.push(Number(limit), Number(offset));
+  const results = await prisma.app_ratings.findMany({
+    where,
+    orderBy: {
+      created_at: "desc",
+    },
+    skip: Number(offset),
+    take: Number(limit),
+  });
 
-  const [rows] = await db.query(sql, params);
-  return rows;
+  return results.map((r) => ({
+    ...r,
+    id: Number(r.id),
+    user_id: r.user_id ? Number(r.user_id) : null,
+  }));
 }
 
 async function updateAppRating(id, fields = {}) {
   const allowed = ["rating", "comment"];
-  const setParts = [];
-  const params = [];
+  const data = {};
 
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(fields, key)) {
-      setParts.push(`${key} = ?`);
-      params.push(fields[key]);
+      data[key] = fields[key];
     }
   }
 
-  if (!setParts.length) return { affectedRows: 0 };
+  if (Object.keys(data).length === 0) return { affectedRows: 0 };
 
-  const sql = `
-    UPDATE app_ratings
-    SET ${setParts.join(", ")}
-    WHERE id = ?
-  `;
-  params.push(id);
+  const result = await prisma.app_ratings.update({
+    where: { id: Number(id) },
+    data,
+  });
 
-  const [result] = await db.query(sql, params);
-  return result;
+  return { affectedRows: 1 };
 }
 
 async function deleteAppRating(id) {
-  const [result] = await db.query(`DELETE FROM app_ratings WHERE id = ?`, [id]);
-  return result;
+  const result = await prisma.app_ratings.delete({
+    where: { id: Number(id) },
+  });
+  return { affectedRows: 1 };
 }
 
 async function getAppRatingSummary() {
-  const [[totals]] = await db.query(`
-    SELECT
-      COUNT(*) AS total_ratings,
-      AVG(rating) AS avg_rating
-    FROM app_ratings
-  `);
+  const totals = await prisma.app_ratings.aggregate({
+    _count: { id: true },
+    _avg: { rating: true },
+  });
 
-  const [breakdownRows] = await db.query(`
-    SELECT rating, COUNT(*) AS count
-    FROM app_ratings
-    GROUP BY rating
-    ORDER BY rating DESC
-  `);
+  const breakdown = await prisma.app_ratings.groupBy({
+    by: ["rating"],
+    _count: { rating: true },
+    orderBy: { rating: "desc" },
+  });
 
   return {
-    total_ratings: totals.total_ratings || 0,
-    avg_rating: totals.avg_rating ? Number(totals.avg_rating) : 0,
-    breakdown: breakdownRows.map((row) => ({
+    total_ratings: totals._count.id || 0,
+    avg_rating: totals._avg.rating ? Number(totals._avg.rating) : 0,
+    breakdown: breakdown.map((row) => ({
       rating: row.rating,
-      count: row.count,
+      count: row._count.rating,
     })),
   };
 }
 
-/* ---------------- ✅ NEW: MERCHANT REPORTS (ADMIN) ---------------- */
-
-const FOOD_TBL = "food_ratings";
-const MART_TBL = "mart_ratings";
-
-// reply keys (merchant side)
-function replyKey(replyId) {
-  return `rating:reply:${replyId}`;
-}
-function replyIndexKey(rating_type, rating_id) {
-  return `rating:replies:idx:${rating_type}:${rating_id}`;
-}
-
-// report keys (merchant side)
-function reportKey(id) {
-  return `rating:report:${id}`;
-}
-function reportIndexKey(type, target) {
-  return `rating:reports:idx:${type}:${target}`;
-}
-
-function toInt(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-function clamp(n, min, max) {
-  return Math.min(max, Math.max(min, n));
-}
+/* ---------------- Helper: Hydrate User Info ---------------- */
 
 async function hydrateUsers(ids) {
   const clean = (ids || []).map((x) => Number(x)).filter((x) => x > 0);
   if (!clean.length) return {};
-  const [rows] = await db.query(
-    `SELECT user_id, user_name, phone, email, profile_image, role
-       FROM users
-      WHERE user_id IN (?)`,
-    [clean]
-  );
+
+  const users = await prisma.users.findMany({
+    where: { user_id: { in: clean } },
+    select: {
+      user_id: true,
+      user_name: true,
+      phone: true,
+      email: true,
+      profile_image: true,
+      role: true,
+    },
+  });
+
   const map = {};
-  for (const r of rows) {
-    map[r.user_id] = {
-      user_id: r.user_id,
-      user_name: r.user_name || null,
-      phone: r.phone || null,
-      email: r.email || null,
-      profile_image: r.profile_image || null,
-      role: r.role || null,
+  for (const u of users) {
+    map[Number(u.user_id)] = {
+      user_id: Number(u.user_id),
+      user_name: u.user_name || null,
+      phone: u.phone || null,
+      email: u.email || null,
+      profile_image: u.profile_image || null,
+      role: u.role || null,
     };
   }
   return map;
 }
 
-/**
- * List reports (ONLY status=open)
- */
+/* ---------------- Redis-based Report Functions (remain the same) ---------------- */
+
+const FOOD_TBL = "food_ratings";
+const MART_TBL = "mart_ratings";
+
+function replyKey(replyId) {
+  return `rating:reply:${replyId}`;
+}
+
+function replyIndexKey(rating_type, rating_id) {
+  return `rating:replies:idx:${rating_type}:${rating_id}`;
+}
+
+function reportKey(id) {
+  return `rating:report:${id}`;
+}
+
+function reportIndexKey(type, target) {
+  return `rating:reports:idx:${type}:${target}`;
+}
+
 async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
   const t = String(type || "").toLowerCase();
   const trg = String(target || "").toLowerCase();
@@ -294,7 +279,6 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
   ids.forEach((id) => {
     if (typeof pipe.hgetall === "function") pipe.hgetall(reportKey(id));
     else if (typeof pipe.hGetAll === "function") pipe.hGetAll(reportKey(id));
-    else pipe.hgetall?.(reportKey(id));
   });
 
   const execRes = await pipe.exec();
@@ -308,7 +292,7 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
     if (!h || !h.id) continue;
 
     const status = String(h.status || "open").toLowerCase();
-    if (status !== "open") continue; // ✅ hide ignored/deleted
+    if (status !== "open") continue;
 
     const reporter = toInt(h.reporter_user_id);
     const reported = toInt(h.reported_user_id);
@@ -352,10 +336,6 @@ async function listMerchantReports({ type, target, page = 1, limit = 20 }) {
   };
 }
 
-/**
- * Ignore report
- * Returns enough info for controller logs
- */
 async function ignoreMerchantReport({ report_id, admin }) {
   const rid = Number(report_id);
   if (!Number.isInteger(rid) || rid <= 0) {
@@ -375,9 +355,6 @@ async function ignoreMerchantReport({ report_id, admin }) {
   const type = String(h.type || "").toLowerCase();
   const target = String(h.target || "").toLowerCase();
 
-  const idxKey = reportIndexKey(type, target);
-
-  // multi-compatible: just do sequential calls (safe, simple)
   await R.hset(
     key,
     "status",
@@ -385,9 +362,9 @@ async function ignoreMerchantReport({ report_id, admin }) {
     "reviewed_by",
     String(admin.admin_user_id),
     "reviewed_at",
-    String(Date.now())
+    String(Date.now()),
   );
-  await R.zrem(idxKey, String(rid));
+  await R.zrem(reportIndexKey(type, target), String(rid));
 
   return {
     success: true,
@@ -403,9 +380,6 @@ async function ignoreMerchantReport({ report_id, admin }) {
   };
 }
 
-/**
- * Delete reported COMMENT (rating row) by report_id
- */
 async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
   const rid = Number(report_id);
   if (!Number.isInteger(rid) || rid <= 0) {
@@ -431,19 +405,16 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
     err.statusCode = 400;
     throw err;
   }
-  if (!Number.isInteger(rating_id) || rating_id <= 0) {
-    const err = new Error("Invalid rating_id in report");
-    err.statusCode = 400;
-    throw err;
-  }
 
   const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
 
-  const [rows] = await db.query(`SELECT id FROM ${tbl} WHERE id = ? LIMIT 1`, [
+  // Use Prisma raw query for dynamic table name (only raw SQL needed)
+  const ratingExists = await prisma.$queryRawUnsafe(
+    `SELECT id FROM ${tbl} WHERE id = ? LIMIT 1`,
     rating_id,
-  ]);
-  if (!rows.length) {
-    // mark report closed anyway
+  );
+
+  if (!ratingExists || !ratingExists.length) {
     await R.hset(
       key,
       "status",
@@ -451,7 +422,7 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
       "reviewed_by",
       String(admin.admin_user_id),
       "reviewed_at",
-      String(Date.now())
+      String(Date.now()),
     );
     await R.zrem(reportIndexKey(type, "comment"), String(rid));
 
@@ -469,10 +440,13 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
     };
   }
 
-  // delete comment row
-  await db.query(`DELETE FROM ${tbl} WHERE id = ? LIMIT 1`, [rating_id]);
+  // Delete comment row using raw SQL (dynamic table name)
+  await prisma.$queryRawUnsafe(
+    `DELETE FROM ${tbl} WHERE id = ? LIMIT 1`,
+    rating_id,
+  );
 
-  // delete replies for this rating
+  // Delete replies from Redis
   const idxReplies = replyIndexKey(type, rating_id);
   const replyIds = await R.zrange(idxReplies, 0, -1);
 
@@ -483,7 +457,6 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
   }
   await R.del(idxReplies);
 
-  // close report
   await R.hset(
     key,
     "status",
@@ -491,7 +464,7 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
     "reviewed_by",
     String(admin.admin_user_id),
     "reviewed_at",
-    String(Date.now())
+    String(Date.now()),
   );
   await R.zrem(reportIndexKey(type, "comment"), String(rid));
 
@@ -509,9 +482,6 @@ async function deleteReportedMerchantCommentByReport({ report_id, admin }) {
   };
 }
 
-/**
- * Delete reported REPLY by report_id
- */
 async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
   const rid = Number(report_id);
   if (!Number.isInteger(rid) || rid <= 0) {
@@ -537,13 +507,7 @@ async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
     err.statusCode = 400;
     throw err;
   }
-  if (!Number.isInteger(reply_id) || reply_id <= 0) {
-    const err = new Error("Invalid reply_id in report");
-    err.statusCode = 400;
-    throw err;
-  }
 
-  // remove reply hash + from rating index
   const repKey = replyKey(reply_id);
   const rep = await R.hgetall(repKey);
 
@@ -554,11 +518,8 @@ async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
       await R.zrem(replyIndexKey(rating_type, rating_id), String(reply_id));
     }
     await R.del(repKey);
-  } else {
-    // reply already missing → still close report
   }
 
-  // close report
   await R.hset(
     key,
     "status",
@@ -566,7 +527,7 @@ async function deleteReportedMerchantReplyByReport({ report_id, admin }) {
     "reviewed_by",
     String(admin.admin_user_id),
     "reviewed_at",
-    String(Date.now())
+    String(Date.now()),
   );
   await R.zrem(reportIndexKey(type, "reply"), String(rid));
 
@@ -590,8 +551,6 @@ module.exports = {
   updateAppRating,
   deleteAppRating,
   getAppRatingSummary,
-
-  // ✅ reports
   listMerchantReports,
   ignoreMerchantReport,
   deleteReportedMerchantCommentByReport,

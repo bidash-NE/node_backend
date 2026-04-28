@@ -1,6 +1,6 @@
-// controllers/pointSystemController.js
+const { prisma } = require("../lib/prisma.js");
 const pointSystemModel = require("../models/pointSystemModel");
-const pool = require("../config/db");
+const { addLog } = require("../models/adminlogModel");
 
 /**
  * Resolve admin identity (name + role label) from token and DB
@@ -15,16 +15,16 @@ async function resolveAdminIdentity(req) {
   let dbName = null;
   let dbRole = null;
 
-  // If we have user_id but no name, fetch from DB
+  // If we have user_id but no name, fetch from DB using Prisma
   if (adminUserId && !tokenName) {
     try {
-      const [rows] = await pool.query(
-        `SELECT user_name, role FROM users WHERE user_id = ? LIMIT 1`,
-        [adminUserId]
-      );
-      if (rows && rows.length > 0) {
-        dbName = rows[0].user_name || null;
-        dbRole = rows[0].role || null;
+      const user = await prisma.users.findUnique({
+        where: { user_id: Number(adminUserId) },
+        select: { user_name: true, role: true },
+      });
+      if (user) {
+        dbName = user.user_name || null;
+        dbRole = user.role || null;
       }
     } catch (err) {
       console.error("Failed to fetch admin info from users table:", err);
@@ -54,9 +54,8 @@ async function resolveAdminIdentity(req) {
  */
 async function logAdminAction(req, actionDescription) {
   try {
-    const { adminUserId, adminName, roleLabel } = await resolveAdminIdentity(
-      req
-    );
+    const { adminUserId, adminName, roleLabel } =
+      await resolveAdminIdentity(req);
 
     let base;
     if (adminName && adminUserId) {
@@ -71,13 +70,11 @@ async function logAdminAction(req, actionDescription) {
 
     const activity = `${base}${actionDescription}`;
 
-    await pool.query(
-      `
-      INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
-      VALUES (?, ?, ?, UTC_TIMESTAMP())
-      `,
-      [adminUserId || null, adminName || null, activity]
-    );
+    await addLog({
+      user_id: adminUserId || null,
+      admin_name: adminName || null,
+      activity: activity,
+    });
   } catch (err) {
     // Do not block main flow if logging fails
     console.error("Failed to write admin log (point_system):", err);
@@ -135,7 +132,6 @@ exports.getPointRuleById = async (req, res) => {
 };
 
 // POST /point-system
-// body: { min_amount_per_point, point_to_award, is_active? }
 exports.createPointRule = async (req, res) => {
   try {
     const { min_amount_per_point, point_to_award, is_active } = req.body || {};
@@ -172,7 +168,7 @@ exports.createPointRule = async (req, res) => {
 
     await logAdminAction(
       req,
-      `created point earning rule (id: ${rule.point_id}, min_amount_per_point: ${rule.min_amount_per_point}, point_to_award: ${rule.point_to_award}, is_active: ${rule.is_active})`
+      `created point earning rule (id: ${rule.point_id}, min_amount_per_point: ${rule.min_amount_per_point}, point_to_award: ${rule.point_to_award}, is_active: ${rule.is_active})`,
     );
 
     return res.status(201).json({
@@ -190,7 +186,6 @@ exports.createPointRule = async (req, res) => {
 };
 
 // PUT /point-system/:id
-// body: { min_amount_per_point?, point_to_award?, is_active? }
 exports.updatePointRule = async (req, res) => {
   try {
     const { id } = req.params;
@@ -234,7 +229,7 @@ exports.updatePointRule = async (req, res) => {
 
     await logAdminAction(
       req,
-      `updated point earning rule (id: ${updated.point_id}, min_amount_per_point: ${updated.min_amount_per_point}, point_to_award: ${updated.point_to_award}, is_active: ${updated.is_active})`
+      `updated point earning rule (id: ${updated.point_id}, min_amount_per_point: ${updated.min_amount_per_point}, point_to_award: ${updated.point_to_award}, is_active: ${updated.is_active})`,
     );
 
     return res.status(200).json({
@@ -307,7 +302,6 @@ exports.getPointConversionRule = async (req, res) => {
 };
 
 // POST /point-conversion-rule
-// body: { points_required, wallet_amount, is_active? }
 exports.createPointConversionRule = async (req, res) => {
   try {
     const { points_required, wallet_amount, is_active } = req.body || {};
@@ -324,7 +318,7 @@ exports.createPointConversionRule = async (req, res) => {
     if (existing) {
       await logAdminAction(
         req,
-        `attempted to create point conversion rule but one already exists (points_required: ${existing.points_required}, wallet_amount: ${existing.wallet_amount}, is_active: ${existing.is_active})`
+        `attempted to create point conversion rule but one already exists (points_required: ${existing.points_required}, wallet_amount: ${existing.wallet_amount}, is_active: ${existing.is_active})`,
       );
 
       return res.status(400).json({
@@ -357,9 +351,16 @@ exports.createPointConversionRule = async (req, res) => {
       is_active: is_active !== undefined ? !!is_active : true,
     });
 
+    if (!rule) {
+      return res.status(400).json({
+        success: false,
+        error: "Failed to create point conversion rule.",
+      });
+    }
+
     await logAdminAction(
       req,
-      `created point conversion rule (points_required: ${rule.points_required}, wallet_amount: ${rule.wallet_amount}, is_active: ${rule.is_active})`
+      `created point conversion rule (points_required: ${rule.points_required}, wallet_amount: ${rule.wallet_amount}, is_active: ${rule.is_active})`,
     );
 
     return res.status(201).json({
@@ -377,7 +378,6 @@ exports.createPointConversionRule = async (req, res) => {
 };
 
 // PUT /point-conversion-rule
-// body: { points_required?, wallet_amount?, is_active? }
 exports.updatePointConversionRule = async (req, res) => {
   try {
     const { points_required, wallet_amount, is_active } = req.body || {};
@@ -420,7 +420,7 @@ exports.updatePointConversionRule = async (req, res) => {
 
     await logAdminAction(
       req,
-      `updated point conversion rule (points_required: ${updated.points_required}, wallet_amount: ${updated.wallet_amount}, is_active: ${updated.is_active})`
+      `updated point conversion rule (points_required: ${updated.points_required}, wallet_amount: ${updated.wallet_amount}, is_active: ${updated.is_active})`,
     );
 
     return res.status(200).json({

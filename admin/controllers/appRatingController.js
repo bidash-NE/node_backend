@@ -1,5 +1,4 @@
-// controllers/appRatingController.js ✅ ADMIN SIDE (FULL)
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 const { addLog } = require("../models/adminlogModel");
 
 const {
@@ -10,7 +9,7 @@ const {
   deleteAppRating,
   getAppRatingSummary,
 
-  // ✅ NEW reports functions (Redis + DB)
+  // Reports functions (Redis + DB)
   listMerchantReports,
   ignoreMerchantReport,
   deleteReportedMerchantCommentByReport,
@@ -29,32 +28,30 @@ async function verifyAdminOrSuperAdmin(admin_user_id) {
     throw err;
   }
 
-  const [rows] = await db.query(
-    "SELECT user_id, user_name, role FROM users WHERE user_id = ? LIMIT 1",
-    [idNum]
-  );
+  const admin = await prisma.users.findUnique({
+    where: { user_id: idNum },
+    select: { user_id: true, user_name: true, role: true },
+  });
 
-  if (!rows.length) {
+  if (!admin) {
     const err = new Error("Admin user not found");
     err.statusCode = 404;
     throw err;
   }
 
-  const admin = rows[0];
   const role = String(admin.role || "").toLowerCase();
-
   const allowedRoles = new Set(["admin", "super admin", "superadmin"]);
 
   if (!allowedRoles.has(role)) {
     const err = new Error(
-      "Not authorized. Only admin/super admin can perform this action."
+      "Not authorized. Only admin/super admin can perform this action.",
     );
     err.statusCode = 403;
     throw err;
   }
 
   return {
-    admin_user_id: admin.user_id,
+    admin_user_id: Number(admin.user_id),
     admin_name: admin.user_name || "UNKNOWN_ADMIN",
     role,
   };
@@ -90,14 +87,13 @@ async function createAppRatingController(req, res) {
     const os_version = deviceInfo.os_version || body.os_version || null;
     const app_version = deviceInfo.app_version || body.app_version || null;
     const device_model = deviceInfo.device_model || body.device_model || null;
-
     const network_type = body.network_type || null;
 
     let role = null;
-    const [[userRow]] = await db.query(
-      "SELECT role FROM users WHERE user_id = ? LIMIT 1",
-      [user_id]
-    );
+    const userRow = await prisma.users.findUnique({
+      where: { user_id: user_id },
+      select: { role: true },
+    });
     if (userRow && userRow.role) role = userRow.role;
 
     const created = await createAppRating({
@@ -235,7 +231,6 @@ async function deleteAppRatingController(req, res) {
   try {
     const { id } = req.params;
 
-    // ✅ prefer Bearer token (admin)
     const admin_user_id = req.user?.user_id;
     const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
     const { admin_user_id: adminId, admin_name, role } = adminInfo;
@@ -260,12 +255,9 @@ async function deleteAppRatingController(req, res) {
       });
     }
 
-    // ✅ log
+    // Log the action
     try {
-      const activity =
-        `Admin ${admin_name} (id=${adminId}, role=${role}) deleted app rating #${id} ` +
-        `(rating=${existing.rating}, comment="${userComment}", given_by_user=${existing.user_id})`;
-
+      const activity = `Admin ${admin_name} (id=${adminId}, role=${role}) deleted app rating #${id} (rating=${existing.rating}, comment="${userComment}", given_by_user=${existing.user_id})`;
       await addLog({ user_id: adminId, admin_name, activity });
     } catch (e) {
       console.error("admin log failed:", e?.message || e);
@@ -297,14 +289,13 @@ async function getAppRatingSummaryController(req, res) {
   }
 }
 
-/* ---------------- ✅ NEW: ADMIN REPORTS API ---------------- */
+/* ---------------- ADMIN REPORTS API ---------------- */
 
 /**
  * GET /api/app-ratings/reports/comments?type=food|mart&page&limit
  */
 async function listReportedCommentsController(req, res) {
   try {
-    // ✅ only admin/superadmin can view
     const admin_user_id = req.user?.user_id;
     await verifyAdminOrSuperAdmin(admin_user_id);
 
@@ -356,7 +347,6 @@ async function listReportedRepliesController(req, res) {
 
 /**
  * POST /api/app-ratings/reports/:report_id/ignore
- * ✅ Uses Bearer token admin id
  */
 async function ignoreReportController(req, res) {
   try {
@@ -366,17 +356,9 @@ async function ignoreReportController(req, res) {
     const report_id = Number(req.params.report_id);
     const out = await ignoreMerchantReport({ report_id, admin: adminInfo });
 
-    // ✅ LOG
+    // Log the action
     try {
-      const activity =
-        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
-        `ignored report_id=${report_id} (type=${
-          out?.data?.type || "?"
-        }, target=${out?.data?.target || "?"}, ` +
-        `rating_id=${out?.data?.rating_id || 0}, reply_id=${
-          out?.data?.reply_id || 0
-        })`;
-
+      const activity = `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ignored report_id=${report_id} (type=${out?.data?.type || "?"}, target=${out?.data?.target || "?"}, rating_id=${out?.data?.rating_id || 0}, reply_id=${out?.data?.reply_id || 0})`;
       await addLog({
         user_id: adminInfo.admin_user_id,
         admin_name: adminInfo.admin_name,
@@ -397,7 +379,6 @@ async function ignoreReportController(req, res) {
 
 /**
  * DELETE /api/app-ratings/reports/:report_id/comment
- * ✅ Uses Bearer token admin id
  */
 async function deleteReportedCommentController(req, res) {
   try {
@@ -405,22 +386,15 @@ async function deleteReportedCommentController(req, res) {
     const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
 
     const report_id = Number(req.params.report_id);
-
     const out = await deleteReportedMerchantCommentByReport({
       report_id,
       admin: adminInfo,
     });
 
-    // ✅ LOG
+    // Log the action
     try {
       const d = out?.data || {};
-      const activity =
-        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
-        `deleted REPORTED COMMENT via report_id=${report_id} ` +
-        `(type=${d.type || "?"}, rating_id=${
-          d.rating_id || 0
-        }, deleted_replies=${d.deleted_replies || 0})`;
-
+      const activity = `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) deleted REPORTED COMMENT via report_id=${report_id} (type=${d.type || "?"}, rating_id=${d.rating_id || 0}, deleted_replies=${d.deleted_replies || 0})`;
       await addLog({
         user_id: adminInfo.admin_user_id,
         admin_name: adminInfo.admin_name,
@@ -442,7 +416,6 @@ async function deleteReportedCommentController(req, res) {
 
 /**
  * DELETE /api/app-ratings/reports/:report_id/reply
- * ✅ Uses Bearer token admin id
  */
 async function deleteReportedReplyController(req, res) {
   try {
@@ -450,20 +423,15 @@ async function deleteReportedReplyController(req, res) {
     const adminInfo = await verifyAdminOrSuperAdmin(admin_user_id);
 
     const report_id = Number(req.params.report_id);
-
     const out = await deleteReportedMerchantReplyByReport({
       report_id,
       admin: adminInfo,
     });
 
-    // ✅ LOG
+    // Log the action
     try {
       const d = out?.data || {};
-      const activity =
-        `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) ` +
-        `deleted REPORTED REPLY via report_id=${report_id} ` +
-        `(type=${d.type || "?"}, reply_id=${d.reply_id || 0})`;
-
+      const activity = `Admin ${adminInfo.admin_name} (id=${adminInfo.admin_user_id}, role=${adminInfo.role}) deleted REPORTED REPLY via report_id=${report_id} (type=${d.type || "?"}, reply_id=${d.reply_id || 0})`;
       await addLog({
         user_id: adminInfo.admin_user_id,
         admin_name: adminInfo.admin_name,
@@ -491,7 +459,7 @@ module.exports = {
   deleteAppRatingController,
   getAppRatingSummaryController,
 
-  // ✅ reports
+  // reports
   listReportedCommentsController,
   listReportedRepliesController,
   ignoreReportController,
