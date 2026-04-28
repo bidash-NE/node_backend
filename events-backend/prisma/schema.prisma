@@ -1,5 +1,5 @@
 generator client {
-  provider      = "prisma-client-js"
+  provider = "prisma-client-js"
   binaryTargets = ["native", "windows", "linux-musl-openssl-3.0.x"]
 }
 
@@ -74,25 +74,25 @@ model banners_base_prices {
 }
 
 model event_bookings {
-  id                  String                  @id @db.VarChar(50)
-  ticket_code         String                  @unique(map: "ticket_code") @db.VarChar(50)
-  user_id             BigInt                  @db.UnsignedBigInt
-  event_id            String                  @db.Char(36)
-  tier_id             String                  @db.Char(36)
-  quantity            Int
-  total_amount        Int
-  payment_method      bookings_payment_method
-  attendee_names      String                  @db.LongText
-  status              bookings_status         @default(confirmed)
-  payment_status      event_payment_status    @default(paid)
-  wallet_journal_code String?                 @db.VarChar(36)
-  created_at          DateTime                @default(now()) @db.Timestamp(0)
-  screening_id        String?                 @db.Char(36)
-  users               users                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "bookings_ibfk_1")
-  events              events                  @relation(fields: [event_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_2")
-  event_ticket_tiers  event_ticket_tiers      @relation(fields: [tier_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_3")
-  event_screenings    event_screenings?       @relation(fields: [screening_id], references: [id], map: "b_ibfk_screening")
-  event_booking_seats event_booking_seats[]
+  id             String                  @id @db.VarChar(50)
+  ticket_code    String                  @unique(map: "ticket_code") @db.VarChar(50)
+  user_id        BigInt                  @db.UnsignedBigInt
+  event_id       String                  @db.Char(36)
+  tier_id        String                  @db.Char(36)
+  quantity       Int
+  total_amount   Int
+  payment_method bookings_payment_method
+  attendee_names String                  @db.LongText
+  status               bookings_status              @default(confirmed)
+  payment_status       event_payment_status         @default(paid)
+  wallet_journal_code  String?                      @db.VarChar(36)
+  created_at           DateTime                     @default(now()) @db.Timestamp(0)
+  screening_id         String?                      @db.Char(36)
+  users          users                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "bookings_ibfk_1")
+  events         events                  @relation(fields: [event_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_2")
+  event_ticket_tiers   event_ticket_tiers            @relation(fields: [tier_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_3")
+  event_screenings     event_screenings?             @relation(fields: [screening_id], references: [id], map: "b_ibfk_screening")
+  event_booking_seats  event_booking_seats[]
 
   @@index([event_id], map: "event_id")
   @@index([tier_id], map: "tier_id")
@@ -475,30 +475,30 @@ model drivers {
 }
 
 model events {
-  id                  String                @id @db.Char(36)
-  title               String                @db.VarChar(255)
-  category            events_category
-  city                String                @db.VarChar(100)
-  venue_name          String                @db.VarChar(255)
-  venue_address       String?               @db.VarChar(255)
-  organizer_name      String?               @db.VarChar(255)
-  organizer_id        String?               @db.Char(36)
-  cover_image         String?               @db.VarChar(500)
-  description         String?               @db.Text
-  start_at            DateTime              @db.DateTime(0)
-  end_at              DateTime              @db.DateTime(0)
-  is_live             Boolean?              @default(false)
-  avg_rating          Decimal?              @default(0.00) @db.Decimal(3, 2)
-  total_reviews       Int?                  @default(0)
-  created_at          DateTime              @default(now()) @db.Timestamp(0)
-  event_bookings      event_bookings[]
-  event_organizers    event_organizers?     @relation(fields: [organizer_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "events_ibfk_1")
-  event_reviews       event_reviews[]
-  event_ticket_tiers  event_ticket_tiers[]
-  event_wishlists     event_wishlists[]
-  event_seat_holds    event_seat_holds[]
-  event_booking_seats event_booking_seats[]
-  event_screenings    event_screenings[]
+  id             String          @id @db.Char(36)
+  title          String          @db.VarChar(255)
+  category       events_category
+  city           String          @db.VarChar(100)
+  venue_name     String          @db.VarChar(255)
+  venue_address  String?         @db.VarChar(255)
+  organizer_name String?         @db.VarChar(255)
+  organizer_id   String?         @db.Char(36)
+  cover_image    String?         @db.VarChar(500)
+  description    String?         @db.Text
+  start_at       DateTime        @db.DateTime(0)
+  end_at         DateTime        @db.DateTime(0)
+  is_live        Boolean?        @default(false)
+  avg_rating     Decimal?        @default(0.00) @db.Decimal(3, 2)
+  total_reviews  Int?            @default(0)
+  created_at     DateTime        @default(now()) @db.Timestamp(0)
+  event_bookings       event_bookings[]
+  event_organizers     event_organizers?     @relation(fields: [organizer_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "events_ibfk_1")
+  event_reviews  event_reviews[]
+  event_ticket_tiers   event_ticket_tiers[]
+  event_wishlists      event_wishlists[]
+  event_seat_holds     event_seat_holds[]
+  event_booking_seats  event_booking_seats[]
+  event_screenings     event_screenings[]
 
   @@index([organizer_id], map: "organizer_id")
 }
@@ -1018,26 +1018,26 @@ model pool_batches {
 }
 
 model event_reviews {
-  id                   String                 @id @db.Char(36)
-  event_id             String                 @db.Char(36)
-  user_id              BigInt                 @db.UnsignedBigInt
-  rating               Int                    @db.TinyInt
-  comment              String?                @db.Text
-  created_at           DateTime               @default(now()) @db.Timestamp(0)
-  events               events                 @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "reviews_ibfk_1")
-  users                users                  @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "reviews_ibfk_2")
-  event_review_helpful event_review_helpful[]
+  id                     String                  @id @db.Char(36)
+  event_id               String                  @db.Char(36)
+  user_id                BigInt                  @db.UnsignedBigInt
+  rating                 Int                     @db.TinyInt
+  comment                String?                 @db.Text
+  created_at             DateTime                @default(now()) @db.Timestamp(0)
+  events                 events                  @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "reviews_ibfk_1")
+  users                  users                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "reviews_ibfk_2")
+  event_review_helpful   event_review_helpful[]
 
   @@unique([event_id, user_id], map: "uq_review")
   @@index([user_id], map: "user_id")
 }
 
 model event_review_helpful {
-  review_id     String        @db.Char(36)
-  user_id       BigInt        @db.UnsignedBigInt
-  created_at    DateTime      @default(now()) @db.Timestamp(0)
-  event_reviews event_reviews @relation(fields: [review_id], references: [id], onDelete: Cascade)
-  users         users         @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  review_id      String         @db.Char(36)
+  user_id        BigInt         @db.UnsignedBigInt
+  created_at     DateTime       @default(now()) @db.Timestamp(0)
+  event_reviews  event_reviews  @relation(fields: [review_id], references: [id], onDelete: Cascade)
+  users          users          @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@id([review_id, user_id])
 }
@@ -1065,7 +1065,7 @@ model ride_bookings {
   booking_id            BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
   ride_id               BigInt                 @db.UnsignedBigInt
   passenger_id          BigInt                 @db.UnsignedBigInt
-  event_seats           Int                    @default(1) @db.UnsignedInt
+  event_seats                 Int                    @default(1) @db.UnsignedInt
   status                ride_bookings_status   @default(requested)
   requested_at          DateTime               @default(now()) @db.DateTime(0)
   accepted_at           DateTime?              @db.DateTime(0)
@@ -1129,7 +1129,7 @@ model ride_participants {
   ride_id        BigInt                        @db.UnsignedBigInt
   user_id        BigInt                        @db.UnsignedBigInt
   role           ride_participants_role
-  event_seats    Int                           @default(1) @db.UnsignedTinyInt
+  event_seats          Int                           @default(1) @db.UnsignedTinyInt
   join_status    ride_participants_join_status @default(joined)
   joined_at      DateTime                      @default(now()) @db.DateTime(0)
   updated_at     DateTime                      @default(now()) @db.DateTime(0)
@@ -1415,14 +1415,14 @@ model tax_rules {
 }
 
 model event_ticket_tiers {
-  id              String           @id @db.Char(36)
-  event_id        String           @db.Char(36)
-  name            String           @db.VarChar(100)
-  description     String?          @db.VarChar(255)
+  id              String     @id @db.Char(36)
+  event_id        String     @db.Char(36)
+  name            String     @db.VarChar(100)
+  description     String?    @db.VarChar(255)
   price           Int
-  available_seats Int              @default(0)
-  event_bookings  event_bookings[]
-  events          events           @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "ticket_tiers_ibfk_1")
+  available_seats Int        @default(0)
+  event_bookings        event_bookings[]
+  events          events     @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "ticket_tiers_ibfk_1")
 
   @@index([event_id], map: "event_id")
 }
@@ -1490,7 +1490,7 @@ model users {
   admin_logs                admin_logs[]
   all_device_ids            all_device_ids?
   app_ratings               app_ratings[]
-  event_bookings            event_bookings[]
+  event_bookings                  event_bookings[]
   carts                     carts[]
   driver_devices            driver_devices[]
   drivers                   drivers?
@@ -1502,10 +1502,10 @@ model users {
   system_notifications      system_notifications[]
   user_devices              user_devices[]
   user_verification         user_verification[]
-  event_wishlists           event_wishlists[]
-  event_seat_holds          event_seat_holds[]
-  event_review_helpful      event_review_helpful[]
-  event_payment_sessions    event_payment_sessions[]
+  event_wishlists                 event_wishlists[]
+  event_seat_holds                event_seat_holds[]
+  event_review_helpful            event_review_helpful[]
+  event_payment_sessions          event_payment_sessions[]
 
   @@index([email], map: "email_2")
   @@index([is_active], map: "is_active")
@@ -1901,6 +1901,7 @@ enum bookings_payment_method {
   WALLET
   CARD
   UPI
+  BANK
 }
 
 enum tax_rules_taxable_base {
@@ -2075,44 +2076,44 @@ enum orders_delivery_special_mode {
 }
 
 model event_halls {
-  id               String             @id @db.Char(36)
-  venue_name       String             @db.VarChar(255)
-  name             String             @db.VarChar(100)
-  total_seats      Int                @default(0)
-  has_balcony      Boolean            @default(false)
-  created_at       DateTime           @default(now()) @db.Timestamp(0)
-  event_seats      event_seats[]
-  event_screenings event_screenings[]
+  id           String   @id @db.Char(36)
+  venue_name   String   @db.VarChar(255)
+  name         String   @db.VarChar(100)
+  total_seats  Int      @default(0)
+  has_balcony  Boolean  @default(false)
+  created_at   DateTime @default(now()) @db.Timestamp(0)
+  event_seats        event_seats[]
+  event_screenings   event_screenings[]
 }
 
 model event_seats {
-  id                  String                @id @db.Char(36)
-  hall_id             String                @db.Char(36)
-  row_label           String                @db.VarChar(5)
-  seat_number         Int                   @db.UnsignedSmallInt
-  column_position     Int                   @db.UnsignedTinyInt
-  section             seats_section         @default(main)
-  category            seats_category        @default(regular)
-  event_halls         event_halls           @relation(fields: [hall_id], references: [id], onDelete: Cascade)
-  event_seat_holds    event_seat_holds[]
-  event_booking_seats event_booking_seats[]
+  id              String        @id @db.Char(36)
+  hall_id         String        @db.Char(36)
+  row_label       String        @db.VarChar(5)
+  seat_number     Int           @db.UnsignedSmallInt
+  column_position Int           @db.UnsignedTinyInt
+  section         seats_section @default(main)
+  category        seats_category @default(regular)
+  event_halls           event_halls         @relation(fields: [hall_id], references: [id], onDelete: Cascade)
+  event_seat_holds      event_seat_holds[]
+  event_booking_seats   event_booking_seats[]
 
   @@unique([hall_id, section, row_label, seat_number], map: "uq_seat")
   @@index([hall_id])
 }
 
 model event_seat_holds {
-  id               String            @id @db.Char(36)
-  event_id         String?           @db.Char(36)
-  screening_id     String?           @db.Char(36)
-  seat_id          String            @db.Char(36)
-  user_id          BigInt            @db.UnsignedBigInt
-  expires_at       DateTime          @db.DateTime(0)
-  created_at       DateTime          @default(now()) @db.Timestamp(0)
-  events           events?           @relation(fields: [event_id], references: [id], onDelete: Cascade, map: "seat_holds_ibfk_event")
-  event_screenings event_screenings? @relation(fields: [screening_id], references: [id], onDelete: Cascade, map: "seat_holds_ibfk_screening")
-  event_seats      event_seats       @relation(fields: [seat_id], references: [id], onDelete: Cascade)
-  users            users             @relation(fields: [user_id], references: [user_id])
+  id            String      @id @db.Char(36)
+  event_id      String?     @db.Char(36)
+  screening_id  String?     @db.Char(36)
+  seat_id       String      @db.Char(36)
+  user_id       BigInt      @db.UnsignedBigInt
+  expires_at    DateTime    @db.DateTime(0)
+  created_at    DateTime    @default(now()) @db.Timestamp(0)
+  events        events?     @relation(fields: [event_id], references: [id], onDelete: Cascade, map: "seat_holds_ibfk_event")
+  event_screenings    event_screenings? @relation(fields: [screening_id], references: [id], onDelete: Cascade, map: "seat_holds_ibfk_screening")
+  event_seats         event_seats       @relation(fields: [seat_id], references: [id], onDelete: Cascade)
+  users         users       @relation(fields: [user_id], references: [user_id])
 
   @@unique([screening_id, seat_id], map: "uq_cinema_hold")
   @@unique([event_id, seat_id], map: "uq_general_hold")
@@ -2122,14 +2123,14 @@ model event_seat_holds {
 }
 
 model event_booking_seats {
-  booking_id       String            @db.VarChar(50)
-  seat_id          String            @db.Char(36)
-  event_id         String            @db.Char(36)
-  screening_id     String?           @db.Char(36)
-  event_bookings   event_bookings    @relation(fields: [booking_id], references: [id], onDelete: Cascade)
-  event_seats      event_seats       @relation(fields: [seat_id], references: [id])
-  events           events            @relation(fields: [event_id], references: [id])
-  event_screenings event_screenings? @relation(fields: [screening_id], references: [id], map: "bs_ibfk_screening")
+  booking_id   String      @db.VarChar(50)
+  seat_id      String      @db.Char(36)
+  event_id     String      @db.Char(36)
+  screening_id String?     @db.Char(36)
+  event_bookings     event_bookings    @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  event_seats        event_seats       @relation(fields: [seat_id], references: [id])
+  events       events      @relation(fields: [event_id], references: [id])
+  event_screenings   event_screenings? @relation(fields: [screening_id], references: [id], map: "bs_ibfk_screening")
 
   @@id([booking_id, seat_id])
   @@index([seat_id])
@@ -2149,18 +2150,18 @@ enum seats_category {
 }
 
 model event_screenings {
-  id                  String                @id @db.Char(36)
-  event_id            String                @db.Char(36)
-  hall_id             String                @db.Char(36)
-  show_date           DateTime              @db.Date
-  show_time           DateTime              @db.Time(0)
-  status              screenings_status     @default(active)
-  created_at          DateTime              @default(now()) @db.Timestamp(0)
-  events              events                @relation(fields: [event_id], references: [id], onDelete: Cascade)
-  event_halls         event_halls           @relation(fields: [hall_id], references: [id])
-  event_seat_holds    event_seat_holds[]
+  id           String             @id @db.Char(36)
+  event_id     String             @db.Char(36)
+  hall_id      String             @db.Char(36)
+  show_date    DateTime           @db.Date
+  show_time    DateTime           @db.Time(0)
+  status       screenings_status  @default(active)
+  created_at   DateTime           @default(now()) @db.Timestamp(0)
+  events       events             @relation(fields: [event_id], references: [id], onDelete: Cascade)
+  event_halls        event_halls              @relation(fields: [hall_id], references: [id])
+  event_seat_holds   event_seat_holds[]
   event_booking_seats event_booking_seats[]
-  event_bookings      event_bookings[]
+  event_bookings     event_bookings[]
 
   @@index([event_id])
   @@index([hall_id])
@@ -2173,16 +2174,16 @@ enum screenings_status {
 }
 
 model event_banners {
-  id         String                  @id @db.Char(36)
-  title      String                  @db.VarChar(255)
-  subtitle   String?                 @db.VarChar(255)
-  image_url  String                  @db.VarChar(500)
-  link_type  event_banners_link_type @default(event)
-  link_id    String?                 @db.VarChar(100)
-  link_url   String?                 @db.VarChar(500)
-  is_active  Boolean                 @default(true)
-  sort_order Int                     @default(0)
-  created_at DateTime                @default(now()) @db.Timestamp(0)
+  id          String                    @id @db.Char(36)
+  title       String                    @db.VarChar(255)
+  subtitle    String?                   @db.VarChar(255)
+  image_url   String                    @db.VarChar(500)
+  link_type   event_banners_link_type   @default(event)
+  link_id     String?                   @db.VarChar(100)
+  link_url    String?                   @db.VarChar(500)
+  is_active   Boolean                   @default(true)
+  sort_order  Int                       @default(0)
+  created_at  DateTime                  @default(now()) @db.Timestamp(0)
 }
 
 enum event_banners_link_type {
@@ -2199,16 +2200,16 @@ enum event_payment_status {
 }
 
 model event_payment_sessions {
-  id              String                       @id @db.Char(36)
-  user_id         BigInt                       @db.UnsignedBigInt
-  order_no        String                       @unique(map: "uq_order_no") @db.VarChar(50)
-  bfs_txn_id      String?                      @db.VarChar(50)
-  amount          Decimal                      @db.Decimal(10, 2)
-  payment_context Json
-  status          event_payment_session_status @default(pending)
-  created_at      DateTime                     @default(now()) @db.Timestamp(0)
-  updated_at      DateTime                     @default(now()) @db.Timestamp(0)
-  users           users                        @relation(fields: [user_id], references: [user_id])
+  id               String                         @id @db.Char(36)
+  user_id          BigInt                         @db.UnsignedBigInt
+  order_no         String                         @unique(map: "uq_order_no") @db.VarChar(50)
+  bfs_txn_id       String?                        @db.VarChar(50)
+  amount           Decimal                        @db.Decimal(10, 2)
+  payment_context  Json
+  status           event_payment_session_status   @default(pending)
+  created_at       DateTime                       @default(now()) @db.Timestamp(0)
+  updated_at       DateTime                       @default(now()) @db.Timestamp(0)
+  users            users                          @relation(fields: [user_id], references: [user_id])
 
   @@index([user_id])
 }

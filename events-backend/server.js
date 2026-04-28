@@ -6,3 +6,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Events API running on port number ${PORT}`);
 });
+
