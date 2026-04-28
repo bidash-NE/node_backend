@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 const paymentRoutes = require("./routes/paymentRoutes");
+const onlinePaymentRoutes = require("./routes/onlinePaymentRoutes");
 const rmaLogRoutes = require("./routes/rmaLogRoutes");
 const withdrawalsRoutes = require("./routes/withdrawals.routes.js");
 const debugRoutes = require("./routes/debugRoutes");
@@ -18,6 +19,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/wallet/topup", paymentRoutes);
+app.use("/api/payment", onlinePaymentRoutes);
 app.use("/api/rma", rmaLogRoutes);
 app.use("/api", withdrawalsRoutes);
 app.use("/api", debugRoutes);
