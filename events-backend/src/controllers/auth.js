@@ -1,0 +1,74 @@
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const prisma = require('../db');
+
+async function register(req, res, next) {
+  try {
+    const { name, email, phone, password } = req.body;
+
+    if (!name || !email || !phone || !password) {
+      return res.status(400).json({ success: false, message: 'name, email, phone, and password are required' });
+    }
+
+    const existing = await prisma.users.findUnique({ where: { email } });
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'Email already registered' });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    const user = await prisma.users.create({
+      data: { user_name: name, email, phone, password_hash: hash },
+      select: { user_id: true, user_name: true, email: true },
+    });
+
+    const token = jwt.sign(
+      { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: { id: user.user_id.toString(), name: user.user_name, email: user.email },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function login(req, res, next) {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'email and password are required' });
+    }
+
+    const user = await prisma.users.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: { id: user.user_id.toString(), name: user.user_name, email: user.email },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { register, login };
