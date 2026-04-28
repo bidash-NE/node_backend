@@ -6,9 +6,9 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files (from parent directory)
-COPY ../package*.json ./
-COPY ../prisma ./prisma/
+# Copy root package files
+COPY package*.json ./
+COPY prisma ./prisma/
 
 # Install ALL dependencies (including dev)
 RUN npm ci --include=dev
@@ -16,10 +16,10 @@ RUN npm ci --include=dev
 # Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the specific service you're building (admin)
-COPY . ./admin
-COPY ../lib ./lib
-COPY ../generated ./generated
+# Copy the admin service and required files
+COPY admin ./admin
+COPY lib ./lib
+COPY generated ./generated
 
 # Prune dev dependencies for production
 RUN npm prune --production
