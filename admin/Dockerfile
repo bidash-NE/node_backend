@@ -13,13 +13,12 @@ COPY prisma ./prisma/
 # Install ALL dependencies (including dev)
 RUN npm ci --include=dev
 
-# Generate Prisma Client
+# Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
 # Copy the admin service and required files
 COPY admin ./admin
 COPY lib ./lib
-COPY generated ./generated
 
 # Prune dev dependencies for production
 RUN npm prune --production
