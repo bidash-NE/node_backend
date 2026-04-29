@@ -1,10 +1,8 @@
-// controllers/forgotPasswordController.js
-const db = require("../config/db"); // MySQL pool
+const { prisma } = require("../lib/prisma.js");
 const redisClient = require("../models/redisClient");
-const Driver = require("../models/driverModel");
 const bcrypt = require("bcrypt");
 
-// ✅ use your existing mailer config (same as we did now)
+// ✅ use your existing mailer config
 const { transporter, from, isConfigured } = require("../config/mailer");
 
 /* ---------------- fetch (Node 18+ has global fetch) ---------------- */
@@ -65,7 +63,7 @@ async function sendSmsGateway({ to, text, from }) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": SMS_MASTER_KEY, // ✅ required
+      "x-api-key": SMS_MASTER_KEY,
     },
     body: JSON.stringify({ to, text, from }),
   });
@@ -85,19 +83,21 @@ async function findUserByPhoneNoNormalize(inputPhone) {
   const candidates = buildLookupCandidates(inputPhone);
   if (!candidates.length) return { user: null, gatewayPhone: null };
 
-  const placeholders = candidates.map(() => "?").join(",");
+  // ✅ Using Prisma to find user by multiple phone candidates
+  let user = null;
 
-  // ✅ Only phone column (your schema has just phone)
-  const sql = `
-    SELECT user_id, role, phone
-    FROM users
-    WHERE phone IN (${placeholders})
-    LIMIT 1
-  `;
+  for (const candidate of candidates) {
+    const found = await prisma.users.findFirst({
+      where: { phone: candidate },
+      select: { user_id: true, role: true, phone: true },
+    });
 
-  const [rows] = await db.execute(sql, candidates);
+    if (found) {
+      user = found;
+      break;
+    }
+  }
 
-  const user = rows?.[0] || null;
   if (!user) return { user: null, gatewayPhone: null };
 
   // Normalize only AFTER user exists (prefer DB stored phone)
@@ -218,7 +218,7 @@ exports.verifyOtpSms = async (req, res) => {
 };
 
 /* ============================================================
-   ✅ 3) RESET PASSWORD BY PHONE (NEW)
+   ✅ 3) RESET PASSWORD BY PHONE
    POST /reset-password-sms
    Body: { phone, newPassword }
    - requires verifyOtpSms first (verified flag)
@@ -266,19 +266,11 @@ exports.resetPasswordSms = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update MySQL (by user_id is safest)
-    await db.query("UPDATE users SET password_hash = ? WHERE user_id = ?", [
-      hashedPassword,
-      user.user_id,
-    ]);
-
-    // If driver, also update in MongoDB
-    if (String(user.role || "").toLowerCase() === "driver") {
-      await Driver.updateOne(
-        { user_id: user.user_id },
-        { $set: { password: hashedPassword } }
-      );
-    }
+    // Update password using Prisma
+    await prisma.users.update({
+      where: { user_id: user.user_id },
+      data: { password_hash: hashedPassword },
+    });
 
     // cleanup verification flag
     await redisClient.del(verifiedKey);
@@ -291,7 +283,7 @@ exports.resetPasswordSms = async (req, res) => {
 };
 
 /* ===========================
-   ✅ EMAIL OTP FLOW (EDITED)
+   ✅ EMAIL OTP FLOW
    - uses config/mailer.js transporter/from
    - normalizes email for redis keys
    - proper success/error responses
@@ -312,7 +304,6 @@ const isValidEmail = (email) =>
    - OTP valid: 5 mins
    - resend cooldown: 30s
    ============================================================ */
-// ✅ Forgot Password (Email) - TabDhey format
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
@@ -330,12 +321,13 @@ exports.sendOtp = async (req, res) => {
 
     const email = normalizeEmail(emailRaw);
 
-    const [rows] = await db.query(
-      "SELECT user_id, role, email, user_name FROM users WHERE email = ? LIMIT 1",
-      [email]
-    );
+    // ✅ Using Prisma to find user by email
+    const user = await prisma.users.findFirst({
+      where: { email: email },
+      select: { user_id: true, role: true, email: true, user_name: true },
+    });
 
-    if (rows.length === 0) {
+    if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "Email not found." });
@@ -357,13 +349,13 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    const otp = makeOtp(); // 6 digits string
+    const otp = makeOtp();
 
     const otpKey = `fp_email_otp:${email}`;
     await redisClient.set(otpKey, otp, { ex: 300 });
     await redisClient.set(rlKey, "1", { ex: 30 });
 
-    const userName = rows[0].user_name || "Valued User";
+    const userName = user.user_name || "Valued User";
     const disclaimer =
       "Disclaimer: Please do NOT share this OTP or your password with anyone. " +
       "TabDhey will never ask for your OTP, password, or T-PIN. " +
@@ -411,6 +403,7 @@ exports.sendOtp = async (req, res) => {
       message: "OTP sent to email.",
     });
   } catch (err) {
+    console.error("Send OTP Email Error:", err);
     return res.status(500).json({
       success: false,
       message: "Failed to send OTP.",
@@ -444,12 +437,13 @@ exports.verifyOtp = async (req, res) => {
     const email = normalizeEmail(emailRaw);
     const otp = String(otpRaw).trim();
 
-    // ensure email exists in DB (same behavior as before: only verify for real users)
-    const [rows] = await db.query(
-      "SELECT user_id FROM users WHERE email = ? LIMIT 1",
-      [email]
-    );
-    if (rows.length === 0) {
+    // ✅ ensure email exists in DB
+    const user = await prisma.users.findFirst({
+      where: { email: email },
+      select: { user_id: true },
+    });
+
+    if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "Email not found." });
@@ -482,6 +476,7 @@ exports.verifyOtp = async (req, res) => {
       message: "OTP verified successfully.",
     });
   } catch (err) {
+    console.error("Verify OTP Email Error:", err);
     return res.status(500).json({
       success: false,
       message: "OTP verification failed.",
@@ -520,11 +515,13 @@ exports.resetPassword = async (req, res) => {
 
     const email = normalizeEmail(emailRaw);
 
-    const [userRows] = await db.query(
-      "SELECT user_id, role FROM users WHERE email = ? LIMIT 1",
-      [email]
-    );
-    if (userRows.length === 0) {
+    // ✅ Using Prisma to find user
+    const user = await prisma.users.findFirst({
+      where: { email: email },
+      select: { user_id: true, role: true },
+    });
+
+    if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "User not found." });
@@ -540,20 +537,13 @@ exports.resetPassword = async (req, res) => {
       });
     }
 
-    const user = userRows[0];
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await db.query("UPDATE users SET password_hash = ? WHERE email = ?", [
-      hashedPassword,
-      email,
-    ]);
-
-    if (String(user.role || "").toLowerCase() === "driver") {
-      await Driver.updateOne(
-        { user_id: user.user_id },
-        { $set: { password: hashedPassword } }
-      );
-    }
+    // ✅ Update using Prisma
+    await prisma.users.update({
+      where: { email: email },
+      data: { password_hash: hashedPassword },
+    });
 
     // cleanup verification flag
     await redisClient.del(verifiedKey);
@@ -563,6 +553,7 @@ exports.resetPassword = async (req, res) => {
       message: "Password reset successfully.",
     });
   } catch (err) {
+    console.error("Reset Password Email Error:", err);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",

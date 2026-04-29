@@ -1,4 +1,4 @@
-const pool = require("../config/db");
+const { prisma } = require("../lib/prisma.js");
 
 const updateDeviceID = async (req, res) => {
   const { user_id, role, deviceID } = req.body;
@@ -9,13 +9,12 @@ const updateDeviceID = async (req, res) => {
       .json({ error: "user_id, role, and deviceID are required" });
   }
 
-  const conn = await pool.getConnection();
   try {
     // 🔎 Step 1: Check if user exists
-    const [userRows] = await conn.query(
-      `SELECT user_id, role FROM users WHERE user_id = ?`,
-      [user_id]
-    );
+    const userRows = await prisma.users.findMany({
+      where: { user_id: parseInt(user_id) },
+      select: { user_id: true, role: true },
+    });
 
     if (userRows.length === 0) {
       return res
@@ -42,21 +41,56 @@ const updateDeviceID = async (req, res) => {
     }
 
     // 🔄 Step 3: Update or Insert device ID
-    const [existingRows] = await conn.query(
-      `SELECT id FROM ${table} WHERE user_id = ?`,
-      [user_id]
-    );
+    let existingRows = [];
+
+    if (table === "driver_devices") {
+      existingRows = await prisma.driver_devices.findMany({
+        where: { user_id: parseInt(user_id) },
+        select: { id: true },
+      });
+    } else if (table === "user_devices") {
+      existingRows = await prisma.user_devices.findMany({
+        where: { user_id: parseInt(user_id) },
+        select: { id: true },
+      });
+    }
 
     if (existingRows.length > 0) {
-      await conn.query(
-        `UPDATE ${table} SET device_id = ?, updated_at = NOW() WHERE user_id = ?`,
-        [deviceID, user_id]
-      );
+      if (table === "driver_devices") {
+        await prisma.driver_devices.update({
+          where: { user_id: parseInt(user_id) },
+          data: {
+            device_id: deviceID,
+            updated_at: new Date(),
+          },
+        });
+      } else if (table === "user_devices") {
+        await prisma.user_devices.update({
+          where: { user_id: parseInt(user_id) },
+          data: {
+            device_id: deviceID,
+            updated_at: new Date(),
+          },
+        });
+      }
     } else {
-      await conn.query(
-        `INSERT INTO ${table} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
-        [user_id, deviceID]
-      );
+      if (table === "driver_devices") {
+        await prisma.driver_devices.create({
+          data: {
+            user_id: parseInt(user_id),
+            device_id: deviceID,
+            updated_at: new Date(),
+          },
+        });
+      } else if (table === "user_devices") {
+        await prisma.user_devices.create({
+          data: {
+            user_id: parseInt(user_id),
+            device_id: deviceID,
+            updated_at: new Date(),
+          },
+        });
+      }
     }
 
     return res
@@ -65,8 +99,6 @@ const updateDeviceID = async (req, res) => {
   } catch (err) {
     console.error("❌ Error updating device ID:", err);
     return res.status(500).json({ error: "Failed to update device ID" });
-  } finally {
-    conn.release();
   }
 };
 

@@ -1,4 +1,4 @@
-const db = require("../config/db"); // your MySQL config
+const { prisma } = require("../lib/prisma.js");
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
@@ -6,29 +6,30 @@ const bcrypt = require("bcryptjs");
 // GET profile
 exports.getProfile = async (req, res) => {
   try {
-    const userId = req.params.user_id;
-    const [rows] = await db.query(
-      `SELECT 
-         user_id, 
-         user_name, 
-         email, 
-         phone, 
-         role, 
-         profile_image, 
-         is_verified, 
-         is_active, 
-         last_login,
-         points              -- ⭐ include points here
-       FROM users 
-       WHERE user_id = ?`,
-      [userId]
-    );
+    const userId = parseInt(req.params.user_id);
 
-    if (rows.length === 0) {
+    // ✅ Using Prisma to get user profile
+    const user = await prisma.users.findUnique({
+      where: { user_id: userId },
+      select: {
+        user_id: true,
+        user_name: true,
+        email: true,
+        phone: true,
+        role: true,
+        profile_image: true,
+        is_verified: true,
+        is_active: true,
+        last_login: true,
+        points: true, // ⭐ include points here
+      },
+    });
+
+    if (!user) {
       return res.status(404).json({ message: "User not found." });
     }
 
-    res.status(200).json(rows[0]);
+    res.status(200).json(user);
   } catch (err) {
     console.error("Error fetching profile:", err.message);
     res.status(500).json({ error: err.message });
@@ -38,7 +39,7 @@ exports.getProfile = async (req, res) => {
 // UPDATE profile
 exports.updateProfile = async (req, res) => {
   try {
-    const userId = req.params.user_id;
+    const userId = parseInt(req.params.user_id);
     const { user_name, email, phone } = req.body;
     let newProfileImage = null;
 
@@ -46,17 +47,14 @@ exports.updateProfile = async (req, res) => {
     if (req.file) {
       newProfileImage = `/uploads/profiles/${req.file.filename}`;
 
-      const [userRows] = await db.query(
-        "SELECT profile_image FROM users WHERE user_id = ?",
-        [userId]
-      );
+      // ✅ Using Prisma to get current profile image
+      const user = await prisma.users.findUnique({
+        where: { user_id: userId },
+        select: { profile_image: true },
+      });
 
-      if (userRows.length > 0 && userRows[0].profile_image) {
-        const oldImagePath = path.join(
-          __dirname,
-          "..",
-          userRows[0].profile_image
-        );
+      if (user && user.profile_image) {
+        const oldImagePath = path.join(__dirname, "..", user.profile_image);
         fs.unlink(oldImagePath, (err) => {
           if (err && err.code !== "ENOENT") {
             console.error("❌ Failed to delete old profile image:", err);
@@ -65,44 +63,47 @@ exports.updateProfile = async (req, res) => {
       }
     }
 
-    // 2. Build update query dynamically
-    let query = `UPDATE users SET `;
-    const updates = [];
-    const values = [];
+    // 2. Build update data dynamically
+    const updateData = {};
 
     if (user_name) {
-      updates.push("user_name = ?");
-      values.push(user_name);
+      updateData.user_name = user_name;
     }
 
     if (email) {
-      updates.push("email = ?");
-      values.push(email);
+      updateData.email = email;
     }
 
     if (phone) {
-      updates.push("phone = ?");
-      values.push(phone);
+      updateData.phone = phone;
     }
 
     if (newProfileImage) {
-      updates.push("profile_image = ?");
-      values.push(newProfileImage);
+      updateData.profile_image = newProfileImage;
     }
 
-    if (updates.length === 0) {
+    if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ error: "No fields provided to update." });
     }
 
-    query += updates.join(", ");
-    query += `, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`;
-    values.push(userId);
+    // Add updated_at
+    updateData.updated_at = new Date();
 
-    await db.query(query, values);
+    // ✅ Using Prisma to update user
+    await prisma.users.update({
+      where: { user_id: userId },
+      data: updateData,
+    });
 
     res.status(200).json({ message: "✅ Profile updated successfully." });
   } catch (err) {
     console.error("⚠️ Profile update error:", err);
+
+    // Handle Prisma specific errors
+    if (err.code === "P2025") {
+      return res.status(404).json({ error: "User not found." });
+    }
+
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -110,7 +111,7 @@ exports.updateProfile = async (req, res) => {
 // Change password (assumes bcrypt and db are available)
 exports.changePassword = async (req, res) => {
   try {
-    const userId = req.params.user_id;
+    const userId = parseInt(req.params.user_id);
     const { current_password, new_password } = req.body || {};
 
     // Basic validations
@@ -130,16 +131,17 @@ exports.changePassword = async (req, res) => {
       });
     }
 
-    // Fetch user & existing hash
-    const [rows] = await db.query(
-      "SELECT password_hash FROM users WHERE user_id = ? LIMIT 1",
-      [userId]
-    );
-    if (!rows || rows.length === 0) {
+    // ✅ Using Prisma to fetch user & existing hash
+    const user = await prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { password_hash: true },
+    });
+
+    if (!user) {
       return res.status(404).json({ error: "User not found." });
     }
 
-    const { password_hash } = rows[0];
+    const { password_hash } = user;
 
     // Verify current password
     const isMatch = await bcrypt.compare(current_password, password_hash);
@@ -149,16 +151,24 @@ exports.changePassword = async (req, res) => {
 
     // Hash and update
     const newHash = await bcrypt.hash(new_password, 10);
-    await db.query("UPDATE users SET password_hash = ? WHERE user_id = ?", [
-      newHash,
-      userId,
-    ]);
+
+    // ✅ Using Prisma to update password
+    await prisma.users.update({
+      where: { user_id: userId },
+      data: { password_hash: newHash },
+    });
 
     return res
       .status(200)
       .json({ message: "✅ Password updated successfully." });
   } catch (err) {
     console.error("Change password error:", err);
+
+    // Handle Prisma specific errors
+    if (err.code === "P2025") {
+      return res.status(404).json({ error: "User not found." });
+    }
+
     return res.status(500).json({
       error: err.sqlMessage || err.message || "Internal server error.",
     });

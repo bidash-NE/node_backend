@@ -1,5 +1,5 @@
+const { prisma } = require("../lib/prisma.js");
 const redis = require("../models/redisClient");
-const db = require("../config/db");
 
 const SMS_URL = process.env.SMS_URL;
 const SMS_MASTER_KEY = (process.env.SMS_MASTER_KEY || "").trim();
@@ -45,12 +45,19 @@ exports.sendSmsOtp = async (req, res) => {
     const phone = normalizePhone(req.body.phone);
     if (!phone) return res.status(400).json({ error: "Invalid phone number" });
 
-    // Optional: block if phone already registered
-    const [rows] = await db.execute(
-      "SELECT user_id FROM users WHERE phone = ? OR phone = ? LIMIT 1",
-      [phone, phone]
-    );
-    if (rows.length > 0) {
+    // ✅ Using Prisma to check if phone already registered
+    // Check both possible formats (with and without +975)
+    const existingUser = await prisma.users.findFirst({
+      where: {
+        OR: [
+          { phone: phone },
+          { phone: phone.startsWith("975") ? `+${phone}` : phone },
+        ],
+      },
+      select: { user_id: true },
+    });
+
+    if (existingUser) {
       return res
         .status(400)
         .json({ error: "Phone already registered. OTP not sent." });

@@ -1,6 +1,4 @@
-// controllers/authController.js
-const pool = require("../config/db");
-const DriverMongo = require("../models/driverModel");
+const { prisma } = require("../lib/prisma.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
@@ -9,7 +7,6 @@ const jwt = require("jsonwebtoken");
 const registerUser = async (req, res) => {
   let user_id = null;
   let driver_id = null;
-  const connection = await pool.getConnection();
 
   // --- helpers ---
   const normalizeBhutanPhone = (raw) => {
@@ -55,120 +52,121 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ error: "Device ID is required" });
     }
 
-    await connection.beginTransaction();
+    // Start transaction
+    const result = await prisma.$transaction(async (prismaTx) => {
+      const hashedPassword = await bcrypt.hash(user.password, 10);
 
-    const hashedPassword = await bcrypt.hash(user.password, 10);
-
-    // 1) users
-    const [userResult] = await connection.query(
-      `INSERT INTO users (user_name, email, phone, password_hash, is_verified, role)
-       VALUES (?, ?, ?, ?, 1, ?)`,
-      [
-        user.user_name ?? null,
-        user.email ?? null,
-        normalizedPhone, // ✅ stored with +975 if missing
-        hashedPassword,
-        user.role,
-      ],
-    );
-    user_id = userResult.insertId;
-
-    // 2) device (skip for admin)
-    if (requiresDevice) {
-      const deviceTable =
-        user.role === "driver" ? "driver_devices" : "user_devices";
-      await connection.query(
-        `INSERT INTO ${deviceTable} (user_id, device_id, updated_at) VALUES (?, ?, NOW())`,
-        [user_id, deviceID],
-      );
-    }
-
-    // 3) driver-only inserts
-    if (user.role === "driver") {
-      if (
-        !driver ||
-        !driver.current_location?.coordinates ||
-        !driver.license_number ||
-        !driver.license_expiry
-      ) {
-        throw new Error("Missing required driver fields");
-      }
-      if (!vehicle || !vehicle.capacity || !vehicle.vehicle_type) {
-        throw new Error("Missing required vehicle fields");
-      }
-
-      const lng = driver.current_location.coordinates[0];
-      const lat = driver.current_location.coordinates[1];
-
-      const [driverResult] = await connection.query(
-        `INSERT INTO drivers (
-          user_id, license_number, license_expiry, approval_status, is_approved,
-          rating, total_rides, is_online, current_location, current_location_updated_at
-        ) VALUES (?, ?, ?, 'pending', 0, 0, 0, 0, ST_GeomFromText(?, 4326), ?)`,
-        [
-          user_id,
-          driver.license_number,
-          driver.license_expiry,
-          `POINT(${lng} ${lat})`,
-          new Date(),
-        ],
-      );
-
-      driver_id = driverResult.insertId;
-
-      // Mongo mirror
-      await DriverMongo.create({
-        user_id,
-        license_number: driver.license_number,
-        license_expiry: driver.license_expiry,
-        current_location: driver.current_location,
-        current_location_updated_at: new Date(),
-        device_id: deviceID ?? null,
-        actual_capacity: vehicle.capacity,
-        available_capacity: vehicle.capacity,
-        vehicle_type: vehicle.vehicle_type,
+      // 1) Create user
+      const newUser = await prismaTx.users.create({
+        data: {
+          user_name: user.user_name ?? null,
+          email: user.email ? user.email.toLowerCase() : null, // Store email in lowercase
+          phone: normalizedPhone,
+          password_hash: hashedPassword,
+          is_verified: 1,
+          role: user.role,
+        },
       });
+      user_id = newUser.user_id;
 
-      // documents
-      if (Array.isArray(documents) && documents.length > 0) {
-        const docValues = documents.map((d) => [
-          driver_id,
-          d.document_type,
-          d.document_url,
-        ]);
-        const placeholders = docValues.map(() => "(?, ?, ?)").join(", ");
-        await connection.query(
-          `INSERT INTO driver_documents (driver_id, document_type, document_url) VALUES ${placeholders}`,
-          docValues.flat(),
-        );
+      // 2) device (skip for admin)
+      if (requiresDevice) {
+        const deviceTable =
+          user.role === "driver" ? "driver_devices" : "user_devices";
+
+        if (user.role === "driver") {
+          await prismaTx.driver_devices.create({
+            data: {
+              user_id: user_id,
+              device_id: deviceID,
+              updated_at: new Date(),
+            },
+          });
+        } else {
+          await prismaTx.user_devices.create({
+            data: {
+              user_id: user_id,
+              device_id: deviceID,
+              updated_at: new Date(),
+            },
+          });
+        }
       }
 
-      // vehicle
-      if (vehicle) {
-        await connection.query(
-          `INSERT INTO driver_vehicles (
-            driver_id, make, model, year, color, license_plate, vehicle_type,
-            actual_capacity, available_capacity, features, insurance_expiry, code
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            driver_id,
-            vehicle.make ?? null,
-            vehicle.model ?? null,
-            vehicle.year ?? null,
-            vehicle.color ?? null,
-            vehicle.license_plate ?? null,
-            vehicle.vehicle_type,
-            vehicle.capacity,
-            vehicle.capacity,
-            Array.isArray(vehicle.features) ? vehicle.features.join(",") : null,
-            vehicle.insurance_expiry ?? null,
-            vehicle.code ?? null,
-          ],
-        );
-      }
-    }
+      // 3) driver-only inserts
+      if (user.role === "driver") {
+        if (
+          !driver ||
+          !driver.current_location?.coordinates ||
+          !driver.license_number ||
+          !driver.license_expiry
+        ) {
+          throw new Error("Missing required driver fields");
+        }
+        if (!vehicle || !vehicle.capacity || !vehicle.vehicle_type) {
+          throw new Error("Missing required vehicle fields");
+        }
 
-    await connection.commit();
+        const lng = driver.current_location.coordinates[0];
+        const lat = driver.current_location.coordinates[1];
+
+        // Create driver
+        const newDriver = await prismaTx.drivers.create({
+          data: {
+            user_id: user_id,
+            license_number: driver.license_number,
+            license_expiry: new Date(driver.license_expiry),
+            approval_status: "pending",
+            is_approved: 0,
+            rating: 0,
+            total_rides: 0,
+            is_online: 0,
+            current_location: `POINT(${lng} ${lat})`,
+            current_location_updated_at: new Date(),
+          },
+        });
+        driver_id = newDriver.driver_id;
+
+        // documents
+        if (Array.isArray(documents) && documents.length > 0) {
+          for (const doc of documents) {
+            await prismaTx.driver_documents.create({
+              data: {
+                driver_id: driver_id,
+                document_type: doc.document_type,
+                document_url: doc.document_url,
+              },
+            });
+          }
+        }
+
+        // vehicle
+        if (vehicle) {
+          await prismaTx.driver_vehicles.create({
+            data: {
+              driver_id: driver_id,
+              make: vehicle.make ?? null,
+              model: vehicle.model ?? null,
+              year: vehicle.year ?? null,
+              color: vehicle.color ?? null,
+              license_plate: vehicle.license_plate ?? null,
+              vehicle_type: vehicle.vehicle_type,
+              actual_capacity: vehicle.capacity,
+              available_capacity: vehicle.capacity,
+              features: Array.isArray(vehicle.features)
+                ? vehicle.features.join(",")
+                : null,
+              insurance_expiry: vehicle.insurance_expiry
+                ? new Date(vehicle.insurance_expiry)
+                : null,
+              code: vehicle.code ?? null,
+            },
+          });
+        }
+      }
+
+      return { newUser: newUser };
+    });
 
     return res.status(201).json({
       message:
@@ -178,59 +176,38 @@ const registerUser = async (req, res) => {
             ? "Admin registered successfully"
             : "User registered successfully",
       user_id,
-      phone: normalizedPhone, // ✅ helpful for frontend
+      phone: normalizedPhone,
     });
   } catch (err) {
-    try {
-      await connection.rollback();
-    } catch {}
-
     console.error("Registration error:", err);
     let errorMessage = "Registration failed";
 
-    if (err.code === "ER_DUP_ENTRY") {
-      const duplicateFieldMatch = err.sqlMessage?.match(/for key '(.+?)'/);
-      if (duplicateFieldMatch && duplicateFieldMatch[1]) {
-        const key = duplicateFieldMatch[1];
-        const fieldParts = key.split(".");
-        let fieldName = fieldParts.length > 1 ? fieldParts[1] : key;
-
-        switch (fieldName) {
-          case "email":
-            errorMessage = "Email already exists";
-            break;
-          case "phone":
-            errorMessage = "Phone number already exists";
-            break;
-          case "license_number":
-            errorMessage = "Driver license number already exists";
-            break;
-          case "license_plate":
-            errorMessage = "Vehicle license plate already exists";
-            break;
-          default:
-            errorMessage = `Duplicate entry for ${fieldName}`;
+    // Handle Prisma unique constraint errors
+    if (err.code === "P2002") {
+      const target = err.meta?.target;
+      if (Array.isArray(target)) {
+        if (target.includes("email")) {
+          errorMessage = "Email already exists";
+        } else if (target.includes("phone")) {
+          errorMessage = "Phone number already exists";
+        } else if (target.includes("license_number")) {
+          errorMessage = "Driver license number already exists";
+        } else if (target.includes("license_plate")) {
+          errorMessage = "Vehicle license plate already exists";
+        } else {
+          errorMessage = `Duplicate entry for ${target.join(", ")}`;
         }
+      } else {
+        errorMessage = "Duplicate entry";
       }
 
-      try {
-        if (user_id) {
-          await connection.query(`DELETE FROM users WHERE user_id = ?`, [
-            user_id,
-          ]);
-        }
-      } catch (delErr) {
-        console.error("Error deleting user after duplicate entry:", delErr);
-      }
-
+      // Clean up user if created (Prisma transaction auto-rolls back, but we need to handle manual cleanup if needed)
       return res.status(409).json({ error: errorMessage });
     }
 
     return res.status(500).json({
       error: err.sqlMessage || err.message || errorMessage,
     });
-  } finally {
-    connection.release();
   }
 };
 
@@ -311,26 +288,33 @@ const loginUser = async (req, res) => {
 
     // 1) Fetch candidates (email case-insensitive OR exact phone)
     let candidates = [];
+
     if (email) {
-      const [rows] = await pool.query(
-        `SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
-           FROM users
-          WHERE LOWER(email) = LOWER(?)
-          ORDER BY user_id DESC
-          LIMIT 25`,
-        [email],
-      );
-      candidates = rows || [];
+      // ✅ FIXED: Use raw query for case-insensitive email search
+      const normalizedEmail = email.toLowerCase();
+      candidates = await prisma.$queryRaw`
+        SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
+        FROM users
+        WHERE LOWER(email) = ${normalizedEmail}
+        ORDER BY user_id DESC
+        LIMIT 25
+      `;
     } else {
-      const [rows] = await pool.query(
-        `SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
-           FROM users
-          WHERE phone = ?
-          ORDER BY user_id DESC
-          LIMIT 25`,
-        [phone],
-      );
-      candidates = rows || [];
+      candidates = await prisma.users.findMany({
+        where: { phone: phone },
+        select: {
+          user_id: true,
+          user_name: true,
+          phone: true,
+          email: true,
+          role: true,
+          is_active: true,
+          is_verified: true,
+          password_hash: true,
+        },
+        orderBy: { user_id: "desc" },
+        take: 25,
+      });
     }
 
     if (!candidates.length) {
@@ -357,13 +341,18 @@ const loginUser = async (req, res) => {
     }
 
     // 3) Fetch fresh user row
-    const [[user]] = await pool.query(
-      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
-         FROM users
-        WHERE user_id = ?
-        LIMIT 1`,
-      [picked.user_id],
-    );
+    const user = await prisma.users.findUnique({
+      where: { user_id: picked.user_id },
+      select: {
+        user_id: true,
+        user_name: true,
+        phone: true,
+        email: true,
+        role: true,
+        is_active: true,
+        is_verified: true,
+      },
+    });
 
     if (!user) {
       return res
@@ -405,16 +394,13 @@ const loginUser = async (req, res) => {
       !merchantDesktopNoDevice &&
       Number(user.is_verified) === 1
     ) {
-      const [drows] = await pool.query(
-        `SELECT device_id
-           FROM all_device_ids
-          WHERE user_id = ?
-          LIMIT 1`,
-        [user.user_id],
-      );
+      const deviceRecord = await prisma.all_device_ids.findUnique({
+        where: { user_id: user.user_id },
+        select: { device_id: true },
+      });
 
-      const dbDeviceId = drows?.[0]?.device_id
-        ? String(drows[0].device_id)
+      const dbDeviceId = deviceRecord?.device_id
+        ? String(deviceRecord.device_id)
         : null;
 
       if (!dbDeviceId || dbDeviceId !== deviceId) {
@@ -430,14 +416,18 @@ const loginUser = async (req, res) => {
     // (NOT for admin/super admin and NOT for merchant desktop=true)
     if (!adminNoDevice && !merchantDesktopNoDevice && deviceId) {
       try {
-        await pool.query(
-          `INSERT INTO all_device_ids (user_id, device_id, last_seen)
-           VALUES (?, ?, NOW())
-           ON DUPLICATE KEY UPDATE
-             device_id = VALUES(device_id),
-             last_seen = NOW()`,
-          [user.user_id, deviceId],
-        );
+        await prisma.all_device_ids.upsert({
+          where: { user_id: user.user_id },
+          update: {
+            device_id: deviceId,
+            last_seen: new Date(),
+          },
+          create: {
+            user_id: user.user_id,
+            device_id: deviceId,
+            last_seen: new Date(),
+          },
+        });
       } catch (e) {
         console.error("device_id save failed:", e?.message || e);
       }
@@ -446,10 +436,10 @@ const loginUser = async (req, res) => {
     // 7) Normalize stored phone (optional, only if login was by phone and differs)
     if (phone && user.phone && user.phone !== phone) {
       try {
-        await pool.query(`UPDATE users SET phone = ? WHERE user_id = ?`, [
-          phone,
-          user.user_id,
-        ]);
+        await prisma.users.update({
+          where: { user_id: user.user_id },
+          data: { phone: phone },
+        });
         user.phone = phone;
       } catch (e) {
         console.error("phone normalize update failed:", e?.message || e);
@@ -458,13 +448,13 @@ const loginUser = async (req, res) => {
 
     // 8) Mark verified + last_login (always on successful login)
     try {
-      await pool.query(
-        `UPDATE users
-            SET is_verified = 1,
-                last_login = NOW()
-          WHERE user_id = ?`,
-        [user.user_id],
-      );
+      await prisma.users.update({
+        where: { user_id: user.user_id },
+        data: {
+          is_verified: 1,
+          last_login: new Date(),
+        },
+      });
       user.is_verified = 1;
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
@@ -479,20 +469,23 @@ const loginUser = async (req, res) => {
 
     if (isMerchant) {
       try {
-        const [[biz]] = await pool.query(
-          `SELECT business_id, business_name, owner_type, business_logo, address
-             FROM merchant_business_details
-            WHERE user_id = ?
-            ORDER BY created_at DESC, business_id DESC
-            LIMIT 1`,
-          [user.user_id],
-        );
+        const business = await prisma.merchant_business_details.findFirst({
+          where: { user_id: user.user_id },
+          orderBy: { created_at: "desc", business_id: "desc" },
+          select: {
+            business_id: true,
+            business_name: true,
+            owner_type: true,
+            business_logo: true,
+            address: true,
+          },
+        });
 
-        owner_type = biz?.owner_type ?? null;
-        business_id = biz?.business_id ?? null;
-        business_name = biz?.business_name ?? null;
-        business_logo = biz?.business_logo ?? null;
-        address = biz?.address ?? null;
+        owner_type = business?.owner_type ?? null;
+        business_id = business?.business_id ?? null;
+        business_name = business?.business_name ?? null;
+        business_logo = business?.business_logo ?? null;
+        address = business?.address ?? null;
       } catch (e) {
         console.error("merchant extras fetch failed:", e?.message || e);
       }
@@ -593,16 +586,16 @@ const logoutUser = async (req, res) => {
         .json({ error: "Invalid or missing user_id param" });
     }
 
-    // ✅ Use the same promise-based pool as in login/register
-    const [result] = await pool.query(
-      `UPDATE users 
-          SET is_verified = 0,
-              last_login = NOW()
-        WHERE user_id = ?`,
-      [n],
-    );
+    // ✅ Update user using Prisma
+    const result = await prisma.users.update({
+      where: { user_id: n },
+      data: {
+        is_verified: 0,
+        last_login: new Date(),
+      },
+    });
 
-    if (result.affectedRows === 0) {
+    if (!result) {
       return res.status(404).json({ error: "User not found" });
     }
 
@@ -613,11 +606,14 @@ const logoutUser = async (req, res) => {
     });
   } catch (err) {
     console.error("Logout error:", err);
+    if (err.code === "P2025") {
+      return res.status(404).json({ error: "User not found" });
+    }
     return res.status(500).json({ error: "Logout failed due to server error" });
   }
 };
 
-// controllers/authController.js (add this function)
+/* ===================== VERIFY ACTIVE SESSION ===================== */
 
 const verifyActiveSession = async (req, res) => {
   const { user_id, device_id } = req.body || {};
@@ -638,28 +634,31 @@ const verifyActiveSession = async (req, res) => {
 
   try {
     // 1) Check user + is_verified
-    const [urows] = await pool.query(
-      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
-         FROM users
-        WHERE user_id = ?
-        LIMIT 1`,
-      [uid],
-    );
+    const user = await prisma.users.findUnique({
+      where: { user_id: uid },
+      select: {
+        user_id: true,
+        user_name: true,
+        phone: true,
+        email: true,
+        role: true,
+        is_active: true,
+        is_verified: true,
+      },
+    });
 
-    if (urows.length === 0) {
+    if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "User not found" });
     }
 
-    const user = urows[0];
-
     // If inactive -> force is_verified=0
     if (Number(user.is_active) !== 1) {
-      await pool.query(
-        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
-        [uid],
-      );
+      await prisma.users.update({
+        where: { user_id: uid },
+        data: { is_verified: 0, last_login: new Date() },
+      });
       return res
         .status(403)
         .json({ success: false, message: "Account is deactivated." });
@@ -667,30 +666,29 @@ const verifyActiveSession = async (req, res) => {
 
     // If already not verified -> keep it 0
     if (Number(user.is_verified) !== 1) {
-      await pool.query(
-        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
-        [uid],
-      );
+      await prisma.users.update({
+        where: { user_id: uid },
+        data: { is_verified: 0, last_login: new Date() },
+      });
       return res.status(200).json({ success: false });
     }
 
     // 2) Check device match in all_device_ids
-    const [drows] = await pool.query(
-      `SELECT device_id
-         FROM all_device_ids
-        WHERE user_id = ?
-        LIMIT 1`,
-      [uid],
-    );
+    const deviceRecord = await prisma.all_device_ids.findUnique({
+      where: { user_id: uid },
+      select: { device_id: true },
+    });
 
-    const dbDeviceId = drows[0]?.device_id ? String(drows[0].device_id) : null;
+    const dbDeviceId = deviceRecord?.device_id
+      ? String(deviceRecord.device_id)
+      : null;
 
     if (!dbDeviceId || dbDeviceId !== deviceId) {
       // ✅ If mismatch -> force logout (is_verified=0)
-      await pool.query(
-        `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
-        [uid],
-      );
+      await prisma.users.update({
+        where: { user_id: uid },
+        data: { is_verified: 0, last_login: new Date() },
+      });
       return res.status(200).json({ success: false });
     }
 
@@ -702,21 +700,24 @@ const verifyActiveSession = async (req, res) => {
     let address = null;
 
     if (user.role === "merchant") {
-      const [mbd] = await pool.query(
-        `SELECT owner_type, business_id, business_name, business_logo, address
-           FROM merchant_business_details
-          WHERE user_id = ?
-          ORDER BY created_at DESC, business_id DESC
-          LIMIT 1`,
-        [uid],
-      );
+      const business = await prisma.merchant_business_details.findFirst({
+        where: { user_id: uid },
+        orderBy: { created_at: "desc", business_id: "desc" },
+        select: {
+          owner_type: true,
+          business_id: true,
+          business_name: true,
+          business_logo: true,
+          address: true,
+        },
+      });
 
-      if (mbd.length) {
-        owner_type = mbd[0]?.owner_type ?? null;
-        business_id = mbd[0]?.business_id ?? null;
-        business_name = mbd[0]?.business_name ?? null;
-        business_logo = mbd[0]?.business_logo ?? null;
-        address = mbd[0]?.address ?? null;
+      if (business) {
+        owner_type = business.owner_type ?? null;
+        business_id = business.business_id ?? null;
+        business_name = business.business_name ?? null;
+        business_logo = business.business_logo ?? null;
+        address = business.address ?? null;
       }
     }
 
@@ -763,6 +764,7 @@ const verifyActiveSession = async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
+
 /* ===================== REFRESH ACCESS TOKEN ===================== */
 /**
  * POST /api/auth/refresh-token
@@ -808,21 +810,22 @@ const refreshAccessToken = async (req, res) => {
     }
 
     // ✅ Load user (and validate)
-    const [urows] = await pool.query(
-      `SELECT user_id, role, phone, is_active, is_verified
-         FROM users
-        WHERE user_id = ?
-        LIMIT 1`,
-      [uid],
-    );
+    const user = await prisma.users.findUnique({
+      where: { user_id: uid },
+      select: {
+        user_id: true,
+        role: true,
+        phone: true,
+        is_active: true,
+        is_verified: true,
+      },
+    });
 
-    if (!urows.length) {
+    if (!user) {
       return res
         .status(404)
         .json({ success: false, message: "User not found" });
     }
-
-    const user = urows[0];
 
     if (Number(user.is_active) !== 1) {
       return res
@@ -845,16 +848,16 @@ const refreshAccessToken = async (req, res) => {
     //   return res.status(400).json({ success: false, message: "device_id is required" });
     // }
     // if (deviceId && user.role !== "admin") {
-    //   const [drows] = await pool.query(
-    //     `SELECT device_id FROM all_device_ids WHERE user_id = ? LIMIT 1`,
-    //     [uid],
-    //   );
-    //   const dbDeviceId = drows[0]?.device_id ? String(drows[0].device_id) : null;
+    //   const deviceRecord = await prisma.all_device_ids.findUnique({
+    //     where: { user_id: uid },
+    //     select: { device_id: true },
+    //   });
+    //   const dbDeviceId = deviceRecord?.device_id ? String(deviceRecord.device_id) : null;
     //   if (!dbDeviceId || dbDeviceId !== deviceId) {
-    //     await pool.query(
-    //       `UPDATE users SET is_verified = 0, last_login = NOW() WHERE user_id = ?`,
-    //       [uid],
-    //     );
+    //     await prisma.users.update({
+    //       where: { user_id: uid },
+    //       data: { is_verified: 0, last_login: new Date() },
+    //     });
     //     return res.status(401).json({ success: false, message: "Device mismatch. Please login again." });
     //   }
     // }
@@ -889,6 +892,7 @@ const refreshAccessToken = async (req, res) => {
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
+
 module.exports = {
   registerUser,
   loginUser, // now sets is_verified=1 + updates last_login
