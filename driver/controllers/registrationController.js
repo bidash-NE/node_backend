@@ -3,7 +3,6 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 /* ===================== REGISTER ===================== */
-
 const registerUser = async (req, res) => {
   let user_id = null;
   let driver_id = null;
@@ -12,24 +11,14 @@ const registerUser = async (req, res) => {
   const normalizeBhutanPhone = (raw) => {
     if (raw == null) return null;
 
-    // keep + and digits only
     let s = String(raw)
       .trim()
       .replace(/[^\d+]/g, "");
 
-    // Convert 00-prefixed to +
     if (s.startsWith("00")) s = `+${s.slice(2)}`;
-
-    // If already has +975, keep it
     if (s.startsWith("+975")) return s;
-
-    // If starts with 975 (no +), add +
     if (s.startsWith("975")) return `+${s}`;
-
-    // If starts with + (other country), keep as-is (or enforce +975 if you want)
     if (s.startsWith("+")) return s;
-
-    // Otherwise prepend +975
     return `+975${s}`;
   };
 
@@ -40,14 +29,10 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ error: "Missing required user fields" });
     }
 
-    // ✅ Normalize phone: ensure it has +975 prefix (unless already +something)
     const normalizedPhone = normalizeBhutanPhone(user.phone);
-
-    // deviceID may come from driver.device_id or req.body.deviceID
     const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
-
-    // ✅ Require device ID for everyone EXCEPT admins
     const requiresDevice = user?.role !== "admin";
+
     if (requiresDevice && !deviceID) {
       return res.status(400).json({ error: "Device ID is required" });
     }
@@ -56,28 +41,28 @@ const registerUser = async (req, res) => {
     const result = await prisma.$transaction(async (prismaTx) => {
       const hashedPassword = await bcrypt.hash(user.password, 10);
 
-      // 1) Create user
+      // 1) Create user - convert Boolean values properly
       const newUser = await prismaTx.users.create({
         data: {
           user_name: user.user_name ?? null,
-          email: user.email ? user.email.toLowerCase() : null, // Store email in lowercase
+          email: user.email ? user.email.toLowerCase() : null,
           phone: normalizedPhone,
           password_hash: hashedPassword,
-          is_verified: 1,
+          is_verified: true, // Boolean, not 1
+          is_active: true, // Boolean, not 1
           role: user.role,
         },
       });
-      user_id = newUser.user_id;
+
+      // Convert BigInt to Number for JSON response
+      user_id = Number(newUser.user_id);
 
       // 2) device (skip for admin)
       if (requiresDevice) {
-        const deviceTable =
-          user.role === "driver" ? "driver_devices" : "user_devices";
-
         if (user.role === "driver") {
           await prismaTx.driver_devices.create({
             data: {
-              user_id: user_id,
+              user_id: newUser.user_id,
               device_id: deviceID,
               updated_at: new Date(),
             },
@@ -85,7 +70,7 @@ const registerUser = async (req, res) => {
         } else {
           await prismaTx.user_devices.create({
             data: {
-              user_id: user_id,
+              user_id: newUser.user_id,
               device_id: deviceID,
               updated_at: new Date(),
             },
@@ -110,29 +95,29 @@ const registerUser = async (req, res) => {
         const lng = driver.current_location.coordinates[0];
         const lat = driver.current_location.coordinates[1];
 
-        // Create driver
         const newDriver = await prismaTx.drivers.create({
           data: {
-            user_id: user_id,
+            user_id: newUser.user_id,
             license_number: driver.license_number,
             license_expiry: new Date(driver.license_expiry),
             approval_status: "pending",
-            is_approved: 0,
+            is_approved: false,
             rating: 0,
             total_rides: 0,
-            is_online: 0,
+            is_online: false,
             current_location: `POINT(${lng} ${lat})`,
             current_location_updated_at: new Date(),
           },
         });
-        driver_id = newDriver.driver_id;
+
+        driver_id = Number(newDriver.driver_id);
 
         // documents
         if (Array.isArray(documents) && documents.length > 0) {
           for (const doc of documents) {
             await prismaTx.driver_documents.create({
               data: {
-                driver_id: driver_id,
+                driver_id: newDriver.driver_id,
                 document_type: doc.document_type,
                 document_url: doc.document_url,
               },
@@ -144,7 +129,7 @@ const registerUser = async (req, res) => {
         if (vehicle) {
           await prismaTx.driver_vehicles.create({
             data: {
-              driver_id: driver_id,
+              driver_id: newDriver.driver_id,
               make: vehicle.make ?? null,
               model: vehicle.model ?? null,
               year: vehicle.year ?? null,
@@ -165,7 +150,7 @@ const registerUser = async (req, res) => {
         }
       }
 
-      return { newUser: newUser };
+      return { newUser };
     });
 
     return res.status(201).json({
@@ -182,7 +167,6 @@ const registerUser = async (req, res) => {
     console.error("Registration error:", err);
     let errorMessage = "Registration failed";
 
-    // Handle Prisma unique constraint errors
     if (err.code === "P2002") {
       const target = err.meta?.target;
       if (Array.isArray(target)) {
@@ -190,18 +174,12 @@ const registerUser = async (req, res) => {
           errorMessage = "Email already exists";
         } else if (target.includes("phone")) {
           errorMessage = "Phone number already exists";
-        } else if (target.includes("license_number")) {
-          errorMessage = "Driver license number already exists";
-        } else if (target.includes("license_plate")) {
-          errorMessage = "Vehicle license plate already exists";
         } else {
           errorMessage = `Duplicate entry for ${target.join(", ")}`;
         }
       } else {
         errorMessage = "Duplicate entry";
       }
-
-      // Clean up user if created (Prisma transaction auto-rolls back, but we need to handle manual cleanup if needed)
       return res.status(409).json({ error: errorMessage });
     }
 
@@ -211,22 +189,19 @@ const registerUser = async (req, res) => {
   }
 };
 
-/* ===================== LOGIN (sets is_verified=1) ===================== */
+/* ===================== LOGIN ===================== */
 
 const loginUser = async (req, res) => {
-  // --- helpers ---
   const normalizeBhutanPhone = (raw) => {
     if (raw == null) return null;
-
     let s = String(raw)
       .trim()
       .replace(/[^\d+]/g, "");
     if (!s) return null;
-
     if (s.startsWith("00")) s = `+${s.slice(2)}`;
     if (s.startsWith("+975")) return s;
     if (s.startsWith("975")) return `+${s}`;
-    if (s.startsWith("+")) return s; // keep other country codes as-is
+    if (s.startsWith("+")) return s;
     return `+975${s}`;
   };
 
@@ -263,11 +238,10 @@ const loginUser = async (req, res) => {
 
   try {
     const b = req.body || {};
-
     const phone = b.phone ? normalizeBhutanPhone(b.phone) : null;
     const email = b.email ? normalizeEmail(b.email) : null;
-
     const password = b.password != null ? String(b.password) : null;
+
     if (!password) {
       return res
         .status(400)
@@ -286,11 +260,10 @@ const loginUser = async (req, res) => {
       b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
     );
 
-    // 1) Fetch candidates (email case-insensitive OR exact phone)
+    // 1) Fetch candidates
     let candidates = [];
 
     if (email) {
-      // ✅ FIXED: Use raw query for case-insensitive email search
       const normalizedEmail = email.toLowerCase();
       candidates = await prisma.$queryRaw`
         SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
@@ -323,7 +296,7 @@ const loginUser = async (req, res) => {
         .json({ success: false, message: "User not found" });
     }
 
-    // 2) Compare password against candidates (newest first)
+    // 2) Compare password
     let picked = null;
     for (const u of candidates) {
       if (!u?.password_hash) continue;
@@ -340,9 +313,12 @@ const loginUser = async (req, res) => {
         .json({ success: false, message: "Incorrect password" });
     }
 
+    // Convert BigInt to Number for JSON
+    const userId = Number(picked.user_id);
+
     // 3) Fetch fresh user row
     const user = await prisma.users.findUnique({
-      where: { user_id: picked.user_id },
+      where: { user_id: userId },
       select: {
         user_id: true,
         user_name: true,
@@ -360,7 +336,11 @@ const loginUser = async (req, res) => {
         .json({ success: false, message: "User not found" });
     }
 
-    if (Number(user.is_active) === 0) {
+    // Convert user_id to number
+    user.user_id = Number(user.user_id);
+
+    // Check if active - using Boolean
+    if (user.is_active === false) {
       return res.status(403).json({
         success: false,
         message: "Account is deactivated. Please contact support.",
@@ -372,12 +352,6 @@ const loginUser = async (req, res) => {
       .trim();
     const isMerchant = roleLower === "merchant";
     const adminNoDevice = isAdminRole(user.role);
-
-    // ✅ NEW: Merchant desktop login -> no device id required
-    // Device rules:
-    // - Admin/Super Admin: NO device id required, NO device lock
-    // - Merchant with desktop=true: NO device id required, NO device lock
-    // - Others: device id REQUIRED
     const merchantDesktopNoDevice = isMerchant && desktop === true;
 
     if (!adminNoDevice && !merchantDesktopNoDevice && !deviceId) {
@@ -387,12 +361,11 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // 5) If already verified, enforce same-device lock
-    // (NOT for admin/super admin and NOT for merchant desktop=true)
+    // 4) Device lock check - using Boolean
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
-      Number(user.is_verified) === 1
+      user.is_verified === true
     ) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
         where: { user_id: user.user_id },
@@ -406,14 +379,12 @@ const loginUser = async (req, res) => {
       if (!dbDeviceId || dbDeviceId !== deviceId) {
         return res.status(409).json({
           success: false,
-          message:
-            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+          message: "This account appears to be logged in on another device.",
         });
       }
     }
 
-    // 6) Save/REPLACE device id
-    // (NOT for admin/super admin and NOT for merchant desktop=true)
+    // 5) Save device id
     if (!adminNoDevice && !merchantDesktopNoDevice && deviceId) {
       try {
         await prisma.all_device_ids.upsert({
@@ -433,7 +404,7 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 7) Normalize stored phone (optional, only if login was by phone and differs)
+    // 6) Update phone if needed
     if (phone && user.phone && user.phone !== phone) {
       try {
         await prisma.users.update({
@@ -446,21 +417,21 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 8) Mark verified + last_login (always on successful login)
+    // 7) Mark verified + last_login - using Boolean
     try {
       await prisma.users.update({
         where: { user_id: user.user_id },
         data: {
-          is_verified: 1,
+          is_verified: true, // Boolean
           last_login: new Date(),
         },
       });
-      user.is_verified = 1;
+      user.is_verified = true;
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
     }
 
-    // 9) Merchant extras (only for merchant)
+    // 8) Merchant extras - FIXED orderBy to use array
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -471,7 +442,11 @@ const loginUser = async (req, res) => {
       try {
         const business = await prisma.merchant_business_details.findFirst({
           where: { user_id: user.user_id },
-          orderBy: { created_at: "desc", business_id: "desc" },
+          orderBy: [
+            // ✅ Array format
+            { created_at: "desc" },
+            { business_id: "desc" },
+          ],
           select: {
             business_id: true,
             business_name: true,
@@ -481,19 +456,23 @@ const loginUser = async (req, res) => {
           },
         });
 
-        owner_type = business?.owner_type ?? null;
-        business_id = business?.business_id ?? null;
-        business_name = business?.business_name ?? null;
-        business_logo = business?.business_logo ?? null;
-        address = business?.address ?? null;
+        if (business) {
+          owner_type = business.owner_type ?? null;
+          business_id = business.business_id
+            ? Number(business.business_id)
+            : null;
+          business_name = business.business_name ?? null;
+          business_logo = business.business_logo ?? null;
+          address = business.address ?? null;
+        }
       } catch (e) {
         console.error("merchant extras fetch failed:", e?.message || e);
       }
     }
 
-    // 10) Issue tokens
+    // 9) Issue tokens - use Number for user_id
     const payload = {
-      user_id: user.user_id,
+      user_id: Number(user.user_id),
       role: user.role,
       user_name: user.user_name,
       phone: user.phone,
@@ -507,7 +486,7 @@ const loginUser = async (req, res) => {
       expiresIn: "1440m",
     });
 
-    // 11) Response shape
+    // 10) Response
     if (isMerchant) {
       return res.status(200).json({
         message: "Login successful",
@@ -518,15 +497,15 @@ const loginUser = async (req, res) => {
           refresh_token_time: 1440,
         },
         user: {
-          user_id: user.user_id,
+          user_id: Number(user.user_id),
           user_name: user.user_name,
           phone: user.phone,
           role: user.role,
           email: user.email,
-          is_verified: 1,
+          is_verified: user.is_verified ? 1 : 0,
           device_id: adminNoDevice || merchantDesktopNoDevice ? null : deviceId,
           owner_type,
-          business_id,
+          business_id: business_id ? Number(business_id) : null,
           business_name,
           business_logo,
           address,
@@ -543,12 +522,12 @@ const loginUser = async (req, res) => {
         refresh_token_time: 1440,
       },
       user: {
-        user_id: user.user_id,
+        user_id: Number(user.user_id),
         user_name: user.user_name,
         phone: user.phone,
         role: user.role,
         email: user.email,
-        is_verified: 1,
+        is_verified: user.is_verified ? 1 : 0,
       },
     });
   } catch (err) {
@@ -559,25 +538,11 @@ const loginUser = async (req, res) => {
   }
 };
 
-/* ===================== LOGOUT (sets is_verified=0) ===================== */
-/**
- * POST /api/auth/logout
- * Accepts either:
- *  - Authorization via x-access-token (preferred), or
- *  - { user_id } in body (fallback when no auth middleware present)
- */
+/* ===================== LOGOUT ===================== */
 
 const logoutUser = async (req, res) => {
   try {
-    console.log(
-      "➡️ logout hit",
-      req.method,
-      req.originalUrl,
-      req.params,
-      new Date().toISOString(),
-    );
-
-    const { user_id } = req.params; // expects /logout/:user_id
+    const { user_id } = req.params;
     const n = Number(user_id);
 
     if (!Number.isInteger(n) || n <= 0) {
@@ -586,11 +551,10 @@ const logoutUser = async (req, res) => {
         .json({ error: "Invalid or missing user_id param" });
     }
 
-    // ✅ Update user using Prisma
     const result = await prisma.users.update({
-      where: { user_id: n },
+      where: { user_id: BigInt(n) }, // Convert to BigInt for query
       data: {
-        is_verified: 0,
+        is_verified: false, // Boolean
         last_login: new Date(),
       },
     });
@@ -612,7 +576,6 @@ const logoutUser = async (req, res) => {
     return res.status(500).json({ error: "Logout failed due to server error" });
   }
 };
-
 /* ===================== VERIFY ACTIVE SESSION ===================== */
 
 const verifyActiveSession = async (req, res) => {
