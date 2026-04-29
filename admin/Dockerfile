@@ -16,8 +16,9 @@ RUN npm ci --include=dev
 # Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
-# Copy the driver service (includes its own lib folder)
-COPY driver ./driver
+# Copy the admin service and required files
+COPY admin ./admin
+COPY lib ./lib
 
 # Prune dev dependencies for production
 RUN npm prune --production
@@ -38,14 +39,15 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/driver ./driver
+COPY --from=builder --chown=nodejs:nodejs /app/admin ./admin
+COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
 
-# Set working directory to driver service
-WORKDIR /app/driver
+# Set working directory to admin service
+WORKDIR /app/admin
 
 # Environment variables
 ENV NODE_ENV=production

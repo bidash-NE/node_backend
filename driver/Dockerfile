@@ -1,4 +1,3 @@
-# driver/Dockerfile
 # Stage 1: Builder
 FROM node:20-alpine AS builder
 
@@ -14,12 +13,11 @@ COPY prisma ./prisma/
 # Install ALL dependencies (including dev)
 RUN npm ci --include=dev
 
-# Generate Prisma Client
+# Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
-# Copy the driver service and required files
+# Copy the driver service (includes its own lib folder)
 COPY driver ./driver
-COPY lib ./lib
 
 # Prune dev dependencies for production
 RUN npm prune --production
@@ -32,7 +30,7 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user
+# Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
@@ -41,7 +39,6 @@ COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/driver ./driver
-COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
