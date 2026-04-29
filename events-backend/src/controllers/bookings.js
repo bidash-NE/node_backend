@@ -317,60 +317,23 @@ async function myTickets(req, res, next) {
   }
 }
 
-async function cancelBooking(req, res, next) {
+async function deleteBooking(req, res, next) {
   try {
     const { bookingId } = req.params;
     const userId = BigInt(req.user.id);
 
-    const refundAmount = await prisma.$transaction(async (tx) => {
-      const booking = await tx.event_bookings.findUnique({
-        where: { id: bookingId },
-        include: { event_booking_seats: true },
-      });
+    const booking = await prisma.event_bookings.findUnique({ where: { id: bookingId } });
 
-      if (!booking || booking.user_id !== userId) {
-        const err = new Error('Booking not found'); err.status = 404; throw err;
-      }
-      if (booking.status === 'cancelled') {
-        const err = new Error('Booking already cancelled'); err.status = 409; throw err;
-      }
+    if (!booking || booking.user_id !== userId) {
+      const err = new Error('Booking not found'); err.status = 404; throw err;
+    }
 
-      await tx.event_bookings.update({
-        where: { id: bookingId },
-        data: { status: 'cancelled', payment_status: booking.payment_status === 'paid' ? 'refunded' : booking.payment_status },
-      });
+    await prisma.event_bookings.delete({ where: { id: bookingId } });
 
-      // Restore tier seat count
-      await tx.event_ticket_tiers.update({
-        where: { id: booking.tier_id },
-        data: { available_seats: { increment: booking.quantity } },
-      });
-
-      // Refund wallet immediately if paid via WALLET
-      if (booking.payment_method === 'WALLET' && booking.payment_status === 'paid') {
-        const refundJournalCode = walletService.generateJournalCode();
-        await walletService.creditWallet(
-          tx, userId, booking.total_amount, refundJournalCode,
-          `Refund: booking ${bookingId}`
-        );
-      }
-
-      // event_booking_seats rows are deleted via ON DELETE CASCADE on event_bookings FK
-
-      return {
-        amount: booking.total_amount,
-        walletRefunded: booking.payment_method === 'WALLET' && booking.payment_status === 'paid',
-      };
-    }, TX_OPTIONS);
-
-    const message = refundAmount.walletRefunded
-      ? `Booking cancelled. BTN ${refundAmount.amount} has been refunded to your wallet.`
-      : `Booking cancelled. Refund of BTN ${refundAmount.amount} will be processed within 3-5 business days.`;
-
-    res.json({ success: true, message });
+    res.json({ success: true, message: 'Booking deleted.' });
   } catch (err) {
     next(err);
   }
 }
 
-module.exports = { createBooking, myTickets, cancelBooking };
+module.exports = { createBooking, myTickets, deleteBooking };

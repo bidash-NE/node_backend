@@ -196,7 +196,7 @@ async function toggleHelpful(req, res, next) {
     const { reviewId } = req.params;
     const userId = BigInt(req.user.id);
 
-    const existing = await prisma.event_event_review_helpful.findUnique({
+    const existing = await prisma.event_review_helpful.findUnique({
       where: { review_id_user_id: { review_id: reviewId, user_id: userId } },
     });
 

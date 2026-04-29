@@ -42,13 +42,16 @@ async function initBankPayment(req, res, next) {
       return res.status(400).json({ success: false, message: 'Could not compute payment amount' });
     }
 
+    // Extract token for BFS service-to-service auth
+    const token = req.headers.authorization?.slice(7);
+
     // Call BFS to init payment
     const bfsData = await bfs.initPayment({
       userId: Number(userId),
       amount: totalAmount,
       email,
-      description: `Event ticket — BTN ${totalAmount}`,
-    });
+      description: `Event ticket BTN ${totalAmount}`,
+    }, token);
 
     // Store payment session
     await prisma.event_payment_sessions.create({

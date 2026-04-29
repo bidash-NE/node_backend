@@ -5,7 +5,7 @@ const walletService = require("./walletService");
 // System wallet owner — receives all online payments.
 // Set SYSTEM_WALLET_USER_ID in your .env.
 function getSystemUserId() {
-  const id = Number(process.env.SYSTEM_WALLET_USER_ID) || 2;
+  const id = Number(process.env.SYSTEM_WALLET_USER_ID);
   if (!id) throw new Error("SYSTEM_WALLET_USER_ID is not configured");
   return id;
 }
@@ -53,7 +53,7 @@ function logBfs(tag, orderNo, payload) {
 }
 
 // ==== INIT (AR) ====
-async function initPayment({ amount, email, description }) {
+async function initPayment({ userId, amount, email, description }) {
   if (!amount || amount <= 0) throw new Error("Invalid amount");
 
   const now = new Date();
@@ -62,6 +62,7 @@ async function initPayment({ amount, email, description }) {
 
   createPayment({
     order_no: orderNo,
+    user_id: userId || null,
     amount,
     currency: "BTN",
     description: description || "Online payment",

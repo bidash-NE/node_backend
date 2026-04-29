@@ -9,6 +9,7 @@ const seatsRouter = require('./routes/seats');
 const screeningsRouter = require('./routes/screenings');
 const bannersRouter = require('./routes/banners');
 const walletRouter = require('./routes/wallet');
+const paymentsRouter = require('./routes/payments');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.use('/events/api/bookings', bookingsRouter);
 app.use('/events/api/wishlist', wishlistRouter);
 app.use('/events/api/banners', bannersRouter);
 app.use('/events/api/wallet', walletRouter);
+app.use('/events/api/payments', paymentsRouter);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
