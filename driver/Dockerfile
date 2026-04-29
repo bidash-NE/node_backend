@@ -7,9 +7,9 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy package files from root (adjust path if needed)
-COPY ../package*.json ./
-COPY ../prisma ./prisma/
+# Copy root package files
+COPY package*.json ./
+COPY prisma ./prisma/
 
 # Install ALL dependencies (including dev)
 RUN npm ci --include=dev
@@ -17,9 +17,9 @@ RUN npm ci --include=dev
 # Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the driver service files
-COPY . ./driver
-COPY ../lib ./lib
+# Copy the driver service and required files
+COPY driver ./driver
+COPY lib ./lib
 
 # Prune dev dependencies for production
 RUN npm prune --production
@@ -32,7 +32,7 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user for security
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
