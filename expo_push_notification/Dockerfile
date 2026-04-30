@@ -6,21 +6,28 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files
-COPY package*.json ./
-COPY prisma ./prisma/
+# Copy expo service package files FIRST (for caching)
+COPY expo_push_notification/package*.json ./expo_push_notification/
 
-# Install ALL dependencies (including dev)
+# Install expo service dependencies
+WORKDIR /app/expo_push_notification
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
-RUN npx prisma generate
+# Copy prisma schema from root
+COPY prisma /app/prisma
 
-# Copy the expo service (includes its own lib folder)
-COPY expo_push_notification ./expo_push_notification
-COPY lib ./lib
+# Copy lib folder from root if needed
+COPY lib /app/lib
 
-# Prune dev dependencies for production
+# Generate Prisma Client (point to schema location)
+WORKDIR /app
+RUN npx prisma generate --schema=./prisma/schema.prisma
+
+# Copy expo service source code
+COPY expo_push_notification /app/expo_push_notification
+
+# Prune dev dependencies
+WORKDIR /app/expo_push_notification
 RUN npm prune --production
 
 # Stage 2: Production
@@ -31,23 +38,20 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user for security
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
 # Copy from builder
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/package*.json ./
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./expo_push_notification
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
-
-# Set working directory to expo service
-WORKDIR /app/expo_push_notification
 
 # Environment variables
 ENV NODE_ENV=production
