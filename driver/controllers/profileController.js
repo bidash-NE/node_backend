@@ -3,6 +3,31 @@ const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 
+// Helper function to convert BigInt to Number recursively
+function serializeBigInt(data) {
+  if (data === null || data === undefined) {
+    return data;
+  }
+
+  if (typeof data === "bigint") {
+    return Number(data);
+  }
+
+  if (Array.isArray(data)) {
+    return data.map((item) => serializeBigInt(item));
+  }
+
+  if (typeof data === "object") {
+    const serialized = {};
+    for (const key in data) {
+      serialized[key] = serializeBigInt(data[key]);
+    }
+    return serialized;
+  }
+
+  return data;
+}
+
 // GET profile
 exports.getProfile = async (req, res) => {
   try {
@@ -29,7 +54,9 @@ exports.getProfile = async (req, res) => {
       return res.status(404).json({ message: "User not found." });
     }
 
-    res.status(200).json(user);
+    // ✅ Convert BigInt values before sending response
+    const serializedUser = serializeBigInt(user);
+    res.status(200).json(serializedUser);
   } catch (err) {
     console.error("Error fetching profile:", err.message);
     res.status(500).json({ error: err.message });
