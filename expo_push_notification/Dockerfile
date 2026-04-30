@@ -6,19 +6,26 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy package files
-COPY package*.json ./
+# Copy expo service package files
+COPY expo_push_notification/package*.json ./expo_push_notification/
 
-# Install ALL dependencies (including dev) for building
+# Install dependencies
+WORKDIR /app/expo_push_notification
 RUN npm ci --include=dev
 
-# Generate Prisma Client
-RUN npx prisma generate
+# Copy prisma schema from root (where it actually exists)
+COPY prisma /app/prisma
 
-# Copy source code
-COPY . .
+# Generate Prisma Client (point to the schema location)
+WORKDIR /app
+RUN npx prisma generate --schema=./prisma/schema.prisma
 
-# Prune dev dependencies for production
+# Copy expo service source code
+COPY expo_push_notification /app/expo_push_notification
+COPY lib /app/lib
+
+# Prune dev dependencies
+WORKDIR /app/expo_push_notification
 RUN npm prune --production
 
 # Stage 2: Production
@@ -29,14 +36,17 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user for security
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
 # Copy from builder
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app ./
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/node_modules ./node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/package*.json ./
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./
+COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
+COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
