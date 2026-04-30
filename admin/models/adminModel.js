@@ -34,43 +34,59 @@ async function logAdmin(conn, actorUserId, adminName, activity) {
   }
 }
 
-// ✅ Users (role='user') + wallet_id + points
+// ✅ Users (role='user') + points (wallet fetched separately)
 async function fetchUsersByRole() {
   const users = await prisma.users.findMany({
     where: {
       role: "user",
     },
     include: {
-      wallet: true,
+      // wallet: true,  // ❌ REMOVE THIS LINE
     },
     orderBy: {
       user_name: "asc",
     },
   });
 
-  return users.map((user) => ({
-    user_id: Number(user.user_id),
-    user_name: user.user_name,
-    email: user.email,
-    phone: user.phone,
-    is_verified: user.is_verified,
-    is_active: user.is_active,
-    role: user.role,
-    profile_image: user.profile_image,
-    points: Number(user.points ?? 0),
-    wallet_id: user.wallet?.wallet_id || null,
-  }));
+  // Fetch wallet info for all users
+  const usersWithWallets = await Promise.all(
+    users.map(async (user) => {
+      let walletInfo = null;
+      try {
+        walletInfo = await prisma.wallets.findUnique({
+          where: { user_id: Number(user.user_id) },
+        });
+      } catch (error) {
+        // Wallet might not exist for this user
+      }
+
+      return {
+        user_id: Number(user.user_id),
+        user_name: user.user_name,
+        email: user.email,
+        phone: user.phone,
+        is_verified: user.is_verified,
+        is_active: user.is_active,
+        role: user.role,
+        profile_image: user.profile_image,
+        points: Number(user.points ?? 0),
+        wallet_id: walletInfo?.wallet_id || null,
+        wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
+      };
+    }),
+  );
+
+  return usersWithWallets;
 }
 
-// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating + points
-// ✅ Drivers (role='driver') + license/vehicles + wallet_id + avg_rating + points
+// ✅ Drivers (role='driver') + license/vehicles + avg_rating + points
 async function fetchDrivers() {
   const users = await prisma.users.findMany({
     where: {
       role: "driver",
     },
     include: {
-      wallet: true,
+      // wallet: true,  // ❌ REMOVE THIS LINE
       drivers: true,
     },
     orderBy: {
@@ -85,6 +101,16 @@ async function fetchDrivers() {
         ? Number(driverInfo.driver_id)
         : null;
       const license_number = driverInfo?.license_number || null;
+
+      // Get wallet info
+      let walletInfo = null;
+      try {
+        walletInfo = await prisma.wallets.findUnique({
+          where: { user_id: Number(user.user_id) },
+        });
+      } catch (error) {
+        // Wallet might not exist for this user
+      }
 
       // Get vehicles using raw SQL to avoid features column issue
       let vehicles = [];
@@ -138,7 +164,8 @@ async function fetchDrivers() {
         is_active: user.is_active,
         role: user.role,
         profile_image: user.profile_image || null,
-        wallet_id: user.wallet?.wallet_id || null,
+        wallet_id: walletInfo?.wallet_id || null,
+        wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
         points: Number(user.points ?? 0),
         driver_id: driver_id,
         license_number: license_number,
