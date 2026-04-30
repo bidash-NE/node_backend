@@ -63,7 +63,6 @@ user_merchant_chat/
 wallet_payment/
 events-backend/
 Map_and_location_services/
-expo_push_notification/
 
 # Prisma - keep this!
 # prisma/ - DO NOT ignore

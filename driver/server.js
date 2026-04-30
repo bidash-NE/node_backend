@@ -75,7 +75,7 @@ const PORT = process.env.PORT || 3000;
 app.get("/health", (_req, res) => res.json({ ok: true }));
 // Call it without waiting for query test
 app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 Server running at port no ${PORT}`),
+  console.log(`🚀 Server running at port ${PORT}`),
 );
 
 // Graceful shutdown
