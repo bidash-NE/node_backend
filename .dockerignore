@@ -50,8 +50,8 @@ CHANGELOG.md
 LICENSE
 
 # Other services (excluded to keep build context small)
+# REMOVED driver/ from here since we need to build it
 bfs-wallet-backend/
-driver/
 food/
 grablike-backend/
 mart/
