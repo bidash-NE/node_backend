@@ -9,13 +9,14 @@ RUN apk add --no-cache openssl
 # Copy expo package files
 COPY expo_push_notification/package*.json ./
 
-# Install all dependencies (including Prisma)
+# Install all dependencies
 RUN npm ci --include=dev
 
-# Copy prisma schema
+# Copy prisma schema from root
 COPY prisma ./prisma
 
-# Generate Prisma Client
+# Generate Prisma Client to the correct location (../../generated from /app/expo)
+# This will create /app/generated/prisma
 RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy expo source code
@@ -35,9 +36,11 @@ RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
+# Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app ./
+COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 
 USER nodejs
 
