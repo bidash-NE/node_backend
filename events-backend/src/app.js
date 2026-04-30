@@ -1,7 +1,9 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
 const authRouter = require('./routes/auth');
+const uploadRouter = require('./routes/upload');
 const eventsRouter = require('./routes/events');
 const bookingsRouter = require('./routes/bookings');
 const wishlistRouter = require('./routes/wishlist');
@@ -16,6 +18,8 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+app.use('/events/api/admin/upload', uploadRouter);
 
 app.use('/events/api/auth', authRouter);
 app.use('/events/api/events', eventsRouter);
