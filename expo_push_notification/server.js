@@ -16,7 +16,7 @@ const pushRoutes = require("./routes/pushRoutes");
 
 const app = express();
 
-// CORS setup
+// CORS setup - FIXED (removed app.options line)
 app.use(
   cors({
     origin: "*",
@@ -24,7 +24,6 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
-app.options("*", cors());
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -35,8 +34,6 @@ async function testPrismaConnection() {
   try {
     await prisma.$connect();
     console.log("✅ Prisma connected to database successfully!");
-
-    // Fixed: Simple query without alias that might cause issues
     const result = await prisma.$queryRaw`SELECT 1 as connected`;
     console.log("✅ Database connection verified");
   } catch (error) {
@@ -118,7 +115,6 @@ const listRoutes = () => {
   console.log("-------------------\n");
 };
 
-// Call listRoutes after all routes are registered
 setTimeout(listRoutes, 100);
 
 const PORT = Number(process.env.PORT || 3007);

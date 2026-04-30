@@ -6,7 +6,7 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files (contains ALL dependencies)
+# Copy root package files
 COPY package*.json ./
 COPY prisma ./prisma/
 
@@ -16,7 +16,7 @@ RUN npm ci --include=dev
 # Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
-# Copy the expo service
+# Copy the expo service and required files
 COPY expo_push_notification ./expo_push_notification
 COPY lib ./lib
 
