@@ -6,21 +6,23 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files (where Prisma dependencies are)
+# Copy root package files (where all dependencies are)
 COPY package*.json ./
-COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev)
+# Install ALL dependencies from root (including express, etc.)
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
+# Copy prisma schema
+COPY prisma ./prisma/
+
+# Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the expo service
+# Copy expo service and lib
 COPY expo_push_notification ./expo_push_notification
 COPY lib ./lib
 
-# Prune dev dependencies for production
+# Prune dev dependencies
 RUN npm prune --production
 
 # Stage 2: Production
@@ -46,7 +48,7 @@ COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 # Switch to non-root user
 USER nodejs
 
-# Set working directory to expo service
+# Set working directory
 WORKDIR /app/expo_push_notification
 
 # Environment variables
