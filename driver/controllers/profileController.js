@@ -28,12 +28,27 @@ function serializeBigInt(data) {
   return data;
 }
 
+// Helper function for consistent error responses
+function errorResponse(res, statusCode, message) {
+  return res.status(statusCode).json({ success: false, message });
+}
+
+// Helper function for success responses
+function successResponse(res, statusCode, message, data = null) {
+  const response = { success: true, message };
+  if (data) response.data = data;
+  return res.status(statusCode).json(response);
+}
+
 // GET profile
 exports.getProfile = async (req, res) => {
   try {
     const userId = parseInt(req.params.user_id);
 
-    // ✅ Using Prisma to get user profile
+    if (!userId || isNaN(userId)) {
+      return errorResponse(res, 400, "Invalid user information provided.");
+    }
+
     const user = await prisma.users.findUnique({
       where: { user_id: userId },
       select: {
@@ -46,20 +61,41 @@ exports.getProfile = async (req, res) => {
         is_verified: true,
         is_active: true,
         last_login: true,
-        points: true, // ⭐ include points here
+        points: true,
       },
     });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found." });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please check your information.",
+      );
     }
 
-    // ✅ Convert BigInt values before sending response
+    if (user.is_active === false) {
+      return errorResponse(
+        res,
+        403,
+        "Your account has been deactivated. Please contact support.",
+      );
+    }
+
     const serializedUser = serializeBigInt(user);
-    res.status(200).json(serializedUser);
+
+    return successResponse(
+      res,
+      200,
+      "Profile retrieved successfully",
+      serializedUser,
+    );
   } catch (err) {
     console.error("Error fetching profile:", err.message);
-    res.status(500).json({ error: err.message });
+    return errorResponse(
+      res,
+      500,
+      "Unable to fetch profile at this time. Please try again later.",
+    );
   }
 };
 
@@ -70,39 +106,106 @@ exports.updateProfile = async (req, res) => {
     const { user_name, email, phone } = req.body;
     let newProfileImage = null;
 
-    // 1. Handle new uploaded profile image
+    if (!userId || isNaN(userId)) {
+      return errorResponse(res, 400, "Invalid user information provided.");
+    }
+
+    // Check if user exists
+    const existingUser = await prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { user_id: true, profile_image: true, email: true },
+    });
+
+    if (!existingUser) {
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please check your information.",
+      );
+    }
+
+    // Handle new uploaded profile image
     if (req.file) {
       newProfileImage = `/uploads/profiles/${req.file.filename}`;
 
-      // ✅ Using Prisma to get current profile image
-      const user = await prisma.users.findUnique({
-        where: { user_id: userId },
-        select: { profile_image: true },
-      });
-
-      if (user && user.profile_image) {
-        const oldImagePath = path.join(__dirname, "..", user.profile_image);
+      if (existingUser.profile_image) {
+        const oldImagePath = path.join(
+          __dirname,
+          "..",
+          existingUser.profile_image,
+        );
         fs.unlink(oldImagePath, (err) => {
           if (err && err.code !== "ENOENT") {
-            console.error("❌ Failed to delete old profile image:", err);
+            console.error("Failed to delete old profile image:", err);
           }
         });
       }
     }
 
-    // 2. Build update data dynamically
+    // Check if email is already taken by another user
+    if (email && email !== existingUser.email) {
+      const emailExists = await prisma.users.findFirst({
+        where: {
+          email: email.toLowerCase(),
+          user_id: { not: userId },
+        },
+      });
+
+      if (emailExists) {
+        return errorResponse(
+          res,
+          409,
+          "This email is already registered to another account. Please use a different email.",
+        );
+      }
+    }
+
+    // Check if phone is already taken by another user
+    if (phone) {
+      const phoneExists = await prisma.users.findFirst({
+        where: {
+          phone: phone,
+          user_id: { not: userId },
+        },
+      });
+
+      if (phoneExists) {
+        return errorResponse(
+          res,
+          409,
+          "This phone number is already registered to another account. Please use a different number.",
+        );
+      }
+    }
+
+    // Build update data dynamically
     const updateData = {};
 
     if (user_name) {
-      updateData.user_name = user_name;
+      if (user_name.trim().length < 2) {
+        return errorResponse(
+          res,
+          400,
+          "Name must be at least 2 characters long.",
+        );
+      }
+      updateData.user_name = user_name.trim();
     }
 
     if (email) {
-      updateData.email = email;
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return errorResponse(res, 400, "Please provide a valid email address.");
+      }
+      updateData.email = email.toLowerCase().trim();
     }
 
     if (phone) {
-      updateData.phone = phone;
+      const phoneDigits = phone.replace(/\D/g, "");
+      if (phoneDigits.length < 8 || phoneDigits.length > 12) {
+        return errorResponse(res, 400, "Please provide a valid phone number.");
+      }
+      updateData.phone = phone.trim();
     }
 
     if (newProfileImage) {
@@ -110,94 +213,173 @@ exports.updateProfile = async (req, res) => {
     }
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ error: "No fields provided to update." });
+      return errorResponse(
+        res,
+        400,
+        "No information provided to update. Please specify at least one field to change.",
+      );
     }
 
-    // Add updated_at
     updateData.updated_at = new Date();
 
-    // ✅ Using Prisma to update user
     await prisma.users.update({
       where: { user_id: userId },
       data: updateData,
     });
 
-    res.status(200).json({ message: "✅ Profile updated successfully." });
-  } catch (err) {
-    console.error("⚠️ Profile update error:", err);
+    let message = "Profile updated successfully";
+    if (user_name) message = "Your name has been updated successfully";
+    if (email) message = "Your email has been updated successfully";
+    if (phone) message = "Your phone number has been updated successfully";
+    if (newProfileImage)
+      message = "Your profile picture has been updated successfully";
+    if (Object.keys(updateData).length > 1)
+      message = "Your profile has been updated successfully";
 
-    // Handle Prisma specific errors
+    return successResponse(res, 200, message);
+  } catch (err) {
+    console.error("Profile update error:", err);
+
     if (err.code === "P2025") {
-      return res.status(404).json({ error: "User not found." });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please check your information.",
+      );
     }
 
-    res.status(500).json({ error: "Internal server error." });
+    if (err.code === "P2002") {
+      return errorResponse(
+        res,
+        409,
+        "This information is already used by another account. Please use different values.",
+      );
+    }
+
+    return errorResponse(
+      res,
+      500,
+      "Unable to update profile at this time. Please try again later.",
+    );
   }
 };
 
-// Change password (assumes bcrypt and db are available)
+// Change password
 exports.changePassword = async (req, res) => {
   try {
     const userId = parseInt(req.params.user_id);
     const { current_password, new_password } = req.body || {};
 
-    // Basic validations
-    if (!current_password || !new_password) {
-      return res
-        .status(400)
-        .json({ error: "current_password and new_password are required." });
-    }
-    if (new_password.length < 8) {
-      return res
-        .status(400)
-        .json({ error: "New password must be at least 8 characters." });
-    }
-    if (current_password === new_password) {
-      return res.status(400).json({
-        error: "New password must be different from current password.",
-      });
+    if (!userId || isNaN(userId)) {
+      return errorResponse(res, 400, "Invalid user information provided.");
     }
 
-    // ✅ Using Prisma to fetch user & existing hash
+    // Basic validations
+    if (!current_password) {
+      return errorResponse(res, 400, "Please provide your current password.");
+    }
+
+    if (!new_password) {
+      return errorResponse(res, 400, "Please provide a new password.");
+    }
+
+    if (new_password.length < 8) {
+      return errorResponse(
+        res,
+        400,
+        "New password must be at least 8 characters long for security.",
+      );
+    }
+
+    if (new_password.length > 100) {
+      return errorResponse(
+        res,
+        400,
+        "Password is too long. Please use a shorter password.",
+      );
+    }
+
+    if (current_password === new_password) {
+      return errorResponse(
+        res,
+        400,
+        "New password must be different from your current password.",
+      );
+    }
+
+    // Fetch user with password hash
     const user = await prisma.users.findUnique({
       where: { user_id: userId },
-      select: { password_hash: true },
+      select: {
+        user_id: true,
+        password_hash: true,
+        is_active: true,
+      },
     });
 
     if (!user) {
-      return res.status(404).json({ error: "User not found." });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please check your information.",
+      );
     }
 
-    const { password_hash } = user;
+    if (user.is_active === false) {
+      return errorResponse(
+        res,
+        403,
+        "Your account has been deactivated. You cannot change password. Please contact support.",
+      );
+    }
+
+    if (!user.password_hash) {
+      return errorResponse(
+        res,
+        400,
+        "Your account uses a different login method. Please contact support to set a password.",
+      );
+    }
 
     // Verify current password
-    const isMatch = await bcrypt.compare(current_password, password_hash);
+    const isMatch = await bcrypt.compare(current_password, user.password_hash);
     if (!isMatch) {
-      return res.status(401).json({ error: "Current password is incorrect." });
+      return errorResponse(
+        res,
+        401,
+        "Current password is incorrect. Please try again.",
+      );
     }
 
-    // Hash and update
+    // Hash new password
     const newHash = await bcrypt.hash(new_password, 10);
 
-    // ✅ Using Prisma to update password
+    // Update password
     await prisma.users.update({
       where: { user_id: userId },
       data: { password_hash: newHash },
     });
 
-    return res
-      .status(200)
-      .json({ message: "✅ Password updated successfully." });
+    return successResponse(
+      res,
+      200,
+      "Your password has been changed successfully. Please use your new password for future logins.",
+    );
   } catch (err) {
     console.error("Change password error:", err);
 
-    // Handle Prisma specific errors
     if (err.code === "P2025") {
-      return res.status(404).json({ error: "User not found." });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please check your information.",
+      );
     }
 
-    return res.status(500).json({
-      error: err.sqlMessage || err.message || "Internal server error.",
-    });
+    return errorResponse(
+      res,
+      500,
+      "Unable to change password at this time. Please try again later.",
+    );
   }
 };
