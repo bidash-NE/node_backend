@@ -2,19 +2,29 @@ const { prisma } = require("../lib/prisma.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+// Helper function to convert BigInt safely
+function toNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "number") return value;
+  return value;
+}
+
+// Helper function for consistent error responses
+function errorResponse(res, statusCode, message) {
+  return res.status(statusCode).json({ success: false, message });
+}
+
 /* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {
-  let user_id = null;
-  let driver_id = null;
+  let userId = null;
+  let driverId = null;
 
-  // --- helpers ---
   const normalizeBhutanPhone = (raw) => {
     if (raw == null) return null;
-
     let s = String(raw)
       .trim()
       .replace(/[^\d+]/g, "");
-
     if (s.startsWith("00")) s = `+${s.slice(2)}`;
     if (s.startsWith("+975")) return s;
     if (s.startsWith("975")) return `+${s}`;
@@ -26,7 +36,11 @@ const registerUser = async (req, res) => {
     const { user, driver, documents, vehicle } = req.body;
 
     if (!user || !user.password || !user.role) {
-      return res.status(400).json({ error: "Missing required user fields" });
+      return errorResponse(
+        res,
+        400,
+        "Please provide all required user information",
+      );
     }
 
     const normalizedPhone = normalizeBhutanPhone(user.phone);
@@ -34,30 +48,26 @@ const registerUser = async (req, res) => {
     const requiresDevice = user?.role !== "admin";
 
     if (requiresDevice && !deviceID) {
-      return res.status(400).json({ error: "Device ID is required" });
+      return errorResponse(res, 400, "Device ID is required for registration");
     }
 
-    // Start transaction
-    const result = await prisma.$transaction(async (prismaTx) => {
+    await prisma.$transaction(async (prismaTx) => {
       const hashedPassword = await bcrypt.hash(user.password, 10);
 
-      // 1) Create user - convert Boolean values properly
       const newUser = await prismaTx.users.create({
         data: {
           user_name: user.user_name ?? null,
           email: user.email ? user.email.toLowerCase() : null,
           phone: normalizedPhone,
           password_hash: hashedPassword,
-          is_verified: true, // Boolean, not 1
-          is_active: true, // Boolean, not 1
+          is_verified: true,
+          is_active: true,
           role: user.role,
         },
       });
 
-      // Convert BigInt to Number for JSON response
-      user_id = Number(newUser.user_id);
+      userId = toNumber(newUser.user_id);
 
-      // 2) device (skip for admin)
       if (requiresDevice) {
         if (user.role === "driver") {
           await prismaTx.driver_devices.create({
@@ -78,7 +88,6 @@ const registerUser = async (req, res) => {
         }
       }
 
-      // 3) driver-only inserts
       if (user.role === "driver") {
         if (
           !driver ||
@@ -86,10 +95,10 @@ const registerUser = async (req, res) => {
           !driver.license_number ||
           !driver.license_expiry
         ) {
-          throw new Error("Missing required driver fields");
+          throw new Error("missing_driver_fields");
         }
         if (!vehicle || !vehicle.capacity || !vehicle.vehicle_type) {
-          throw new Error("Missing required vehicle fields");
+          throw new Error("missing_vehicle_fields");
         }
 
         const lng = driver.current_location.coordinates[0];
@@ -110,9 +119,8 @@ const registerUser = async (req, res) => {
           },
         });
 
-        driver_id = Number(newDriver.driver_id);
+        driverId = toNumber(newDriver.driver_id);
 
-        // documents
         if (Array.isArray(documents) && documents.length > 0) {
           for (const doc of documents) {
             await prismaTx.driver_documents.create({
@@ -125,7 +133,6 @@ const registerUser = async (req, res) => {
           }
         }
 
-        // vehicle
         if (vehicle) {
           await prismaTx.driver_vehicles.create({
             data: {
@@ -149,48 +156,71 @@ const registerUser = async (req, res) => {
           });
         }
       }
-
-      return { newUser };
     });
 
+    let message = "Registration successful";
+    if (user.role === "driver") message = "Driver registration successful";
+    if (user.role === "admin") message = "Admin registration successful";
+
     return res.status(201).json({
-      message:
-        user.role === "driver"
-          ? "User and driver registered successfully"
-          : user.role === "admin"
-            ? "Admin registered successfully"
-            : "User registered successfully",
-      user_id,
+      success: true,
+      message,
+      user_id: userId,
       phone: normalizedPhone,
     });
   } catch (err) {
     console.error("Registration error:", err);
-    let errorMessage = "Registration failed";
 
     if (err.code === "P2002") {
       const target = err.meta?.target;
       if (Array.isArray(target)) {
         if (target.includes("email")) {
-          errorMessage = "Email already exists";
-        } else if (target.includes("phone")) {
-          errorMessage = "Phone number already exists";
-        } else {
-          errorMessage = `Duplicate entry for ${target.join(", ")}`;
+          return errorResponse(
+            res,
+            409,
+            "This email is already registered. Please use a different email or login.",
+          );
         }
-      } else {
-        errorMessage = "Duplicate entry";
+        if (target.includes("phone")) {
+          return errorResponse(
+            res,
+            409,
+            "This phone number is already registered. Please use a different number or login.",
+          );
+        }
       }
-      return res.status(409).json({ error: errorMessage });
+      return errorResponse(
+        res,
+        409,
+        "Account already exists with this information.",
+      );
     }
 
-    return res.status(500).json({
-      error: err.sqlMessage || err.message || errorMessage,
-    });
+    if (err.message === "missing_driver_fields") {
+      return errorResponse(
+        res,
+        400,
+        "Please provide all required driver information including license and location.",
+      );
+    }
+
+    if (err.message === "missing_vehicle_fields") {
+      return errorResponse(
+        res,
+        400,
+        "Please provide all required vehicle information.",
+      );
+    }
+
+    return errorResponse(
+      res,
+      500,
+      "Registration failed. Please try again later.",
+    );
   }
 };
 
 /* ===================== LOGIN ===================== */
-
 const loginUser = async (req, res) => {
   const normalizeBhutanPhone = (raw) => {
     if (raw == null) return null;
@@ -243,16 +273,15 @@ const loginUser = async (req, res) => {
     const password = b.password != null ? String(b.password) : null;
 
     if (!password) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Password is required" });
+      return errorResponse(res, 400, "Password is required");
     }
 
     if (!phone && !email) {
-      return res.status(400).json({
-        success: false,
-        message: "Phone or email is required",
-      });
+      return errorResponse(
+        res,
+        400,
+        "Please provide either email or phone number to login",
+      );
     }
 
     const desktop = truthy(b.desktop);
@@ -260,7 +289,6 @@ const loginUser = async (req, res) => {
       b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
     );
 
-    // 1) Fetch candidates
     let candidates = [];
 
     if (email) {
@@ -291,12 +319,13 @@ const loginUser = async (req, res) => {
     }
 
     if (!candidates.length) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found" });
+      return errorResponse(
+        res,
+        404,
+        "No account found with this email or phone number. Please check and try again.",
+      );
     }
 
-    // 2) Compare password
     let picked = null;
     for (const u of candidates) {
       if (!u?.password_hash) continue;
@@ -308,17 +337,11 @@ const loginUser = async (req, res) => {
     }
 
     if (!picked) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Incorrect password" });
+      return errorResponse(res, 401, "Incorrect password. Please try again.");
     }
 
-    // Convert BigInt to Number for JSON
-    const userId = Number(picked.user_id);
-
-    // 3) Fetch fresh user row
     const user = await prisma.users.findUnique({
-      where: { user_id: userId },
+      where: { user_id: toNumber(picked.user_id) },
       select: {
         user_id: true,
         user_name: true,
@@ -331,20 +354,21 @@ const loginUser = async (req, res) => {
     });
 
     if (!user) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found" });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
 
-    // Convert user_id to number
-    user.user_id = Number(user.user_id);
+    user.user_id = toNumber(user.user_id);
 
-    // Check if active - using Boolean
     if (user.is_active === false) {
-      return res.status(403).json({
-        success: false,
-        message: "Account is deactivated. Please contact support.",
-      });
+      return errorResponse(
+        res,
+        403,
+        "Your account has been deactivated. Please contact support for assistance.",
+      );
     }
 
     const roleLower = String(user.role || "")
@@ -355,13 +379,13 @@ const loginUser = async (req, res) => {
     const merchantDesktopNoDevice = isMerchant && desktop === true;
 
     if (!adminNoDevice && !merchantDesktopNoDevice && !deviceId) {
-      return res.status(400).json({
-        success: false,
-        message: "device_id is required",
-      });
+      return errorResponse(
+        res,
+        400,
+        "Device information is required for login. Please restart the app.",
+      );
     }
 
-    // 4) Device lock check - using Boolean
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
@@ -377,22 +401,19 @@ const loginUser = async (req, res) => {
         : null;
 
       if (!dbDeviceId || dbDeviceId !== deviceId) {
-        return res.status(409).json({
-          success: false,
-          message: "This account appears to be logged in on another device.",
-        });
+        return errorResponse(
+          res,
+          409,
+          "You are already logged in on another device. Please logout from that device first.",
+        );
       }
     }
 
-    // 5) Save device id
     if (!adminNoDevice && !merchantDesktopNoDevice && deviceId) {
       try {
         await prisma.all_device_ids.upsert({
           where: { user_id: user.user_id },
-          update: {
-            device_id: deviceId,
-            last_seen: new Date(),
-          },
+          update: { device_id: deviceId, last_seen: new Date() },
           create: {
             user_id: user.user_id,
             device_id: deviceId,
@@ -404,7 +425,6 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 6) Update phone if needed
     if (phone && user.phone && user.phone !== phone) {
       try {
         await prisma.users.update({
@@ -417,21 +437,16 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 7) Mark verified + last_login - using Boolean
     try {
       await prisma.users.update({
         where: { user_id: user.user_id },
-        data: {
-          is_verified: true, // Boolean
-          last_login: new Date(),
-        },
+        data: { is_verified: true, last_login: new Date() },
       });
       user.is_verified = true;
     } catch (e) {
       console.error("is_verified update failed:", e?.message || e);
     }
 
-    // 8) Merchant extras - FIXED orderBy to use array
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -442,11 +457,7 @@ const loginUser = async (req, res) => {
       try {
         const business = await prisma.merchant_business_details.findFirst({
           where: { user_id: user.user_id },
-          orderBy: [
-            // ✅ Array format
-            { created_at: "desc" },
-            { business_id: "desc" },
-          ],
+          orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
           select: {
             business_id: true,
             business_name: true,
@@ -459,7 +470,7 @@ const loginUser = async (req, res) => {
         if (business) {
           owner_type = business.owner_type ?? null;
           business_id = business.business_id
-            ? Number(business.business_id)
+            ? toNumber(business.business_id)
             : null;
           business_name = business.business_name ?? null;
           business_logo = business.business_logo ?? null;
@@ -470,9 +481,8 @@ const loginUser = async (req, res) => {
       }
     }
 
-    // 9) Issue tokens - use Number for user_id
     const payload = {
-      user_id: Number(user.user_id),
+      user_id: toNumber(user.user_id),
       role: user.role,
       user_name: user.user_name,
       phone: user.phone,
@@ -481,14 +491,13 @@ const loginUser = async (req, res) => {
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
-
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
       expiresIn: "1440m",
     });
 
-    // 10) Response
     if (isMerchant) {
       return res.status(200).json({
+        success: true,
         message: "Login successful",
         token: {
           access_token,
@@ -497,7 +506,7 @@ const loginUser = async (req, res) => {
           refresh_token_time: 1440,
         },
         user: {
-          user_id: Number(user.user_id),
+          user_id: toNumber(user.user_id),
           user_name: user.user_name,
           phone: user.phone,
           role: user.role,
@@ -505,7 +514,7 @@ const loginUser = async (req, res) => {
           is_verified: user.is_verified ? 1 : 0,
           device_id: adminNoDevice || merchantDesktopNoDevice ? null : deviceId,
           owner_type,
-          business_id: business_id ? Number(business_id) : null,
+          business_id,
           business_name,
           business_logo,
           address,
@@ -514,6 +523,7 @@ const loginUser = async (req, res) => {
     }
 
     return res.status(200).json({
+      success: true,
       message: "Login successful",
       token: {
         access_token,
@@ -522,7 +532,7 @@ const loginUser = async (req, res) => {
         refresh_token_time: 1440,
       },
       user: {
-        user_id: Number(user.user_id),
+        user_id: toNumber(user.user_id),
         user_name: user.user_name,
         phone: user.phone,
         role: user.role,
@@ -532,54 +542,63 @@ const loginUser = async (req, res) => {
     });
   } catch (err) {
     console.error("loginUser error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Login failed due to server error" });
+    return errorResponse(
+      res,
+      500,
+      "Unable to login at this time. Please try again later.",
+    );
   }
 };
 
 /* ===================== LOGOUT ===================== */
-
 const logoutUser = async (req, res) => {
   try {
     const { user_id } = req.params;
     const n = Number(user_id);
 
     if (!Number.isInteger(n) || n <= 0) {
-      return res
-        .status(400)
-        .json({ error: "Invalid or missing user_id param" });
+      return errorResponse(
+        res,
+        400,
+        "Invalid user information. Please try again.",
+      );
     }
 
     const result = await prisma.users.update({
-      where: { user_id: BigInt(n) }, // Convert to BigInt for query
-      data: {
-        is_verified: false, // Boolean
-        last_login: new Date(),
-      },
+      where: { user_id: n },
+      data: { is_verified: false, last_login: new Date() },
     });
 
     if (!result) {
-      return res.status(404).json({ error: "User not found" });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
 
     return res.status(200).json({
-      message: "Logout successful",
-      user_id: n,
-      is_verified: 0,
+      success: true,
+      message: "You have been successfully logged out.",
     });
   } catch (err) {
     console.error("Logout error:", err);
     if (err.code === "P2025") {
-      return res.status(404).json({ error: "User not found" });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
-    return res.status(500).json({ error: "Logout failed due to server error" });
+    return errorResponse(
+      res,
+      500,
+      "Unable to logout at this time. Please try again later.",
+    );
   }
 };
-/* ===================== VERIFY ACTIVE SESSION ===================== */
 
 /* ===================== VERIFY ACTIVE SESSION ===================== */
-
 const verifyActiveSession = async (req, res) => {
   const { user_id, device_id } = req.body || {};
 
@@ -588,17 +607,14 @@ const verifyActiveSession = async (req, res) => {
     device_id && String(device_id).trim() ? String(device_id).trim() : null;
 
   if (!Number.isInteger(uid) || uid <= 0) {
-    return res.status(400).json({ success: false, message: "Invalid user_id" });
+    return errorResponse(res, 400, "Invalid user information.");
   }
 
   if (!deviceId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "device_id is required" });
+    return errorResponse(res, 400, "Device information is required.");
   }
 
   try {
-    // 1) Check user + is_verified
     const user = await prisma.users.findUnique({
       where: { user_id: uid },
       select: {
@@ -613,32 +629,32 @@ const verifyActiveSession = async (req, res) => {
     });
 
     if (!user) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found" });
+      return errorResponse(res, 404, "Account not found.");
     }
 
-    // If inactive -> force is_verified=0
-    if (Number(user.is_active) !== 1) {
+    if (user.is_active === false) {
       await prisma.users.update({
         where: { user_id: uid },
-        data: { is_verified: 0, last_login: new Date() },
+        data: { is_verified: false, last_login: new Date() },
       });
-      return res
-        .status(403)
-        .json({ success: false, message: "Account is deactivated." });
+      return errorResponse(
+        res,
+        403,
+        "Your account has been deactivated. Please contact support.",
+      );
     }
 
-    // If already not verified -> keep it 0
-    if (Number(user.is_verified) !== 1) {
+    if (user.is_verified === false) {
       await prisma.users.update({
         where: { user_id: uid },
-        data: { is_verified: 0, last_login: new Date() },
+        data: { is_verified: false, last_login: new Date() },
       });
-      return res.status(200).json({ success: false });
+      return res.status(200).json({
+        success: false,
+        message: "Session expired. Please login again.",
+      });
     }
 
-    // 2) Check device match in all_device_ids
     const deviceRecord = await prisma.all_device_ids.findUnique({
       where: { user_id: uid },
       select: { device_id: true },
@@ -649,15 +665,16 @@ const verifyActiveSession = async (req, res) => {
       : null;
 
     if (!dbDeviceId || dbDeviceId !== deviceId) {
-      // ✅ If mismatch -> force logout (is_verified=0)
       await prisma.users.update({
         where: { user_id: uid },
-        data: { is_verified: 0, last_login: new Date() },
+        data: { is_verified: false, last_login: new Date() },
       });
-      return res.status(200).json({ success: false });
+      return res.status(200).json({
+        success: false,
+        message: "Session expired due to device change. Please login again.",
+      });
     }
 
-    // 3) Merchant extras (only for merchant)
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -681,7 +698,7 @@ const verifyActiveSession = async (req, res) => {
         if (business) {
           owner_type = business.owner_type ?? null;
           business_id = business.business_id
-            ? Number(business.business_id)
+            ? toNumber(business.business_id)
             : null;
           business_name = business.business_name ?? null;
           business_logo = business.business_logo ?? null;
@@ -692,24 +709,22 @@ const verifyActiveSession = async (req, res) => {
       }
     }
 
-    // 4) Issue tokens - ✅ Convert BigInt to Number
     const payload = {
-      user_id: Number(user.user_id), // Convert BigInt to Number
-      role: String(user.role),
+      user_id: toNumber(user.user_id),
+      role: user.role,
       phone: String(user.phone || ""),
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
-
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
       expiresIn: "1440m",
     });
 
     return res.status(200).json({
       success: true,
-      message: "Login successful",
+      message: "Session verified successfully",
       token: {
         access_token,
         access_token_time: 60,
@@ -717,7 +732,7 @@ const verifyActiveSession = async (req, res) => {
         refresh_token_time: 10,
       },
       user: {
-        user_id: Number(user.user_id), // Convert BigInt to Number
+        user_id: toNumber(user.user_id),
         user_name: user.user_name,
         phone: user.phone,
         role: user.role,
@@ -731,55 +746,48 @@ const verifyActiveSession = async (req, res) => {
     });
   } catch (err) {
     console.error("verifyActiveSession error:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
+    return errorResponse(
+      res,
+      500,
+      "Unable to verify session. Please try again later.",
+    );
   }
 };
 
 /* ===================== REFRESH ACCESS TOKEN ===================== */
-/**
- * POST /api/auth/refresh-token
- * Body: { refresh_token }  (or Authorization: Bearer <refresh_token> as fallback)
- *
- * - Verifies refresh token using REFRESH_TOKEN_SECRET
- * - Optional: checks user's is_active and is_verified
- * - Optional: checks device_id matches stored device (if you want strict binding)
- * - Returns a NEW access_token (and optionally a new refresh_token if you want rotation)
- */
 const refreshAccessToken = async (req, res) => {
   try {
     const bodyToken = req.body?.refresh_token;
-
-    // Optional fallback: allow refresh token in Authorization header
     const auth = req.headers.authorization || "";
     const headerToken = auth.startsWith("Bearer ")
       ? auth.slice("Bearer ".length).trim()
       : null;
-
     const refreshToken = bodyToken || headerToken;
 
     if (!refreshToken) {
-      return res
-        .status(400)
-        .json({ success: false, message: "refresh_token is required" });
+      return errorResponse(res, 400, "Refresh token is required.");
     }
 
     let decoded;
     try {
       decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
     } catch (e) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid or expired refresh token" });
+      return errorResponse(
+        res,
+        401,
+        "Your session has expired. Please login again.",
+      );
     }
 
     const uid = Number(decoded?.user_id);
     if (!Number.isInteger(uid) || uid <= 0) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid token payload" });
+      return errorResponse(
+        res,
+        401,
+        "Invalid session information. Please login again.",
+      );
     }
 
-    // ✅ Load user (and validate)
     const user = await prisma.users.findUnique({
       where: { user_id: uid },
       select: {
@@ -792,81 +800,57 @@ const refreshAccessToken = async (req, res) => {
     });
 
     if (!user) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found" });
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
 
-    if (Number(user.is_active) !== 1) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Account is deactivated." });
+    if (user.is_active === false) {
+      return errorResponse(
+        res,
+        403,
+        "Your account has been deactivated. Please contact support.",
+      );
     }
 
-    // ✅ Optional: require active verified session to refresh
-    // If you want refresh to work even when is_verified=0, remove this block.
-    if (Number(user.is_verified) !== 1 && user.role !== "admin") {
-      return res.status(401).json({
-        success: false,
-        message: "Session expired. Please login again.",
-      });
+    if (user.is_verified === false && user.role !== "admin") {
+      return errorResponse(
+        res,
+        401,
+        "Your session has expired. Please login again.",
+      );
     }
 
-    // ✅ Optional strict device binding (uncomment if you want)
-    // const deviceId = req.body?.device_id ? String(req.body.device_id).trim() : null;
-    // if (!deviceId && user.role !== "admin") {
-    //   return res.status(400).json({ success: false, message: "device_id is required" });
-    // }
-    // if (deviceId && user.role !== "admin") {
-    //   const deviceRecord = await prisma.all_device_ids.findUnique({
-    //     where: { user_id: uid },
-    //     select: { device_id: true },
-    //   });
-    //   const dbDeviceId = deviceRecord?.device_id ? String(deviceRecord.device_id) : null;
-    //   if (!dbDeviceId || dbDeviceId !== deviceId) {
-    //     await prisma.users.update({
-    //       where: { user_id: uid },
-    //       data: { is_verified: 0, last_login: new Date() },
-    //     });
-    //     return res.status(401).json({ success: false, message: "Device mismatch. Please login again." });
-    //   }
-    // }
-
-    // ✅ Issue new access token (keep payload minimal)
     const payload = {
-      user_id: user.user_id,
+      user_id: toNumber(user.user_id),
       role: user.role,
       phone: user.phone,
     };
-
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
 
-    // ✅ Optional rotation: also return a new refresh token
-    // If you rotate, consider storing/blacklisting old refresh tokens.
-    // const new_refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: "10m" });
-
     return res.status(200).json({
       success: true,
-      message: "Token refreshed",
-      token: {
-        access_token,
-        access_token_time: 60,
-        // refresh_token: new_refresh_token,
-        // refresh_token_time: 10,
-      },
+      message: "Token refreshed successfully",
+      token: { access_token, access_token_time: 60 },
     });
   } catch (err) {
     console.error("refreshAccessToken error:", err);
-    return res.status(500).json({ success: false, message: "Server error" });
+    return errorResponse(
+      res,
+      500,
+      "Unable to refresh session. Please login again.",
+    );
   }
 };
 
 module.exports = {
   registerUser,
-  loginUser, // now sets is_verified=1 + updates last_login
-  logoutUser, // sets is_verified=0
+  loginUser,
+  logoutUser,
   verifyActiveSession,
   refreshAccessToken,
 };
