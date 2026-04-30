@@ -261,17 +261,17 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build & push Expo Push Notification
-        if: needs.changes.outputs.expo_push_notification == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./expo_push_notification/Dockerfile
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:latest
-            ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          if: needs.changes.outputs.expo_push_notification == 'true'
+          uses: docker/build-push-action@v6
+          with:
+            context: .
+            file: ./expo_push_notification/Dockerfile
+            push: true
+            tags: |
+              ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:latest
+              ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:${{ github.sha }}
+            cache-from: type=gha
+            cache-to: type=gha,mode=max
 
       - name: Build & push Events Backend
         if: needs.changes.outputs.events_backend == 'true'
