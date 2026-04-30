@@ -578,6 +578,8 @@ const logoutUser = async (req, res) => {
 };
 /* ===================== VERIFY ACTIVE SESSION ===================== */
 
+/* ===================== VERIFY ACTIVE SESSION ===================== */
+
 const verifyActiveSession = async (req, res) => {
   const { user_id, device_id } = req.body || {};
 
@@ -655,7 +657,7 @@ const verifyActiveSession = async (req, res) => {
       return res.status(200).json({ success: false });
     }
 
-    // 3) Merchant extras
+    // 3) Merchant extras (only for merchant)
     let owner_type = null;
     let business_id = null;
     let business_name = null;
@@ -663,32 +665,38 @@ const verifyActiveSession = async (req, res) => {
     let address = null;
 
     if (user.role === "merchant") {
-      const business = await prisma.merchant_business_details.findFirst({
-        where: { user_id: uid },
-        orderBy: { created_at: "desc", business_id: "desc" },
-        select: {
-          owner_type: true,
-          business_id: true,
-          business_name: true,
-          business_logo: true,
-          address: true,
-        },
-      });
+      try {
+        const business = await prisma.merchant_business_details.findFirst({
+          where: { user_id: uid },
+          orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
+          select: {
+            owner_type: true,
+            business_id: true,
+            business_name: true,
+            business_logo: true,
+            address: true,
+          },
+        });
 
-      if (business) {
-        owner_type = business.owner_type ?? null;
-        business_id = business.business_id ?? null;
-        business_name = business.business_name ?? null;
-        business_logo = business.business_logo ?? null;
-        address = business.address ?? null;
+        if (business) {
+          owner_type = business.owner_type ?? null;
+          business_id = business.business_id
+            ? Number(business.business_id)
+            : null;
+          business_name = business.business_name ?? null;
+          business_logo = business.business_logo ?? null;
+          address = business.address ?? null;
+        }
+      } catch (e) {
+        console.error("merchant extras fetch failed:", e?.message || e);
       }
     }
 
-    // 4) Issue tokens
+    // 4) Issue tokens - ✅ Convert BigInt to Number
     const payload = {
-      user_id: user.user_id,
-      role: user.role,
-      phone: user.phone,
+      user_id: Number(user.user_id), // Convert BigInt to Number
+      role: String(user.role),
+      phone: String(user.phone || ""),
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
@@ -709,7 +717,7 @@ const verifyActiveSession = async (req, res) => {
         refresh_token_time: 10,
       },
       user: {
-        user_id: user.user_id,
+        user_id: Number(user.user_id), // Convert BigInt to Number
         user_name: user.user_name,
         phone: user.phone,
         role: user.role,
@@ -723,7 +731,6 @@ const verifyActiveSession = async (req, res) => {
     });
   } catch (err) {
     console.error("verifyActiveSession error:", err);
-    // optional: don't force is_verified=0 on server errors
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
