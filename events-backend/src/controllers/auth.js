@@ -18,11 +18,11 @@ async function register(req, res, next) {
     const hash = await bcrypt.hash(password, 10);
     const user = await prisma.users.create({
       data: { user_name: name, email, phone, password_hash: hash },
-      select: { user_id: true, user_name: true, email: true },
+      select: { user_id: true, user_name: true, email: true, role: true },
     });
 
     const token = jwt.sign(
-      { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      { id: user.user_id.toString(), name: user.user_name, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -30,7 +30,7 @@ async function register(req, res, next) {
     res.status(201).json({
       success: true,
       token,
-      user: { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      user: { id: user.user_id.toString(), name: user.user_name, email: user.email, role: user.role },
     });
   } catch (err) {
     next(err);
@@ -56,7 +56,7 @@ async function login(req, res, next) {
     }
 
     const token = jwt.sign(
-      { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      { id: user.user_id.toString(), name: user.user_name, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -64,7 +64,7 @@ async function login(req, res, next) {
     res.json({
       success: true,
       token,
-      user: { id: user.user_id.toString(), name: user.user_name, email: user.email },
+      user: { id: user.user_id.toString(), name: user.user_name, email: user.email, role: user.role },
     });
   } catch (err) {
     next(err);

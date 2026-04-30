@@ -10,6 +10,7 @@ const screeningsRouter = require('./routes/screenings');
 const bannersRouter = require('./routes/banners');
 const walletRouter = require('./routes/wallet');
 const paymentsRouter = require('./routes/payments');
+const adminRouter    = require('./routes/admin');
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use('/events/api/wishlist', wishlistRouter);
 app.use('/events/api/banners', bannersRouter);
 app.use('/events/api/wallet', walletRouter);
 app.use('/events/api/payments', paymentsRouter);
+app.use('/events/api/admin',   adminRouter);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
