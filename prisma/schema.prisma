@@ -1374,6 +1374,12 @@ model users {
   carts                     carts[]
   driver_devices            driver_devices[]
   drivers                   drivers?
+  event_bookings            event_bookings[]
+  event_payment_sessions    event_payment_sessions[]
+  event_review_helpful      event_review_helpful[]
+  event_reviews             event_reviews[]
+  event_seat_holds          event_seat_holds[]
+  event_wishlists           event_wishlists[]
   food_ratings              food_ratings[]
   mart_ratings              mart_ratings[]
   merchant_bank_details     merchant_bank_details[]
@@ -1381,9 +1387,6 @@ model users {
   system_notifications      system_notifications[]
   user_devices              user_devices[]
   user_verification         user_verification[]
-
-  // Just declare the relation field - NO walletsId field
-  wallet wallets?
 
   @@index([email], map: "email_2")
   @@index([is_active], map: "is_active")
@@ -1455,10 +1458,9 @@ model wallets {
   created_at DateTime       @default(now()) @db.Timestamp(0)
   updated_at DateTime       @default(now()) @db.Timestamp(0)
 
-  // Define the relation here only
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
   @@index([user_id], map: "idx_wallet_user")
+  @@index([created_at], map: "idx_wallet_created")
+  @@index([status], map: "idx_wallet_status")
 }
 
 model withdrawal_audit {
@@ -1499,6 +1501,261 @@ model withdrawal_requests {
   @@unique([user_id, idempotency_key], map: "uq_user_idem")
   @@index([status, created_at], map: "idx_status_date")
   @@index([user_id, created_at], map: "idx_user_date")
+}
+
+model event_banners {
+  id         String                  @id @db.Char(36)
+  title      String                  @db.VarChar(255)
+  subtitle   String?                 @db.VarChar(255)
+  image_url  String                  @db.VarChar(500)
+  link_type  event_banners_link_type @default(event)
+  link_id    String?                 @db.VarChar(100)
+  link_url   String?                 @db.VarChar(500)
+  is_active  Boolean                 @default(true)
+  sort_order Int                     @default(0)
+  created_at DateTime                @default(now()) @db.Timestamp(0)
+}
+
+model event_booking_seats {
+  booking_id       String            @db.VarChar(50)
+  seat_id          String            @db.Char(36)
+  event_id         String            @db.Char(36)
+  screening_id     String?           @db.Char(36)
+  event_screenings event_screenings? @relation(fields: [screening_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "bs_ibfk_screening")
+  event_bookings   event_bookings    @relation(fields: [booking_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_booking_seats_ibfk_1")
+  event_seats      event_seats       @relation(fields: [seat_id], references: [id], onUpdate: Restrict, map: "event_booking_seats_ibfk_2")
+  events           events            @relation(fields: [event_id], references: [id], onUpdate: Restrict, map: "event_booking_seats_ibfk_3")
+
+  @@id([booking_id, seat_id])
+  @@index([event_id], map: "event_id")
+  @@index([screening_id], map: "idx_bs_screening")
+  @@index([seat_id], map: "seat_id")
+}
+
+model event_bookings {
+  id                  String                        @id @db.VarChar(50)
+  ticket_code         String                        @unique(map: "ticket_code") @db.VarChar(50)
+  user_id             BigInt                        @db.UnsignedBigInt
+  event_id            String                        @db.Char(36)
+  screening_id        String?                       @db.Char(36)
+  tier_id             String                        @db.Char(36)
+  quantity            Int
+  total_amount        Int
+  payment_method      event_bookings_payment_method
+  attendee_names      String                        @db.LongText
+  status              event_bookings_status         @default(confirmed)
+  payment_status      event_bookings_payment_status @default(paid)
+  wallet_journal_code String?                       @db.VarChar(36)
+  created_at          DateTime                      @default(now()) @db.Timestamp(0)
+  event_booking_seats event_booking_seats[]
+  event_screenings    event_screenings?             @relation(fields: [screening_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "b_ibfk_screening")
+  users               users                         @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_bookings_ibfk_1")
+  events              events                        @relation(fields: [event_id], references: [id], onUpdate: Restrict, map: "event_bookings_ibfk_2")
+  event_ticket_tiers  event_ticket_tiers            @relation(fields: [tier_id], references: [id], onUpdate: Restrict, map: "event_bookings_ibfk_3")
+
+  @@index([event_id], map: "event_id")
+  @@index([screening_id], map: "idx_b_screening")
+  @@index([tier_id], map: "tier_id")
+  @@index([user_id], map: "user_id")
+}
+
+model event_halls {
+  id               String             @id @db.Char(36)
+  venue_name       String             @db.VarChar(255)
+  name             String             @db.VarChar(100)
+  total_seats      Int                @default(0)
+  created_at       DateTime           @default(now()) @db.Timestamp(0)
+  has_balcony      Boolean            @default(false)
+  event_screenings event_screenings[]
+  event_seats      event_seats[]
+}
+
+model event_organizers {
+  id         String   @id @db.Char(36)
+  name       String   @db.VarChar(255)
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  events     events[]
+}
+
+model event_payment_sessions {
+  id              String                        @id @db.Char(36)
+  user_id         BigInt                        @db.UnsignedBigInt
+  order_no        String                        @unique(map: "uq_order_no") @db.VarChar(50)
+  bfs_txn_id      String?                       @db.VarChar(50)
+  amount          Decimal                       @db.Decimal(10, 2)
+  payment_context String                        @db.LongText
+  status          event_payment_sessions_status @default(pending)
+  created_at      DateTime                      @default(now()) @db.Timestamp(0)
+  updated_at      DateTime                      @default(now()) @db.Timestamp(0)
+  users           users                         @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_payment_sessions_ibfk_1")
+
+  @@index([user_id], map: "user_id")
+}
+
+model event_review_helpful {
+  review_id     String        @db.Char(36)
+  user_id       BigInt        @db.UnsignedBigInt
+  created_at    DateTime      @default(now()) @db.Timestamp(0)
+  event_reviews event_reviews @relation(fields: [review_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_review_helpful_ibfk_1")
+  users         users         @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: Restrict, map: "event_review_helpful_ibfk_2")
+
+  @@id([review_id, user_id])
+  @@index([user_id], map: "user_id")
+}
+
+model event_reviews {
+  id                   String                 @id @db.Char(36)
+  event_id             String                 @db.Char(36)
+  user_id              BigInt                 @db.UnsignedBigInt
+  rating               Int                    @db.TinyInt
+  comment              String?                @db.Text
+  created_at           DateTime               @default(now()) @db.Timestamp(0)
+  event_review_helpful event_review_helpful[]
+  events               events                 @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_reviews_ibfk_1")
+  users                users                  @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_reviews_ibfk_2")
+
+  @@unique([event_id, user_id], map: "uq_review")
+  @@index([user_id], map: "user_id")
+}
+
+model event_screenings {
+  id                  String                  @id @db.Char(36)
+  event_id            String                  @db.Char(36)
+  hall_id             String                  @db.Char(36)
+  show_date           DateTime                @db.Date
+  show_time           DateTime                @db.Time(0)
+  status              event_screenings_status @default(active)
+  created_at          DateTime                @default(now()) @db.Timestamp(0)
+  event_booking_seats event_booking_seats[]
+  event_bookings      event_bookings[]
+  events              events                  @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_screenings_ibfk_1")
+  event_halls         event_halls             @relation(fields: [hall_id], references: [id], onUpdate: Restrict, map: "event_screenings_ibfk_2")
+  event_seat_holds    event_seat_holds[]
+
+  @@index([event_id], map: "event_id")
+  @@index([hall_id], map: "hall_id")
+}
+
+model event_seat_holds {
+  id               String            @id @db.Char(36)
+  event_id         String?           @db.Char(36)
+  screening_id     String?           @db.Char(36)
+  seat_id          String            @db.Char(36)
+  user_id          BigInt            @db.UnsignedBigInt
+  expires_at       DateTime          @db.DateTime(0)
+  created_at       DateTime          @default(now()) @db.Timestamp(0)
+  event_seats      event_seats       @relation(fields: [seat_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_seat_holds_ibfk_2")
+  users            users             @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_seat_holds_ibfk_3")
+  events           events?           @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_seat_holds_ibfk_event")
+  event_screenings event_screenings? @relation(fields: [screening_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_seat_holds_ibfk_screening")
+
+  @@unique([screening_id, seat_id], map: "uq_cinema_hold")
+  @@unique([event_id, seat_id], map: "uq_general_hold")
+  @@index([screening_id], map: "idx_sh_screening")
+  @@index([seat_id], map: "seat_id")
+  @@index([user_id], map: "user_id")
+}
+
+model event_seats {
+  id                  String                @id @db.Char(36)
+  hall_id             String                @db.Char(36)
+  row_label           String                @db.VarChar(5)
+  seat_number         Int                   @db.UnsignedSmallInt
+  column_position     Int                   @db.UnsignedTinyInt
+  section             event_seats_section   @default(main)
+  category            event_seats_category  @default(regular)
+  event_booking_seats event_booking_seats[]
+  event_seat_holds    event_seat_holds[]
+  event_halls         event_halls           @relation(fields: [hall_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_seats_ibfk_1")
+
+  @@unique([hall_id, section, row_label, seat_number], map: "uq_seat")
+  @@index([hall_id], map: "idx_hall_id")
+}
+
+model event_ticket_tiers {
+  id              String           @id @db.Char(36)
+  event_id        String           @db.Char(36)
+  name            String           @db.VarChar(100)
+  description     String?          @db.VarChar(255)
+  price           Int
+  available_seats Int              @default(0)
+  event_bookings  event_bookings[]
+  events          events           @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_ticket_tiers_ibfk_1")
+
+  @@index([event_id], map: "event_id")
+}
+
+model event_wishlists {
+  user_id    BigInt   @db.UnsignedBigInt
+  event_id   String   @db.Char(36)
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  users      users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: Restrict, map: "event_wishlists_ibfk_1")
+  events     events   @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "event_wishlists_ibfk_2")
+
+  @@id([user_id, event_id])
+  @@index([event_id], map: "event_id")
+}
+
+model events {
+  id                  String                @id @db.Char(36)
+  title               String                @db.VarChar(255)
+  category            events_category
+  city                String                @db.VarChar(100)
+  venue_name          String                @db.VarChar(255)
+  venue_address       String?               @db.VarChar(255)
+  organizer_name      String?               @db.VarChar(255)
+  organizer_id        String?               @db.Char(36)
+  cover_image         String?               @db.VarChar(500)
+  description         String?               @db.Text
+  start_at            DateTime              @db.DateTime(0)
+  end_at              DateTime              @db.DateTime(0)
+  is_live             Boolean?              @default(false)
+  avg_rating          Decimal?              @default(0.00) @db.Decimal(3, 2)
+  total_reviews       Int?                  @default(0)
+  created_at          DateTime              @default(now()) @db.Timestamp(0)
+  event_booking_seats event_booking_seats[]
+  event_bookings      event_bookings[]
+  event_reviews       event_reviews[]
+  event_screenings    event_screenings[]
+  event_seat_holds    event_seat_holds[]
+  event_ticket_tiers  event_ticket_tiers[]
+  event_wishlists     event_wishlists[]
+  event_organizers    event_organizers?     @relation(fields: [organizer_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "events_ibfk_1")
+
+  @@index([organizer_id], map: "organizer_id")
+}
+
+model places {
+  id       BigInt               @id @default(autoincrement())
+  osm_id   BigInt?
+  name     String               @db.VarChar(500)
+  name_en  String?              @db.VarChar(500)
+  amenity  String?              @db.VarChar(100)
+  tourism  String?              @db.VarChar(100)
+  shop     String?              @db.VarChar(100)
+  place    String?              @db.VarChar(100)
+  lat      Float
+  lon      Float
+  location Unsupported("point")
+  tags     String?              @db.LongText
+
+  @@index([location(length: 32)], map: "sp_location")
+  @@fulltext([name], map: "ft_name")
+}
+
+model notification_logs {
+  id      Int      @id @default(autoincrement())
+  user_id Int
+  title   String   @db.VarChar(255)
+  body    String   @db.Text
+  data    Json?
+  status  String   @db.VarChar(50)
+  sent_at DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([user_id])
+  @@index([status])
+  @@index([sent_at])
+  @@map("notification_logs")
 }
 
 enum settlement_accounts_party_type {
@@ -1921,4 +2178,61 @@ enum delivered_orders_delivery_special_mode {
 enum orders_delivery_special_mode {
   DROP_OFF
   MEET_UP
+}
+
+enum events_category {
+  cinema
+  concert
+  festival
+  workshop
+  experience
+}
+
+enum event_banners_link_type {
+  event
+  screening
+  external
+}
+
+enum event_screenings_status {
+  active
+  housefull
+  cancelled
+}
+
+enum event_seats_section {
+  main
+  balcony
+}
+
+enum event_payment_sessions_status {
+  pending
+  success
+  failed
+  cancelled
+}
+
+enum event_seats_category {
+  regular
+  premium
+  balcony
+}
+
+enum event_bookings_payment_method {
+  WALLET
+  CARD
+  UPI
+  BANK
+}
+
+enum event_bookings_status {
+  confirmed
+  cancelled
+}
+
+enum event_bookings_payment_status {
+  pending
+  paid
+  failed
+  refunded
 }
