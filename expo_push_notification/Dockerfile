@@ -6,26 +6,21 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy expo service package files
-COPY expo_push_notification/package*.json ./expo_push_notification/
+# Copy root package files
+COPY package*.json ./
+COPY prisma ./prisma/
 
-# Install dependencies
-WORKDIR /app/expo_push_notification
+# Install ALL dependencies (including dev)
 RUN npm ci --include=dev
 
-# Copy prisma schema from root (where it actually exists)
-COPY prisma /app/prisma
+# Generate Prisma Client (creates /app/generated folder)
+RUN npx prisma generate
 
-# Generate Prisma Client (point to the schema location)
-WORKDIR /app
-RUN npx prisma generate --schema=./prisma/schema.prisma
+# Copy the expo service (includes its own lib folder)
+COPY expo_push_notification ./expo_push_notification
+COPY lib ./lib
 
-# Copy expo service source code
-COPY expo_push_notification /app/expo_push_notification
-COPY lib /app/lib
-
-# Prune dev dependencies
-WORKDIR /app/expo_push_notification
+# Prune dev dependencies for production
 RUN npm prune --production
 
 # Stage 2: Production
@@ -36,20 +31,23 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user
+# Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
 # Copy from builder
-COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./
+COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
+COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
+COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./expo_push_notification
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
+
+# Set working directory to expo service
+WORKDIR /app/expo_push_notification
 
 # Environment variables
 ENV NODE_ENV=production
