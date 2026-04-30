@@ -30,8 +30,7 @@ router.post('/', requireAuth, requireAdmin, upload.single('image'), (req, res) =
     return res.status(400).json({ success: false, message: 'No image uploaded or invalid file type.' });
   }
   const internalUrl = req.file.location;
-  const publicUrl = internalUrl.replace('http://minio-service:9000', process.env.MINIO_PUBLIC_URL);
-  res.json({ success: true, url: publicUrl });
+  const publicUrl = internalUrl.replace('http://minio-service.default.svc.cluster.local:9000', process.env.MINIO_PUBLIC_URL);  res.json({ success: true, url: publicUrl });
 });
 
 module.exports = router;
