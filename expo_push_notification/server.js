@@ -129,7 +129,7 @@ app.listen(PORT, HOST, () => {
   console.log(
     `📍 URL: http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`,
   );
-  console.log(`❤️  Health check goog: http://localhost:${PORT}/health`);
+  console.log(`❤️  Health check : http://localhost:${PORT}/health`);
   console.log(`📱 Push API base: http://localhost:${PORT}/api/push`);
   console.log(`⏰ Started at: ${new Date().toISOString()}\n`);
 });
