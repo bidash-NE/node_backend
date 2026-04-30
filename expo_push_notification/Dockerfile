@@ -6,25 +6,23 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy expo service package files FIRST (for caching)
+# Copy expo service package files
 COPY expo_push_notification/package*.json ./expo_push_notification/
 
-# Install expo service dependencies
+# Install expo dependencies
 WORKDIR /app/expo_push_notification
 RUN npm ci --include=dev
 
 # Copy prisma schema from root
 COPY prisma /app/prisma
 
-# Copy lib folder from root if needed
-COPY lib /app/lib
-
-# Generate Prisma Client (point to schema location)
+# Generate Prisma Client
 WORKDIR /app
 RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy expo service source code
 COPY expo_push_notification /app/expo_push_notification
+COPY lib /app/lib
 
 # Prune dev dependencies
 WORKDIR /app/expo_push_notification
