@@ -6,21 +6,28 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files (contains Prisma dependencies)
+# Copy expo package files
 COPY package*.json ./
-COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev) from root
+# Install dependencies (all from expo's package.json)
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
-RUN npx prisma generate
+# Copy prisma schema from parent (since prisma is at root, not in expo folder)
+# Note: With context ./expo_push_notification, you cannot access ../prisma
+# So you need to either:
+# Option 1: Copy prisma schema to expo folder in workflow
+# Option 2: Or use root context like Driver (but Driver relies on root package.json)
 
-# Copy the expo service (includes its own lib folder)
-COPY expo_push_notification ./expo_push_notification
-COPY lib ./lib
+# For now, if prisma is needed, you'll need to adjust
+COPY prisma ./prisma
 
-# Prune dev dependencies for production
+# Generate Prisma Client
+RUN npx prisma generate --schema=./prisma/schema.prisma
+
+# Copy expo source code
+COPY . .
+
+# Prune dev dependencies
 RUN npm prune --production
 
 # Stage 2: Production
@@ -28,36 +35,24 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/expo_push_notification ./expo_push_notification
-COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
-COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nodejs:nodejs /app ./
+COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 
-# Switch to non-root user
 USER nodejs
 
-# Set working directory to expo service
-WORKDIR /app/expo_push_notification
-
-# Environment variables
 ENV NODE_ENV=production
 ENV PORT=3007
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3007/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
 
 EXPOSE 3007
 
-# Start the application
 CMD ["node", "server.js"]
