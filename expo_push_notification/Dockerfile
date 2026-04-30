@@ -3,26 +3,14 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install OpenSSL for Prisma
+# Install OpenSSL (not needed for expo but kept for consistency)
 RUN apk add --no-cache openssl
 
 # Copy expo package files
 COPY package*.json ./
 
-# Install dependencies (all from expo's package.json)
+# Install dependencies
 RUN npm ci --include=dev
-
-# Copy prisma schema from parent (since prisma is at root, not in expo folder)
-# Note: With context ./expo_push_notification, you cannot access ../prisma
-# So you need to either:
-# Option 1: Copy prisma schema to expo folder in workflow
-# Option 2: Or use root context like Driver (but Driver relies on root package.json)
-
-# For now, if prisma is needed, you'll need to adjust
-COPY prisma ./prisma
-
-# Generate Prisma Client
-RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Copy expo source code
 COPY . .
@@ -43,7 +31,6 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app ./
-COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 
 USER nodejs
 

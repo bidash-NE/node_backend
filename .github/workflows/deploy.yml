@@ -264,7 +264,8 @@ jobs:
         if: needs.changes.outputs.expo_push_notification == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./expo_push_notification
+          context: .
+          file: ./expo_push_notification/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-expo-push-notification:latest
