@@ -9,11 +9,10 @@
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
-    "express": "^4.22.1",
     "expo-server-sdk": "^3.7.0",
+    "express": "^4.22.1",
     "express-rate-limit": "^6.10.0",
     "helmet": "^7.0.0",
-    "node-fetch": "^2.7.0",
     "redis": "^4.6.8"
   },
   "devDependencies": {
