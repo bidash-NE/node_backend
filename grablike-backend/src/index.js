@@ -169,6 +169,9 @@ const adapter = {
 };
 configureMatcher(adapter);
 
+// Make io accessible in controllers via req.app.get("io")
+app.set("io", io);
+
 // Attach sockets
 initDriverSocket(io, mysqlPool);
 
