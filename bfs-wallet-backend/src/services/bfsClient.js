@@ -86,7 +86,8 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
   const fullParams = { ...params, bfs_checkSum: checksum };
 
   const body = toFormUrlEncoded(fullParams);
-  // console.log("[BFS] Request body:", body);
+  console.log("[BFS] Source string:", source);
+  console.log("[BFS] Request body:", body);
 
   const { data } = await axios.post(url, body, {
     headers: {
