@@ -151,7 +151,7 @@ async function sendAR({
     bfs_benfBankCode: BFS_BENF_BANK_CODE,
 
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
-    bfs_txnAmount: Number(amount).toFixed(1), // e.g. 600.0
+    bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
     bfs_paymentDesc: paymentDesc || "Wallet topup",
     bfs_version: BFS_VERSION || "1.0",
@@ -211,7 +211,7 @@ async function sendAS({
     bfs_benfId: BFS_BENF_ID,
     bfs_benfBankCode: BFS_BENF_BANK_CODE,
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
-    bfs_txnAmount: Number(amount).toFixed(1),
+    bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
     bfs_paymentDesc: paymentDesc || "Wallet topup",
     bfs_version: BFS_VERSION || "1.0",
