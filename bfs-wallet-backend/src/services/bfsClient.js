@@ -153,7 +153,7 @@ async function sendAR({
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
     bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
-    bfs_paymentDesc: paymentDesc || "Wallet topup",
+    bfs_paymentDesc: (paymentDesc || "Wallet topup").slice(0, 30),
     bfs_version: BFS_VERSION || "1.0",
   };
 
@@ -213,7 +213,7 @@ async function sendAS({
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
     bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
-    bfs_paymentDesc: paymentDesc || "Wallet topup",
+    bfs_paymentDesc: (paymentDesc || "Wallet topup").slice(0, 30),
     bfs_version: BFS_VERSION || "1.0",
   };
 
