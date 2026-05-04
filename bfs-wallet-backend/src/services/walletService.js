@@ -1,8 +1,11 @@
 const axios = require("axios");
+const https = require("https");
+
+const internalAgent = new https.Agent({ rejectUnauthorized: false });
 const { pool } = require("../config/mysql");
 
 const WALLET_SERVICE_BASE_URL =
-  (process.env.WALLET_SERVICE_BASE_URL || "https://grab.newedge.bt").replace(
+  (process.env.WALLET_SERVICE_BASE_URL || "https://backend.tabdhey.bt").replace(
     /\/$/,
     ""
   );
@@ -46,6 +49,7 @@ async function fetchWalletByUserId(userId) {
 
   const response = await axios.get(url, {
     timeout: WALLET_SERVICE_TIMEOUT_MS,
+    httpsAgent: internalAgent,
   });
 
   const payload = response?.data;
