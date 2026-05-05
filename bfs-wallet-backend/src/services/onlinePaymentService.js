@@ -5,7 +5,7 @@ const walletService = require("./walletService");
 // System wallet owner — receives all online payments.
 // Set SYSTEM_WALLET_USER_ID in your .env.
 function getSystemUserId() {
-  const id = Number(process.env.SYSTEM_WALLET_USER_ID);
+  const id = "TD00000001";
   if (!id) throw new Error("SYSTEM_WALLET_USER_ID is not configured");
   return id;
 }
