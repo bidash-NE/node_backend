@@ -1,5 +1,8 @@
 const { v4: uuidv4 } = require('uuid');
+const bcrypt = require('bcryptjs');
 const prisma = require('../../db');
+
+const DEFAULT_PASSWORD = 'password123';
 
 async function listOrganizers(req, res, next) {
   try {
@@ -24,11 +27,37 @@ async function listOrganizers(req, res, next) {
 
 async function createOrganizer(req, res, next) {
   try {
-    const { name } = req.body;
-    if (!name) return res.status(400).json({ success: false, message: 'name is required' });
+    const { name, email, phone } = req.body;
+    if (!name || !email || !phone) {
+      return res.status(400).json({ success: false, message: 'name, email, and phone are required' });
+    }
 
-    const organizer = await prisma.event_organizers.create({ data: { id: uuidv4(), name } });
-    res.status(201).json({ success: true, data: organizer });
+    const existing = await prisma.users.findUnique({ where: { email } });
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'A user with this email already exists' });
+    }
+
+    const password_hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
+
+    const [organizer] = await prisma.$transaction([
+      prisma.event_organizers.create({ data: { id: uuidv4(), name } }),
+      prisma.users.create({
+        data: {
+          user_name: name,
+          email,
+          phone,
+          password_hash,
+          role: 'organizer',
+          is_verified: true,
+          is_active: true,
+        },
+      }),
+    ]);
+
+    res.status(201).json({
+      success: true,
+      data: { id: organizer.id, name: organizer.name, email, phone, default_password: DEFAULT_PASSWORD },
+    });
   } catch (err) {
     next(err);
   }
