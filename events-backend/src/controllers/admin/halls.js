@@ -80,4 +80,45 @@ async function createSeats(req, res, next) {
   }
 }
 
-module.exports = { listHalls, createHall, createSeats };
+async function listSeats(req, res, next) {
+  try {
+    const { id: hallId } = req.params;
+    const seats = await prisma.event_seats.findMany({
+      where: { hall_id: hallId },
+      orderBy: [{ row_label: 'asc' }, { seat_number: 'asc' }],
+    });
+
+    // Group by row_label
+    const byRow = {};
+    for (const s of seats) {
+      if (!byRow[s.row_label]) byRow[s.row_label] = { row_label: s.row_label, section: s.section, category: s.category, seats: [] };
+      byRow[s.row_label].seats.push(s.seat_number);
+    }
+
+    res.json({ success: true, data: Object.values(byRow) });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deleteRowSeats(req, res, next) {
+  try {
+    const { id: hallId } = req.params;
+    const { row } = req.query;
+
+    if (!row) return res.status(400).json({ success: false, message: 'row query param is required' });
+
+    const { count } = await prisma.event_seats.deleteMany({
+      where: { hall_id: hallId, row_label: row },
+    });
+
+    const newCount = await prisma.event_seats.count({ where: { hall_id: hallId } });
+    await prisma.event_halls.update({ where: { id: hallId }, data: { total_seats: newCount } });
+
+    res.json({ success: true, message: `${count} seat(s) in row ${row} deleted.` });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listHalls, createHall, createSeats, listSeats, deleteRowSeats };

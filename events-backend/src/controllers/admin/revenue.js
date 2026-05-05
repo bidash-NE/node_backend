@@ -1,4 +1,4 @@
-const prisma = require('../../db');
+const prisma = require("../../db");
 
 async function getSummary(req, res, next) {
   try {
@@ -7,7 +7,10 @@ async function getSummary(req, res, next) {
     const dateFilter = {};
     if (from_date) dateFilter.gte = new Date(from_date);
     if (to_date) dateFilter.lte = new Date(to_date);
-    const where = { status: 'confirmed', ...(Object.keys(dateFilter).length && { created_at: dateFilter }) };
+    const where = {
+      status: "confirmed",
+      ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
+    };
 
     const [totals, byPaymentMethod, bookingsRaw] = await Promise.all([
       prisma.event_bookings.aggregate({
@@ -16,7 +19,7 @@ async function getSummary(req, res, next) {
         _count: { id: true },
       }),
       prisma.event_bookings.groupBy({
-        by: ['payment_method'],
+        by: ["payment_method"],
         where,
         _sum: { total_amount: true },
         _count: { id: true },
@@ -36,15 +39,16 @@ async function getSummary(req, res, next) {
     const categoryMap = new Map(events.map((e) => [e.id, e.category]));
     const byCategoryMap = {};
     for (const b of bookingsRaw) {
-      const cat = categoryMap.get(b.event_id) || 'unknown';
-      if (!byCategoryMap[cat]) byCategoryMap[cat] = { revenue: 0, booking_count: 0 };
+      const cat = categoryMap.get(b.event_id) || "unknown";
+      if (!byCategoryMap[cat])
+        byCategoryMap[cat] = { revenue: 0, booking_count: 0 };
       byCategoryMap[cat].revenue += b.total_amount;
       byCategoryMap[cat].booking_count += 1;
     }
 
     // Daily trend via parameterized raw query
-    const fromTs = from_date ? new Date(from_date) : new Date('2020-01-01');
-    const toTs = to_date ? new Date(to_date) : new Date('2099-12-31');
+    const fromTs = from_date ? new Date(from_date) : new Date("2020-01-01");
+    const toTs = to_date ? new Date(to_date) : new Date("2099-12-31");
     const dailyTrend = await prisma.$queryRaw`
       SELECT DATE(created_at) AS date,
              CAST(SUM(total_amount) AS SIGNED) AS revenue,
@@ -63,15 +67,19 @@ async function getSummary(req, res, next) {
         gross_revenue: totals._sum.total_amount || 0,
         tickets_sold: totals._sum.quantity || 0,
         total_bookings: totals._count.id,
-        avg_ticket_value: totals._count.id > 0
-          ? Math.round((totals._sum.total_amount || 0) / totals._count.id)
-          : 0,
+        avg_ticket_value:
+          totals._count.id > 0
+            ? Math.round((totals._sum.total_amount || 0) / totals._count.id)
+            : 0,
         by_payment_method: byPaymentMethod.map((r) => ({
           method: r.payment_method,
           revenue: r._sum.total_amount || 0,
           count: r._count.id,
         })),
-        by_category: Object.entries(byCategoryMap).map(([category, stats]) => ({ category, ...stats })),
+        by_category: Object.entries(byCategoryMap).map(([category, stats]) => ({
+          category,
+          ...stats,
+        })),
         daily_trend: dailyTrend.map((row) => ({
           date: row.date,
           revenue: Number(row.revenue),
@@ -90,11 +98,20 @@ async function getEventRevenue(req, res, next) {
 
     const event = await prisma.events.findUnique({
       where: { id },
-      select: { id: true, title: true, category: true, venue_name: true, start_at: true },
+      select: {
+        id: true,
+        title: true,
+        category: true,
+        venue_name: true,
+        start_at: true,
+      },
     });
-    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+    if (!event)
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found" });
 
-    const bookingWhere = { event_id: id, status: 'confirmed' };
+    const bookingWhere = { event_id: id, status: "confirmed" };
 
     const [totals, byTier, byPaymentMethod, screenings] = await Promise.all([
       prisma.event_bookings.aggregate({
@@ -103,13 +120,13 @@ async function getEventRevenue(req, res, next) {
         _count: { id: true },
       }),
       prisma.event_bookings.groupBy({
-        by: ['tier_id'],
+        by: ["tier_id"],
         where: bookingWhere,
         _sum: { total_amount: true, quantity: true },
         _count: { id: true },
       }),
       prisma.event_bookings.groupBy({
-        by: ['payment_method'],
+        by: ["payment_method"],
         where: bookingWhere,
         _sum: { total_amount: true },
         _count: { id: true },
@@ -131,14 +148,16 @@ async function getEventRevenue(req, res, next) {
     // Screening occupancy
     const screeningIds = screenings.map((s) => s.id);
     const bookedCounts = await prisma.event_booking_seats.groupBy({
-      by: ['screening_id'],
+      by: ["screening_id"],
       where: {
         screening_id: { in: screeningIds },
-        event_bookings: { status: 'confirmed' },
+        event_bookings: { status: "confirmed" },
       },
       _count: { seat_id: true },
     });
-    const bookedMap = new Map(bookedCounts.map((b) => [b.screening_id, b._count.seat_id]));
+    const bookedMap = new Map(
+      bookedCounts.map((b) => [b.screening_id, b._count.seat_id]),
+    );
 
     const screeningOccupancy = screenings.map((s) => {
       const booked = bookedMap.get(s.id) || 0;
@@ -162,12 +181,13 @@ async function getEventRevenue(req, res, next) {
         gross_revenue: totals._sum.total_amount || 0,
         tickets_sold: totals._sum.quantity || 0,
         total_bookings: totals._count.id,
-        avg_ticket_value: totals._count.id > 0
-          ? Math.round((totals._sum.total_amount || 0) / totals._count.id)
-          : 0,
+        avg_ticket_value:
+          totals._count.id > 0
+            ? Math.round((totals._sum.total_amount || 0) / totals._count.id)
+            : 0,
         by_tier: byTier.map((t) => ({
           tier_id: t.tier_id,
-          tier_name: tierNameMap.get(t.tier_id) || 'Unknown',
+          tier_name: tierNameMap.get(t.tier_id) || "Unknown",
           revenue: t._sum.total_amount || 0,
           tickets_sold: t._sum.quantity || 0,
           booking_count: t._count.id,
@@ -203,7 +223,7 @@ async function getPaymentSessions(req, res, next) {
         where,
         skip: (Number(page) - 1) * Number(limit),
         take: Number(limit),
-        orderBy: { created_at: 'desc' },
+        orderBy: { created_at: "desc" },
         include: { users: { select: { user_name: true, email: true } } },
       }),
       prisma.event_payment_sessions.count({ where }),
