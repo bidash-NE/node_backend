@@ -56,6 +56,7 @@ exports.sendSmsOtp = async (req, res) => {
       },
       select: { user_id: true },
     });
+    
 
     if (existingUser) {
       return res

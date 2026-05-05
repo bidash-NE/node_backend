@@ -30,11 +30,38 @@ function formatTxnTime(date = new Date()) {
 
 const BFS_CODE_MESSAGES = {
   "00": "Payment successful.",
-  "51": "Insufficient funds.",
-  BC: "Payment cancelled by customer.",
-  IM: "Invalid request received.",
+  "03": "Invalid beneficiary.",
+  "05": "Beneficiary account closed.",
+  "12": "Invalid transaction.",
+  "13": "Invalid amount.",
+  "14": "Invalid remitter account.",
+  "20": "Invalid response from bank.",
+  "30": "Transaction not supported or format error.",
   "45": "Duplicate order number.",
+  "47": "Invalid currency.",
+  "48": "Transaction limit exceeded.",
+  "51": "Insufficient funds.",
+  "53": "No savings account found.",
+  "57": "Transaction not permitted.",
+  "61": "Withdrawal limit exceeded.",
+  "65": "Withdrawal frequency exceeded.",
+  "76": "Transaction not found.",
+  "78": "Decryption failed.",
+  "80": "Transaction cancelled by buyer.",
+  "84": "Invalid transaction type.",
+  "85": "Internal error at bank system.",
+  BC: "Transaction cancelled by customer.",
+  UC: "Transaction cancelled by customer.",
+  NF: "Transaction not found.",
+  UN: "Unknown error.",
+  IM: "Invalid request received.",
+  DO: "Duplicate order number received.",
+  IE: "Account verification failed. Please check your bank and account number.",
   TO: "Transaction timed out.",
+  TI: "Transaction invalid status.",
+  RB: "Remitter bank is blocked.",
+  IB: "Invalid remitter bank.",
+  ID: "Transaction ID invalid.",
 };
 
 function mapBfsMessage(code, defaultMsg) {
@@ -97,6 +124,7 @@ async function initPayment({ userId, amount, email, description }) {
       mapBfsMessage(obj.bfs_responseCode, obj.bfs_responseDesc || "Authorization failed.")
     );
     err.code = obj.bfs_responseCode;
+    err.status = 400;
     throw err;
   }
 
@@ -147,8 +175,11 @@ async function accountEnquiry({ orderNo, remitterBankId, remitterAccNo }) {
       bfs_ae_desc: obj.bfs_responseDesc,
     });
 
-    const err = new Error(obj.bfs_responseDesc || "Account verification failed.");
+    const err = new Error(
+      mapBfsMessage(obj.bfs_responseCode, obj.bfs_responseDesc || "Account verification failed.")
+    );
     err.code = obj.bfs_responseCode;
+    err.status = 400;
     throw err;
   }
 
@@ -192,6 +223,8 @@ async function pay({ orderNo, otp }) {
     remitter_name: obj.bfs_remitterName,
     remitter_bank_id: obj.bfs_remitterBankId,
     raw_ac: raw,
+    dr_submitted_at: new Date(),
+    as_poll_count: 0,
   });
 
   if (isSuccess && !payment.system_credited) {
@@ -222,9 +255,37 @@ async function pay({ orderNo, otp }) {
 }
 
 // ==== STATUS (AS) ====
+// Spec rules: start polling 6 min after DR, max 3 retries.
+const AS_MIN_DELAY_MS = 6 * 60 * 1000;
+const AS_MAX_POLLS = 3;
+
 async function checkStatus(orderNo) {
   const payment = getPayment(orderNo);
   if (!payment) throw new Error("Order not found");
+
+  if (payment.dr_submitted_at) {
+    const pollCount = payment.as_poll_count || 0;
+
+    if (pollCount >= AS_MAX_POLLS) {
+      const err = new Error(
+        "Maximum status check attempts (3) reached. Transaction is deemed approved — contact RMA support if funds are not settled."
+      );
+      err.status = 429;
+      throw err;
+    }
+
+    const elapsed = Date.now() - new Date(payment.dr_submitted_at).getTime();
+    if (elapsed < AS_MIN_DELAY_MS) {
+      const waitSec = Math.ceil((AS_MIN_DELAY_MS - elapsed) / 1000);
+      const err = new Error(
+        `Status check too early. Please wait ${waitSec} more seconds before polling (RMA spec requires 6 minutes after debit request).`
+      );
+      err.status = 429;
+      throw err;
+    }
+
+    updatePayment(orderNo, { as_poll_count: pollCount + 1 });
+  }
 
   const { raw, obj } = await sendAS({
     orderNo,

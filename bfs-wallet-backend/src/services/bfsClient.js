@@ -33,7 +33,7 @@ const AR_AS_FIELDS = [
   "bfs_version",
 ];
 
-// AE
+// AE – account enquiry (spec: bfs_benfId|bfs_bfsTxnId|bfs_msgType|bfs_remitterAccNo|bfs_remitterBankId)
 const AE_FIELDS = [
   "bfs_benfId",
   "bfs_bfsTxnId",
@@ -42,7 +42,7 @@ const AE_FIELDS = [
   "bfs_remitterBankId",
 ];
 
-// DR
+// DR – debit request (spec: bfs_benfId|bfs_bfsTxnId|bfs_msgType|bfs_remitterOtp)
 const DR_FIELDS = [
   "bfs_benfId",
   "bfs_bfsTxnId",
@@ -60,7 +60,11 @@ const RC_FIELDS = [
 ];
 
 // EC (response to AE)
-const EC_FIELDS = ["bfs_msgType", "bfs_responseCode", "bfs_responseDesc"];
+const EC_FIELDS = [
+  "bfs_msgType",
+  "bfs_responseCode",
+  "bfs_responseDesc",
+];
 
 // AC (response to DR / AS)
 const AC_FIELDS = [
@@ -88,12 +92,34 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
   const body = toFormUrlEncoded(fullParams);
   // console.log("[BFS] Request body:", body);
 
-  const { data } = await axios.post(url, body, {
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    timeout: BFS_TIMEOUT_MS,
-  });
+  let data;
+  try {
+    const resp = await axios.post(url, body, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: BFS_TIMEOUT_MS,
+    });
+    data = resp.data;
+  } catch (axiosErr) {
+    const code = axiosErr.code || "";
+    let message;
+    let status;
+
+    if (code === "ECONNABORTED" || axiosErr.message?.includes("timeout")) {
+      message = "Payment gateway timed out. Please try again.";
+      status = 504;
+    } else if (["ECONNREFUSED", "ENOTFOUND", "ECONNRESET", "ENETUNREACH"].includes(code)) {
+      message = "Payment gateway is unreachable. Please try again later.";
+      status = 503;
+    } else {
+      message = "Payment gateway error. Please try again.";
+      status = 502;
+    }
+
+    const err = new Error(message);
+    err.status = status;
+    err.bfsCode = code;
+    throw err;
+  }
 
   const raw = typeof data === "string" ? data : String(data);
   const respObj = parseBfsResponse(raw);
@@ -102,11 +128,19 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
 
   // 🔐 Log raw BFS response directly into DB
   try {
-    const tag = logCtx.tag || `${(params.bfs_msgType || "").toUpperCase()}-RES`; // e.g. AR-RES, AE-RES, ...
+    const tag =
+      logCtx.tag ||
+      `${(params.bfs_msgType || "").toUpperCase()}-RES`; // e.g. AR-RES, AE-RES, ...
     const orderNo =
-      logCtx.orderNo || params.bfs_orderNo || respObj.bfs_orderNo || null;
+      logCtx.orderNo ||
+      params.bfs_orderNo ||
+      respObj.bfs_orderNo ||
+      null;
     const bfsTxnId =
-      logCtx.bfsTxnId || respObj.bfs_bfsTxnId || params.bfs_bfsTxnId || null;
+      logCtx.bfsTxnId ||
+      respObj.bfs_bfsTxnId ||
+      params.bfs_bfsTxnId ||
+      null;
 
     await logRmaPg({
       orderNo,
@@ -135,13 +169,7 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
 // ===== High-level helpers =====
 
 // AR – Authorization Request (init topup)
-async function sendAR({
-  orderNo,
-  benfTxnTime,
-  amount,
-  remitterEmail,
-  paymentDesc,
-}) {
+async function sendAR({ orderNo, benfTxnTime, amount, remitterEmail, paymentDesc }) {
   const params = {
     bfs_msgType: "AR",
     bfs_benfTxnTime: benfTxnTime,
@@ -151,9 +179,9 @@ async function sendAR({
     bfs_benfBankCode: BFS_BENF_BANK_CODE,
 
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
-    bfs_txnAmount: Number(amount).toFixed(1), // e.g. 600.0
+    bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
-    bfs_paymentDesc: paymentDesc || "Wallet topup",
+    bfs_paymentDesc: (paymentDesc || "Wallet topup").slice(0, 30),
     bfs_version: BFS_VERSION || "1.0",
   };
 
@@ -197,13 +225,7 @@ async function sendDR({ bfsTxnId, otp, orderNo }) {
 }
 
 // AS – Status Check
-async function sendAS({
-  orderNo,
-  benfTxnTime,
-  amount,
-  remitterEmail,
-  paymentDesc,
-}) {
+async function sendAS({ orderNo, benfTxnTime, amount, remitterEmail, paymentDesc }) {
   const params = {
     bfs_msgType: "AS",
     bfs_benfTxnTime: benfTxnTime,
@@ -211,9 +233,9 @@ async function sendAS({
     bfs_benfId: BFS_BENF_ID,
     bfs_benfBankCode: BFS_BENF_BANK_CODE,
     bfs_txnCurrency: BFS_TXN_CURRENCY || "BTN",
-    bfs_txnAmount: Number(amount).toFixed(1),
+    bfs_txnAmount: Number(amount).toFixed(2),
     bfs_remitterEmail: remitterEmail || "",
-    bfs_paymentDesc: paymentDesc || "Wallet topup",
+    bfs_paymentDesc: (paymentDesc || "Wallet topup").slice(0, 30),
     bfs_version: BFS_VERSION || "1.0",
   };
 

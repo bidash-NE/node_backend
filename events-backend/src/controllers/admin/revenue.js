@@ -47,8 +47,8 @@ async function getSummary(req, res, next) {
     const toTs = to_date ? new Date(to_date) : new Date('2099-12-31');
     const dailyTrend = await prisma.$queryRaw`
       SELECT DATE(created_at) AS date,
-             SUM(total_amount) AS revenue,
-             COUNT(id) AS bookings
+             CAST(SUM(total_amount) AS SIGNED) AS revenue,
+             CAST(COUNT(id) AS SIGNED) AS bookings
       FROM event_bookings
       WHERE status = 'confirmed'
         AND created_at >= ${fromTs}
@@ -72,7 +72,11 @@ async function getSummary(req, res, next) {
           count: r._count.id,
         })),
         by_category: Object.entries(byCategoryMap).map(([category, stats]) => ({ category, ...stats })),
-        daily_trend: dailyTrend,
+        daily_trend: dailyTrend.map((row) => ({
+          date: row.date,
+          revenue: Number(row.revenue),
+          bookings: Number(row.bookings),
+        })),
       },
     });
   } catch (err) {

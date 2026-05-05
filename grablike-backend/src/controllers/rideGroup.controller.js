@@ -1,6 +1,8 @@
 // controllers/rideGroup.controller.js
 import crypto from "crypto";
 import { mysqlPool } from "../db/mysql.js"; // adjust path if needed
+import { getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { sendPushToTokens } from "../services/push.js";
 
 /* ---------------- helpers ---------------- */
 const asInt = (v, def = null) => {
@@ -170,6 +172,34 @@ export async function getInviteByCode(req, res) {
   }
 }
 
+/* fire-and-forget: socket emit + push to driver when a guest joins */
+function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats, status }) {
+  // Socket: emit to the ride room so driver's app updates in realtime
+  try {
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`ride:${rideId}`).emit("guestJoined", {
+        ride_id: rideId,
+        user_id: guestUserId,
+        seats,
+        status,
+      });
+    }
+  } catch {}
+
+  // Push notification to driver
+  getPushTokensByDriverIds([driverUserId])
+    .then((tokens) => {
+      if (!tokens.length) return;
+      return sendPushToTokens(tokens, {
+        title: "New guest joined your ride",
+        body: `A passenger joined your group ride (${seats} seat${seats > 1 ? "s" : ""}).`,
+        data: { type: "guest_joined", ride_id: String(rideId), seats: String(seats) },
+      });
+    })
+    .catch(() => {});
+}
+
 /* =========================================================
    3) JOIN RIDE BY INVITE CODE
    POST /api/ride-invites/:code/join
@@ -279,6 +309,7 @@ export async function joinByInviteCode(req, res) {
         );
 
         await conn.commit();
+        notifyDriverGuestJoined({ req, rideId: inv.ride_id, driverUserId: host.user_id, guestUserId: user_id, seats, status: "rejoined" });
         return res.json({
           ok: true,
           data: { ride_id: inv.ride_id, status: "rejoined", seats },
@@ -319,6 +350,7 @@ export async function joinByInviteCode(req, res) {
     );
 
     await conn.commit();
+    notifyDriverGuestJoined({ req, rideId: inv.ride_id, driverUserId: host.user_id, guestUserId: user_id, seats, status: "joined" });
     return res.json({
       ok: true,
       data: { ride_id: inv.ride_id, status: "joined", seats },

@@ -4,6 +4,7 @@ const {
   pay,
   checkStatus,
 } = require("../services/onlinePaymentService");
+const { validateBankAccNo, validateOtp } = require("../utils/bfsValidation");
 
 async function initPaymentHandler(req, res, next) {
   try {
@@ -23,6 +24,13 @@ async function initPaymentHandler(req, res, next) {
 async function accountEnquiryHandler(req, res, next) {
   try {
     const { orderNo, remitterBankId, remitterAccNo } = req.body;
+
+    try {
+      validateBankAccNo(remitterBankId, remitterAccNo);
+    } catch (e) {
+      return res.status(e.status || 400).json({ ok: false, error: e.message });
+    }
+
     const data = await accountEnquiry({ orderNo, remitterBankId, remitterAccNo });
     res.json({ ok: true, data });
   } catch (err) {
@@ -33,6 +41,13 @@ async function accountEnquiryHandler(req, res, next) {
 async function payHandler(req, res, next) {
   try {
     const { orderNo, otp } = req.body;
+
+    try {
+      validateOtp(otp);
+    } catch (e) {
+      return res.status(e.status || 400).json({ ok: false, error: e.message });
+    }
+
     const data = await pay({ orderNo, otp });
     res.json({ ok: true, data });
   } catch (err) {
