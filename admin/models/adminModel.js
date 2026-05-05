@@ -41,7 +41,7 @@ async function fetchUsersByRole() {
       role: "user",
     },
     include: {
-      // wallet: true,  // ❌ REMOVE THIS LINE
+      // wallet: true,  // ❌ REMOVED
     },
     orderBy: {
       user_name: "asc",
@@ -86,7 +86,7 @@ async function fetchDrivers() {
       role: "driver",
     },
     include: {
-      // wallet: true,  // ❌ REMOVE THIS LINE
+      // wallet: true,  // ❌ REMOVED
       drivers: true,
     },
     orderBy: {
@@ -178,7 +178,7 @@ async function fetchDrivers() {
   return detailedDrivers;
 }
 
-// ✅ Admins (role in 'admin','superadmin') + wallet_id + points
+// ✅ Admins (role in 'admin','superadmin') + points
 async function fetchAdmins() {
   const admins = await prisma.users.findMany({
     where: {
@@ -187,35 +187,51 @@ async function fetchAdmins() {
       },
     },
     include: {
-      wallet: true,
+      // wallet: true,  // ❌ REMOVED
     },
     orderBy: {
       user_name: "asc",
     },
   });
 
-  return admins.map((admin) => ({
-    user_id: Number(admin.user_id),
-    user_name: admin.user_name,
-    email: admin.email,
-    phone: admin.phone,
-    is_active: admin.is_active,
-    role: admin.role,
-    profile_image: admin.profile_image,
-    points: Number(admin.points ?? 0),
-    wallet_id: admin.wallet?.wallet_id || null,
-  }));
+  // Fetch wallet info for all admins
+  const adminsWithWallets = await Promise.all(
+    admins.map(async (admin) => {
+      let walletInfo = null;
+      try {
+        walletInfo = await prisma.wallets.findUnique({
+          where: { user_id: Number(admin.user_id) },
+        });
+      } catch (error) {
+        // Wallet might not exist for this admin
+      }
+
+      return {
+        user_id: Number(admin.user_id),
+        user_name: admin.user_name,
+        email: admin.email,
+        phone: admin.phone,
+        is_active: admin.is_active,
+        role: admin.role,
+        profile_image: admin.profile_image,
+        points: Number(admin.points ?? 0),
+        wallet_id: walletInfo?.wallet_id || null,
+        wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
+      };
+    }),
+  );
+
+  return adminsWithWallets;
 }
 
 // ✅ Merchants with business details + wallet_id + average_rating + points
-// ✅ Merchants with business details + average_rating + points
 async function fetchMerchantsWithBusiness() {
   const merchants = await prisma.users.findMany({
     where: {
       role: "merchant",
     },
     include: {
-      // wallet: true,  // ❌ REMOVE THIS - doesn't exist in schema
+      // wallet: true,  // ❌ REMOVED
       merchant_business_details: true,
     },
     orderBy: {
@@ -253,7 +269,7 @@ async function fetchMerchantsWithBusiness() {
         }
       }
 
-      // If you need wallet info, fetch it separately
+      // Fetch wallet info separately
       let walletInfo = null;
       try {
         walletInfo = await prisma.wallets.findUnique({
@@ -273,7 +289,7 @@ async function fetchMerchantsWithBusiness() {
         role: merchant.role,
         profile_image: merchant.profile_image || business.business_logo,
         points: Number(merchant.points ?? 0),
-        wallet_id: walletInfo?.wallet_id || null, // Now this will work
+        wallet_id: walletInfo?.wallet_id || null,
         wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
         business_id: businessId,
         business_name: business.business_name,
@@ -291,6 +307,7 @@ async function fetchMerchantsWithBusiness() {
 
   return merchantsWithDetails;
 }
+
 // ===== admin ops =====
 async function deactivateUser(user_id, actorUserId = null, adminName = null) {
   try {
