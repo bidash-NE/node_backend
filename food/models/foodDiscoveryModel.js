@@ -1,15 +1,4 @@
-// models/foodDiscoveryModel.js
-const db = require("../config/db");
-
-/**
- * Flow:
- * 1) Validate the :business_type_id exists and belongs to FOOD
- * 2) merchant_business_types → collect all business_id for that business_type_id
- * 3) merchant_business_details
- *    LEFT JOIN food_menu (by business_id)
- *    LEFT JOIN food_menu_ratings (by menu_id)
- *    → aggregated avg_rating + total_comments (+ total_ratings) per business
- */
+const { prisma } = require("../lib/prisma");
 
 function toPositiveIntOrThrow(v, msg) {
   const n = Number(v);
@@ -18,102 +7,151 @@ function toPositiveIntOrThrow(v, msg) {
 }
 
 async function getFoodBusinessesByBusinessTypeId(business_type_id) {
-  const btId = toPositiveIntOrThrow(
-    business_type_id,
-    "business_type_id must be a positive integer"
-  );
+  try {
+    const btId = toPositiveIntOrThrow(
+      business_type_id,
+      "Business type ID must be a valid positive number.",
+    );
 
-  // 1) Validate business_type id belongs to FOOD
-  const [btRows] = await db.query(
-    `SELECT id, name, types
-       FROM business_types
-      WHERE id = ?
-      LIMIT 1`,
-    [btId]
-  );
-  if (!btRows.length) {
-    return {
-      success: false,
-      message: `business_type_id ${btId} not found in business_types.`,
-      data: [],
-    };
-  }
-  const bt = btRows[0];
-  if (String(bt.types || "").toLowerCase() !== "food") {
-    return {
-      success: false,
-      message: `business_type_id ${btId} is not a FOOD type.`,
-      data: [],
-    };
-  }
+    // 1) Validate business_type id belongs to FOOD
+    const businessType = await prisma.business_types.findUnique({
+      where: { id: btId },
+      select: { id: true, name: true, types: true },
+    });
 
-  // 2) business_ids mapped to that type
-  const [mapRows] = await db.query(
-    `SELECT DISTINCT business_id
-       FROM merchant_business_types
-      WHERE business_type_id = ?`,
-    [btId]
-  );
-  if (!mapRows.length) {
+    if (!businessType) {
+      return {
+        success: false,
+        message: `Business type with ID ${btId} was not found. Please check the ID and try again.`,
+        data: [],
+      };
+    }
+
+    if (String(businessType.types || "").toLowerCase() !== "food") {
+      return {
+        success: false,
+        message: `Business type "${businessType.name}" is not a FOOD service type. Please select a food category.`,
+        data: [],
+      };
+    }
+
+    // 2) Get business_ids mapped to that type
+    const merchantBusinessTypes = await prisma.merchant_business_types.findMany(
+      {
+        where: { business_type_id: btId },
+        select: { business_id: true },
+        distinct: ["business_id"],
+      },
+    );
+
+    if (!merchantBusinessTypes.length) {
+      return {
+        success: true,
+        data: [],
+        meta: {
+          kind: "food",
+          business_type_id: btId,
+          business_type_name: businessType.name,
+          businesses_count: 0,
+        },
+      };
+    }
+
+    const bizIds = merchantBusinessTypes.map((item) => item.business_id);
+
+    // 3) Fetch businesses with their details
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: {
+        business_id: { in: bizIds },
+      },
+      select: {
+        business_id: true,
+        business_name: true,
+        address: true,
+        business_logo: true,
+        opening_time: true,
+        closing_time: true,
+        delivery_option: true,
+        complementary: true,
+        complementary_details: true,
+        latitude: true,
+        longitude: true,
+        food_ratings: {
+          select: {
+            rating: true,
+            comment: true,
+          },
+        },
+      },
+    });
+
+    // Calculate aggregates for each business
+    const formattedBusinesses = businesses.map((business) => {
+      let totalRating = 0;
+      let totalRatings = 0;
+      let totalComments = 0;
+
+      // Calculate ratings from food_ratings
+      if (business.food_ratings && business.food_ratings.length) {
+        for (const rating of business.food_ratings) {
+          totalRating += rating.rating;
+          totalRatings++;
+          if (rating.comment && rating.comment.trim()) {
+            totalComments++;
+          }
+        }
+      }
+
+      const avgRating = totalRatings > 0 ? totalRating / totalRatings : 0;
+
+      return {
+        business_id: Number(business.business_id),
+        business_name: business.business_name,
+        address: business.address,
+        business_logo: business.business_logo,
+        opening_time: business.opening_time,
+        closing_time: business.closing_time,
+        delivery_option: business.delivery_option,
+        complementary: business.complementary,
+        complementary_details: business.complementary_details,
+        latitude: business.latitude ? parseFloat(business.latitude) : null,
+        longitude: business.longitude ? parseFloat(business.longitude) : null,
+        avg_rating: parseFloat(avgRating.toFixed(2)),
+        total_ratings: totalRatings,
+        total_comments: totalComments,
+      };
+    });
+
+    // Sort by avg_rating DESC, total_comments DESC, business_name ASC
+    formattedBusinesses.sort((a, b) => {
+      if (a.avg_rating !== b.avg_rating) {
+        return b.avg_rating - a.avg_rating;
+      }
+      if (a.total_comments !== b.total_comments) {
+        return b.total_comments - a.total_comments;
+      }
+      return a.business_name.localeCompare(b.business_name);
+    });
+
     return {
       success: true,
-      data: [],
+      data: formattedBusinesses,
       meta: {
         kind: "food",
         business_type_id: btId,
-        business_type_name: bt.name,
-        businesses_count: 0,
+        business_type_name: businessType.name,
+        businesses_count: formattedBusinesses.length,
       },
     };
+  } catch (error) {
+    console.error("getFoodBusinessesByBusinessTypeId error:", error);
+    return {
+      success: false,
+      message:
+        error.message || "Failed to fetch food businesses. Please try again.",
+      data: [],
+    };
   }
-
-  const bizIds = mapRows.map((r) => r.business_id);
-  const placeholders = bizIds.map(() => "?").join(",");
-
-  // 3) Fetch business details + aggregates from food_menu_ratings (per product)
-  const [bizRows] = await db.query(
-    `
-    SELECT
-      mbd.business_id,
-      mbd.business_name,
-      mbd.address,
-      mbd.business_logo,
-      mbd.opening_time,
-      mbd.closing_time,
-      mbd.delivery_option,
-      mbd.complementary,
-      mbd.complementary_details,
-      mbd.latitude,
-      mbd.longitude,
-      COALESCE(ROUND(AVG(fmr.rating), 2), 0) AS avg_rating,
-      COUNT(fmr.id) AS total_ratings,
-      SUM(CASE WHEN fmr.comment IS NOT NULL AND fmr.comment <> '' THEN 1 ELSE 0 END) AS total_comments
-    FROM merchant_business_details mbd
-    LEFT JOIN food_menu fm
-      ON fm.business_id = mbd.business_id
-    LEFT JOIN food_menu_ratings fmr
-      ON fmr.menu_id = fm.id
-    WHERE mbd.business_id IN (${placeholders})
-    GROUP BY
-      mbd.business_id, mbd.business_name, mbd.address, mbd.business_logo,
-      mbd.opening_time, mbd.closing_time, mbd.delivery_option,
-      mbd.complementary, mbd.complementary_details,
-      mbd.latitude, mbd.longitude
-    ORDER BY avg_rating DESC, total_comments DESC, mbd.business_name ASC
-    `,
-    bizIds
-  );
-
-  return {
-    success: true,
-    data: bizRows,
-    meta: {
-      kind: "food",
-      business_type_id: btId,
-      business_type_name: bt.name,
-      businesses_count: bizRows.length,
-    },
-  };
 }
 
 module.exports = {

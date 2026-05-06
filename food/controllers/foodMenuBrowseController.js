@@ -1,4 +1,3 @@
-// controllers/foodMenuBrowseController.js
 const {
   getFoodMenuGroupedByCategoryForBusiness,
 } = require("../models/foodMenuBrowseModel");
@@ -7,17 +6,27 @@ const {
 async function listFoodMenuGroupedByCategoryCtrl(req, res) {
   try {
     const business_id = req.params.business_id;
-    const out = await getFoodMenuGroupedByCategoryForBusiness(business_id);
+    const result = await getFoodMenuGroupedByCategoryForBusiness(business_id);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Menu grouped by category fetched successfully.",
-      data: out.data,
-      meta: out.meta, // now contains min_amount_for_fd
+      data: result.data,
+      meta: result.meta,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("listFoodMenuGroupedByCategoryCtrl error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to fetch grouped menu.",
+      message:
+        error.message || "Failed to fetch grouped menu. Please try again.",
     });
   }
 }

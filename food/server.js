@@ -11,7 +11,6 @@ const foodMenuRoute = require("./routes/foodMenuRoute");
 const foodDiscoveryRoute = require("./routes/foodDiscoveryRoute");
 const foodMenuBrowseRoute = require("./routes/foodMenuBrowseRoute");
 const foodRatingsRoutes = require("./routes/foodRatingsRoutes");
-const cartRoutes = require("./routes/cartRoute");
 
 // Load env (MUST BE FIRST)
 dotenv.config();
@@ -84,7 +83,6 @@ app.use("/api/food-menu", foodMenuRoute);
 app.use("/api/food/discovery", foodDiscoveryRoute);
 app.use("/api/food", foodMenuBrowseRoute);
 app.use("/api/food/ratings", foodRatingsRoutes);
-app.use("/api/food/cart", cartRoutes);
 
 // Simple root route
 app.get("/", (_req, res) =>

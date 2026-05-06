@@ -165,29 +165,6 @@ model cancelled_orders {
   @@index([user_id], map: "idx_cancelled_user")
 }
 
-model carts {
-  id                        BigInt                    @id @default(autoincrement()) @db.UnsignedBigInt
-  user_id                   BigInt                    @db.UnsignedBigInt
-  business_id               BigInt                    @db.UnsignedBigInt
-  owner_type                carts_owner_type
-  is_active                 Boolean                   @default(true)
-  note_for_merchant         String?                   @db.Text
-  fulfillment               carts_fulfillment?        @default(pickup)
-  business_name_snapshot    String?                   @db.VarChar(255)
-  business_logo_snapshot    String?                   @db.VarChar(1024)
-  subtotal                  Decimal                   @default(0.00) @db.Decimal(10, 2)
-  platform_fee              Decimal                   @default(0.00) @db.Decimal(10, 2)
-  delivery_fee              Decimal                   @default(0.00) @db.Decimal(10, 2)
-  created_at                DateTime                  @default(now()) @db.DateTime(0)
-  updated_at                DateTime                  @default(now()) @db.DateTime(0)
-  merchant_business_details merchant_business_details @relation(fields: [business_id], references: [business_id], onDelete: Cascade, map: "fk_carts_business")
-  users                     users                     @relation(fields: [user_id], references: [user_id], onDelete: Cascade, map: "fk_carts_user")
-
-  @@unique([user_id, business_id, owner_type, is_active], map: "uk_active_cart")
-  @@index([business_id], map: "idx_carts_business")
-  @@index([user_id], map: "idx_carts_user")
-}
-
 model contact_messages {
   id            BigInt                        @id @default(autoincrement()) @db.UnsignedBigInt
   full_name     String                        @db.VarChar(255)
@@ -652,7 +629,6 @@ model merchant_business_details {
   special_celebration                     String?                   @db.VarChar(255)
   special_celebration_discount_percentage Decimal?                  @default(0.00) @db.Decimal(5, 2)
   business_banners                        business_banners[]
-  carts                                   carts[]
   food_menu                               food_menu[]
   food_ratings                            food_ratings[]
   mart_menu                               mart_menu[]
@@ -1371,10 +1347,10 @@ model users {
   admin_logs                admin_logs[]
   all_device_ids            all_device_ids?
   app_ratings               app_ratings[]
-  carts                     carts[]
   driver_devices            driver_devices[]
   drivers                   drivers?
   event_bookings            event_bookings[]
+  event_organizers          event_organizers?
   event_payment_sessions    event_payment_sessions[]
   event_review_helpful      event_review_helpful[]
   event_reviews             event_reviews[]
@@ -1566,15 +1542,22 @@ model event_halls {
   total_seats      Int                @default(0)
   created_at       DateTime           @default(now()) @db.Timestamp(0)
   has_balcony      Boolean            @default(false)
+  organizer_id     String?            @db.Char(36)
+  event_organizers event_organizers?  @relation(fields: [organizer_id], references: [id], onUpdate: Restrict, map: "halls_ibfk_organizer")
   event_screenings event_screenings[]
   event_seats      event_seats[]
+
+  @@index([organizer_id], map: "halls_ibfk_organizer")
 }
 
 model event_organizers {
-  id         String   @id @db.Char(36)
-  name       String   @db.VarChar(255)
-  created_at DateTime @default(now()) @db.Timestamp(0)
-  events     events[]
+  id          String        @id @db.Char(36)
+  name        String        @db.VarChar(255)
+  created_at  DateTime      @default(now()) @db.Timestamp(0)
+  user_id     BigInt?       @unique(map: "uq_organizers_user_id") @db.UnsignedBigInt
+  event_halls event_halls[]
+  users       users?        @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "organizers_ibfk_user")
+  events      events[]
 }
 
 model event_payment_sessions {
@@ -1748,7 +1731,7 @@ model notification_logs {
   user_id Int
   title   String   @db.VarChar(255)
   body    String   @db.Text
-  data    Json?
+  data    String?  @db.LongText
   status  String   @db.VarChar(50)
   sent_at DateTime @default(now()) @db.Timestamp(0)
 
@@ -1823,11 +1806,6 @@ enum driver_documents_document_type {
 enum contact_messages_contact_type {
   email
   phone
-}
-
-enum carts_owner_type {
-  food
-  mart
 }
 
 enum ride_participants_role {
@@ -1990,11 +1968,6 @@ enum wallet_transactions_remark {
 enum platform_revenue_commission_type {
   PERCENT
   FIXED
-}
-
-enum carts_fulfillment {
-  pickup
-  delivery
 }
 
 enum notifications_status {
