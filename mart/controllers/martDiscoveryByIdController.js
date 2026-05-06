@@ -1,21 +1,32 @@
-// controllers/martDiscoveryByBusinessTypeController.js
 const {
   getMartBusinessesByBusinessTypeId,
 } = require("../models/martDiscoveryByIdModel");
 
-// GET /api/mart/discovery/business-types/businesses/:business_type_id
 async function listMartBusinessesByBusinessTypeIdCtrl(req, res) {
   try {
     const { business_type_id } = req.params;
-    const out = await getMartBusinessesByBusinessTypeId(business_type_id);
-    return res.status(out.success ? 200 : 404).json(out);
-  } catch (e) {
-    console.error("listMartBusinessesByBusinessTypeIdCtrl:", e);
-    const msg =
-      e?.message ||
-      "Failed to fetch businesses for the provided business_type_id.";
-    const code = /positive integer|must be/i.test(msg) ? 400 : 500;
-    return res.status(code).json({ success: false, message: msg });
+    const result = await getMartBusinessesByBusinessTypeId(business_type_id);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Mart businesses fetched successfully.",
+      data: result.data,
+      meta: result.meta,
+    });
+  } catch (error) {
+    console.error("listMartBusinessesByBusinessTypeIdCtrl error:", error);
+    return res.status(500).json({
+      success: false,
+      message:
+        error.message || "Failed to fetch mart businesses. Please try again.",
+    });
   }
 }
 

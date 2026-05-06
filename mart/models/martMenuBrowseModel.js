@@ -1,23 +1,24 @@
-// models/martMenuBrowseModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 function toBizIdOrThrow(v) {
   const n = Number(v);
   if (!Number.isInteger(n) || n <= 0)
-    throw new Error("business_id must be a positive integer");
+    throw new Error("Business ID must be a positive integer.");
   return n;
 }
 
 async function assertBusinessExists(business_id) {
-  const [r] = await db.query(
-    `SELECT business_id, min_amount_for_fd
-       FROM merchant_business_details
-      WHERE business_id = ?
-      LIMIT 1`,
-    [business_id]
-  );
-  if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
-  return r[0]; // return row so we can read min_amount_for_fd
+  const business = await prisma.merchant_business_details.findUnique({
+    where: { business_id: business_id },
+    select: { business_id: true, min_amount_for_fd: true },
+  });
+
+  if (!business) {
+    throw new Error(
+      `Business with ID ${business_id} does not exist. Please check the business ID.`,
+    );
+  }
+  return business;
 }
 
 /**
@@ -29,105 +30,184 @@ async function assertBusinessExists(business_id) {
  * 5) Exclude categories with zero items
  */
 async function getMartMenuGroupedByCategoryForBusiness(business_id) {
-  const bid = toBizIdOrThrow(business_id);
+  try {
+    const bid = toBizIdOrThrow(business_id);
 
-  // get business row (also has min_amount_for_fd)
-  const bizRow = await assertBusinessExists(bid);
-  const minFD = Number(bizRow.min_amount_for_fd || 0);
+    // Get business row (also has min_amount_for_fd)
+    const business = await assertBusinessExists(bid);
+    const minFD = Number(business.min_amount_for_fd || 0);
 
-  // 1) business_type names (MART only) for this business
-  const [btRows] = await db.query(
-    `SELECT DISTINCT bt.id, bt.name
-       FROM merchant_business_types mbt
-       JOIN business_types bt
-         ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id = ?
-        AND LOWER(bt.types) = 'mart'`,
-    [bid]
-  );
-  if (!btRows.length) {
+    // 1) Get all merchant business types for this business
+    const merchantBusinessTypes = await prisma.merchant_business_types.findMany(
+      {
+        where: {
+          business_id: bid,
+        },
+        include: {
+          business_types: {
+            select: { id: true, name: true, types: true },
+          },
+        },
+      },
+    );
+
+    // Filter in JavaScript to get only MART types
+    const martTypes = merchantBusinessTypes.filter(
+      (mbt) => mbt.business_types?.types?.toLowerCase() === "mart",
+    );
+
+    if (!martTypes.length) {
+      return {
+        success: true,
+        data: [],
+        meta: {
+          business_id: bid,
+          min_amount_for_fd: minFD,
+          categories_count: 0,
+          items_count: 0,
+        },
+      };
+    }
+
+    const btNames = martTypes
+      .map((mbt) => mbt.business_types?.name)
+      .filter(Boolean);
+
+    if (!btNames.length) {
+      return {
+        success: true,
+        data: [],
+        meta: {
+          business_id: bid,
+          min_amount_for_fd: minFD,
+          categories_count: 0,
+          items_count: 0,
+        },
+      };
+    }
+
+    // 2) Get all categories first, then filter in JavaScript
+    const allCategories = await prisma.mart_category.findMany({
+      orderBy: { category_name: "asc" },
+      select: {
+        id: true,
+        category_name: true,
+        business_type: true,
+        description: true,
+        category_image: true,
+      },
+    });
+
+    // Filter categories by business_type matching btNames (case-insensitive)
+    const btNamesLower = btNames.map((n) => n.toLowerCase());
+    const categories = allCategories.filter((cat) =>
+      btNamesLower.includes(cat.business_type?.toLowerCase()),
+    );
+
+    if (!categories.length) {
+      return {
+        success: true,
+        data: [],
+        meta: {
+          business_id: bid,
+          min_amount_for_fd: minFD,
+          categories_count: 0,
+          items_count: 0,
+        },
+      };
+    }
+
+    const catNames = categories.map((c) => c.category_name);
+
+    // 3) Get all mart menu items for this business
+    const allItems = await prisma.mart_menu.findMany({
+      where: {
+        business_id: bid,
+      },
+      orderBy: [{ sort_order: "asc" }, { item_name: "asc" }],
+      select: {
+        id: true,
+        business_id: true,
+        category_name: true,
+        item_name: true,
+        description: true,
+        item_image: true,
+        actual_price: true,
+        discount_percentage: true,
+        tax_rate: true,
+        is_veg: true,
+        spice_level: true,
+        is_available: true,
+        stock_limit: true,
+        sort_order: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    // Filter items to only those in allowed categories
+    const catNamesLower = catNames.map((n) => n.toLowerCase());
+    const filteredItems = allItems.filter((item) =>
+      catNamesLower.includes((item.category_name || "").toLowerCase()),
+    );
+
+    // Format items (convert boolean to 0/1)
+    const formattedItems = filteredItems.map((item) => ({
+      ...item,
+      is_veg: item.is_veg ? 1 : 0,
+      is_available: item.is_available ? 1 : 0,
+      actual_price: Number(item.actual_price),
+      discount_percentage: Number(item.discount_percentage),
+      tax_rate: Number(item.tax_rate),
+    }));
+
+    // Group items under categories
+    const itemsByCategory = new Map();
+    for (const item of formattedItems) {
+      const key = (item.category_name || "").toLowerCase();
+      if (!itemsByCategory.has(key)) {
+        itemsByCategory.set(key, []);
+      }
+      itemsByCategory.get(key).push(item);
+    }
+
+    // Build grouped response (only include categories that have items)
+    const grouped = [];
+    for (const cat of categories) {
+      const key = (cat.category_name || "").toLowerCase();
+      const categoryItems = itemsByCategory.get(key) || [];
+
+      if (categoryItems.length > 0) {
+        grouped.push({
+          category_id: cat.id,
+          category_name: cat.category_name,
+          business_type: cat.business_type,
+          category_image: cat.category_image,
+          description: cat.description,
+          items: categoryItems,
+        });
+      }
+    }
+
     return {
       success: true,
-      data: [],
+      data: grouped,
       meta: {
         business_id: bid,
         min_amount_for_fd: minFD,
-        categories_count: 0,
-        items_count: 0,
+        categories_count: grouped.length,
+        items_count: formattedItems.length,
       },
     };
-  }
-  const btNames = btRows.map((r) => r.name);
-
-  // 2) categories from mart_category for those business_type names
-  const placeholders = btNames.map(() => "?").join(",");
-  const [catRows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image
-       FROM mart_category
-      WHERE LOWER(business_type) IN (${placeholders})
-      ORDER BY category_name ASC`,
-    btNames.map((n) => n.toLowerCase())
-  );
-  if (!catRows.length) {
+  } catch (error) {
+    console.error("getMartMenuGroupedByCategoryForBusiness error:", error);
     return {
-      success: true,
+      success: false,
+      message: error.message || "Failed to fetch mart menu. Please try again.",
       data: [],
-      meta: {
-        business_id: bid,
-        min_amount_for_fd: minFD,
-        categories_count: 0,
-        items_count: 0,
-      },
+      meta: {},
     };
   }
-  const catNames = catRows.map((c) => c.category_name);
-
-  // 3) fetch all menu items for this business across those category names (MART)
-  const catPh = catNames.map(() => "?").join(",");
-  const [itemRows] = await db.query(
-    `SELECT id, business_id, category_name, item_name, description, item_image,
-            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
-            stock_limit, sort_order, created_at, updated_at
-       FROM mart_menu
-      WHERE business_id = ?
-        AND LOWER(category_name) IN (${catPh})
-      ORDER BY sort_order ASC, item_name ASC`,
-    [bid, ...catNames.map((n) => n.toLowerCase())]
-  );
-
-  // 4) group items under categories
-  const itemsByCat = new Map();
-  for (const it of itemRows) {
-    const key = String(it.category_name || "").toLowerCase();
-    if (!itemsByCat.has(key)) itemsByCat.set(key, []);
-    itemsByCat.get(key).push(it);
-  }
-
-  const grouped = catRows.map((cat) => {
-    const key = String(cat.category_name || "").toLowerCase();
-    return {
-      category_id: cat.id,
-      category_name: cat.category_name,
-      business_type: cat.business_type,
-      category_image: cat.category_image,
-      description: cat.description,
-      items: itemsByCat.get(key) || [],
-    };
-  });
-
-  // 5) exclude categories with zero items
-  const groupedNonEmpty = grouped.filter((g) => g.items && g.items.length > 0);
-
-  return {
-    success: true,
-    data: groupedNonEmpty,
-    meta: {
-      business_id: bid,
-      min_amount_for_fd: minFD,
-      categories_count: groupedNonEmpty.length,
-      items_count: itemRows.length,
-    },
-  };
 }
 
 module.exports = {

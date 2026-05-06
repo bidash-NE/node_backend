@@ -11,7 +11,6 @@ const martMenuRoutes = require("./routes/martMenuRoutes");
 const martMenuBrowseRoutes = require("./routes/martMenuBrowseRoutes");
 const martDiscoveryRoutes = require("./routes/martDiscoveryRoutes");
 const martRatingsRoutes = require("./routes/martRatingsRoutes");
-const cartRoutes = require("./routes/cartRoute");
 const urlCipherRoutes = require("./routes/urlCipherRoute");
 
 // Load env (MUST BE FIRST)
@@ -95,7 +94,6 @@ app.use("/api/mart-menu", martMenuRoutes);
 app.use("/api/mart/browse", martMenuBrowseRoutes);
 app.use("/api/mart/discovery", martDiscoveryRoutes);
 app.use("/api/mart/ratings", martRatingsRoutes);
-app.use("/api/mart/cart", cartRoutes);
 app.use("/api/url-cipher", urlCipherRoutes);
 
 // List all registered routes

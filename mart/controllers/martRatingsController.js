@@ -1,4 +1,3 @@
-// controllers/martRatingsController.js
 const {
   insertMartRating,
   fetchMartRatings,
@@ -8,19 +7,22 @@ exports.createMartRating = async (req, res) => {
   try {
     const { business_id, user_id, rating, comment } = req.body || {};
 
-    const out = await insertMartRating({
+    const result = await insertMartRating({
       business_id,
       user_id,
       rating,
       comment,
     });
 
-    return res.status(201).json(out);
-  } catch (e) {
-    const status = e.statusCode || 400;
+    return res.status(201).json({
+      success: true,
+      message: result.message,
+    });
+  } catch (error) {
+    const status = error.statusCode || 400;
     return res.status(status).json({
       success: false,
-      message: e.message || "Failed to save feedback.",
+      message: error.message || "Failed to save your rating. Please try again.",
     });
   }
 };
@@ -30,13 +32,19 @@ exports.getMartRatings = async (req, res) => {
     const { business_id } = req.params;
     const { page, limit } = req.query;
 
-    const out = await fetchMartRatings(business_id, { page, limit });
-    return res.status(200).json(out);
-  } catch (e) {
-    const status = e.statusCode || 400;
+    const result = await fetchMartRatings(business_id, { page, limit });
+
+    return res.status(200).json({
+      success: true,
+      message: "Ratings fetched successfully.",
+      data: result.data,
+      meta: result.meta,
+    });
+  } catch (error) {
+    const status = error.statusCode || 400;
     return res.status(status).json({
       success: false,
-      message: e.message || "Failed to fetch feedback.",
+      message: error.message || "Failed to fetch ratings. Please try again.",
     });
   }
 };
