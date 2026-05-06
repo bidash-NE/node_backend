@@ -6,21 +6,19 @@ WORKDIR /app
 # Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy package files
+# Copy root package files
 COPY package*.json ./
+COPY prisma ./prisma/
 
 # Install ALL dependencies (including dev)
 RUN npm ci --include=dev
 
-# Copy prisma schema from root (since context is ./food, we need to go up)
-# Note: With context ./food, prisma is at ../prisma
-COPY ../prisma ./prisma
+# Generate Prisma Client (creates /app/generated folder)
+RUN npx prisma generate
 
-# Generate Prisma Client
-RUN npx prisma generate --schema=./prisma/schema.prisma
-
-# Copy food service source code
-COPY . .
+# Copy the food service (includes its own lib folder)
+COPY food ./food
+COPY lib ./lib
 
 # Prune dev dependencies for production
 RUN npm prune --production
@@ -39,22 +37,27 @@ RUN addgroup -g 1001 -S nodejs && \
 
 # Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app ./
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
+COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
+COPY --from=builder --chown=nodejs:nodejs /app/food ./food
+COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
 
+# Set working directory to food service (THIS IS THE KEY FIX)
+WORKDIR /app/food
+
 # Environment variables
 ENV NODE_ENV=production
-ENV PORT=3003
+ENV PORT=3001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3003/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
+    CMD node -e "require('http').get('http://localhost:3001/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
 
-EXPOSE 3003
+EXPOSE 3001
 
 # Start the application
 CMD ["node", "server.js"]
