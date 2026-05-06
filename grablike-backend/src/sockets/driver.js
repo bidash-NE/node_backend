@@ -1987,7 +1987,7 @@ async function handlePassengerStage({ io, socket, mysqlPool, payload, stage, ack
 
     // Verify driver owns this ride
     const [[ride]] = await conn.query(
-      `SELECT request_id, passenger_id FROM rides WHERE request_id = ? AND driver_id = ? LIMIT 1`,
+      `SELECT ride_id, passenger_id FROM rides WHERE ride_id = ? AND driver_id = ? LIMIT 1`,
       [request_id, driver_id],
     );
     if (!ride) return safeAck({ ok: false, error: "Ride not found or unauthorized" });
