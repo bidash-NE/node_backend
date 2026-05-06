@@ -26,7 +26,7 @@ const otpVerifyLimiter = makeLimiter({
   message: "Too many SMS OTP verification attempts. Please try again later.",
 });
 
-router.post("/send-otp-sms", otpSendLimiter, sendSmsOtp);
+router.post("/send-otp-sms", sendSmsOtp);
 router.post("/verify-otp-sms", otpVerifyLimiter, verifySmsOtp);
 
 module.exports = router;

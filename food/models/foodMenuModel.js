@@ -1,397 +1,518 @@
-// models/foodMenuModel.js
-const db = require("../config/db");
-const moment = require("moment-timezone");
+const { prisma } = require("../lib/prisma");
 
 /* -------- helpers -------- */
-const bhutanNow = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
 
 const toStrOrNull = (v) => {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s.length ? s : null;
 };
+
 const toNumOrNull = (v) => {
   if (v === undefined || v === null || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
-const toBool01 = (v, def = 0) => {
+
+const toBool = (v, def = false) => {
   if (v === undefined || v === null || v === "") return def;
   if (typeof v === "string") {
     const s = v.trim().toLowerCase();
-    if (["1", "true", "yes", "on"].includes(s)) return 1;
-    if (["0", "false", "no", "off"].includes(s)) return 0;
+    if (["1", "true", "yes", "on"].includes(s)) return true;
+    if (["0", "false", "no", "off"].includes(s)) return false;
   }
-  return v ? 1 : 0;
+  return Boolean(v);
 };
-const toBizId = (v) => {
+
+const toNumber = (v, fieldName) => {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0)
-    throw new Error("business_id must be a positive integer");
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${fieldName} must be a positive integer.`);
+  }
   return n;
 };
 
-/* -------- validations & resolvers -------- */
+/* -------- validations -------- */
 
-async function assertBusinessExists(business_id) {
-  const [r] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-    [business_id]
-  );
-  if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
-}
-
-/** Return array of FOOD business type names that the merchant (business_id) is registered for. */
-async function getMerchantFoodTypeNames(business_id) {
-  const [rows] = await db.query(
-    `SELECT DISTINCT bt.name
-       FROM merchant_business_types mbt
-       JOIN business_types bt ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id = ?
-        AND LOWER(bt.types) = 'food'`,
-    [business_id]
-  );
-  return rows.map((r) => String(r.name).trim()).filter(Boolean);
-}
-
-/** Resolve a food category row by name; returns {id, category_name, business_type, description, category_image} */
-async function getFoodCategoryByName(category_name) {
-  const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image
-       FROM food_category
-      WHERE LOWER(category_name) = LOWER(?)
-      LIMIT 1`,
-    [category_name]
-  );
-  return rows[0] || null;
-}
-
-/**
- * Enforce: merchant can only add/update items in categories that belong
- * to one of the FOOD business types they registered for.
- */
-async function assertCategoryAllowedForBusiness(business_id, category_name) {
-  const catRow = await getFoodCategoryByName(category_name);
-  if (!catRow) {
+async function validateBusinessExists(business_id) {
+  const business = await prisma.merchant_business_details.findUnique({
+    where: { business_id: business_id },
+    select: { business_id: true, business_name: true },
+  });
+  if (!business) {
     throw new Error(
-      `Category "${category_name}" does not exist in food_category`
+      `Business with ID ${business_id} does not exist. Please check the business ID and try again.`,
     );
   }
+  return business;
+}
+
+async function getMerchantFoodTypeNames(business_id) {
+  const rows = await prisma.merchant_business_types.findMany({
+    where: { business_id: business_id },
+    include: {
+      business_types: {
+        select: { name: true, types: true },
+      },
+    },
+  });
+
+  return rows
+    .filter((r) => r.business_types?.types?.toLowerCase() === "food")
+    .map((r) => r.business_types?.name)
+    .filter(Boolean);
+}
+
+async function validateCategoryExists(category_name) {
+  const category = await prisma.food_category.findFirst({
+    where: {
+      category_name: category_name.toLowerCase(),
+    },
+  });
+  if (!category) {
+    throw new Error(
+      `Category "${category_name}" does not exist. Available categories can be viewed in the categories list.`,
+    );
+  }
+  return category;
+}
+
+async function validateCategoryAllowedForBusiness(business_id, category_name) {
+  const category = await validateCategoryExists(category_name);
   const merchantFoodTypes = await getMerchantFoodTypeNames(business_id);
+
   if (!merchantFoodTypes.length) {
     throw new Error(
-      `Business ${business_id} is not registered under any FOOD business type`
+      `This business is not registered for any food services. Please contact support to enable food services.`,
     );
   }
-  const allowed = merchantFoodTypes
-    .map((n) => n.toLowerCase())
-    .includes(String(catRow.business_type).toLowerCase());
-  if (!allowed) {
+
+  const isAllowed = merchantFoodTypes
+    .map((t) => t.toLowerCase())
+    .includes(String(category.business_type).toLowerCase());
+
+  if (!isAllowed) {
     throw new Error(
-      `Category "${category_name}" belongs to business_type "${catRow.business_type}", ` +
-        `which this business (${business_id}) is not registered for`
+      `Category "${category_name}" belongs to "${category.business_type}" category type, but your business is not registered for this service.`,
     );
   }
-  return catRow;
+
+  return category;
 }
 
-// prevent duplicates per (business_id, category_name, item_name)
-async function assertUniquePerBusinessCategory(
+// FIXED: This function now properly checks for duplicates BEFORE insert
+async function checkDuplicateItem(
   business_id,
   category_name,
   item_name,
-  excludeId = null
+  excludeId = null,
 ) {
-  const sql = `
-    SELECT id FROM food_menu
-     WHERE business_id = ?
-       AND LOWER(category_name) = LOWER(?)
-       AND LOWER(item_name) = LOWER(?)
-     ${excludeId ? "AND id <> ?" : ""}
-     LIMIT 1`;
-  const params = excludeId
-    ? [business_id, category_name, item_name, excludeId]
-    : [business_id, category_name, item_name];
-  const [rows] = await db.query(sql, params);
-  if (rows.length) {
-    throw new Error(
-      `item "${item_name}" already exists in category "${category_name}" for business_id ${business_id}`
-    );
+  // Build query for case-insensitive check
+  let query = `
+    SELECT id FROM food_menu 
+    WHERE business_id = ? 
+    AND LOWER(category_name) = LOWER(?) 
+    AND LOWER(item_name) = LOWER(?)
+  `;
+  const params = [business_id, category_name, item_name];
+
+  if (excludeId) {
+    query += ` AND id != ?`;
+    params.push(excludeId);
   }
+
+  query += ` LIMIT 1`;
+
+  const [rows] = await prisma.$queryRawUnsafe(query, ...params);
+
+  if (rows && rows.length) {
+    return true; // Duplicate exists
+  }
+  return false; // No duplicate
 }
 
-/* -------- queries -------- */
+/* -------- Main CRUD Operations -------- */
 
 async function createFoodMenuItem(payload) {
-  const {
-    business_id,
-    category_name,
-    item_name,
-    description,
-    item_image,
-    actual_price,
-    discount_percentage,
-    tax_rate,
-    is_veg,
-    spice_level,
-    is_available,
-    stock_limit,
-    sort_order,
-  } = payload;
+  try {
+    const {
+      business_id,
+      category_name,
+      item_name,
+      description,
+      item_image,
+      actual_price,
+      discount_percentage,
+      tax_rate,
+      is_veg,
+      spice_level,
+      is_available,
+      stock_limit,
+      sort_order,
+    } = payload;
 
-  const bizId = toBizId(business_id);
-  await assertBusinessExists(bizId);
+    // Validate required fields
+    if (!business_id) {
+      throw new Error("Business ID is required.");
+    }
+    if (!category_name) {
+      throw new Error("Category name is required.");
+    }
+    if (!item_name) {
+      throw new Error("Item name is required.");
+    }
 
-  const cat = toStrOrNull(category_name);
-  if (!cat) throw new Error("category_name is required");
+    // Validate and process inputs
+    const bizId = toNumber(business_id, "Business ID");
+    const catName = toStrOrNull(category_name);
+    const itemName = toStrOrNull(item_name);
+    const price = validatePrice(actual_price, "Price");
+    const discount = validateDiscount(discount_percentage);
+    const tax = validatePrice(tax_rate, "Tax rate") ?? 0;
+    const isVeg = toBool(is_veg, false);
+    const spice = validateSpiceLevel(spice_level);
+    const isAvail = toBool(is_available, true);
+    const stock = toNumOrNull(stock_limit) ?? 0;
+    const sort = toNumOrNull(sort_order) ?? 0;
+    const desc = toStrOrNull(description);
+    const img = toStrOrNull(item_image);
+    const catNameLower = catName.toLowerCase();
 
-  // enforce merchant↔FOOD type↔category relationship
-  await assertCategoryAllowedForBusiness(bizId, cat);
+    // Validate business exists
+    await validateBusinessExists(bizId);
 
-  const name = toStrOrNull(item_name);
-  if (!name) throw new Error("item_name is required");
+    // Validate category exists and is allowed for this business
+    await validateCategoryAllowedForBusiness(bizId, catNameLower);
 
-  await assertUniquePerBusinessCategory(bizId, cat, name);
+    // FIXED: Check for duplicate BEFORE trying to insert
+    const isDuplicate = await checkDuplicateItem(bizId, catNameLower, itemName);
+    if (isDuplicate) {
+      return {
+        success: false,
+        message: `Item "${itemName}" already exists in category "${catName}". Please use a different item name.`,
+      };
+    }
 
-  const desc = toStrOrNull(description);
-  const img = toStrOrNull(item_image);
+    // Create the food item
+    const result = await prisma.food_menu.create({
+      data: {
+        business_id: bizId,
+        category_name: catNameLower,
+        item_name: itemName,
+        description: desc,
+        item_image: img,
+        actual_price: price,
+        discount_percentage: discount,
+        tax_rate: tax,
+        is_veg: isVeg,
+        spice_level: spice,
+        is_available: isAvail,
+        stock_limit: stock,
+        sort_order: sort,
+      },
+    });
 
-  // prices
-  const price = toNumOrNull(actual_price);
-  if (price === null || price < 0)
-    throw new Error("actual_price must be a non-negative number");
+    const createdItem = await getFoodMenuItemById(result.id);
 
-  let discount = toNumOrNull(discount_percentage);
-  if (discount === null) discount = 0;
-  if (discount < 0 || discount > 100)
-    throw new Error("discount_percentage must be between 0 and 100");
+    return {
+      success: true,
+      message: "Food item created successfully.",
+      data: createdItem.data,
+    };
+  } catch (error) {
+    console.error("Create food item error:", error);
 
-  const tax = toNumOrNull(tax_rate) ?? 0;
-  const veg = toBool01(is_veg, 0);
-  const spice = toStrOrNull(spice_level) || "None";
-  if (!["None", "Mild", "Medium", "Hot"].includes(spice))
-    throw new Error("spice_level must be one of: None, Mild, Medium, Hot");
-  const available = toBool01(is_available, 1);
-  const stock = Number.isInteger(Number(stock_limit)) ? Number(stock_limit) : 0;
-  const sort = Number.isInteger(Number(sort_order)) ? Number(sort_order) : 0;
+    // Handle Prisma unique constraint error as fallback
+    if (error.code === "P2002") {
+      return {
+        success: false,
+        message: `Item already exists. Please use a different item name.`,
+      };
+    }
 
-  const now = bhutanNow();
-
-  const [res] = await db.query(
-    `INSERT INTO food_menu
-      (business_id, category_name, item_name, description, item_image,
-       actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
-       stock_limit, sort_order, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      bizId,
-      cat,
-      name,
-      desc,
-      img,
-      price,
-      discount,
-      tax,
-      veg,
-      spice,
-      available,
-      stock,
-      sort,
-      now,
-      now,
-    ]
-  );
-
-  const item = await getFoodMenuItemById(res.insertId);
-  return {
-    success: true,
-    message: "Food menu item created successfully.",
-    data: item.data,
-  };
+    return {
+      success: false,
+      message: error.message || "Failed to create food item. Please try again.",
+    };
+  }
 }
 
 async function getFoodMenuItemById(id) {
-  const [rows] = await db.query(
-    `SELECT id, business_id, category_name, item_name, description, item_image,
-            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
-            stock_limit, sort_order, created_at, updated_at
-       FROM food_menu
-      WHERE id = ?`,
-    [id]
-  );
-  if (!rows.length)
-    return { success: false, message: `Food menu item id ${id} not found.` };
-  return { success: true, data: rows[0] };
+  try {
+    const item = await prisma.food_menu.findUnique({
+      where: { id: id },
+    });
+
+    if (!item) {
+      return {
+        success: false,
+        message: `Food item with ID ${id} was not found. Please check the ID and try again.`,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        ...item,
+        is_veg: item.is_veg ? 1 : 0,
+        is_available: item.is_available ? 1 : 0,
+      },
+    };
+  } catch (error) {
+    console.error("Get food item error:", error);
+    return {
+      success: false,
+      message: "Failed to fetch food item. Please try again.",
+    };
+  }
 }
 
-// list with optional filters: business_id & category_name
 async function listFoodMenuItems({ business_id, category_name } = {}) {
-  const parts = [];
-  const params = [];
+  try {
+    const whereCondition = {};
 
-  if (business_id !== undefined) {
-    const bid = toBizId(business_id);
-    parts.push("business_id = ?");
-    params.push(bid);
-  }
-  if (category_name) {
-    parts.push("LOWER(category_name) = LOWER(?)");
-    params.push(category_name);
-  }
+    if (business_id) {
+      whereCondition.business_id = toNumber(business_id, "Business ID");
+    }
 
-  const where = parts.length ? `WHERE ${parts.join(" AND ")}` : "";
-  const [rows] = await db.query(
-    `SELECT id, business_id, category_name, item_name, description, item_image,
-            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
-            stock_limit, sort_order, created_at, updated_at
-       FROM food_menu
-       ${where}
-      ORDER BY sort_order ASC, item_name ASC`,
-    params
-  );
-  return { success: true, data: rows };
+    if (category_name) {
+      whereCondition.category_name = category_name.toLowerCase();
+    }
+
+    const rows = await prisma.food_menu.findMany({
+      where: whereCondition,
+      orderBy: [{ sort_order: "asc" }, { item_name: "asc" }],
+    });
+
+    const formattedRows = rows.map((item) => ({
+      ...item,
+      is_veg: item.is_veg ? 1 : 0,
+      is_available: item.is_available ? 1 : 0,
+    }));
+
+    return {
+      success: true,
+      data: formattedRows,
+      count: formattedRows.length,
+    };
+  } catch (error) {
+    console.error("List food items error:", error);
+    return {
+      success: false,
+      message: "Failed to fetch food items. Please try again.",
+    };
+  }
 }
 
 async function listFoodMenuByBusiness(business_id) {
-  const bid = toBizId(business_id);
-  const [rows] = await db.query(
-    `SELECT id, business_id, category_name, item_name, description, item_image,
-            actual_price, discount_percentage, tax_rate, is_veg, spice_level, is_available,
-            stock_limit, sort_order, created_at, updated_at
-       FROM food_menu
-      WHERE business_id = ?
-      ORDER BY category_name ASC, sort_order ASC, item_name ASC`,
-    [bid]
-  );
-  return { success: true, data: rows };
+  try {
+    const bizId = toNumber(business_id, "Business ID");
+    await validateBusinessExists(bizId);
+
+    const rows = await prisma.food_menu.findMany({
+      where: { business_id: bizId },
+      orderBy: [
+        { category_name: "asc" },
+        { sort_order: "asc" },
+        { item_name: "asc" },
+      ],
+    });
+
+    const formattedRows = rows.map((item) => ({
+      ...item,
+      is_veg: item.is_veg ? 1 : 0,
+      is_available: item.is_available ? 1 : 0,
+    }));
+
+    return {
+      success: true,
+      data: formattedRows,
+      count: formattedRows.length,
+    };
+  } catch (error) {
+    console.error("List business food items error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch food items for this business.",
+    };
+  }
 }
 
 async function updateFoodMenuItem(id, fields) {
-  const existing = await getFoodMenuItemById(id);
-  if (!existing.success) return existing;
-  const prev = existing.data;
+  try {
+    const existing = await getFoodMenuItemById(id);
+    if (!existing.success) {
+      return existing;
+    }
 
-  const updates = {};
+    const prev = existing.data;
+    const updates = {};
 
-  if ("business_id" in fields) {
-    const bid = toBizId(fields.business_id);
-    await assertBusinessExists(bid);
-    updates.business_id = bid;
-  }
+    if ("business_id" in fields) {
+      const bizId = toNumber(fields.business_id, "Business ID");
+      await validateBusinessExists(bizId);
+      updates.business_id = bizId;
+    }
 
-  if ("category_name" in fields) {
-    const cat = toStrOrNull(fields.category_name);
-    if (!cat) throw new Error("category_name cannot be empty");
-    updates.category_name = cat;
-  }
+    if ("category_name" in fields) {
+      const cat = toStrOrNull(fields.category_name);
+      if (!cat) throw new Error("Category name cannot be empty.");
+      const finalBiz = updates.business_id ?? prev.business_id;
+      await validateCategoryAllowedForBusiness(finalBiz, cat.toLowerCase());
+      updates.category_name = cat.toLowerCase();
+    }
 
-  if ("item_name" in fields) {
-    const n = toStrOrNull(fields.item_name);
-    if (!n) throw new Error("item_name cannot be empty");
-    updates.item_name = n;
-  }
+    if ("item_name" in fields) {
+      const name = toStrOrNull(fields.item_name);
+      if (!name) throw new Error("Item name cannot be empty.");
+      updates.item_name = name;
+    }
 
-  if ("description" in fields)
-    updates.description = toStrOrNull(fields.description);
-  if ("item_image" in fields)
-    updates.item_image = toStrOrNull(fields.item_image);
+    if ("description" in fields) {
+      updates.description = toStrOrNull(fields.description);
+    }
 
-  if ("actual_price" in fields) {
-    const price = toNumOrNull(fields.actual_price);
-    if (price === null || price < 0)
-      throw new Error("actual_price must be a non-negative number");
-    updates.actual_price = price;
-  }
+    if ("item_image" in fields) {
+      updates.item_image = toStrOrNull(fields.item_image);
+    }
 
-  if ("discount_percentage" in fields) {
-    const disc = toNumOrNull(fields.discount_percentage);
-    if (disc === null || disc < 0 || disc > 100)
-      throw new Error("discount_percentage must be between 0 and 100");
-    updates.discount_percentage = disc;
-  }
+    if ("actual_price" in fields) {
+      updates.actual_price = validatePrice(fields.actual_price, "Price");
+    }
 
-  if ("tax_rate" in fields) {
-    const tax = toNumOrNull(fields.tax_rate);
-    if (tax === null) throw new Error("tax_rate must be a valid number");
-    updates.tax_rate = tax;
-  }
+    if ("discount_percentage" in fields) {
+      updates.discount_percentage = validateDiscount(
+        fields.discount_percentage,
+      );
+    }
 
-  if ("is_veg" in fields) updates.is_veg = toBool01(fields.is_veg);
+    if ("tax_rate" in fields) {
+      updates.tax_rate = validatePrice(fields.tax_rate, "Tax rate") ?? 0;
+    }
 
-  if ("spice_level" in fields) {
-    const spice = toStrOrNull(fields.spice_level);
-    if (spice && !["None", "Mild", "Medium", "Hot"].includes(spice))
-      throw new Error("spice_level must be one of: None, Mild, Medium, Hot");
-    updates.spice_level = spice || "None";
-  }
+    if ("is_veg" in fields) {
+      updates.is_veg = toBool(fields.is_veg, false);
+    }
 
-  if ("is_available" in fields)
-    updates.is_available = toBool01(fields.is_available);
-  if ("stock_limit" in fields)
-    updates.stock_limit = Number.isInteger(Number(fields.stock_limit))
-      ? Number(fields.stock_limit)
-      : 0;
+    if ("spice_level" in fields) {
+      updates.spice_level = validateSpiceLevel(fields.spice_level);
+    }
 
-  if ("sort_order" in fields)
-    updates.sort_order = Number.isInteger(Number(fields.sort_order))
-      ? Number(fields.sort_order)
-      : 0;
+    if ("is_available" in fields) {
+      updates.is_available = toBool(fields.is_available, true);
+    }
 
-  // Determine final biz/category for validation
-  const finalBiz = updates.business_id ?? prev.business_id;
-  const finalCat = updates.category_name ?? prev.category_name;
-  const finalName = updates.item_name ?? prev.item_name;
+    if ("stock_limit" in fields) {
+      updates.stock_limit = toNumOrNull(fields.stock_limit) ?? 0;
+    }
 
-  // enforce category assignment for this business
-  await assertCategoryAllowedForBusiness(finalBiz, finalCat);
+    if ("sort_order" in fields) {
+      updates.sort_order = toNumOrNull(fields.sort_order) ?? 0;
+    }
 
-  // uniqueness check
-  await assertUniquePerBusinessCategory(finalBiz, finalCat, finalName, id);
+    // Check for duplicate if name or category changed
+    const finalBiz = updates.business_id ?? prev.business_id;
+    const finalCat = updates.category_name ?? prev.category_name;
+    const finalName = updates.item_name ?? prev.item_name;
 
-  const setClauses = [];
-  const params = [];
-  Object.entries(updates).forEach(([k, v]) => {
-    setClauses.push(`${k} = ?`);
-    params.push(v);
-  });
+    if (finalName !== prev.item_name || finalCat !== prev.category_name) {
+      const isDuplicate = await checkDuplicateItem(
+        finalBiz,
+        finalCat,
+        finalName,
+        id,
+      );
+      if (isDuplicate) {
+        return {
+          success: false,
+          message: `Item "${finalName}" already exists in category "${finalCat}". Please use a different item name.`,
+        };
+      }
+    }
 
-  if (!setClauses.length) {
+    if (Object.keys(updates).length === 0) {
+      return {
+        success: true,
+        message: "No changes were made to the food item.",
+        data: prev,
+      };
+    }
+
+    await prisma.food_menu.update({
+      where: { id: id },
+      data: {
+        ...updates,
+        updated_at: new Date(),
+      },
+    });
+
+    const updatedItem = await getFoodMenuItemById(id);
+
     return {
       success: true,
-      message: "No changes.",
-      data: prev,
+      message: "Food item updated successfully.",
+      data: updatedItem.data,
       old_image: prev.item_image,
-      new_image: prev.item_image,
+      new_image: updatedItem.data.item_image,
+    };
+  } catch (error) {
+    console.error("Update food item error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to update food item. Please try again.",
     };
   }
-
-  setClauses.push("updated_at = ?");
-  params.push(bhutanNow(), id);
-
-  await db.query(
-    `UPDATE food_menu SET ${setClauses.join(", ")} WHERE id = ?`,
-    params
-  );
-
-  const nowData = await getFoodMenuItemById(id);
-  return {
-    success: true,
-    message: "Food menu item updated successfully.",
-    data: nowData.data,
-    old_image: prev.item_image,
-    new_image: nowData.data.item_image,
-  };
 }
 
 async function deleteFoodMenuItem(id) {
-  const existing = await getFoodMenuItemById(id);
-  if (!existing.success) return existing;
-  await db.query(`DELETE FROM food_menu WHERE id = ?`, [id]);
-  return {
-    success: true,
-    message: "Food menu item deleted successfully.",
-    old_image: existing.data.item_image || null,
-  };
+  try {
+    const existing = await getFoodMenuItemById(id);
+    if (!existing.success) {
+      return existing;
+    }
+
+    await prisma.food_menu.delete({
+      where: { id: id },
+    });
+
+    return {
+      success: true,
+      message: "Food item deleted successfully.",
+      deleted_item: existing.data,
+    };
+  } catch (error) {
+    console.error("Delete food item error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to delete food item. Please try again.",
+    };
+  }
+}
+
+// Add missing helper functions
+function validateSpiceLevel(spice_level) {
+  const validLevels = ["None", "Mild", "Medium", "Hot"];
+  if (spice_level && !validLevels.includes(spice_level)) {
+    throw new Error(`Spice level must be one of: ${validLevels.join(", ")}.`);
+  }
+  return spice_level || "None";
+}
+
+function validatePrice(price, fieldName) {
+  const num = toNumOrNull(price);
+  if (num === null || num < 0) {
+    throw new Error(`${fieldName} must be a valid non-negative number.`);
+  }
+  return num;
+}
+
+function validateDiscount(discount) {
+  const num = toNumOrNull(discount);
+  if (num === null) return 0;
+  if (num < 0 || num > 100) {
+    throw new Error(`Discount percentage must be between 0 and 100.`);
+  }
+  return num;
 }
 
 module.exports = {

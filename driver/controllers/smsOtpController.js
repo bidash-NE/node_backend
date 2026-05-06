@@ -18,25 +18,40 @@ function makeOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// ✅ FIXED: send SMS using x-api-key (not Content-Type)
 async function sendViaGateway({ to, text, from }) {
   if (!SMS_MASTER_KEY) throw new Error("SMS_MASTER_KEY missing in .env");
+  if (!SMS_URL) throw new Error("SMS_URL missing in .env");
 
-  const resp = await fetch(SMS_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": SMS_MASTER_KEY, // ✅ correct header
-    },
-    body: JSON.stringify({ to, text, from }),
-  });
+  console.log("Attempting to send SMS to URL:", SMS_URL);
+  console.log("Phone number:", to);
 
-  const bodyText = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
+  try {
+    const resp = await fetch(SMS_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": SMS_MASTER_KEY,
+      },
+      body: JSON.stringify({ to, text, from }),
+      // Add timeout to avoid hanging
+      signal: AbortSignal.timeout(10000), // 10 second timeout
+    });
+
+    const bodyText = await resp.text();
+    if (!resp.ok) {
+      throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
+    }
+    return bodyText;
+  } catch (err) {
+    // More detailed error logging
+    console.error("Fetch error details:", {
+      name: err.name,
+      message: err.message,
+      cause: err.cause,
+      code: err.code,
+    });
+    throw err;
   }
-
-  return bodyText;
 }
 
 // ✅ Send OTP SMS (registration)

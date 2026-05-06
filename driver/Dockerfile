@@ -16,8 +16,9 @@ RUN npm ci --include=dev
 # Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
-# Copy the driver service (includes its own lib folder)
-COPY driver ./driver
+# Copy the food service (includes its own lib folder)
+COPY food ./food
+COPY lib ./lib
 
 # Prune dev dependencies for production
 RUN npm prune --production
@@ -38,24 +39,25 @@ RUN addgroup -g 1001 -S nodejs && \
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/driver ./driver
+COPY --from=builder --chown=nodejs:nodejs /app/food ./food
+COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
 
-# Set working directory to driver service
-WORKDIR /app/driver
+# Set working directory to food service
+WORKDIR /app/food
 
 # Environment variables
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=3003
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3000/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
+    CMD node -e "require('http').get('http://localhost:3003/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
 
-EXPOSE 3000
+EXPOSE 3003
 
 # Start the application
 CMD ["node", "server.js"]
