@@ -131,7 +131,8 @@ jobs:
         if: needs.changes.outputs.mart == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./mart
+          context: .
+          file: ./mart/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-mart:latest
