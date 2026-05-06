@@ -7,8 +7,18 @@ async function getSummary(req, res, next) {
     const dateFilter = {};
     if (from_date) dateFilter.gte = new Date(from_date);
     if (to_date) dateFilter.lte = new Date(to_date);
+    let eventIdFilter;
+    if (req.user.role === 'organizer') {
+      const orgEvents = await prisma.events.findMany({
+        where: { organizer_id: req.user.organizer_id },
+        select: { id: true },
+      });
+      eventIdFilter = { in: orgEvents.map((e) => e.id) };
+    }
+
     const where = {
       status: "confirmed",
+      ...(eventIdFilter && { event_id: eventIdFilter }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
     };
 

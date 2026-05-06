@@ -61,6 +61,7 @@ router.delete('/reviews/:reviewId',     reviewsCtrl.deleteReview);
 // ── Organizers ────────────────────────────────────────────────────────────────
 router.get('/organizers',              organizersCtrl.listOrganizers);
 router.post('/organizers',             organizersCtrl.createOrganizer);
+router.delete('/organizers/:id',       organizersCtrl.deleteOrganizer);
 router.get('/organizers/:id/revenue',  organizersCtrl.getOrganizerRevenue);
 
 module.exports = router;

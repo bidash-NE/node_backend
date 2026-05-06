@@ -8,7 +8,18 @@ async function listBookings(req, res, next) {
     if (from_date) dateFilter.gte = new Date(from_date);
     if (to_date) dateFilter.lte = new Date(to_date);
 
+    // For organizers, restrict to their own events only
+    let allowedEventIds;
+    if (req.user.role === 'organizer') {
+      const orgEvents = await prisma.events.findMany({
+        where: { organizer_id: req.user.organizer_id },
+        select: { id: true },
+      });
+      allowedEventIds = orgEvents.map((e) => e.id);
+    }
+
     const where = {
+      ...(allowedEventIds && { event_id: { in: allowedEventIds } }),
       ...(event_id && { event_id }),
       ...(screening_id && { screening_id }),
       ...(payment_method && { payment_method }),

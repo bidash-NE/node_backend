@@ -56,8 +56,12 @@ async function deleteReview(req, res, next) {
   try {
     const { reviewId } = req.params;
 
-    const review = await prisma.event_reviews.findUnique({ where: { id: reviewId } });
+    const review = await prisma.event_reviews.findUnique({ where: { id: reviewId }, include: { events: { select: { organizer_id: true } } } });
     if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+
+    if (req.user.role === 'organizer' && review.events.organizer_id !== req.user.organizer_id) {
+      return res.status(403).json({ success: false, message: 'Forbidden: this review does not belong to your event' });
+    }
 
     await prisma.event_reviews.delete({ where: { id: reviewId } });
 

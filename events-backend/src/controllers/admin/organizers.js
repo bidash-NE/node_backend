@@ -27,6 +27,10 @@ async function listOrganizers(req, res, next) {
 
 async function createOrganizer(req, res, next) {
   try {
+    if (req.user.role === 'organizer') {
+      return res.status(403).json({ success: false, message: 'Forbidden: organizers cannot add other organizers' });
+    }
+
     const { name, email, phone } = req.body;
     if (!name || !email || !phone) {
       return res.status(400).json({ success: false, message: 'name, email, and phone are required' });
@@ -39,20 +43,14 @@ async function createOrganizer(req, res, next) {
 
     const password_hash = await bcrypt.hash(DEFAULT_PASSWORD, 10);
 
-    const [organizer] = await prisma.$transaction([
-      prisma.event_organizers.create({ data: { id: uuidv4(), name } }),
-      prisma.users.create({
-        data: {
-          user_name: name,
-          email,
-          phone,
-          password_hash,
-          role: 'organizer',
-          is_verified: true,
-          is_active: true,
-        },
-      }),
-    ]);
+    // Create user first to get the auto-generated user_id, then link organizer to it
+    const user = await prisma.users.create({
+      data: { user_name: name, email, phone, password_hash, role: 'organizer', is_verified: true, is_active: true },
+    });
+
+    const organizer = await prisma.event_organizers.create({
+      data: { id: uuidv4(), name, user_id: user.user_id },
+    });
 
     res.status(201).json({
       success: true,
@@ -116,4 +114,35 @@ async function getOrganizerRevenue(req, res, next) {
   }
 }
 
-module.exports = { listOrganizers, createOrganizer, getOrganizerRevenue };
+async function deleteOrganizer(req, res, next) {
+  try {
+    if (req.user.role === 'organizer') {
+      return res.status(403).json({ success: false, message: 'Forbidden: organizers cannot remove organizers' });
+    }
+
+    const { id } = req.params;
+
+    const organizer = await prisma.event_organizers.findUnique({
+      where: { id },
+      include: { _count: { select: { events: true } } },
+    });
+    if (!organizer) return res.status(404).json({ success: false, message: 'Organizer not found' });
+
+    if (organizer._count.events > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot remove organizer — they have ${organizer._count.events} event(s). Delete or reassign those events first.`,
+      });
+    }
+
+    const userId = organizer.user_id;
+    await prisma.event_organizers.delete({ where: { id } });
+    if (userId) await prisma.users.delete({ where: { user_id: userId } });
+
+    res.json({ success: true, message: `Organizer "${organizer.name}" removed.` });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listOrganizers, createOrganizer, deleteOrganizer, getOrganizerRevenue };

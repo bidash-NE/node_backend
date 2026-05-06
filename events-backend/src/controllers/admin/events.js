@@ -12,6 +12,8 @@ async function listEvents(req, res, next) {
       ...(from_date && { start_at: { gte: new Date(from_date) } }),
       ...(to_date && { start_at: { lte: new Date(to_date) } }),
       ...(q && { OR: [{ title: { contains: q } }, { venue_name: { contains: q } }] }),
+      // Scope to own events for organizer role
+      ...(req.user.role === 'organizer' && { organizer_id: req.user.organizer_id }),
     };
 
     const orderByMap = {

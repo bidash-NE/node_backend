@@ -1,9 +1,21 @@
 const { v4: uuidv4 } = require('uuid');
 const prisma = require('../../db');
 
+function isOrganizer(req) { return req.user.role === 'organizer'; }
+
+async function assertHallOwnership(hallId, organizerId) {
+  const hall = await prisma.event_halls.findUnique({ where: { id: hallId }, select: { id: true, organizer_id: true } });
+  if (!hall) return { error: 'Hall not found', status: 404 };
+  if (hall.organizer_id !== organizerId) return { error: 'Forbidden: this hall does not belong to you', status: 403 };
+  return { hall };
+}
+
 async function listHalls(req, res, next) {
   try {
+    const where = isOrganizer(req) ? { organizer_id: req.user.organizer_id } : {};
+
     const halls = await prisma.event_halls.findMany({
+      where,
       orderBy: { created_at: 'desc' },
       include: { _count: { select: { event_seats: true } } },
     });
@@ -33,8 +45,10 @@ async function createHall(req, res, next) {
       return res.status(400).json({ success: false, message: 'venue_name, name, and total_seats are required' });
     }
 
+    const organizer_id = isOrganizer(req) ? req.user.organizer_id : (req.body.organizer_id || null);
+
     const hall = await prisma.event_halls.create({
-      data: { id: uuidv4(), venue_name, name, total_seats: Number(total_seats), has_balcony: Boolean(has_balcony) },
+      data: { id: uuidv4(), venue_name, name, total_seats: Number(total_seats), has_balcony: Boolean(has_balcony), organizer_id },
     });
 
     res.status(201).json({ success: true, data: hall });
@@ -52,8 +66,13 @@ async function createSeats(req, res, next) {
       return res.status(400).json({ success: false, message: 'seats must be a non-empty array' });
     }
 
-    const hall = await prisma.event_halls.findUnique({ where: { id: hallId }, select: { id: true } });
-    if (!hall) return res.status(404).json({ success: false, message: 'Hall not found' });
+    if (isOrganizer(req)) {
+      const { error, status } = await assertHallOwnership(hallId, req.user.organizer_id);
+      if (error) return res.status(status).json({ success: false, message: error });
+    } else {
+      const hall = await prisma.event_halls.findUnique({ where: { id: hallId }, select: { id: true } });
+      if (!hall) return res.status(404).json({ success: false, message: 'Hall not found' });
+    }
 
     await prisma.event_seats.createMany({
       data: seats.map((s) => ({
@@ -83,12 +102,17 @@ async function createSeats(req, res, next) {
 async function listSeats(req, res, next) {
   try {
     const { id: hallId } = req.params;
+
+    if (isOrganizer(req)) {
+      const { error, status } = await assertHallOwnership(hallId, req.user.organizer_id);
+      if (error) return res.status(status).json({ success: false, message: error });
+    }
+
     const seats = await prisma.event_seats.findMany({
       where: { hall_id: hallId },
       orderBy: [{ row_label: 'asc' }, { seat_number: 'asc' }],
     });
 
-    // Group by row_label + section (same letter can exist in multiple sections)
     const byRow = {};
     for (const s of seats) {
       const key = `${s.row_label}__${s.section}`;
@@ -108,6 +132,11 @@ async function deleteRowSeats(req, res, next) {
     const { row, section } = req.query;
 
     if (!row || !section) return res.status(400).json({ success: false, message: 'row and section query params are required' });
+
+    if (isOrganizer(req)) {
+      const { error, status } = await assertHallOwnership(hallId, req.user.organizer_id);
+      if (error) return res.status(status).json({ success: false, message: error });
+    }
 
     const { count } = await prisma.event_seats.deleteMany({
       where: { hall_id: hallId, row_label: row, section },
