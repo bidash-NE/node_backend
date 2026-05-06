@@ -1,7 +1,7 @@
 // controllers/rideGroup.controller.js
 import crypto from "crypto";
 import { mysqlPool } from "../db/mysql.js"; // adjust path if needed
-import { getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { getPushTokensByDriverIds, getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
 import { sendPushToTokens } from "../services/push.js";
 
 /* ---------------- helpers ---------------- */
@@ -381,7 +381,7 @@ export async function listParticipants(req, res) {
   try {
     const [rows] = await mysqlPool.query(
       `
-      SELECT participant_id, ride_id, user_id, role, seats, join_status, joined_at, updated_at
+      SELECT participant_id, ride_id, user_id, role, seats, join_status, stage, joined_at, updated_at
       FROM ride_participants
       WHERE ride_id = ?
       ORDER BY (role='host') DESC, joined_at ASC
