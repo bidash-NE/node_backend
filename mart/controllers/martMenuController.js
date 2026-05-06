@@ -1,4 +1,3 @@
-// controllers/martMenuController.js
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -40,7 +39,7 @@ function safeDeleteFile(oldWebPath) {
 function saveBase64ImageIfPresent(body) {
   const raw = (body?.item_image || body?.image || "").toString().trim();
   const m = raw.match(
-    /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,(.+)$/i
+    /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,(.+)$/i,
   );
   if (!m) return null;
 
@@ -63,25 +62,15 @@ function saveBase64ImageIfPresent(body) {
   return `/uploads/mart-menu/${fileName}`;
 }
 
-/**
- * Accept ONLY:
- *  1) req.file uploaded by multer -> /uploads/mart-menu/<name>
- *  2) body with already-server-stored path starting with /uploads/mart-menu/
- *  3) base64 data URL in body (data:image/...;base64,...) -> will be saved and return path
- * Everything else (file:///..., http://device/..., etc.) => ignored (null)
- */
 function extractStorableImagePath(req) {
   if (req.file) return toWebPath(req.file);
 
-  // Accept already server-stored path
   const raw = (req.body?.item_image || req.body?.image || "").toString().trim();
   if (raw.startsWith("/uploads/mart-menu/")) return raw;
 
-  // Accept base64 data URL
   const saved = saveBase64ImageIfPresent(req.body);
   if (saved) return saved;
 
-  // Reject device-local URIs like file:///...
   return null;
 }
 
@@ -92,7 +81,7 @@ async function createMartMenuCtrl(req, res) {
     const img = extractStorableImagePath(req);
 
     const payload = {
-      business_id: b.business_id, // required
+      business_id: b.business_id,
       category_name: b.category_name,
       item_name: b.item_name,
       description: b.description,
@@ -107,16 +96,26 @@ async function createMartMenuCtrl(req, res) {
       sort_order: b.sort_order,
     };
 
-    const out = await createMartMenuItem(payload);
+    const result = await createMartMenuItem(payload);
+
+    // ✅ Check if the operation was successful
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(201).json({
       success: true,
       message: "Mart item created successfully.",
-      data: out.data,
+      data: result.data,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("Create mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to create mart item.",
+      message: error.message || "Failed to create mart item. Please try again.",
     });
   }
 }
@@ -126,16 +125,25 @@ async function listMartMenuCtrl(req, res) {
   try {
     const business_id = req.query.business_id;
     const category_name = req.query.category_name;
-    const out = await listMartMenuItems({ business_id, category_name });
+    const result = await listMartMenuItems({ business_id, category_name });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Mart items fetched successfully.",
-      data: out.data,
+      data: result.data,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("List mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to fetch mart items.",
+      message: error.message || "Failed to fetch mart items.",
     });
   }
 }
@@ -144,16 +152,25 @@ async function listMartMenuCtrl(req, res) {
 async function listMartMenuByBusinessCtrl(req, res) {
   try {
     const business_id = req.params.business_id;
-    const out = await listMartMenuByBusiness(business_id);
+    const result = await listMartMenuByBusiness(business_id);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Mart items for business fetched successfully.",
-      data: out.data,
+      data: result.data,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("List business mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to fetch mart items.",
+      message: error.message || "Failed to fetch mart items.",
     });
   }
 }
@@ -162,18 +179,25 @@ async function listMartMenuByBusinessCtrl(req, res) {
 async function getMartMenuByIdCtrl(req, res) {
   try {
     const id = Number(req.params.id);
-    const out = await getMartMenuItemById(id);
-    if (!out.success)
-      return res.status(404).json({ success: false, message: out.message });
+    const result = await getMartMenuItemById(id);
+
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Mart item fetched successfully.",
-      data: out.data,
+      data: result.data,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("Get mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to fetch mart item.",
+      message: error.message || "Failed to fetch mart item.",
     });
   }
 }
@@ -208,27 +232,37 @@ async function updateMartMenuCtrl(req, res) {
     if (newImg) fields.item_image = newImg;
     else if (wantsClear) fields.item_image = null;
 
-    const out = await updateMartMenuItem(id, fields);
-    if (!out.success)
-      return res.status(400).json({ success: false, message: out.message });
+    const result = await updateMartMenuItem(id, fields);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: result.message,
+      });
+    }
 
     // If image changed (or cleared), remove old file
-    if (out.old_image && out.new_image && out.old_image !== out.new_image) {
-      safeDeleteFile(out.old_image);
+    if (
+      result.old_image &&
+      result.new_image &&
+      result.old_image !== result.new_image
+    ) {
+      safeDeleteFile(result.old_image);
     }
-    if (fields.item_image === null && out.old_image) {
-      safeDeleteFile(out.old_image);
+    if (fields.item_image === null && result.old_image) {
+      safeDeleteFile(result.old_image);
     }
 
     return res.status(200).json({
       success: true,
       message: "Mart item updated successfully.",
-      data: out.data,
+      data: result.data,
     });
-  } catch (e) {
-    return res.status(400).json({
+  } catch (error) {
+    console.error("Update mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to update mart item.",
+      message: error.message || "Failed to update mart item.",
     });
   }
 }
@@ -237,19 +271,26 @@ async function updateMartMenuCtrl(req, res) {
 async function deleteMartMenuCtrl(req, res) {
   try {
     const id = Number(req.params.id);
-    const out = await deleteMartMenuItem(id);
-    if (!out.success)
-      return res.status(404).json({ success: false, message: out.message });
+    const result = await deleteMartMenuItem(id);
 
-    if (out.old_image) safeDeleteFile(out.old_image);
+    if (!result.success) {
+      return res.status(404).json({
+        success: false,
+        message: result.message,
+      });
+    }
 
-    return res
-      .status(200)
-      .json({ success: true, message: "Mart item deleted successfully." });
-  } catch (e) {
-    return res.status(400).json({
+    if (result.old_image) safeDeleteFile(result.old_image);
+
+    return res.status(200).json({
+      success: true,
+      message: "Mart item deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete mart menu error:", error);
+    return res.status(500).json({
       success: false,
-      message: e.message || "Failed to delete mart item.",
+      message: error.message || "Failed to delete mart item.",
     });
   }
 }
