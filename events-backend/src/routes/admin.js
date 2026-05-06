@@ -34,7 +34,9 @@ router.patch('/screenings/:id/cancel',      screeningsCtrl.cancelScreening);
 // ── Halls & Seats ─────────────────────────────────────────────────────────────
 router.get('/halls',               hallsCtrl.listHalls);
 router.post('/halls',              hallsCtrl.createHall);
+router.get('/halls/:id/seats',     hallsCtrl.listSeats);
 router.post('/halls/:id/seats',    hallsCtrl.createSeats);
+router.delete('/halls/:id/seats',  hallsCtrl.deleteRowSeats);
 
 // ── Bookings ──────────────────────────────────────────────────────────────────
 router.get('/bookings',            bookingsCtrl.listBookings);
