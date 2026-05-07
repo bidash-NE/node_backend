@@ -4,7 +4,7 @@ const axios = require("axios");
 
 const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
 const ID_SERVICE_URL = process.env.ID_SERVICE_URL;
-
+console.log("ID Service URL:", ID_SERVICE_URL);
 /* ---------- Helpers to call ID generator API ---------- */
 async function getJournalCodeViaApi() {
   const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});

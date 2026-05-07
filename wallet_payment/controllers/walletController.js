@@ -20,7 +20,7 @@ const { sendOtpEmail } = require("../utils/mailer");
 /* ---------------- SMS ENV ---------------- */
 const SMS_API_URL = process.env.SMS_API_URL && process.env.SMS_API_URL.trim();
 const SMS_API_KEY = (process.env.SMS_API_KEY || "").trim();
-const SMS_FROM = (process.env.SMS_FROM || "Taabdoe").trim();
+const SMS_FROM = (process.env.SMS_FROM || "Tabdey").trim();
 
 /* ---------------- EXPO PUSH ENV ---------------- */
 const EXPO_NOTIFICATION_URL = (process.env.EXPO_NOTIFICATION_URL || "").trim();
