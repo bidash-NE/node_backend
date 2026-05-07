@@ -1,27 +1,76 @@
 // models/adminTransferModel.js
 const db = require("../config/db");
 const axios = require("axios");
+const https = require("https");
+
+// Get configuration from environment variables
+const ID_SERVICE_URL =
+  process.env.ID_SERVICE_URL || "https://grab.newedge.bt/wallet";
+const NODE_TLS_REJECT_UNAUTHORIZED =
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0";
+
+// Create HTTPS agent based on environment
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: !NODE_TLS_REJECT_UNAUTHORIZED,
+});
 
 const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
-const ID_SERVICE_URL = "https://grab.newedge.bt/wallet";
 
 /* ---------- Helpers to call ID generator API ---------- */
 async function getJournalCodeViaApi() {
-  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});
-  if (!data?.ok || !data.code) {
-    throw new Error("ID service: failed to generate journal_code");
+  try {
+    console.log(`Calling ID service at: ${ID_SERVICE_URL}/ids/journal`);
+
+    const response = await axios.post(
+      `${ID_SERVICE_URL}/ids/journal`,
+      {},
+      {
+        httpsAgent: httpsAgent,
+        timeout: 30000,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    if (!response.data?.ok || !response.data.code) {
+      throw new Error("ID service: failed to generate journal_code");
+    }
+    return response.data.code;
+  } catch (error) {
+    console.error("getJournalCodeViaApi error:", error.message);
+    throw new Error(`ID service error: ${error.message}`);
   }
-  return data.code;
 }
 
 async function getTxnIdsViaApi(count = 2) {
-  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/transaction`, {
-    count,
-  });
-  if (!data?.ok || !Array.isArray(data.data) || data.data.length < count) {
-    throw new Error("ID service: failed to generate transaction_id(s)");
+  try {
+    console.log(`Calling ID service at: ${ID_SERVICE_URL}/ids/transaction`);
+
+    const response = await axios.post(
+      `${ID_SERVICE_URL}/ids/transaction`,
+      { count },
+      {
+        httpsAgent: httpsAgent,
+        timeout: 30000,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    if (
+      !response.data?.ok ||
+      !Array.isArray(response.data.data) ||
+      response.data.data.length < count
+    ) {
+      throw new Error("ID service: failed to generate transaction_id(s)");
+    }
+    return response.data.data; // array of ids
+  } catch (error) {
+    console.error("getTxnIdsViaApi error:", error.message);
+    throw new Error(`ID service error: ${error.message}`);
   }
-  return data.data; // array of ids
 }
 
 /** Find admin by users.user_name (case-insensitive) with allowed role */
@@ -32,7 +81,7 @@ async function findAdminByUserName(conn, admin_name) {
       WHERE LOWER(user_name) = LOWER(?)
         AND LOWER(role) IN (?, ?)
       LIMIT 1`,
-    [admin_name, ADMIN_ROLES[0], ADMIN_ROLES[1]]
+    [admin_name, ADMIN_ROLES[0], ADMIN_ROLES[1]],
   );
   return rows[0] || null;
 }
@@ -73,23 +122,28 @@ async function adminTipTransfer({
     // 2️⃣ Lock wallets
     const [[adminW]] = await conn.query(
       "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [admin_wallet_id]
+      [admin_wallet_id],
     );
     const [[userW]] = await conn.query(
       "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [user_wallet_id]
+      [user_wallet_id],
     );
 
     const user_id = userW.user_id;
 
     const [rows] = await conn.query(
-      `SELECT driver_id FROM drivers WHERE user_id = ?`, [user_id]
+      `SELECT driver_id FROM drivers WHERE user_id = ?`,
+      [user_id],
     );
 
     if (rows.length === 0) {
-      // handle case where no driver found for this user_id
-      console.error('Driver not found');
-      return;
+      console.error("Driver not found for user_id:", user_id);
+      await conn.rollback();
+      return {
+        ok: false,
+        status: 404,
+        message: "Driver not found for this user.",
+      };
     }
 
     const driver_id = rows[0].driver_id;
@@ -152,7 +206,7 @@ async function adminTipTransfer({
       `INSERT INTO wallet_transactions 
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
        VALUES (?, ?, ?, ?, ?, 'DR', ?)`,
-      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note]
+      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note],
     );
 
     // CR: admin -> user
@@ -160,7 +214,7 @@ async function adminTipTransfer({
       `INSERT INTO wallet_transactions 
         (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
        VALUES (?, ?, ?, ?, ?, 'CR', ?)`,
-      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note]
+      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note],
     );
 
     // 8️⃣ Log admin action
@@ -171,21 +225,22 @@ async function adminTipTransfer({
 
     await conn.query(
       `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
-      [userW.user_id, adminUser.user_name, activity]
+      [userW.user_id, adminUser.user_name, activity],
     );
 
     // 9️⃣ Get updated balances
     const [[adminNew]] = await conn.query(
       "SELECT * FROM wallets WHERE id = ?",
-      [adminW.id]
+      [adminW.id],
     );
     const [[userNew]] = await conn.query("SELECT * FROM wallets WHERE id = ?", [
       userW.id,
     ]);
 
-    // update payment_status in ride_ratings table 
+    // update payment_status in ride_ratings table
     await conn.query(
-      `UPDATE ride_ratings SET payment_status = 1 WHERE driver_id = ? AND payment_status = 0;`, [driver_id]
+      `UPDATE ride_ratings SET payment_status = 1 WHERE driver_id = ? AND payment_status = 0;`,
+      [driver_id],
     );
 
     await conn.commit();
@@ -220,6 +275,7 @@ async function adminTipTransfer({
       transactions: { admin_dr: txnAdmin, user_cr: txnUser },
     };
   } catch (err) {
+    console.error("adminTipTransfer error:", err);
     try {
       await conn.rollback();
     } catch {}
