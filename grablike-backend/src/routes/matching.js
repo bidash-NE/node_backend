@@ -10,6 +10,12 @@ import {
 import { getRedis } from "../matching/redis.js";
 import { applyCancellationPolicy } from "../services/cancellations.js";
 import { walletTransfer } from "../services/wallet/walletTransfer.js";
+import {
+  BOOKING_TYPE,
+  TRIP_TYPE,
+  VALID_TRIP_TYPES,
+  VALID_BOOKING_TYPES,
+} from "../constants/rideTypes.js";
 
 const redis = getRedis();
 
@@ -106,24 +112,22 @@ export function makeMatchingRouter(io, mysqlPool) {
     // keep your system consistent (redis geoKey, DB, etc.)
     const cityId = String(cityIdRaw || "thimphu").trim();
 
-    /* -------------------- normalize trip_type -------------------- */
-    const booking_type = ["SCHEDULED", "GROUP"].includes(
-      String(bookingTypeRaw || "").toUpperCase(),
-    )
-      ? String(bookingTypeRaw).toUpperCase()
-      : "INSTANT";
+    /* -------------------- normalize booking_type & trip_type -------------------- */
+    const normalizedBookingType = String(bookingTypeRaw || "").toUpperCase();
+    const booking_type = VALID_BOOKING_TYPES.includes(normalizedBookingType)
+      ? normalizedBookingType
+      : BOOKING_TYPE.INSTANT;
 
     const trip_type = (() => {
       const direct = String(tripTypeRaw ?? "")
         .trim()
         .toLowerCase();
-      if (["instant", "scheduled", "pool", "group"].includes(direct))
-        return direct;
+      if (VALID_TRIP_TYPES.includes(direct)) return direct;
 
       // fallback from booking_type
-      if (booking_type === "SCHEDULED") return "scheduled";
-      if (booking_type === "GROUP") return "group";
-      return "instant";
+      if (booking_type === BOOKING_TYPE.SCHEDULED) return TRIP_TYPE.SCHEDULED;
+      if (booking_type === BOOKING_TYPE.GROUP) return TRIP_TYPE.GROUP;
+      return TRIP_TYPE.INSTANT;
     })();
 
     let scheduled_at = null; // JS Date or null
@@ -251,6 +255,12 @@ export function makeMatchingRouter(io, mysqlPool) {
             .json({ error: "waypoints must be an array if provided" });
         }
 
+        if (waypointsRaw.length > MAX_WPS) {
+          return res.status(400).json({
+            error: `Too many waypoints: maximum ${MAX_WPS} allowed, got ${waypointsRaw.length}`,
+          });
+        }
+
         waypoints = waypointsRaw
           .slice(0, MAX_WPS)
           .map((w, i) => {
@@ -269,6 +279,20 @@ export function makeMatchingRouter(io, mysqlPool) {
     let conn;
     try {
       conn = await mysqlPool.getConnection();
+
+      /* -------------------- validate service_code exists -------------------- */
+      const [[rideTypeRow]] = await conn.query(
+        `SELECT id FROM ride_types WHERE code = ? AND is_active = 1 LIMIT 1`,
+        [String(service_code).trim()],
+      );
+      if (!rideTypeRow) {
+        conn.release();
+        conn = null;
+        return res.status(400).json({
+          error: `Unknown or inactive service_code: "${service_code}". Check /api/get-ride-types for valid codes.`,
+        });
+      }
+
       await conn.beginTransaction();
 
       /* -------------------- pool_batch_id handling -------------------- */
@@ -288,9 +312,9 @@ export function makeMatchingRouter(io, mysqlPool) {
       }
 
       /* -------------------- initial ride status -------------------- */
-      // ✅ scheduled rides should NOT enter matching until time comes
+      // scheduled rides stay in 'scheduled' state until the worker dispatches them
       const initialStatus =
-        booking_type === "SCHEDULED" ? "scheduled" : "requested";
+        booking_type === BOOKING_TYPE.SCHEDULED ? "scheduled" : "requested";
 
       /* -------------------- insert ride shell -------------------- */
       // NOTE: requires rides table to have booking_type + scheduled_at + base_fare_cents columns
@@ -331,8 +355,8 @@ export function makeMatchingRouter(io, mysqlPool) {
 
       const rideId = String(ins.insertId);
 
-      // ✅ GROUP ride: create host participant row (required for invites)
-      if (booking_type === "GROUP") {
+      // GROUP ride: create host participant row (required for invites)
+      if (booking_type === BOOKING_TYPE.GROUP) {
         await conn.execute(
           `
           INSERT INTO ride_participants (ride_id, user_id, role, seats, join_status)
@@ -366,8 +390,8 @@ export function makeMatchingRouter(io, mysqlPool) {
         );
       }
 
-      /* -------------------- pool bookings row -------------------- */
-      if (trip_type === "pool") {
+      /* -------------------- pool / group bookings row -------------------- */
+      if (trip_type === "pool" || booking_type === BOOKING_TYPE.GROUP) {
         const [insBk] = await conn.execute(
           `
         INSERT INTO ride_bookings (
@@ -398,7 +422,7 @@ export function makeMatchingRouter(io, mysqlPool) {
       await conn.commit();
 
       /* -------------------- if SCHEDULED: return now, DO NOT MATCH -------------------- */
-      if (booking_type === "SCHEDULED") {
+      if (booking_type === BOOKING_TYPE.SCHEDULED) {
         return res.json({
           ok: true,
           rideId,
@@ -746,7 +770,7 @@ export function makeMatchingRouter(io, mysqlPool) {
             const driverWalletId = driverWalletRows[0].wallet_id;
 
             const fee_nu = fee_cents / 100;
-            const SYSTEM_WALLET_ID = "TD00000001"; // Define your system wallet ID
+            const SYSTEM_WALLET_ID = "NET000001"; // Define your system wallet ID
 
             const payload = {
               from_wallet: driverWalletId,
@@ -1247,7 +1271,7 @@ export function makeMatchingRouter(io, mysqlPool) {
           currency,
           fareCents,
           fareCents,
-          payment_method,
+          payment_method
         ],
       );
 

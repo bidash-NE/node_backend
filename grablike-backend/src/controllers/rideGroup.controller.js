@@ -1,7 +1,7 @@
 // controllers/rideGroup.controller.js
 import crypto from "crypto";
 import { mysqlPool } from "../db/mysql.js"; // adjust path if needed
-import { getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
+import { getPushTokensByDriverIds, getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
 import { sendPushToTokens } from "../services/push.js";
 
 /* ---------------- helpers ---------------- */
@@ -173,8 +173,8 @@ export async function getInviteByCode(req, res) {
 }
 
 /* fire-and-forget: socket emit + push to driver when a guest joins */
-function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats, status }) {
-  // Socket: emit to the ride room so driver's app updates in realtime
+async function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats, status }) {
+  // Socket: emit guestJoined + refreshed poolSummary so PoolList updates
   try {
     const io = req.app.get("io");
     if (io) {
@@ -184,8 +184,47 @@ function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats
         seats,
         status,
       });
+
+      // Re-emit poolSummary so driver's PoolList immediately shows the new guest booking
+      const { mysqlPool } = await import("../db/mysql.js");
+      const conn = await mysqlPool.getConnection();
+      try {
+        const [rows] = await conn.query(
+          `SELECT booking_id, passenger_id, seats,
+                  pickup_place AS pickup, dropoff_place AS dropoff,
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  fare_cents, currency, status
+           FROM ride_bookings
+           WHERE ride_id = ? AND status IN ('accepted','arrived_pickup','started','requested')`,
+          [rideId]
+        );
+        const [[sum]] = await conn.query(
+          `SELECT COALESCE(capacity_seats,0) AS capacity_seats,
+                  COALESCE(seats_booked,0) AS seats_booked,
+                  COALESCE(SUM(CASE WHEN b.status IN ('accepted','arrived_pickup','started') THEN b.seats END),0) AS seats_confirmed
+           FROM rides r LEFT JOIN ride_bookings b ON b.ride_id = r.ride_id
+           WHERE r.ride_id = ? GROUP BY r.ride_id`,
+          [rideId]
+        );
+        const sc = Number(sum?.seats_confirmed || 0);
+        io.to(`ride:${rideId}`).emit("poolSummary", {
+          request_id: String(rideId),
+          seats_confirmed: sc,
+          capacity_seats: Math.max(Number(sum?.capacity_seats || 2), sc),
+          seats_booked: Number(sum?.seats_booked || 0),
+          bookings: (rows || []).map((r) => ({
+            ...r,
+            booking_id: String(r.booking_id),
+            request_id: String(rideId),
+          })),
+        });
+      } finally {
+        conn.release();
+      }
     }
-  } catch {}
+  } catch (e) {
+    console.log("[notifyDriverGuestJoined] poolSummary error:", e?.message);
+  }
 
   // Push notification to driver
   getPushTokensByDriverIds([driverUserId])
@@ -349,6 +388,54 @@ export async function joinByInviteCode(req, res) {
       [inv.ride_id, user_id, seats]
     );
 
+    // Create ride_bookings row for guest + recalculate fare split
+    const [[rideInfo]] = await conn.query(
+      `SELECT fare_cents, currency, pickup_place, dropoff_place,
+              pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+              COALESCE(seats_booked, 1) AS seats_booked, passenger_id
+       FROM rides WHERE ride_id = ? LIMIT 1`,
+      [inv.ride_id]
+    );
+
+    if (rideInfo) {
+      const totalFare    = Number(rideInfo.fare_cents || 0);
+      const oldSeats     = Number(rideInfo.seats_booked || 1);
+      const newTotalSeats = oldSeats + seats;
+
+      const guestFare = totalFare > 0 ? Math.round(totalFare * seats / newTotalSeats) : 0;
+      const hostFare  = totalFare > 0 ? totalFare - guestFare : 0;
+
+      // Adjust host booking fare
+      if (rideInfo.passenger_id && hostFare >= 0) {
+        await conn.query(
+          `UPDATE ride_bookings SET fare_cents = ? WHERE ride_id = ? AND passenger_id = ?`,
+          [hostFare, inv.ride_id, rideInfo.passenger_id]
+        );
+      }
+
+      // Insert guest booking
+      await conn.query(
+        `INSERT INTO ride_bookings
+           (ride_id, passenger_id, seats, status, requested_at,
+            pickup_place, dropoff_place, pickup_lat, pickup_lng,
+            dropoff_lat, dropoff_lng, fare_cents, currency)
+         VALUES (?, ?, ?, 'accepted', NOW(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          inv.ride_id, user_id, seats,
+          rideInfo.pickup_place, rideInfo.dropoff_place,
+          rideInfo.pickup_lat,   rideInfo.pickup_lng,
+          rideInfo.dropoff_lat,  rideInfo.dropoff_lng,
+          guestFare, rideInfo.currency || 'BTN',
+        ]
+      );
+
+      // Update seats_booked count
+      await conn.query(
+        `UPDATE rides SET seats_booked = ? WHERE ride_id = ?`,
+        [newTotalSeats, inv.ride_id]
+      );
+    }
+
     await conn.commit();
     notifyDriverGuestJoined({ req, rideId: inv.ride_id, driverUserId: host.user_id, guestUserId: user_id, seats, status: "joined" });
     return res.json({
@@ -381,7 +468,7 @@ export async function listParticipants(req, res) {
   try {
     const [rows] = await mysqlPool.query(
       `
-      SELECT participant_id, ride_id, user_id, role, seats, join_status, joined_at, updated_at
+      SELECT participant_id, ride_id, user_id, role, seats, join_status, stage, joined_at, updated_at
       FROM ride_participants
       WHERE ride_id = ?
       ORDER BY (role='host') DESC, joined_at ASC

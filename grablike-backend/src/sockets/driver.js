@@ -997,6 +997,33 @@ export function initDriverSocket(io, mysqlPool) {
       handleDriverCompleteTrip({ io, socket, mysqlPool, payload });
     });
 
+    /* ===================== Pool / Group summary on demand ===================== */
+    socket.on("getPoolSummary", async ({ request_id } = {}, ack) => {
+      if (!request_id) return;
+      let conn;
+      try {
+        conn = await mysqlPool.getConnection();
+        await emitPoolSummary(io, conn, Number(request_id));
+        if (typeof ack === "function") ack({ ok: true });
+      } catch (e) {
+        console.log("[getPoolSummary] error:", e?.message);
+        if (typeof ack === "function") ack({ ok: false, error: e?.message });
+      } finally {
+        if (conn) conn.release();
+      }
+    });
+
+    /* ===================== Per-passenger stage (Taxi Sharing) ===================== */
+    socket.on("passengerArrived", (payload, ack) =>
+      handlePassengerStage({ io, socket, mysqlPool, payload, stage: "arrived", ack }),
+    );
+    socket.on("passengerOnboard", (payload, ack) =>
+      handlePassengerStage({ io, socket, mysqlPool, payload, stage: "onboard", ack }),
+    );
+    socket.on("passengerDropped", (payload, ack) =>
+      handlePassengerStage({ io, socket, mysqlPool, payload, stage: "dropped", ack }),
+    );
+
     /* ===================== DELIVERY: per-order drop update ===================== */
     socket.on("deliveryDropUpdate", async ({ order_id, status } = {}, ack) => {
       const ok = (data = {}) => safeAck(ack, { ok: true, ...data });
@@ -1775,7 +1802,21 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
         io.to(rideRoom(request_id)).emit("rideAccepted", msg);
       }
 
-      if (ride?.trip_type === "pool") {
+      if (["pool","group"].includes(ride?.trip_type)) {
+        // Mark all pending bookings as accepted when driver accepts
+        try {
+          const cAcc = await mysqlPool.getConnection();
+          try {
+            await cAcc.execute(
+              `UPDATE ride_bookings SET status = 'accepted', accepted_at = NOW()
+               WHERE ride_id = ? AND status IN ('requested','scheduled')`,
+              [request_id],
+            );
+          } finally {
+            cAcc.release();
+          }
+        } catch {}
+
         let acceptedBookings = [];
         try {
           const c2 = await mysqlPool.getConnection();
@@ -1960,6 +2001,81 @@ async function handleJobReject({ io, socket, mysqlPool, payload }) {
   }
 }
 
+/* ─── Per-passenger stage update (Taxi Sharing) ──────────────────────────── */
+async function handlePassengerStage({ io, socket, mysqlPool, payload, stage, ack }) {
+  const safeAck = (data) => { try { if (typeof ack === "function") ack(data); } catch {} };
+  const { request_id, user_id } = payload || {};
+
+  if (!request_id || !user_id) return safeAck({ ok: false, error: "Missing request_id or user_id" });
+
+  const driver_id = socket.data?.driver_id;
+  if (!driver_id) return safeAck({ ok: false, error: "Not authenticated as driver" });
+
+  let conn;
+  try {
+    conn = await mysqlPool.getConnection();
+
+    // Verify driver owns this ride
+    const [[ride]] = await conn.query(
+      `SELECT ride_id, passenger_id FROM rides WHERE ride_id = ? AND driver_id = ? LIMIT 1`,
+      [request_id, driver_id],
+    );
+    if (!ride) return safeAck({ ok: false, error: "Ride not found or unauthorized" });
+
+    // Ensure stage column exists (graceful: may be added by migration)
+    const [upd] = await conn.query(
+      `UPDATE ride_participants SET stage = ?, updated_at = NOW()
+       WHERE ride_id = ? AND user_id = ? AND join_status = 'joined'`,
+      [stage, request_id, user_id],
+    );
+    if (upd.affectedRows === 0) return safeAck({ ok: false, error: "Participant not found" });
+
+    // Notify all ride room members (driver + passenger) — one emit covers both
+    const updatePayload = { request_id, user_id, stage };
+    io.to(rideRoom(request_id)).emit("participantStageUpdate", updatePayload);
+
+    // Per-stage push notification
+    const pushMap = {
+      arrived: {
+        title: "Driver Arrived",
+        body: "Your driver has arrived at your pickup point.",
+        type: "passenger_arrived",
+      },
+      onboard: {
+        title: "On the Way!",
+        body: "You are now onboard. Enjoy your ride!",
+        type: "passenger_onboard",
+      },
+      dropped: {
+        title: "You've Arrived",
+        body: "You have reached your destination. Thank you for riding!",
+        type: "passenger_dropped",
+      },
+    };
+
+    const msg = pushMap[stage];
+    if (msg) {
+      getPushTokensByUserIds([user_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: msg.title,
+            body: msg.body,
+            data: { type: msg.type, ride_id: String(request_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    console.log(`[passengerStage] ride=${request_id} user=${user_id} stage=${stage}`);
+    safeAck({ ok: true, request_id, user_id, stage });
+  } catch (err) {
+    console.error("[handlePassengerStage] error:", err);
+    safeAck({ ok: false, error: "Server error" });
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
 async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
   const { request_id } = payload || {};
   if (!request_id) {
@@ -1999,7 +2115,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
       });
     }
 
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       await conn.execute(
         `
         UPDATE ride_bookings
@@ -2064,7 +2180,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
     } catch {}
 
     // pool summary
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       try {
         const c2 = await mysqlPool.getConnection();
         try {
@@ -2094,7 +2210,7 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
       stage: "arrived_pickup",
     });
 
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       io.to(rideRoom(request_id)).emit("bookingStageUpdate", {
         request_id,
         stage: "arrived_pickup",
@@ -2112,6 +2228,27 @@ async function handleDriverArrivedPickup({ io, socket, mysqlPool, payload }) {
           sendPushToTokens(tokens, {
             title: "Driver Arrived",
             body: "Your driver has arrived at the pickup point.",
+            data: { type: "driver_arrived", ride_id: String(request_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    // Also notify any sharing-ride guests
+    const [guests] = await conn.query(
+      `SELECT user_id FROM ride_participants WHERE ride_id = ? AND join_status = 'joined' AND role = 'guest'`,
+      [request_id],
+    );
+    if (guests.length) {
+      const guestIds = guests.map((g) => g.user_id);
+      guestIds.forEach((uid) =>
+        io.to(passengerRoom(uid)).emit("rideStageUpdate", { request_id, stage: "arrived_pickup" }),
+      );
+      getPushTokensByUserIds(guestIds).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Driver Arrived",
+            body: "Your driver has arrived at the pickup area.",
             data: { type: "driver_arrived", ride_id: String(request_id) },
           }).catch(() => {});
         }
@@ -2173,7 +2310,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       });
     }
 
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       await conn.execute(
         `
         UPDATE ride_bookings
@@ -2240,7 +2377,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
     } catch {}
 
     // pool summary
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       try {
         const c2 = await mysqlPool.getConnection();
         try {
@@ -2262,7 +2399,7 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       stage: "started",
     });
 
-    if (cur?.trip_type === "pool") {
+    if (["pool","group"].includes(cur?.trip_type)) {
       io.to(rideRoom(request_id)).emit("bookingStageUpdate", {
         request_id,
         stage: "started",
@@ -2276,6 +2413,27 @@ async function handleDriverStartTrip({ io, socket, mysqlPool, payload }) {
       });
 
       getPushTokensByUserIds([passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Trip Started",
+            body: "Your trip is underway. Hang tight!",
+            data: { type: "trip_started", ride_id: String(request_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    // Also notify sharing-ride guests
+    const [guests] = await conn.query(
+      `SELECT user_id FROM ride_participants WHERE ride_id = ? AND join_status = 'joined' AND role = 'guest'`,
+      [request_id],
+    );
+    if (guests.length) {
+      const guestIds = guests.map((g) => g.user_id);
+      guestIds.forEach((uid) =>
+        io.to(passengerRoom(uid)).emit("rideStageUpdate", { request_id, stage: "started" }),
+      );
+      getPushTokensByUserIds(guestIds).then((tokens) => {
         if (tokens.length) {
           sendPushToTokens(tokens, {
             title: "Trip Started",
@@ -2446,7 +2604,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
       `UPDATE rides SET status = 'completed', completed_at = NOW() WHERE ride_id = ?`,
       [request_id]
     );
-    if (ride.trip_type === "pool") {
+    if (["pool","group"].includes(ride.trip_type)) {
       await conn.execute(
         `UPDATE ride_bookings SET status = 'completed', completed_at = NOW() WHERE ride_id = ? AND status = 'started'`,
         [request_id]
@@ -2608,61 +2766,80 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
       );
     }
 
-    // 12) WALLET TRANSFERS (only if payment method is wallet)
-    const isWallet = ride.payment_method === 'In-App Wallet';   // from rides table
+    // 12) WALLET TRANSFERS
+    const isWallet = ride.payment_method === 'In-App Wallet';
     console.log("[DEBUG] isWallet:", isWallet, "payment_method from ride:", ride.payment_method);
     let walletResult = { ok: false, reason: "not_wallet_payment" };
 
     const driver_user_id = await resolveUserId(conn, String(ride.driver_id));
 
     if (isWallet) {
-      // Get wallet IDs
-      let passengerWallet, driverWallet;
-      try {
-        passengerWallet = await getWalletByUserId(conn, ride.passenger_id);
-        
-        console.log("[DEBUG] Resolved driver_user_id for wallet fetch:", driver_user_id);
-        driverWallet = await getWalletByUserId(conn, driver_user_id.user_id);
-      } catch (err) {
-        console.error("[DEBUG] Error fetching wallets:", err.message);
-        throw new Error(`Wallet fetch failed: ${err.message}`);
-      }
-      console.log("[DEBUG] passengerWallet:", passengerWallet, "driverWallet:", driverWallet);
-      const platformWallet = 'TD00000001';   // hardcoded platform wallet ID
+      const platformWallet = 'TD00000001';
+      const driverWallet   = await getWalletByUserId(conn, driver_user_id.user_id);
+      const totalFeesNu    = platform_fee_nu + gst_nu;
 
-      // Transfer 1: Passenger → Driver (net payout)
-      console.log("[DEBUG] Starting transfer1: passenger -> driver, amount_nu:", driver_payout_nu);
-      const transfer1 = await walletTransfer(conn, {
-        from_wallet: passengerWallet,
-        to_wallet: driverWallet,
-        amount_nu: driver_payout_nu,
-        reason: "RIDE PAYOUT",
-        meta: { ride_id: request_id, service_type: ride.service_type }
-      });
-      console.log("[DEBUG] transfer1 result:", transfer1);
-      if (!transfer1.ok) {
-        throw new Error(`Driver payout transfer failed: ${transfer1.reason}`);
-      }
-
-      // Transfer 2: Passenger → Platform (fees + GST)
-      const totalFeesNu = platform_fee_nu + gst_nu;
-      console.log("[DEBUG] totalFeesNu:", totalFeesNu);
-      if (totalFeesNu > 0) {
-        console.log("[DEBUG] Starting transfer2: passenger -> platform, amount_nu:", totalFeesNu);
-        const transfer2 = await walletTransfer(conn, {
-          from_wallet: passengerWallet,
-          to_wallet: platformWallet,
-          amount_nu: totalFeesNu,
-          reason: "PLATFORM_FEES_AND_GST",
-          meta: { ride_id: request_id, platform_fee_nu, gst_nu }
-        });
-        console.log("[DEBUG] transfer2 result:", transfer2);
-        if (!transfer2.ok) {
-          throw new Error(`Platform fee transfer failed: ${transfer2.reason}`);
+      if (["pool", "group"].includes(ride.trip_type)) {
+        // ── GROUP/POOL: each booking passenger pays their fare share ──
+        const [bookings] = await conn.query(
+          `SELECT rb.passenger_id, rb.fare_cents
+           FROM ride_bookings rb
+           WHERE rb.ride_id = ? AND rb.status = 'completed' AND rb.fare_cents > 0`,
+          [request_id]
+        );
+        const payoutIds = [];
+        for (const bk of bookings) {
+          const pWallet  = await getWalletByUserId(conn, bk.passenger_id);
+          const payoutNu = Number(bk.fare_cents) / 100;
+          const t = await walletTransfer(conn, {
+            from_wallet: pWallet, to_wallet: driverWallet,
+            amount_nu: payoutNu, reason: "RIDE PAYOUT",
+            meta: { ride_id: request_id, passenger_id: bk.passenger_id },
+          });
+          if (!t.ok) throw new Error(`Payout failed for passenger ${bk.passenger_id}: ${t.reason}`);
+          payoutIds.push(t.transaction_id_dr);
+          console.log(`[group payout] passenger=${bk.passenger_id} amount=${payoutNu} ok`);
         }
-        walletResult = { ok: true, driver_txn: transfer1.transaction_id, platform_txn: transfer2.transaction_id };
+        // Platform fees charged from host only
+        if (totalFeesNu > 0) {
+          const hostWallet = await getWalletByUserId(conn, ride.passenger_id);
+          const t2 = await walletTransfer(conn, {
+            from_wallet: hostWallet, to_wallet: platformWallet,
+            amount_nu: totalFeesNu, reason: "PLATFORM_FEES_AND_GST",
+            meta: { ride_id: request_id, platform_fee_nu, gst_nu },
+          });
+          if (!t2.ok) throw new Error(`Platform fee transfer failed: ${t2.reason}`);
+          walletResult = { ok: true, payout_txns: payoutIds, platform_txn: t2.transaction_id_cr };
+        } else {
+          walletResult = { ok: true, payout_txns: payoutIds };
+        }
       } else {
-        walletResult = { ok: true, driver_txn: transfer1.transaction_id };
+        // ── INSTANT/SCHEDULED: single passenger pays full fare ──
+        const passengerWallet = await getWalletByUserId(conn, ride.passenger_id);
+        console.log("[DEBUG] passengerWallet:", passengerWallet, "driverWallet:", driverWallet);
+
+        console.log("[DEBUG] Starting transfer1: passenger -> driver, amount_nu:", driver_payout_nu);
+        const transfer1 = await walletTransfer(conn, {
+          from_wallet: passengerWallet, to_wallet: driverWallet,
+          amount_nu: driver_payout_nu, reason: "RIDE PAYOUT",
+          meta: { ride_id: request_id, service_type: ride.service_type },
+        });
+        console.log("[DEBUG] transfer1 result:", transfer1);
+        if (!transfer1.ok) throw new Error(`Driver payout transfer failed: ${transfer1.reason}`);
+
+        console.log("[DEBUG] totalFeesNu:", totalFeesNu);
+        if (totalFeesNu > 0) {
+          console.log("[DEBUG] Starting transfer2: passenger -> platform, amount_nu:", totalFeesNu);
+          const transfer2 = await walletTransfer(conn, {
+            from_wallet: passengerWallet, to_wallet: platformWallet,
+            amount_nu: totalFeesNu, reason: "PLATFORM_FEES_AND_GST",
+            meta: { ride_id: request_id, platform_fee_nu, gst_nu },
+          });
+          console.log("[DEBUG] transfer2 result:", transfer2);
+          if (!transfer2.ok) throw new Error(`Platform fee transfer failed: ${transfer2.reason}`);
+          walletResult = { ok: true, driver_txn: transfer1.transaction_id, platform_txn: transfer2.transaction_id };
+        } else {
+          walletResult = { ok: true, driver_txn: transfer1.transaction_id };
+        }
       }
     }
 
@@ -2682,9 +2859,30 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     }
     socket.emit("fareFinalized", out);
 
-    // Push to passenger: trip complete
+    // Push to host passenger: trip complete
     if (ride.passenger_id) {
       getPushTokensByUserIds([ride.passenger_id]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "You've Arrived",
+            body: "Your trip has been completed. Thank you for riding!",
+            data: { type: "trip_completed", ride_id: String(request_id) },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    // Also notify sharing-ride guests on trip completion
+    const [guestsOnComplete] = await mysqlPool.query(
+      `SELECT user_id FROM ride_participants WHERE ride_id = ? AND join_status = 'joined' AND role = 'guest'`,
+      [request_id],
+    );
+    if (guestsOnComplete.length) {
+      const guestIds = guestsOnComplete.map((g) => g.user_id);
+      guestIds.forEach((uid) =>
+        io.to(passengerRoom(uid)).emit("fareFinalized", out),
+      );
+      getPushTokensByUserIds(guestIds).then((tokens) => {
         if (tokens.length) {
           sendPushToTokens(tokens, {
             title: "You've Arrived",
@@ -2979,7 +3177,7 @@ async function emitMerchantDelivered({ io, conn, request_id }) {
 async function emitPassengerOnRoad({ io, conn, request_id }) {
   try {
     const [[ride]] = await conn.query(
-      `SELECT passenger_id, batch_id FROM orders WHERE delivery_ride_id = ?`,
+      `SELECT user_id AS passenger_id, batch_id FROM orders WHERE delivery_ride_id = ?`,
       [request_id],
     );
 
