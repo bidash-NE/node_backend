@@ -1,76 +1,27 @@
 // models/adminTransferModel.js
 const db = require("../config/db");
 const axios = require("axios");
-const https = require("https");
-
-// Get configuration from environment variables
-const ID_SERVICE_URL =
-  process.env.ID_SERVICE_URL || "https://grab.newedge.bt/wallet";
-const NODE_TLS_REJECT_UNAUTHORIZED =
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0";
-
-// Create HTTPS agent based on environment
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: !NODE_TLS_REJECT_UNAUTHORIZED,
-});
 
 const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
+const ID_SERVICE_URL = process.env.ID_SERVICE_URL;
 
 /* ---------- Helpers to call ID generator API ---------- */
 async function getJournalCodeViaApi() {
-  try {
-    console.log(`Calling ID service at: ${ID_SERVICE_URL}/ids/journal`);
-
-    const response = await axios.post(
-      `${ID_SERVICE_URL}/ids/journal`,
-      {},
-      {
-        httpsAgent: httpsAgent,
-        timeout: 30000,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    if (!response.data?.ok || !response.data.code) {
-      throw new Error("ID service: failed to generate journal_code");
-    }
-    return response.data.code;
-  } catch (error) {
-    console.error("getJournalCodeViaApi error:", error.message);
-    throw new Error(`ID service error: ${error.message}`);
+  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});
+  if (!data?.ok || !data.code) {
+    throw new Error("ID service: failed to generate journal_code");
   }
+  return data.code;
 }
 
 async function getTxnIdsViaApi(count = 2) {
-  try {
-    console.log(`Calling ID service at: ${ID_SERVICE_URL}/ids/transaction`);
-
-    const response = await axios.post(
-      `${ID_SERVICE_URL}/ids/transaction`,
-      { count },
-      {
-        httpsAgent: httpsAgent,
-        timeout: 30000,
-        headers: {
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    if (
-      !response.data?.ok ||
-      !Array.isArray(response.data.data) ||
-      response.data.data.length < count
-    ) {
-      throw new Error("ID service: failed to generate transaction_id(s)");
-    }
-    return response.data.data; // array of ids
-  } catch (error) {
-    console.error("getTxnIdsViaApi error:", error.message);
-    throw new Error(`ID service error: ${error.message}`);
+  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/transaction`, {
+    count,
+  });
+  if (!data?.ok || !Array.isArray(data.data) || data.data.length < count) {
+    throw new Error("ID service: failed to generate transaction_id(s)");
   }
+  return data.data; // array of ids
 }
 
 /** Find admin by users.user_name (case-insensitive) with allowed role */
@@ -137,13 +88,9 @@ async function adminTipTransfer({
     );
 
     if (rows.length === 0) {
-      console.error("Driver not found for user_id:", user_id);
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 404,
-        message: "Driver not found for this user.",
-      };
+      // handle case where no driver found for this user_id
+      console.error("Driver not found");
+      return;
     }
 
     const driver_id = rows[0].driver_id;
@@ -275,7 +222,6 @@ async function adminTipTransfer({
       transactions: { admin_dr: txnAdmin, user_cr: txnUser },
     };
   } catch (err) {
-    console.error("adminTipTransfer error:", err);
     try {
       await conn.rollback();
     } catch {}
