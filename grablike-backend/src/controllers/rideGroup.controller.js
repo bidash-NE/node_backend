@@ -173,8 +173,8 @@ export async function getInviteByCode(req, res) {
 }
 
 /* fire-and-forget: socket emit + push to driver when a guest joins */
-function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats, status }) {
-  // Socket: emit to the ride room so driver's app updates in realtime
+async function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats, status }) {
+  // Socket: emit guestJoined + refreshed poolSummary so PoolList updates
   try {
     const io = req.app.get("io");
     if (io) {
@@ -184,8 +184,47 @@ function notifyDriverGuestJoined({ req, rideId, driverUserId, guestUserId, seats
         seats,
         status,
       });
+
+      // Re-emit poolSummary so driver's PoolList immediately shows the new guest booking
+      const { mysqlPool } = await import("../db/mysql.js");
+      const conn = await mysqlPool.getConnection();
+      try {
+        const [rows] = await conn.query(
+          `SELECT booking_id, passenger_id, seats,
+                  pickup_place AS pickup, dropoff_place AS dropoff,
+                  pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+                  fare_cents, currency, status
+           FROM ride_bookings
+           WHERE ride_id = ? AND status IN ('accepted','arrived_pickup','started','requested')`,
+          [rideId]
+        );
+        const [[sum]] = await conn.query(
+          `SELECT COALESCE(capacity_seats,0) AS capacity_seats,
+                  COALESCE(seats_booked,0) AS seats_booked,
+                  COALESCE(SUM(CASE WHEN b.status IN ('accepted','arrived_pickup','started') THEN b.seats END),0) AS seats_confirmed
+           FROM rides r LEFT JOIN ride_bookings b ON b.ride_id = r.ride_id
+           WHERE r.ride_id = ? GROUP BY r.ride_id`,
+          [rideId]
+        );
+        const sc = Number(sum?.seats_confirmed || 0);
+        io.to(`ride:${rideId}`).emit("poolSummary", {
+          request_id: String(rideId),
+          seats_confirmed: sc,
+          capacity_seats: Math.max(Number(sum?.capacity_seats || 2), sc),
+          seats_booked: Number(sum?.seats_booked || 0),
+          bookings: (rows || []).map((r) => ({
+            ...r,
+            booking_id: String(r.booking_id),
+            request_id: String(rideId),
+          })),
+        });
+      } finally {
+        conn.release();
+      }
     }
-  } catch {}
+  } catch (e) {
+    console.log("[notifyDriverGuestJoined] poolSummary error:", e?.message);
+  }
 
   // Push notification to driver
   getPushTokensByDriverIds([driverUserId])

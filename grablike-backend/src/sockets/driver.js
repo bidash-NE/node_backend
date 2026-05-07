@@ -1803,6 +1803,20 @@ async function handleJobAccept({ io, socket, mysqlPool, payload }) {
       }
 
       if (["pool","group"].includes(ride?.trip_type)) {
+        // Mark all pending bookings as accepted when driver accepts
+        try {
+          const cAcc = await mysqlPool.getConnection();
+          try {
+            await cAcc.execute(
+              `UPDATE ride_bookings SET status = 'accepted', accepted_at = NOW()
+               WHERE ride_id = ? AND status IN ('requested','scheduled')`,
+              [request_id],
+            );
+          } finally {
+            cAcc.release();
+          }
+        } catch {}
+
         let acceptedBookings = [];
         try {
           const c2 = await mysqlPool.getConnection();
