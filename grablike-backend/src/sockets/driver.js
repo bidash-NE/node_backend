@@ -2000,10 +2000,9 @@ async function handlePassengerStage({ io, socket, mysqlPool, payload, stage, ack
     );
     if (upd.affectedRows === 0) return safeAck({ ok: false, error: "Participant not found" });
 
-    // Notify driver app and passenger app via socket
+    // Notify all ride room members (driver + passenger) — one emit covers both
     const updatePayload = { request_id, user_id, stage };
     io.to(rideRoom(request_id)).emit("participantStageUpdate", updatePayload);
-    io.to(passengerRoom(user_id)).emit("participantStageUpdate", updatePayload);
 
     // Per-stage push notification
     const pushMap = {
@@ -3129,7 +3128,7 @@ async function emitMerchantDelivered({ io, conn, request_id }) {
 async function emitPassengerOnRoad({ io, conn, request_id }) {
   try {
     const [[ride]] = await conn.query(
-      `SELECT passenger_id, batch_id FROM orders WHERE delivery_ride_id = ?`,
+      `SELECT user_id AS passenger_id, batch_id FROM orders WHERE delivery_ride_id = ?`,
       [request_id],
     );
 
