@@ -19,7 +19,7 @@ async function enrichDriver(mysqlPool, driverId) {
          u.phone,
          dv.vehicle_id,
          dv.vehicle_type,
-         dv.plate_number,
+         dv.license_plate AS plate_number,
          (SELECT ROUND(AVG(rating), 1) FROM ride_ratings WHERE driver_id = d.driver_id) AS rating,
          (SELECT COUNT(*) FROM rides WHERE driver_id = d.driver_id AND status = 'completed') AS trips_completed
        FROM drivers d
