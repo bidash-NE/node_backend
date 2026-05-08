@@ -604,7 +604,198 @@ export async function removeGuest(req, res) {
 }
 
 /* =========================================================
-   7) REVOKE / EXPIRE INVITE (host only)
+   7) LIST AVAILABLE SHARED RIDES NEARBY
+   GET /api/rides/available-shared?lat=&lng=&radius_km=
+========================================================= */
+export async function listAvailableSharedRides(req, res) {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const radius = Math.min(Number(req.query.radius_km) || 10, 50);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ ok: false, error: "lat and lng are required" });
+  }
+
+  try {
+    const [rows] = await mysqlPool.query(
+      `SELECT
+         r.ride_id,
+         r.trip_type,
+         r.pickup_place,
+         r.dropoff_place,
+         r.pickup_lat,
+         r.pickup_lng,
+         r.dropoff_lat,
+         r.dropoff_lng,
+         r.fare_cents,
+         r.currency,
+         COALESCE(r.capacity_seats, 4)          AS capacity_seats,
+         COALESCE(r.seats_booked, 1)             AS seats_booked,
+         (COALESCE(r.capacity_seats,4) - COALESCE(r.seats_booked,1)) AS seats_available,
+         r.status,
+         r.created_at,
+         (
+           6371 * acos(
+             cos(radians(?)) * cos(radians(r.pickup_lat)) *
+             cos(radians(r.pickup_lng) - radians(?)) +
+             sin(radians(?)) * sin(radians(r.pickup_lat))
+           )
+         ) AS distance_km
+       FROM rides r
+       WHERE r.trip_type IN ('group','pool')
+         AND r.status IN ('driver_searching','accepted','driver_accepted')
+         AND (COALESCE(r.capacity_seats,4) - COALESCE(r.seats_booked,1)) > 0
+       HAVING distance_km <= ?
+       ORDER BY distance_km ASC
+       LIMIT 30`,
+      [lat, lng, lat, radius]
+    );
+    return res.json({ ok: true, data: rows });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message || "Server error" });
+  }
+}
+
+/* =========================================================
+   8) JOIN RIDE DIRECTLY (no invite code — Grab style)
+   POST /api/rides/:ride_id/join-direct
+   body: { user_id, seats? }
+========================================================= */
+export async function joinRideDirectly(req, res) {
+  const ride_id = asInt(req.params.ride_id);
+  const user_id = asInt(req.body?.user_id);
+
+  if (!ride_id) return res.status(400).json({ ok: false, error: "Invalid ride_id" });
+  if (!user_id) return res.status(400).json({ ok: false, error: "user_id is required" });
+
+  const seats = clampInt(req.body?.seats, 1, 1, 10);
+
+  let conn;
+  try {
+    conn = await mysqlPool.getConnection();
+    await conn.beginTransaction();
+
+    // fetch ride with lock
+    const [[ride]] = await conn.query(
+      `SELECT ride_id, trip_type, status, passenger_id,
+              capacity_seats, seats_booked,
+              fare_cents, currency,
+              pickup_place, dropoff_place,
+              pickup_lat, pickup_lng, dropoff_lat, dropoff_lng
+       FROM rides WHERE ride_id = ? FOR UPDATE`,
+      [ride_id]
+    );
+
+    if (!ride) {
+      await conn.rollback();
+      return res.status(404).json({ ok: false, error: "Ride not found" });
+    }
+
+    const allowedStatuses = ["driver_searching", "accepted", "driver_accepted"];
+    if (!allowedStatuses.includes(ride.status)) {
+      await conn.rollback();
+      return res.status(409).json({ ok: false, error: "Ride is no longer accepting passengers" });
+    }
+
+    if (!["group", "pool"].includes(String(ride.trip_type || "").toLowerCase())) {
+      await conn.rollback();
+      return res.status(409).json({ ok: false, error: "This ride is not a shared ride" });
+    }
+
+    // prevent host from joining as guest
+    if (Number(ride.passenger_id) === Number(user_id)) {
+      await conn.rollback();
+      return res.status(409).json({ ok: false, error: "You are the host of this ride" });
+    }
+
+    // capacity check
+    const currentSeats = Number(ride.seats_booked || 1);
+    const capacity     = Number(ride.capacity_seats || 4);
+    if (currentSeats + seats > capacity) {
+      await conn.rollback();
+      return res.status(409).json({ ok: false, error: "Not enough seats available" });
+    }
+
+    // already a participant?
+    const [[existing]] = await conn.query(
+      `SELECT participant_id, role, join_status
+       FROM ride_participants
+       WHERE ride_id = ? AND user_id = ?
+       LIMIT 1 FOR UPDATE`,
+      [ride_id, user_id]
+    );
+
+    if (existing) {
+      if (existing.join_status === "removed") {
+        await conn.rollback();
+        return res.status(403).json({ ok: false, error: "You were removed from this ride" });
+      }
+      if (existing.join_status === "joined") {
+        await conn.rollback();
+        return res.status(200).json({ ok: true, data: { ride_id, status: "already_joined" } });
+      }
+      // re-join if left
+      await conn.query(
+        `UPDATE ride_participants SET join_status='joined', seats=?, updated_at=NOW() WHERE participant_id=?`,
+        [seats, existing.participant_id]
+      );
+      await conn.commit();
+      notifyDriverGuestJoined({ req, rideId: ride_id, driverUserId: ride.passenger_id, guestUserId: user_id, seats, status: "rejoined" });
+      return res.json({ ok: true, data: { ride_id, status: "rejoined", seats } });
+    }
+
+    // insert participant
+    await conn.query(
+      `INSERT INTO ride_participants (ride_id, user_id, role, seats, join_status) VALUES (?, ?, 'guest', ?, 'joined')`,
+      [ride_id, user_id, seats]
+    );
+
+    // fare split
+    const totalFare     = Number(ride.fare_cents || 0);
+    const newTotalSeats = currentSeats + seats;
+    const guestFare     = totalFare > 0 ? Math.round(totalFare * seats / newTotalSeats) : 0;
+    const hostFare      = totalFare > 0 ? totalFare - guestFare : 0;
+
+    if (ride.passenger_id && hostFare >= 0) {
+      await conn.query(
+        `UPDATE ride_bookings SET fare_cents=? WHERE ride_id=? AND passenger_id=?`,
+        [hostFare, ride_id, ride.passenger_id]
+      );
+    }
+
+    await conn.query(
+      `INSERT INTO ride_bookings
+         (ride_id, passenger_id, seats, status, requested_at,
+          pickup_place, dropoff_place, pickup_lat, pickup_lng,
+          dropoff_lat, dropoff_lng, fare_cents, currency)
+       VALUES (?, ?, ?, 'accepted', NOW(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ride_id, user_id, seats,
+        ride.pickup_place, ride.dropoff_place,
+        ride.pickup_lat,   ride.pickup_lng,
+        ride.dropoff_lat,  ride.dropoff_lng,
+        guestFare, ride.currency || "BTN",
+      ]
+    );
+
+    await conn.query(
+      `UPDATE rides SET seats_booked=? WHERE ride_id=?`,
+      [newTotalSeats, ride_id]
+    );
+
+    await conn.commit();
+    notifyDriverGuestJoined({ req, rideId: ride_id, driverUserId: ride.passenger_id, guestUserId: user_id, seats, status: "joined" });
+    return res.json({ ok: true, data: { ride_id, status: "joined", seats } });
+  } catch (e) {
+    try { await conn?.rollback(); } catch {}
+    return res.status(500).json({ ok: false, error: e.message || "Server error" });
+  } finally {
+    try { conn?.release(); } catch {}
+  }
+}
+
+/* =========================================================
+   9) REVOKE / EXPIRE INVITE (host only)
    POST /api/rides/:ride_id/invites/:code/revoke
 ========================================================= */
 export async function revokeInvite(req, res) {

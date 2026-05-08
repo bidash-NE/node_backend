@@ -8,6 +8,8 @@ import {
   leaveRide,
   removeGuest,
   revokeInvite,
+  listAvailableSharedRides,
+  joinRideDirectly,
 } from "../controllers/rideGroup.controller.js";
 
 const router = Router();
@@ -19,6 +21,10 @@ router.post("/rides/:ride_id/invites/:code/revoke", revokeInvite);
 // invite lookup + join
 router.get("/ride-invites/:code", getInviteByCode);
 router.post("/ride-invites/:code/join", joinByInviteCode);
+
+/* -------- discovery & direct join (Grab-style) -------- */
+router.get("/rides/available-shared", listAvailableSharedRides);
+router.post("/rides/:ride_id/join-direct", joinRideDirectly);
 
 /* -------- participants -------- */
 router.get("/rides/:ride_id/participants", listParticipants);
