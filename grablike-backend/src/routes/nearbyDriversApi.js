@@ -21,7 +21,7 @@ async function getUserAndDriver(mysqlPool, driverId) {
     u.email           AS email,
     u.phone           AS phone,
     u.role            AS role,
-    u.profile_image   AS profile_image
+    u.profile_image   AS profile_image,
 
     d.driver_id       AS driver_id,
     d.user_id         AS driver_user_id,
