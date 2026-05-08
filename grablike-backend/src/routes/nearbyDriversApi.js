@@ -21,6 +21,7 @@ async function getUserAndDriver(mysqlPool, driverId) {
     u.email           AS email,
     u.phone           AS phone,
     u.role            AS role,
+    u.profile_image   AS profile_image
 
     d.driver_id       AS driver_id,
     d.user_id         AS driver_user_id,
@@ -49,6 +50,7 @@ async function getUserAndDriver(mysqlPool, driverId) {
       email: r.email,
       phone: r.phone,
       role: r.role,
+      profile_image: r.profile_image
     };
 
     const driver = r.driver_id
