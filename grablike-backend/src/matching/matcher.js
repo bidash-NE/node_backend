@@ -155,9 +155,14 @@ export const matcher = {
   }) {
     const wps = normalizeWaypoints(waypoints);
 
+    const prefDriverId =
+      preferred_driver_id != null && String(preferred_driver_id).trim() !== ""
+        ? String(preferred_driver_id).trim()
+        : null;
+
     // Store ride details with state "broadcasted"
     await redis.hset(rideHash(rideId), {
-      state: "broadcasted", // was "searching"
+      state: "broadcasted",
       cityId: cityId || "thimphu",
       serviceType: serviceType || service_code,
       service_code: service_code || serviceType,
@@ -183,6 +188,7 @@ export const matcher = {
       booking_id: booking_id != null ? String(booking_id) : "",
       job_type: job_type || "SINGLE",
       batch_id: batch_id != null ? String(batch_id) : "",
+      preferred_driver_id: prefDriverId ?? "",
     });
 
     // Discover nearby drivers
@@ -192,27 +198,21 @@ export const matcher = {
       pickup,
     });
 
-    // Prioritize preferred driver if provided
-    let finalCandidates = candidates;
-    if (
-      preferred_driver_id != null &&
-      String(preferred_driver_id).trim() !== ""
-    ) {
-      const pref = String(preferred_driver_id);
-      const rest = candidates.filter((id) => String(id) !== pref);
-      finalCandidates = [pref, ...rest];
+    // If preferred driver not already in geo results, inject them so we always
+    // attempt the socket emit even if they're slightly outside the geo key.
+    let allCandidates = candidates;
+    if (prefDriverId && !candidates.map(String).includes(prefDriverId)) {
+      allCandidates = [prefDriverId, ...candidates];
     }
 
-    if (!finalCandidates.length) {
+    if (!allCandidates.length) {
       await redis.hset(rideHash(rideId), { state: "no_drivers" });
       await offerAdapter.markNoDrivers({ rideId });
-      console.log(
-        `[matcher.requestRide] rideId=${rideId} no drivers found, cancelling`,
-      );
+      console.log(`[matcher.requestRide] rideId=${rideId} no drivers found`);
       return { rideId, state: "no_drivers" };
     }
 
-    // Broadcast to all drivers immediately (no sequential queue)
+    // Fetch ride from Redis for building the job payload
     const ride = await redis.hgetall(rideHash(rideId));
 
     // Normalize fare for emission
@@ -235,21 +235,17 @@ export const matcher = {
     const dropoffArr = ride.dropoff ? JSON.parse(ride.dropoff) : undefined;
     let waypointsStored = [];
     try {
-      waypointsStored = ride.waypoints_json
-        ? JSON.parse(ride.waypoints_json)
-        : [];
+      waypointsStored = ride.waypoints_json ? JSON.parse(ride.waypoints_json) : [];
     } catch {
       waypointsStored = [];
     }
     const stops_count = Number(ride.stops_count || 0);
     const jobType = ride.job_type || "SINGLE";
     const batchId =
-      ride.batch_id != null && ride.batch_id !== ""
-        ? Number(ride.batch_id)
-        : null;
+      ride.batch_id != null && ride.batch_id !== "" ? Number(ride.batch_id) : null;
 
-    // Emit to every driver via Socket.IO
-    finalCandidates.forEach((driverId) => {
+    // Helper: build and emit jobRequest payload to a single driver
+    const emitJobRequest = (driverId, { preferred = false } = {}) => {
       io.to(`driver:${driverId}`).emit("jobRequest", {
         request_id: rideId,
         passenger_id: ride.passenger_id,
@@ -260,8 +256,7 @@ export const matcher = {
         waypoints: waypointsStored,
         stops_count,
         distance_m: Number(ride.distance_m || 0),
-        distance_km:
-          Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10,
+        distance_km: Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10,
         eta_min: Math.round(Number(ride.duration_s || 0) / 60),
         fare: fareOut ?? 0,
         cityId: ride.cityId,
@@ -269,45 +264,80 @@ export const matcher = {
         service_code: ride.service_code,
         trip_type: ride.trip_type || "instant",
         offer_code: ride.offer_code || null,
-        payment_method: ride.payment_method
-          ? JSON.parse(ride.payment_method)
-          : null,
+        payment_method: ride.payment_method ? JSON.parse(ride.payment_method) : null,
         booking_id: ride.booking_id || null,
         seats: ride.seats ? Number(ride.seats) : undefined,
         job_type: jobType,
         batch_id: batchId,
+        preferred,  // tells driver app "you were specifically requested"
       });
-    });
+    };
 
-    // ---- PUSH NOTIFICATIONS FOR DRIVERS (added) ----
-    if (finalCandidates.length) {
+    const PREFERRED_FALLBACK_MS = 30_000; // 30 s
+
+    if (prefDriverId) {
+      // ── Preferred driver mode ──
+      // 1. Notify only the preferred driver immediately
+      console.log(`[matcher] preferred_driver_id=${prefDriverId} for rideId=${rideId} — sending exclusive offer`);
+      emitJobRequest(prefDriverId, { preferred: true });
+
+      // Push notification to preferred driver only
+      const prefPushTokens = await getPushTokensByDriverIds([prefDriverId]);
+      if (prefPushTokens.length) {
+        sendPushToTokens(prefPushTokens, {
+          title: "You were requested!",
+          body: `A passenger specifically requested you. Pickup: ${ride.pickup_place || "nearby"}`,
+          data: { type: "ride_request", rideId, preferred: true },
+        }).catch((err) => console.error("[matcher] preferred push error:", err));
+      }
+
+      // 2. After 30s, if the ride is still unaccepted, fall back to all other candidates
+      setTimeout(async () => {
+        try {
+          const current = await redis.hget(rideHash(rideId), "state");
+          if (current !== "broadcasted") return; // already accepted or cancelled
+
+          const fallbackCandidates = allCandidates.filter((id) => String(id) !== prefDriverId);
+          if (!fallbackCandidates.length) return;
+
+          console.log(`[matcher] preferred driver ${prefDriverId} did not respond for rideId=${rideId} — broadcasting to ${fallbackCandidates.length} others`);
+
+          fallbackCandidates.forEach((driverId) => emitJobRequest(driverId));
+
+          const distanceKm = Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10;
+          const tokens = await getPushTokensByDriverIds(fallbackCandidates);
+          if (tokens.length) {
+            sendPushToTokens(tokens, {
+              title: "New Ride Request",
+              body: `Pickup: ${ride.pickup_place || "Your location"} – ${distanceKm} km`,
+              data: { type: "ride_request", rideId },
+            }).catch((err) => console.error("[matcher] fallback push error:", err));
+          }
+        } catch (err) {
+          console.error("[matcher] preferred fallback error:", err);
+        }
+      }, PREFERRED_FALLBACK_MS);
+
+    } else {
+      // ── Normal broadcast to all nearby drivers ──
+      allCandidates.forEach((driverId) => emitJobRequest(driverId));
+
       const distanceKm = Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10;
-      const pushTokens = await getPushTokensByDriverIds(finalCandidates);
-      console.log("[matcher.requestRide] Push tokens for drivers:", pushTokens);
-
+      const pushTokens = await getPushTokensByDriverIds(allCandidates);
       if (pushTokens.length) {
-        const notificationMessage = {
+        sendPushToTokens(pushTokens, {
           title: "New Ride Request",
           body: `Pickup: ${ride.pickup_place || "Your location"} – ${distanceKm} km`,
-          data: {
-            type: "ride_request",
-            rideId,
-            pickup: ride.pickup,        // JSON string; app can parse
-            dropoff: ride.dropoff,
-            fare: fareOut,
-            // Include any other data needed to open the ride screen
-          },
-        };
-        sendPushToTokens(pushTokens, notificationMessage).catch((err) => {
-          console.error("[matcher.requestRide] Push notification error:", err);
-        });
+          data: { type: "ride_request", rideId, pickup: ride.pickup, dropoff: ride.dropoff, fare: fareOut },
+        }).catch((err) => console.error("[matcher.requestRide] Push notification error:", err));
       }
     }
 
     return {
       rideId,
       state: "broadcasted",
-      candidates: finalCandidates.length,
+      candidates: allCandidates.length,
+      preferred_driver_id: prefDriverId,
       pickup,
       dropoff,
       pickup_place,

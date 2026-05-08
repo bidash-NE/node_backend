@@ -15,12 +15,15 @@ async function enrichDriver(mysqlPool, driverId) {
     const [rows] = await conn.execute(
       `SELECT
          d.driver_id,
+         d.rating,
+         d.trips_completed,
          u.user_name,
          u.phone,
          dv.vehicle_id,
-         dv.vehicle_type
+         dv.vehicle_type,
+         dv.plate_number
        FROM drivers d
-       LEFT JOIN users u  ON u.user_id  = d.user_id
+       LEFT JOIN users u          ON u.user_id    = d.user_id
        LEFT JOIN driver_vehicles dv ON dv.driver_id = d.driver_id
        WHERE d.driver_id = ?
        LIMIT 1`,
@@ -184,6 +187,9 @@ export default function makePassengerNearbyDriversRouter(mysqlPool) {
             phone: db?.phone ?? null,
             vehicle_type: db?.vehicle_type ?? null,
             vehicle_id: db?.vehicle_id ?? null,
+            plate_number: db?.plate_number ?? null,
+            rating: db?.rating != null ? parseFloat(Number(db.rating).toFixed(1)) : null,
+            trips_completed: db?.trips_completed != null ? Number(db.trips_completed) : null,
           };
         })
       );
