@@ -148,54 +148,54 @@ export function earningsRouter(mysqlPool) {
         }));
       });
 
-      // ---------- Online hours from Mongo ----------
-      const onlineAgg = await DriverOnlineSession.aggregate([
-        {
-          $match: {
-            driver_id: Number(driver_id),
-            started_at: { $lt: endPlusOne },
-            $or: [{ ended_at: null }, { ended_at: { $gt: startDate } }],
-          },
-        },
-        {
-          $project: {
-            overlapStart: {
-              $cond: [
-                { $gt: ["$started_at", startDate] },
-                "$started_at",
-                startDate,
-              ],
-            },
-            // Fix: compute overlapEnd only if ended_at exists and is before endPlusOne
-            overlapEnd: {
-              $cond: [
-                {
-                  $and: [
-                    { $ne: ["$ended_at", null] },
-                    { $lt: ["$ended_at", endPlusOne] },
-                  ],
-                },
-                "$ended_at",
-                endPlusOne,
-              ],
+      // ---------- Online hours from Mongo (optional — fails gracefully) ----------
+      let hours = 0;
+      try {
+        const onlineAgg = await DriverOnlineSession.aggregate([
+          {
+            $match: {
+              driver_id: Number(driver_id),
+              started_at: { $lt: endPlusOne },
+              $or: [{ ended_at: null }, { ended_at: { $gt: startDate } }],
             },
           },
-        },
-        {
-          $project: {
-            seconds: {
-              $divide: [{ $subtract: ["$overlapEnd", "$overlapStart"] }, 1000],
+          {
+            $project: {
+              overlapStart: {
+                $cond: [
+                  { $gt: ["$started_at", startDate] },
+                  "$started_at",
+                  startDate,
+                ],
+              },
+              overlapEnd: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$ended_at", null] },
+                      { $lt: ["$ended_at", endPlusOne] },
+                    ],
+                  },
+                  "$ended_at",
+                  endPlusOne,
+                ],
+              },
             },
           },
-        },
-        { $group: { _id: null, total_seconds: { $sum: "$seconds" } } },
-      ]);
-
-      const onlineSeconds = Math.max(
-        0,
-        Math.round(onlineAgg?.[0]?.total_seconds || 0),
-      );
-      const hours = Math.round((onlineSeconds / 3600) * 10) / 10;
+          {
+            $project: {
+              seconds: {
+                $divide: [{ $subtract: ["$overlapEnd", "$overlapStart"] }, 1000],
+              },
+            },
+          },
+          { $group: { _id: null, total_seconds: { $sum: "$seconds" } } },
+        ]);
+        const onlineSeconds = Math.max(0, Math.round(onlineAgg?.[0]?.total_seconds || 0));
+        hours = Math.round((onlineSeconds / 3600) * 10) / 10;
+      } catch (mongoErr) {
+        console.warn("[earnings] MongoDB online-hours unavailable:", mongoErr?.message);
+      }
 
       // Keep your original response shape
       res.json({
