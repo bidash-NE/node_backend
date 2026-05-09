@@ -458,7 +458,7 @@ async function processJob(jobId) {
 
     // ❌ If still pending → wait for merchant
     if (status === "PENDING") {
-      console.log(`[SCHED] ⏳ job ${jobId} waiting for merchant action`);
+      // console.log(`[SCHED] ⏳ job ${jobId} waiting for merchant action`);
       await redis.del(buildLockKey(jobId)); // release lock
       return;
     }

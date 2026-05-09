@@ -28,6 +28,9 @@ module.exports = async function create(orderData) {
     order_id,
     user_id: orderData.user_id,
 
+    // ✅ ADDED: business_id from the first item (or null if no items)
+    business_id: orderData.items?.[0]?.business_id || null,
+
     total_amount:
       orderData.total_amount != null ? Number(orderData.total_amount) : 0,
     discount_amount:
