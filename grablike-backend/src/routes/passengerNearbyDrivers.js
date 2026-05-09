@@ -17,10 +17,14 @@ async function enrichDriver(mysqlPool, driverId) {
          d.driver_id,
          u.user_name,
          u.phone,
+         u.profile_image,
          dv.vehicle_id,
-         dv.vehicle_type
+         dv.vehicle_type,
+         dv.license_plate AS plate_number,
+         (SELECT ROUND(AVG(rating), 1) FROM ride_ratings WHERE driver_id = d.driver_id) AS rating,
+         (SELECT COUNT(*) FROM rides WHERE driver_id = d.driver_id AND status = 'completed') AS trips_completed
        FROM drivers d
-       LEFT JOIN users u  ON u.user_id  = d.user_id
+       LEFT JOIN users u          ON u.user_id    = d.user_id
        LEFT JOIN driver_vehicles dv ON dv.driver_id = d.driver_id
        WHERE d.driver_id = ?
        LIMIT 1`,
@@ -182,8 +186,12 @@ export default function makePassengerNearbyDriversRouter(mysqlPool) {
             status: "online",
             driver_name: db?.user_name ?? null,
             phone: db?.phone ?? null,
+            profile_image: db?.profile_image ?? null,
             vehicle_type: db?.vehicle_type ?? null,
             vehicle_id: db?.vehicle_id ?? null,
+            plate_number: db?.plate_number ?? null,
+            rating: db?.rating != null ? parseFloat(Number(db.rating).toFixed(1)) : null,
+            trips_completed: db?.trips_completed != null ? Number(db.trips_completed) : null,
           };
         })
       );

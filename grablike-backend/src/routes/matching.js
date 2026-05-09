@@ -79,6 +79,9 @@ export function makeMatchingRouter(io, mysqlPool) {
       // scheduling
       booking_type: bookingTypeRaw = "INSTANT", // INSTANT | SCHEDULED
       scheduled_at: scheduledAtRaw = null,
+
+      // preferred driver (from DriversNearby screen)
+      preferred_driver_id: preferredDriverIdRaw = null,
     } = req.body || {};
 
     /* -------------------- basic validation -------------------- */
@@ -243,6 +246,11 @@ export function makeMatchingRouter(io, mysqlPool) {
     const platform_fee_rule_id = Number.isFinite(Number(platformFeeRuleIdRaw))
       ? Number(platformFeeRuleIdRaw)
       : null;
+
+    const preferred_driver_id =
+      preferredDriverIdRaw != null && String(preferredDriverIdRaw).trim() !== ""
+        ? String(preferredDriverIdRaw).trim()
+        : null;
 
     /* -------------------- waypoints normalize -------------------- */
     const MAX_WPS = 5;
@@ -479,6 +487,8 @@ export function makeMatchingRouter(io, mysqlPool) {
         platform_fee_rule_id,
         platform_fee_cents: platformFeeCents,
         gst_cents: gstCents,
+
+        preferred_driver_id,
       });
 
       return res.json({
