@@ -485,6 +485,7 @@ const ALLOWED_STATUSES = new Set([
   "READY",
   "OUT_FOR_DELIVERY",
   "DELIVERED",
+  "PICKEDUP",
   "CANCELLED",
 ]);
 
@@ -1220,6 +1221,54 @@ async function updateOrderStatus(req, res) {
       return markOrderDelivered(req, res);
     }
 
+    // PICKEDUP pipeline (customer pickup)
+    if (normalized === "PICKEDUP") {
+      // Store pickedup_by in orders table immediately
+      const pickedup_by = body.pickedup_by || "CUSTOMER";
+
+      // Update orders table with pickedup info
+      await db.query(
+        `UPDATE orders 
+     SET pickedup_by = ?, 
+         pickedup_at = NOW(),
+         status = 'PICKEDUP'
+     WHERE order_id = ?`,
+        [pickedup_by, order_id],
+      );
+
+      // Send immediate notification to customer
+      try {
+        await sendPushToUserId(user_id, {
+          title: "✅ Order Picked Up Successfully",
+          body: `You have successfully picked up your order ${order_id}. Thank you for shopping with us!`,
+        });
+
+        // Also notify merchant
+        for (const business_id of business_ids) {
+          const merchantUserId = await resolveMerchantUserIdFromBusinessId(
+            db,
+            business_id,
+          );
+          if (merchantUserId) {
+            await sendPushToUserId(merchantUserId, {
+              title: "Order Picked Up",
+              body: `Order ${order_id} has been picked up by the customer.`,
+            });
+          }
+        }
+      } catch (notifyErr) {
+        console.error("[PICKEDUP notify error]", notifyErr);
+      }
+
+      // ✅ IMPORTANT: Call markOrderPickedUp to migrate to pickedup_orders
+      req.body = {
+        ...(req.body || {}),
+        order_id,
+        pickedup_by: pickedup_by,
+        reason: finalReason || "",
+      };
+      return markOrderPickedUp(req, res);
+    }
     // CONFIRMED with unavailable changes
     if (normalized === "CONFIRMED") {
       const locked = new Set(["DELIVERED", "CANCELLED"]);
@@ -1672,6 +1721,176 @@ async function markOrderDelivered(req, res) {
   }
 }
 
+// Add this function after markOrderDelivered function (around line 900+)
+
+async function markOrderPickedUp(req, res) {
+  const order_id = String(req.params.order_id || req.body?.order_id || "")
+    .trim()
+    .toUpperCase();
+  const pickedup_by = String(req.body?.pickedup_by || "SYSTEM").trim();
+  const reason = String(req.body?.reason || "").trim();
+
+  if (!order_id) {
+    return res
+      .status(400)
+      .json({ success: false, message: "order_id is required" });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Get order details
+    const [[order]] = await conn.query(
+      `SELECT * FROM orders WHERE order_id = ? FOR UPDATE`,
+      [order_id],
+    );
+
+    if (!order) {
+      await conn.rollback();
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    // Check if already migrated
+    const [[existing]] = await conn.query(
+      `SELECT order_id FROM pickedup_orders WHERE order_id = ? LIMIT 1`,
+      [order_id],
+    );
+
+    if (existing) {
+      await conn.commit();
+      return res.json({
+        success: true,
+        message: "Order already migrated to pickedup_orders",
+        order_id,
+        status: "PICKEDUP",
+      });
+    }
+
+    // ✅ FIXED: Removed fm.name (only use item_name)
+    const [items] = await conn.query(
+      `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
+      [order_id],
+    );
+
+    if (!items.length) {
+      await conn.rollback();
+      return res.status(404).json({
+        success: false,
+        message: "No items found for this order",
+      });
+    }
+
+    // Get business name
+    const [[business]] = await conn.query(
+      `SELECT business_name FROM merchant_business_details WHERE business_id = ?`,
+      [order.business_id],
+    );
+
+    const businessName = business?.business_name || "Unknown Business";
+
+    // Parse pickup address
+    let pickupAddress = order.delivery_address || "N/A";
+    if (pickupAddress !== "N/A" && typeof pickupAddress === "string") {
+      try {
+        const parsed = JSON.parse(pickupAddress);
+        pickupAddress = parsed.address || pickupAddress;
+      } catch (e) {}
+    }
+
+    // Insert into pickedup_orders
+    await conn.query(
+      `INSERT INTO pickedup_orders (
+        order_id, user_id, business_id, business_name, status,
+        total_amount, discount_amount, payment_method, pickup_address,
+        pickedup_by, pickedup_at, original_created_at, original_updated_at
+      ) VALUES (?, ?, ?, ?, 'PICKEDUP', ?, ?, ?, ?, ?, NOW(), ?, ?)`,
+      [
+        order_id,
+        order.user_id,
+        order.business_id,
+        businessName,
+        order.total_amount,
+        order.discount_amount || 0,
+        order.payment_method,
+        pickupAddress,
+        pickedup_by,
+        order.created_at,
+        order.updated_at,
+      ],
+    );
+
+    // Insert items into pickedup_order_items
+    for (const item of items) {
+      const subtotal =
+        (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
+
+      await conn.query(
+        `INSERT INTO pickedup_order_items (
+          order_id, business_id, business_name, menu_id, item_name,
+          item_image, quantity, price, subtotal
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          order_id,
+          item.business_id || order.business_id,
+          businessName,
+          item.menu_id,
+          item.menu_name || `Item ${item.menu_id}`,
+          item.item_image || null,
+          item.quantity,
+          item.price,
+          subtotal,
+        ],
+      );
+    }
+
+    // Delete from orders
+    await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [order_id]);
+    await conn.query(`DELETE FROM orders WHERE order_id = ?`, [order_id]);
+
+    await conn.commit();
+
+    console.log(
+      `[PICKEDUP] Order ${order_id} migrated to pickedup_orders by ${pickedup_by}`,
+    );
+
+    // Send push notification (optional)
+    try {
+      const [[user]] = await conn.query(
+        `SELECT user_name FROM users WHERE user_id = ?`,
+        [order.user_id],
+      );
+
+      await sendPushToUserId(order.user_id, {
+        title: "✅ Order Picked Up Successfully",
+        body: `You have successfully picked up your order ${order_id}. Thank you for shopping with us!`,
+      });
+    } catch (notifyErr) {
+      console.error("[PICKEDUP notify error]", notifyErr);
+    }
+
+    return res.json({
+      success: true,
+      message: "Order marked as picked up and migrated successfully.",
+      data: { order_id, status: "PICKEDUP" },
+    });
+  } catch (e) {
+    await conn.rollback();
+    console.error("[markOrderPickedUp]", e);
+    return res.status(500).json({
+      success: false,
+      message: "Technical error while marking picked up.",
+      error: e?.message,
+    });
+  } finally {
+    conn.release();
+  }
+}
 module.exports = {
   uploadOrderImages,
   createOrder,
@@ -1686,4 +1905,5 @@ module.exports = {
   getOrderStatusCountsByBusiness,
   cancelOrderByUser,
   markOrderDelivered,
+  markOrderPickedUp,
 };

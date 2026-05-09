@@ -8,6 +8,7 @@ const dotenv = require("dotenv");
 
 const { initOrderManagementTable } = require("./models/initModel");
 const { startDeliveredMigrationJob } = require("./jobs/deliveredMigrationJob");
+const { startPickedupMigrationJob } = require("./jobs/pickedupMigrationJob");
 
 const orderRoutes = require("./routes/orderRoutes");
 const { attachRealtime } = require("./realtime"); // socket attach
@@ -134,6 +135,10 @@ const server = http.createServer(app);
       batchSize: 50,
     });
 
+    startPickedupMigrationJob({
+      intervalMs: 60000, // Check every minute
+      batchSize: 50,
+    });
     // ✅ ADDED: auto cleanup rejected scheduled orders (every 5 minutes)
     setInterval(
       () => {
