@@ -247,14 +247,15 @@ async function migrateDELIVEREDOrdersOnce({
   }
 }
 
-// Function to retry failed emails
+// jobs/deliveredMigrationJob.js - Fix retryFailedEmails function
+
 async function retryFailedEmails({
   batchSize = Number(process.env.DELIVERED_MIGRATION_BATCH || 10),
 } = {}) {
   try {
     const [failedEmails] = await db.query(
       `
-      SELECT order_id, user_email, user_name, business_name, order_data
+      SELECT order_id, user_email, business_name, order_data
       FROM receipt_email
       WHERE email_status = 'failed' 
         AND receipt_sent = 0
@@ -269,14 +270,14 @@ async function retryFailedEmails({
     console.log(`[RETRY] Retrying ${failedEmails.length} failed emails`);
 
     for (const failed of failedEmails) {
-      // You would need to rebuild order data or store full JSON
-      // For now, just log
       console.log(`[RETRY] Would retry order ${failed.order_id}`);
 
-      // Update retry count
+      // Use updated_at instead of last_attempt (or just don't track last_attempt)
       await db.query(
         `UPDATE receipt_email 
-         SET retry_count = retry_count + 1, last_attempt = NOW()
+         SET retry_count = retry_count + 1, 
+             updated_at = NOW(),
+             email_status = 'pending'
          WHERE order_id = ?`,
         [failed.order_id],
       );
