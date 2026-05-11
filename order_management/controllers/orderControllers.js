@@ -1829,6 +1829,8 @@ async function markOrderDelivered(req, res) {
 
     const deliveryFee = parseFloat(order.delivery_fee) || 0;
     const platformFee = parseFloat(order.platform_fee) || 0;
+    const discountAmount = parseFloat(order.discount_amount) || 0; // ✅ ADD THIS
+    const merchantDeliveryFee = parseFloat(order.merchant_delivery_fee) || 0; // ✅ ADD THIS
     const grandTotal = parseFloat(order.total_amount) || subtotal;
 
     // ✅ STEP 7: Handle business logo URL
@@ -1876,9 +1878,14 @@ async function markOrderDelivered(req, res) {
       subtotal: subtotal,
       delivery_fee: deliveryFee,
       platform_fee: platformFee,
-      discount_amount: 0,
+      discount_amount: discountAmount, // ✅ ADD THIS
+      merchant_delivery_fee: merchantDeliveryFee, // ✅ ADD THIS
       grand_total: grandTotal,
     };
+
+    console.log(
+      `[DELIVERED] Discount: ${discountAmount}, Merchant Delivery Fee: ${merchantDeliveryFee}`,
+    );
 
     // ✅ STEP 10: Send email immediately
     console.log(`[DELIVERED] Sending delivery receipt to ${user.email}...`);
