@@ -263,16 +263,17 @@ class PDFReceiptService {
 
         // ============ TOTALS SECTION ============
         const subtotal = this.safeNumber(orderData.subtotal);
-        const deliveryFee = this.safeNumber(orderData.delivery_fee);
         const platformFee = this.safeNumber(orderData.platform_fee);
+        const discountAmount = this.safeNumber(orderData.discount_amount);
+        const customerDeliveryFee = this.safeNumber(orderData.delivery_fee); // Paid by customer
         const merchantDeliveryFee = this.safeNumber(
           orderData.merchant_delivery_fee,
-        );
-        const discountAmount = this.safeNumber(orderData.discount_amount);
+        ); // Paid by merchant (free delivery to customer)
         const grandTotal = this.safeNumber(orderData.grand_total) || subtotal;
 
         let totalsY = tableY;
 
+        // Subtotal
         const subtotalRowHeight = 26;
         doc
           .rect(
@@ -289,7 +290,7 @@ class PDFReceiptService {
         doc.text(subtotalText, col4 + 45 - subtotalWidth, totalsY + 2);
         totalsY += subtotalRowHeight;
 
-        // ✅ Show Platform Fee if greater than 0 (for both delivery and pickup)
+        // Platform Fee (if greater than 0)
         if (platformFee > 0) {
           const platformFeeRowHeight = 26;
           doc
@@ -307,43 +308,7 @@ class PDFReceiptService {
           totalsY += platformFeeRowHeight;
         }
 
-        // ✅ Show Delivery Fee only if greater than 0 (for delivery orders, hide for pickup)
-        if (deliveryFee > 0) {
-          const deliveryFeeRowHeight = 26;
-          doc
-            .rect(
-              tableLeft,
-              totalsY - 5,
-              tableRight - tableLeft,
-              deliveryFeeRowHeight,
-            )
-            .stroke();
-          doc.text("Delivery Fee", col1 + 10, totalsY + 2);
-          const deliveryFeeText = `Nu ${deliveryFee.toFixed(2)}`;
-          const deliveryFeeWidth = doc.widthOfString(deliveryFeeText);
-          doc.text(deliveryFeeText, col4 + 45 - deliveryFeeWidth, totalsY + 2);
-          totalsY += deliveryFeeRowHeight;
-        }
-
-        // ✅ Show Merchant Delivery Fee only if exists and different from Delivery Fee
-        if (merchantDeliveryFee > 0 && merchantDeliveryFee !== deliveryFee) {
-          const merchantFeeRowHeight = 26;
-          doc
-            .rect(
-              tableLeft,
-              totalsY - 5,
-              tableRight - tableLeft,
-              merchantFeeRowHeight,
-            )
-            .stroke();
-          doc.text("Merchant Delivery Fee", col1 + 10, totalsY + 2);
-          const merchantFeeText = `Nu ${merchantDeliveryFee.toFixed(2)}`;
-          const merchantFeeWidth = doc.widthOfString(merchantFeeText);
-          doc.text(merchantFeeText, col4 + 45 - merchantFeeWidth, totalsY + 2);
-          totalsY += merchantFeeRowHeight;
-        }
-
-        // ✅ Show Discount if greater than 0
+        // Discount (if greater than 0)
         if (discountAmount > 0) {
           const discountRowHeight = 26;
           doc
@@ -361,6 +326,43 @@ class PDFReceiptService {
           totalsY += discountRowHeight;
         }
 
+        // ✅ Customer Delivery Fee (if greater than 0 - customer pays)
+        if (customerDeliveryFee > 0) {
+          const deliveryFeeRowHeight = 26;
+          doc
+            .rect(
+              tableLeft,
+              totalsY - 5,
+              tableRight - tableLeft,
+              deliveryFeeRowHeight,
+            )
+            .stroke();
+          doc.text("Delivery Fee", col1 + 10, totalsY + 2);
+          const deliveryFeeText = `Nu ${customerDeliveryFee.toFixed(2)}`;
+          const deliveryFeeWidth = doc.widthOfString(deliveryFeeText);
+          doc.text(deliveryFeeText, col4 + 45 - deliveryFeeWidth, totalsY + 2);
+          totalsY += deliveryFeeRowHeight;
+        }
+
+        // ✅ Merchant Delivery Fee (if greater than 0 - free delivery to customer, merchant pays)
+        if (merchantDeliveryFee > 0 && customerDeliveryFee === 0) {
+          const merchantFeeRowHeight = 26;
+          doc
+            .rect(
+              tableLeft,
+              totalsY - 5,
+              tableRight - tableLeft,
+              merchantFeeRowHeight,
+            )
+            .stroke();
+          doc.text("Delivery Fee (Paid by Merchant)", col1 + 10, totalsY + 2);
+          const merchantFeeText = `Nu ${merchantDeliveryFee.toFixed(2)}`;
+          const merchantFeeWidth = doc.widthOfString(merchantFeeText);
+          doc.text(merchantFeeText, col4 + 45 - merchantFeeWidth, totalsY + 2);
+          totalsY += merchantFeeRowHeight;
+        }
+
+        // Grand Total
         const grandTotalRowHeight = 38;
         doc
           .rect(
@@ -385,7 +387,6 @@ class PDFReceiptService {
           .stroke();
 
         currentY = totalsY + 15;
-
         // ============ SEAL SECTION ============
         const sealWidth = 60;
         const sealHeight = 60;
