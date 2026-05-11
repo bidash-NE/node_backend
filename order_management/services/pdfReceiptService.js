@@ -287,7 +287,15 @@ class PDFReceiptService {
         }
 
         // ============ RENDER TOTALS ON FIRST PAGE ============
-        await this.renderTotals(doc, orderData, tableLeft, col1, col4, tableY);
+        await this.renderTotals(
+          doc,
+          orderData,
+          tableLeft,
+          tableRight,
+          col1,
+          col4,
+          tableY,
+        );
 
         // ============ RENDER REMAINING ITEMS ON NEW PAGES ============
         if (itemsOnRest.length > 0) {
@@ -388,6 +396,7 @@ class PDFReceiptService {
                 doc,
                 orderData,
                 tableLeft,
+                tableRight,
                 col1,
                 col4,
                 pageTableY,
@@ -415,7 +424,15 @@ class PDFReceiptService {
     });
   }
 
-  async renderTotals(doc, orderData, tableLeft, col1, col4, startY) {
+  async renderTotals(
+    doc,
+    orderData,
+    tableLeft,
+    tableRight,
+    col1,
+    col4,
+    startY,
+  ) {
     const subtotal = this.safeNumber(orderData.subtotal);
     const platformFee = this.safeNumber(orderData.platform_fee);
     const discountAmount = this.safeNumber(orderData.discount_amount);
