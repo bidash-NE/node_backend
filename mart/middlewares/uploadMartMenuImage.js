@@ -62,26 +62,40 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-/* Updated multer uploader - supports both single and multiple files */
+/* Updated multer uploader - include ALL possible field names from HTML form */
 const fieldsUploader = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024, files: 10 }, // Allow up to 10 files total
+  limits: { fileSize: 5 * 1024 * 1024, files: 15 }, // Allow up to 15 files total
 }).fields([
-  { name: "item_image", maxCount: 1 },
-  { name: "image", maxCount: 1 },
-  { name: "file", maxCount: 1 },
-  { name: "additional_images", maxCount: 9 }, // Support multiple additional images
+  { name: "item_image", maxCount: 1 }, // Main image
+  { name: "image", maxCount: 1 }, // Alternative main image field
+  { name: "file", maxCount: 1 }, // Another alternative
+  { name: "additional_images", maxCount: 10 }, // Multiple additional images
+  { name: "product_images", maxCount: 1 }, // Optional: comma-separated URLs field
+  { name: "business_id", maxCount: 1 }, // Non-file field (ignored by multer)
+  { name: "category_name", maxCount: 1 }, // Non-file field
+  { name: "item_name", maxCount: 1 }, // Non-file field
+  { name: "description", maxCount: 1 }, // Non-file field
+  { name: "actual_price", maxCount: 1 }, // Non-file field
+  { name: "discount_percentage", maxCount: 1 }, // Non-file field
+  { name: "tax_rate", maxCount: 1 }, // Non-file field
+  { name: "is_veg", maxCount: 1 }, // Non-file field
+  { name: "spice_level", maxCount: 1 }, // Non-file field
+  { name: "is_available", maxCount: 1 }, // Non-file field
+  { name: "stock_limit", maxCount: 1 }, // Non-file field
+  { name: "sort_order", maxCount: 1 }, // Non-file field
+  { name: "size_standard", maxCount: 1 }, // Non-file field
+  { name: "available_sizes", maxCount: 1 }, // Non-file field
 ]);
 
 /**
- * Ready-to-use middleware (NOT a factory). Attach directly in routes.
- * Puts the chosen file on req.file (for single uploads) and
- * req.additionalFiles for multiple uploads.
+ * Ready-to-use middleware
  */
 function uploadMartMenuImage(req, res, next) {
   fieldsUploader(req, res, (err) => {
     if (err) {
+      console.error("Multer error:", err);
       err.statusCode = 400;
       return next(err);
     }
@@ -98,6 +112,11 @@ function uploadMartMenuImage(req, res, next) {
     // Handle multiple additional images
     req.additionalFiles =
       (Array.isArray(any.additional_images) && any.additional_images) || [];
+
+    // Also capture product_images field if it's a file
+    if (Array.isArray(any.product_images) && any.product_images.length > 0) {
+      req.productImagesFiles = any.product_images;
+    }
 
     return next();
   });
@@ -116,9 +135,9 @@ function toWebPaths(fileObjs) {
 }
 
 module.exports = {
-  uploadMartMenuImage, // <- middleware function
-  toWebPath, // <- function for single file
-  toWebPaths, // <- function for multiple files
+  uploadMartMenuImage,
+  toWebPath,
+  toWebPaths,
   DEST,
   SUBFOLDER,
   UPLOAD_ROOT,
