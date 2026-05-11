@@ -564,6 +564,7 @@ model mart_menu {
   created_at                DateTime                  @default(now()) @db.DateTime(0)
   updated_at                DateTime                  @default(now()) @db.DateTime(0)
   merchant_business_details merchant_business_details @relation(fields: [business_id], references: [business_id], onDelete: Cascade, map: "mart_menu_ibfk_1")
+  mart_product_info         mart_product_info?
 
   @@unique([business_id, category_name, item_name], map: "uk_martmenu_biz_cat_name")
   @@index([is_available], map: "idx_mart_menu_available")
@@ -809,6 +810,8 @@ model orders {
   delivery_photo_url        String?                       @db.Text
   delivery_special_mode     orders_delivery_special_mode?
   delivery_photo_urls       String?                       @db.Text
+  pickedup_by               String?                       @db.VarChar(100)
+  pickedup_at               DateTime?                     @db.Timestamp(0)
   order_items               order_items[]
 
   @@index([batch_id], map: "idx_orders_batch_id")
@@ -1001,6 +1004,7 @@ model ride_participants {
   role           ride_participants_role
   seats          Int                           @default(1) @db.UnsignedTinyInt
   join_status    ride_participants_join_status @default(joined)
+  stage          ride_participants_stage       @default(waiting)
   joined_at      DateTime                      @default(now()) @db.DateTime(0)
   updated_at     DateTime                      @default(now()) @db.DateTime(0)
 
@@ -1741,6 +1745,96 @@ model notification_logs {
   @@map("notification_logs")
 }
 
+model pickedup_order_items {
+  pickedup_item_id Int             @id @default(autoincrement())
+  order_id         String          @db.VarChar(50)
+  business_id      Int
+  business_name    String?         @db.VarChar(255)
+  menu_id          Int?
+  item_name        String?         @db.VarChar(255)
+  item_image       String?         @db.VarChar(500)
+  quantity         Int?            @default(1)
+  price            Decimal?        @db.Decimal(10, 2)
+  subtotal         Decimal?        @db.Decimal(10, 2)
+  created_at       DateTime        @default(now()) @db.Timestamp(0)
+  pickedup_orders  pickedup_orders @relation(fields: [order_id], references: [order_id], onDelete: Cascade, onUpdate: Restrict, map: "fk_pickedup_order_items_order")
+
+  @@index([business_id], map: "idx_business_id")
+  @@index([order_id], map: "idx_order_id")
+}
+
+model pickedup_orders {
+  pickedup_id           Int                    @id @default(autoincrement())
+  order_id              String                 @unique(map: "order_id") @db.VarChar(50)
+  user_id               Int
+  business_id           Int
+  business_name         String?                @db.VarChar(255)
+  status                String?                @default("PICKEDUP") @db.VarChar(50)
+  status_reason         String?                @db.VarChar(255)
+  total_amount          Decimal?               @db.Decimal(10, 2)
+  discount_amount       Decimal?               @default(0.00) @db.Decimal(10, 2)
+  payment_method        String?                @db.VarChar(50)
+  pickup_address        String?                @db.Text
+  note_for_restaurant   String?                @db.Text
+  if_unavailable        String?                @db.VarChar(50)
+  fulfillment_type      String?                @db.VarChar(50)
+  priority              String?                @db.VarChar(20)
+  estimated_pickup_time DateTime?              @db.Timestamp(0)
+  pickedup_by           String?                @db.VarChar(100)
+  pickedup_at           DateTime?              @db.Timestamp(0)
+  original_created_at   DateTime               @default(dbgenerated("('0000-00-00 00:00:00')")) @db.Timestamp(0)
+  original_updated_at   DateTime               @default(dbgenerated("('0000-00-00 00:00:00')")) @db.Timestamp(0)
+  created_at            DateTime               @default(now()) @db.Timestamp(0)
+  updated_at            DateTime               @default(now()) @db.Timestamp(0)
+  pickedup_order_items  pickedup_order_items[]
+
+  @@index([business_id], map: "idx_business_id")
+  @@index([order_id], map: "idx_order_id")
+  @@index([pickedup_at], map: "idx_pickedup_at")
+  @@index([status], map: "idx_status")
+  @@index([user_id], map: "idx_user_id")
+}
+
+model receipt_email {
+  id              Int                            @id @default(autoincrement())
+  order_id        String                         @unique(map: "unique_order") @db.VarChar(50)
+  user_id         Int
+  business_id     Int
+  user_email      String                         @db.VarChar(255)
+  user_name       String?                        @db.VarChar(255)
+  business_name   String?                        @db.VarChar(255)
+  receipt_sent    Boolean?                       @default(false)
+  receipt_sent_at DateTime?                      @db.Timestamp(0)
+  pdf_generated   Boolean?                       @default(false)
+  email_status    receipt_email_email_status?    @default(pending)
+  error_message   String?                        @db.Text
+  retry_count     Int?                           @default(0)
+  order_data      String?                        @db.LongText
+  created_at      DateTime                       @default(now()) @db.Timestamp(0)
+  updated_at      DateTime                       @default(now()) @db.Timestamp(0)
+  delivery_method receipt_email_delivery_method? @default(DELIVERY)
+
+  @@index([business_id], map: "idx_business_id")
+  @@index([delivery_method], map: "idx_delivery_method")
+  @@index([order_id], map: "idx_order_id")
+  @@index([receipt_sent, email_status], map: "idx_receipt_sent")
+  @@index([user_id], map: "idx_user_id")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model mart_product_info {
+  id              BigInt    @id @default(autoincrement()) @db.UnsignedBigInt
+  menu_id         BigInt    @unique(map: "menu_id") @db.UnsignedBigInt
+  size_standard   String?   @db.VarChar(50)
+  available_sizes String?   @db.VarChar(500)
+  product_images  String?   @db.VarChar(2000)
+  created_at      DateTime  @default(now()) @db.DateTime(0)
+  updated_at      DateTime  @default(now()) @db.DateTime(0)
+  mart_menu       mart_menu @relation(fields: [menu_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "mart_product_info_ibfk_1")
+
+  @@index([menu_id], map: "idx_menu_id")
+}
+
 enum settlement_accounts_party_type {
   DRIVER
   MERCHANT
@@ -2208,4 +2302,23 @@ enum event_bookings_payment_status {
   paid
   failed
   refunded
+}
+
+enum ride_participants_stage {
+  waiting
+  arrived
+  onboard
+  dropped
+}
+
+enum receipt_email_email_status {
+  pending
+  sent
+  failed
+  retry
+}
+
+enum receipt_email_delivery_method {
+  DELIVERY
+  PICKUP
 }
