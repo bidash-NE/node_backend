@@ -303,13 +303,13 @@ function startDeliveredMigrationJob({
 } = {}) {
   if (_timer) return;
 
-  migrateDELIVEREDOrdersOnce({ batchSize });
-  cleanupDECLINEDOrdersOnce({ batchSize });
+  migrateDELIVEREDOrdersOnce({ batchSize }).catch(console.error);
+  cleanupDECLINEDOrdersOnce({ batchSize }).catch(console.error);
 
   _timer = setInterval(() => {
-    migrateDELIVEREDOrdersOnce({ batchSize });
-    cleanupDECLINEDOrdersOnce({ batchSize });
-    retryFailedEmails({ batchSize: 10 });
+    migrateDELIVEREDOrdersOnce({ batchSize }).catch(console.error);
+    cleanupDECLINEDOrdersOnce({ batchSize }).catch(console.error);
+    retryFailedEmails({ batchSize: 10 }).catch(console.error);
   }, intervalMs);
 
   console.log(

@@ -49,11 +49,11 @@ class PickupEmailService {
         delivered_at:
           orderData.pickedup_at || orderData.created_at || new Date(),
 
-        // For pickup orders, these are zero
+        // ✅ For pickup orders: delivery_fee = 0, but platform_fee should be the actual value
         delivery_fee: 0,
-        platform_fee: 0,
+        platform_fee: orderData.platform_fee || 0,
         merchant_delivery_fee: 0,
-        discount_amount: 0,
+        discount_amount: orderData.discount_amount || 0,
       };
 
       const pdfBuffer =

@@ -22,7 +22,35 @@ class EmailService {
     try {
       console.log("📧 Preparing to send email...");
 
-      const pdfBuffer = await PDFReceiptService.generateOrderReceipt(orderData);
+      // ✅ Ensure all required fields are passed to PDF service
+      const pdfData = {
+        // Required fields
+        order_id: orderData.order_id,
+        customer_name: orderData.customer_name,
+        customer_email: orderData.customer_email,
+        customer_phone: orderData.customer_phone || "N/A",
+        business_name: orderData.business_name,
+        business_logo: orderData.business_logo,
+        business_address: orderData.business_address,
+        payment_method: orderData.payment_method,
+        status: orderData.status || "DELIVERED",
+        items: orderData.items,
+        subtotal: orderData.subtotal || 0,
+        grand_total: orderData.grand_total || 0,
+        delivery_address: orderData.delivery_address,
+        delivered_at: orderData.delivered_at,
+
+        // ✅ Important: Pass delivery_fee and platform_fee
+        delivery_fee: orderData.delivery_fee || 0,
+        platform_fee: orderData.platform_fee || 0,
+        discount_amount: orderData.discount_amount || 0,
+        merchant_delivery_fee: orderData.merchant_delivery_fee || 0,
+      };
+
+      console.log(`[EMAIL] Delivery Fee in PDF: ${pdfData.delivery_fee}`);
+      console.log(`[EMAIL] Platform Fee in PDF: ${pdfData.platform_fee}`);
+
+      const pdfBuffer = await PDFReceiptService.generateOrderReceipt(pdfData);
 
       const htmlContent = `
         <!DOCTYPE html>
@@ -54,7 +82,7 @@ class EmailService {
                 <p><strong>Delivery Date:</strong> ${orderData.delivered_at ? new Date(orderData.delivered_at).toLocaleString() : "N/A"}</p>
                 <p><strong>Business:</strong> ${orderData.business_name}</p>
                 <p><strong>Payment Method:</strong> ${orderData.payment_method}</p>
-                <p><strong>Total Amount:</strong> Nu. ${orderData.grand_total.toFixed(2)}</p>
+                <p><strong>Total Amount:</strong> Nu. ${(orderData.grand_total || 0).toFixed(2)}</p>
               </div>
               
               <p>Please find attached your detailed receipt in PDF format.</p>

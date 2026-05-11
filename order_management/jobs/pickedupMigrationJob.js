@@ -141,22 +141,21 @@ async function migratePICKEDUPOrdersOnce({
   _running = true;
 
   try {
+    // In pickedupMigrationJob.js
     const [rows] = await db.query(
       `
-      SELECT o.order_id, o.user_id, o.total_amount, o.created_at, 
-             o.payment_method, o.delivery_address, o.status, o.business_id,
-             o.updated_at, o.discount_amount, o.pickedup_by, o.pickedup_at
-      FROM orders o
-      LEFT JOIN pickedup_orders pu ON o.order_id = pu.order_id
-      LEFT JOIN receipt_email re ON o.order_id = re.order_id AND re.delivery_method = 'PICKUP'
-      WHERE UPPER(o.status) = 'PICKEDUP'
-        AND o.updated_at IS NOT NULL
-        AND o.updated_at <= (NOW() - INTERVAL 1 MINUTE)
-        AND pu.order_id IS NULL
-        AND (re.order_id IS NULL OR re.email_status != 'sent')
-      ORDER BY o.updated_at ASC
-      LIMIT ?
-      `,
+  SELECT o.order_id, o.user_id, o.total_amount, o.created_at, 
+         o.payment_method, o.delivery_address, o.status, o.business_id,
+         o.updated_at, o.discount_amount, o.pickedup_by, o.pickedup_at
+  FROM orders o
+  LEFT JOIN pickedup_orders pu ON o.order_id = pu.order_id
+  WHERE UPPER(o.status) = 'PICKEDUP'
+    AND o.pickedup_at IS NOT NULL
+    AND o.pickedup_at <= (NOW() - INTERVAL 30 MINUTE)  -- Wait 30 minutes before migrating
+    AND pu.order_id IS NULL
+  ORDER BY o.pickedup_at ASC
+  LIMIT ?
+  `,
       [batchSize],
     );
 

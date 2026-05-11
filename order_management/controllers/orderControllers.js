@@ -36,6 +36,7 @@ function pickFn(mod, name) {
   const first = Object.values(mod).find((v) => typeof v === "function");
   return first || null;
 }
+const PickupEmailService = require("../services/pickupEmailService");
 
 /* ---------------- CRUD ---------------- */
 const _createMod = require("../models/orders/crud/create");
@@ -1223,51 +1224,148 @@ async function updateOrderStatus(req, res) {
 
     // PICKEDUP pipeline (customer pickup)
     if (normalized === "PICKEDUP") {
-      // Store pickedup_by in orders table immediately
       const pickedup_by = body.pickedup_by || "CUSTOMER";
 
-      // Update orders table with pickedup info
+      // Update order status only (don't migrate yet)
       await db.query(
         `UPDATE orders 
      SET pickedup_by = ?, 
          pickedup_at = NOW(),
-         status = 'PICKEDUP'
+         status = 'PICKEDUP',
+         updated_at = NOW()
      WHERE order_id = ?`,
         [pickedup_by, order_id],
       );
 
-      // Send immediate notification to customer
+      // ✅ Fetch order details and SEND EMAIL IMMEDIATELY
       try {
-        await sendPushToUserId(user_id, {
+        // Get order details
+        const [[order]] = await db.query(
+          `SELECT * FROM orders WHERE order_id = ?`,
+          [order_id],
+        );
+
+        // Get user
+        const [users] = await db.query(
+          `SELECT user_id, user_name, email, phone FROM users WHERE user_id = ?`,
+          [order.user_id],
+        );
+
+        // Get items
+        const [items] = await db.query(
+          `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
+          [order_id],
+        );
+
+        // Get business
+        const [businesses] = await db.query(
+          `SELECT business_id, business_name, address, business_logo
+       FROM merchant_business_details 
+       WHERE business_id = ?`,
+          [order.business_id],
+        );
+
+        const business = businesses[0] || {};
+        const user = users[0] || {};
+
+        // Calculate totals
+        const subtotal = items.reduce((sum, item) => {
+          const price = parseFloat(item.price) || 0;
+          const quantity = parseInt(item.quantity) || 0;
+          return sum + price * quantity;
+        }, 0);
+        const grandTotal = parseFloat(order.total_amount) || subtotal;
+        // Get platform_fee from order
+        const platformFee = parseFloat(order.platform_fee) || 0;
+        const discountAmount = parseFloat(order.discount_amount) || 0;
+
+        // Build order data
+        const orderData = {
+          order_id: order.order_id,
+          created_at: order.created_at,
+          pickedup_at: order.pickedup_at,
+          payment_method: order.payment_method,
+          pickup_address: order.delivery_address,
+          customer_name: user.user_name,
+          customer_email: user.email,
+          customer_phone: user.phone,
+          business_name: business.business_name,
+          business_logo: business.business_logo,
+          business_address: business.address,
+          platform_fee: platformFee, // ✅ Add this
+          discount_amount: discountAmount, // ✅ Add this
+          items: items.map((item) => ({
+            menu_name: item.menu_name,
+            quantity: item.quantity,
+            price_per_unit: item.price,
+            subtotal:
+              (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+          })),
+          subtotal: subtotal,
+          grand_total: grandTotal,
+        };
+
+        // Send email immediately
+        const emailResult =
+          await PickupEmailService.sendPickupReceipt(orderData);
+
+        if (emailResult.success) {
+          // Save to receipt_email
+          await db.query(
+            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
+         VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'PICKUP')
+         ON DUPLICATE KEY UPDATE 
+         receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent'`,
+            [
+              order_id,
+              order.user_id,
+              order.business_id,
+              user.email,
+              user.user_name,
+              business.business_name,
+            ],
+          );
+          console.log(
+            `[PICKEDUP] Email sent immediately for order ${order_id}`,
+          );
+        } else {
+          console.error(
+            `[PICKEDUP] Email failed for order ${order_id}:`,
+            emailResult.error,
+          );
+          await db.query(
+            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
+         VALUES (?, ?, ?, ?, 'failed', ?, 'PICKUP')
+         ON DUPLICATE KEY UPDATE email_status = 'failed', error_message = ?`,
+            [
+              order_id,
+              order.user_id,
+              order.business_id,
+              user.email,
+              emailResult.error,
+              emailResult.error,
+            ],
+          );
+        }
+
+        // Send push notification
+        await sendPushToUserId(order.user_id, {
           title: "✅ Order Picked Up Successfully",
           body: `You have successfully picked up your order ${order_id}. Thank you for shopping with us!`,
         });
-
-        // Also notify merchant
-        for (const business_id of business_ids) {
-          const merchantUserId = await resolveMerchantUserIdFromBusinessId(
-            db,
-            business_id,
-          );
-          if (merchantUserId) {
-            await sendPushToUserId(merchantUserId, {
-              title: "Order Picked Up",
-              body: `Order ${order_id} has been picked up by the customer.`,
-            });
-          }
-        }
-      } catch (notifyErr) {
-        console.error("[PICKEDUP notify error]", notifyErr);
+      } catch (emailError) {
+        console.error("[PICKEDUP] Failed to send email:", emailError);
       }
 
-      // ✅ IMPORTANT: Call markOrderPickedUp to migrate to pickedup_orders
-      req.body = {
-        ...(req.body || {}),
+      return res.json({
+        success: true,
+        message: "Order marked as picked up. Receipt sent to customer.",
         order_id,
-        pickedup_by: pickedup_by,
-        reason: finalReason || "",
-      };
-      return markOrderPickedUp(req, res);
+        status: "PICKEDUP",
+      });
     }
     // CONFIRMED with unavailable changes
     if (normalized === "CONFIRMED") {
@@ -1660,54 +1758,188 @@ async function markOrderDelivered(req, res) {
       .json({ success: false, message: "order_id is required" });
   }
 
-  const conn = await db.getConnection();
   try {
-    if (typeof completeAndArchiveDeliveredOrder !== "function")
-      throw new Error(
-        "completeAndArchiveDeliveredOrder() pipeline not found/exported.",
-      );
+    // ✅ STEP 1: Update order status to DELIVERED
+    await db.query(
+      `UPDATE orders 
+       SET status = 'DELIVERED', 
+           delivered_at = NOW(),
+           updated_at = NOW()
+       WHERE order_id = ?`,
+      [order_id],
+    );
 
-    const result =
-      completeAndArchiveDeliveredOrder.length >= 3
-        ? await completeAndArchiveDeliveredOrder(conn, order_id, {
-            delivered_by,
-            reason,
-            capture_at: "DELIVERED",
-          })
-        : await completeAndArchiveDeliveredOrder(order_id, {
-            delivered_by,
-            reason,
-            capture_at: "DELIVERED",
-          });
+    console.log(
+      `[DELIVERED] Order ${order_id} marked as delivered by ${delivered_by}`,
+    );
 
-    if (!result?.ok) {
-      return res.status(400).json({
-        success: false,
-        message: result?.code || "Failed to mark delivered",
-        data: result || null,
-      });
+    // ✅ STEP 2: Fetch order details
+    const [[order]] = await db.query(
+      `SELECT * FROM orders WHERE order_id = ?`,
+      [order_id],
+    );
+
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
-    // console.log("[DELIVERED RESULT.capture]", result?.capture);
 
-    await safeNotifyWalletAndDelivery(conn, {
-      order_id,
-      user_id: result.user_id,
-      capture: result.capture,
-    });
+    // ✅ STEP 3: Fetch user details
+    const [users] = await db.query(
+      `SELECT user_id, user_name, email, phone FROM users WHERE user_id = ?`,
+      [order.user_id],
+    );
 
+    const user = users[0] || {};
+
+    if (!user.email) {
+      console.error(`[DELIVERED] No email found for user ${order.user_id}`);
+    }
+
+    // ✅ STEP 4: Fetch order items
+    const [items] = await db.query(
+      `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
+      [order_id],
+    );
+
+    if (!items.length) {
+      console.error(`[DELIVERED] No items found for order ${order_id}`);
+    }
+
+    // ✅ STEP 5: Fetch business details
+    const [businesses] = await db.query(
+      `SELECT business_id, business_name, address, business_logo
+       FROM merchant_business_details 
+       WHERE business_id = ?`,
+      [order.business_id],
+    );
+
+    const business = businesses[0] || {};
+
+    // ✅ STEP 6: Calculate totals
+    const subtotal = items.reduce((sum, item) => {
+      const price = parseFloat(item.price) || 0;
+      const quantity = parseInt(item.quantity) || 0;
+      return sum + price * quantity;
+    }, 0);
+
+    const deliveryFee = parseFloat(order.delivery_fee) || 0;
+    const platformFee = parseFloat(order.platform_fee) || 0;
+    const grandTotal = parseFloat(order.total_amount) || subtotal;
+
+    // ✅ STEP 7: Handle business logo URL
+    let businessLogo = null;
+    if (business.business_logo) {
+      let logo = business.business_logo;
+      if (logo.startsWith("/uploads/")) {
+        businessLogo = `https://backend.tabdhey.bt/merchant${logo}`;
+      } else if (logo.startsWith("http")) {
+        businessLogo = logo;
+      } else {
+        businessLogo = `https://backend.tabdhey.bt/merchant/uploads/logos/${logo}`;
+      }
+    }
+
+    // ✅ STEP 8: Parse delivery address
+    let deliveryAddress = order.delivery_address || "N/A";
+    if (deliveryAddress !== "N/A" && typeof deliveryAddress === "string") {
+      try {
+        const parsed = JSON.parse(deliveryAddress);
+        deliveryAddress = parsed.address || deliveryAddress;
+      } catch (e) {}
+    }
+
+    // ✅ STEP 9: Build order data for email
+    const orderData = {
+      order_id: order.order_id,
+      delivered_at: order.delivered_at || new Date(),
+      payment_method: order.payment_method,
+      delivery_address: deliveryAddress,
+      status: "DELIVERED",
+      customer_name: user.user_name || "Customer",
+      customer_email: user.email,
+      customer_phone: user.phone || "N/A",
+      business_name: business.business_name || "TabDhey",
+      business_logo: businessLogo,
+      business_address: business.address || "Thimphu, Bhutan",
+      items: items.map((item) => ({
+        menu_name: item.menu_name,
+        quantity: parseInt(item.quantity) || 0,
+        price_per_unit: parseFloat(item.price) || 0,
+        subtotal:
+          (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+      })),
+      subtotal: subtotal,
+      delivery_fee: deliveryFee,
+      platform_fee: platformFee,
+      discount_amount: 0,
+      grand_total: grandTotal,
+    };
+
+    // ✅ STEP 10: Send email immediately
+    console.log(`[DELIVERED] Sending delivery receipt to ${user.email}...`);
+    const EmailService = require("../services/emailService");
+    const emailResult = await EmailService.sendOrderReceipt(orderData);
+
+    if (emailResult.success) {
+      // Save to receipt_email
+      await db.query(
+        `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
+         VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'DELIVERY')
+         ON DUPLICATE KEY UPDATE 
+         receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent', delivery_method = 'DELIVERY'`,
+        [
+          order_id,
+          order.user_id,
+          order.business_id,
+          user.email,
+          user.user_name,
+          business.business_name,
+        ],
+      );
+      console.log(
+        `[DELIVERED] ✅ Email sent successfully for order ${order_id}`,
+      );
+    } else {
+      console.error(
+        `[DELIVERED] ❌ Email failed for order ${order_id}:`,
+        emailResult.error,
+      );
+      await db.query(
+        `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
+         VALUES (?, ?, ?, ?, 'failed', ?, 'DELIVERY')
+         ON DUPLICATE KEY UPDATE email_status = 'failed', error_message = ?`,
+        [
+          order_id,
+          order.user_id,
+          order.business_id,
+          user.email,
+          emailResult.error,
+          emailResult.error,
+        ],
+      );
+    }
+
+    // ✅ STEP 11: Send push notification
     try {
-      broadcastOrderStatusToMany({
-        order_id,
-        user_id: result.user_id,
-        business_ids: result.business_ids || [],
-        status: "DELIVERED",
+      await sendPushToUserId(order.user_id, {
+        title: "✅ Order Delivered Successfully",
+        body: `Your order ${order_id} has been delivered successfully. Thank you for shopping with us!`,
       });
-    } catch {}
+    } catch (pushErr) {
+      console.error("[DELIVERED] Push notification failed:", pushErr);
+    }
 
+    // ✅ STEP 12: Return success (order stays in orders table for 30 minutes)
     return res.json({
       success: true,
-      message: "Order delivered successfully.",
-      data: result,
+      message: "Order marked as delivered. Receipt sent to customer.",
+      order_id,
+      status: "DELIVERED",
     });
   } catch (e) {
     console.error("[markOrderDelivered]", e);
@@ -1716,8 +1948,6 @@ async function markOrderDelivered(req, res) {
       message: "Technical error while marking delivered.",
       error: e?.message,
     });
-  } finally {
-    conn.release();
   }
 }
 

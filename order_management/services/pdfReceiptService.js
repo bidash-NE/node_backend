@@ -11,6 +11,12 @@ class PDFReceiptService {
     this.sealPath = path.join(__dirname, "../assets/seals/official-seal.png");
   }
 
+  // Helper function to safely format numbers
+  safeNumber(value, defaultValue = 0) {
+    const num = parseFloat(value);
+    return isNaN(num) ? defaultValue : num;
+  }
+
   async downloadImage(url) {
     return new Promise((resolve) => {
       if (!url) return resolve(null);
@@ -217,8 +223,8 @@ class PDFReceiptService {
             const item = orderData.items[i];
             const itemName = item.menu_name || "Item";
             const quantity = item.quantity || 0;
-            const price = item.price_per_unit || 0;
-            const total = item.subtotal || quantity * price;
+            const price = this.safeNumber(item.price_per_unit);
+            const total = this.safeNumber(item.subtotal) || price * quantity;
 
             const itemHeight = doc.heightOfString(itemName, { width: 290 });
             const rowHeight = Math.max(itemHeight + 18, 30);
@@ -255,122 +261,137 @@ class PDFReceiptService {
           }
         }
 
+        // ============ TOTALS SECTION ============
+        const subtotal = this.safeNumber(orderData.subtotal);
+        const deliveryFee = this.safeNumber(orderData.delivery_fee);
+        const platformFee = this.safeNumber(orderData.platform_fee);
+        const merchantDeliveryFee = this.safeNumber(
+          orderData.merchant_delivery_fee,
+        );
+        const discountAmount = this.safeNumber(orderData.discount_amount);
+        const grandTotal = this.safeNumber(orderData.grand_total) || subtotal;
+
+        let totalsY = tableY;
+
         const subtotalRowHeight = 26;
         doc
           .rect(
             tableLeft,
-            tableY - 5,
+            totalsY - 5,
             tableRight - tableLeft,
             subtotalRowHeight,
           )
           .stroke();
         doc.font("Helvetica-Bold").fontSize(9);
-        doc.text("Subtotal", col1 + 10, tableY + 2);
-        const subtotalText = `Nu ${orderData.subtotal.toFixed(2)}`;
+        doc.text("Subtotal", col1 + 10, totalsY + 2);
+        const subtotalText = `Nu ${subtotal.toFixed(2)}`;
         const subtotalWidth = doc.widthOfString(subtotalText);
-        doc.text(subtotalText, col4 + 45 - subtotalWidth, tableY + 2);
-        tableY += subtotalRowHeight;
+        doc.text(subtotalText, col4 + 45 - subtotalWidth, totalsY + 2);
+        totalsY += subtotalRowHeight;
 
-        const deliveryFeeRowHeight = 26;
-        doc
-          .rect(
-            tableLeft,
-            tableY - 5,
-            tableRight - tableLeft,
-            deliveryFeeRowHeight,
-          )
-          .stroke();
-        doc.text("Delivery Fee", col1 + 10, tableY + 2);
-        const deliveryFeeText = `Nu ${orderData.delivery_fee.toFixed(2)}`;
-        const deliveryFeeWidth = doc.widthOfString(deliveryFeeText);
-        doc.text(deliveryFeeText, col4 + 45 - deliveryFeeWidth, tableY + 2);
-        tableY += deliveryFeeRowHeight;
+        // ✅ Show Platform Fee if greater than 0 (for both delivery and pickup)
+        if (platformFee > 0) {
+          const platformFeeRowHeight = 26;
+          doc
+            .rect(
+              tableLeft,
+              totalsY - 5,
+              tableRight - tableLeft,
+              platformFeeRowHeight,
+            )
+            .stroke();
+          doc.text("Platform Fee", col1 + 10, totalsY + 2);
+          const platformFeeText = `Nu ${platformFee.toFixed(2)}`;
+          const platformFeeWidth = doc.widthOfString(platformFeeText);
+          doc.text(platformFeeText, col4 + 45 - platformFeeWidth, totalsY + 2);
+          totalsY += platformFeeRowHeight;
+        }
 
-        const platformFeeRowHeight = 26;
-        doc
-          .rect(
-            tableLeft,
-            tableY - 5,
-            tableRight - tableLeft,
-            platformFeeRowHeight,
-          )
-          .stroke();
-        doc.text("Platform Fee", col1 + 10, tableY + 2);
-        const platformFeeText = `Nu ${orderData.platform_fee.toFixed(2)}`;
-        const platformFeeWidth = doc.widthOfString(platformFeeText);
-        doc.text(platformFeeText, col4 + 45 - platformFeeWidth, tableY + 2);
-        tableY += platformFeeRowHeight;
+        // ✅ Show Delivery Fee only if greater than 0 (for delivery orders, hide for pickup)
+        if (deliveryFee > 0) {
+          const deliveryFeeRowHeight = 26;
+          doc
+            .rect(
+              tableLeft,
+              totalsY - 5,
+              tableRight - tableLeft,
+              deliveryFeeRowHeight,
+            )
+            .stroke();
+          doc.text("Delivery Fee", col1 + 10, totalsY + 2);
+          const deliveryFeeText = `Nu ${deliveryFee.toFixed(2)}`;
+          const deliveryFeeWidth = doc.widthOfString(deliveryFeeText);
+          doc.text(deliveryFeeText, col4 + 45 - deliveryFeeWidth, totalsY + 2);
+          totalsY += deliveryFeeRowHeight;
+        }
 
-        if (
-          orderData.merchant_delivery_fee > 0 &&
-          orderData.merchant_delivery_fee !== orderData.delivery_fee
-        ) {
+        // ✅ Show Merchant Delivery Fee only if exists and different from Delivery Fee
+        if (merchantDeliveryFee > 0 && merchantDeliveryFee !== deliveryFee) {
           const merchantFeeRowHeight = 26;
           doc
             .rect(
               tableLeft,
-              tableY - 5,
+              totalsY - 5,
               tableRight - tableLeft,
               merchantFeeRowHeight,
             )
             .stroke();
-          doc.text("Merchant Delivery Fee", col1 + 10, tableY + 2);
-          const merchantFeeText = `Nu ${orderData.merchant_delivery_fee.toFixed(2)}`;
+          doc.text("Merchant Delivery Fee", col1 + 10, totalsY + 2);
+          const merchantFeeText = `Nu ${merchantDeliveryFee.toFixed(2)}`;
           const merchantFeeWidth = doc.widthOfString(merchantFeeText);
-          doc.text(merchantFeeText, col4 + 45 - merchantFeeWidth, tableY + 2);
-          tableY += merchantFeeRowHeight;
+          doc.text(merchantFeeText, col4 + 45 - merchantFeeWidth, totalsY + 2);
+          totalsY += merchantFeeRowHeight;
         }
 
-        if (orderData.discount_amount > 0) {
+        // ✅ Show Discount if greater than 0
+        if (discountAmount > 0) {
           const discountRowHeight = 26;
           doc
             .rect(
               tableLeft,
-              tableY - 5,
+              totalsY - 5,
               tableRight - tableLeft,
               discountRowHeight,
             )
             .stroke();
-          doc.text("Discount", col1 + 10, tableY + 2);
-          const discountText = `- Nu ${orderData.discount_amount.toFixed(2)}`;
+          doc.text("Discount", col1 + 10, totalsY + 2);
+          const discountText = `- Nu ${discountAmount.toFixed(2)}`;
           const discountWidth = doc.widthOfString(discountText);
-          doc.text(discountText, col4 + 45 - discountWidth, tableY + 2);
-          tableY += discountRowHeight;
+          doc.text(discountText, col4 + 45 - discountWidth, totalsY + 2);
+          totalsY += discountRowHeight;
         }
 
         const grandTotalRowHeight = 38;
         doc
           .rect(
             tableLeft,
-            tableY - 5,
+            totalsY - 5,
             tableRight - tableLeft,
             grandTotalRowHeight,
           )
           .fillAndStroke("#4CAF50", "#4CAF50");
         doc.fillColor("white");
         doc.font("Helvetica-Bold").fontSize(11);
-        doc.text("GRAND TOTAL", col1 + 10, tableY + 10);
-        const grandTotalText = `Nu ${orderData.grand_total.toFixed(2)}`;
+        doc.text("GRAND TOTAL", col1 + 10, totalsY + 10);
+        const grandTotalText = `Nu ${grandTotal.toFixed(2)}`;
         const grandTotalWidth = doc.widthOfString(grandTotalText);
-        doc.text(grandTotalText, col4 + 45 - grandTotalWidth, tableY + 10);
+        doc.text(grandTotalText, col4 + 45 - grandTotalWidth, totalsY + 10);
         doc.fillColor("black");
-        tableY += grandTotalRowHeight;
+        totalsY += grandTotalRowHeight;
 
         doc
-          .moveTo(tableLeft, tableY - 5)
-          .lineTo(tableRight, tableY - 5)
+          .moveTo(tableLeft, totalsY - 5)
+          .lineTo(tableRight, totalsY - 5)
           .stroke();
 
-        currentY = tableY + 15;
+        currentY = totalsY + 15;
 
         // ============ SEAL SECTION ============
-        // Add seal below the table on the right side
         const sealWidth = 60;
         const sealHeight = 60;
-        const sealX = 490; // Right side of page
+        const sealX = 490;
         const sealY = currentY + 10;
 
-        // Check if seal file exists
         if (fs.existsSync(this.sealPath)) {
           try {
             doc.image(this.sealPath, sealX, sealY, {
@@ -383,7 +404,6 @@ class PDFReceiptService {
           }
         } else {
           console.log("⚠️ Seal not found at:", this.sealPath);
-          // Optional: Add text as fallback
           doc
             .fontSize(7)
             .font("Helvetica")
