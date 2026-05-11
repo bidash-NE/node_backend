@@ -41,7 +41,7 @@ app.use("/uploads", express.static(UPLOAD_ROOT));
 async function testPrismaConnection() {
   try {
     await prisma.$connect();
-    console.log("✅ Prisma connected to database successfully!");
+    console.log("✅ Prisma connected to database successfully !");
 
     // Optional: Test a simple query
     const result = await prisma.$queryRaw`SELECT 1 as connected`;
