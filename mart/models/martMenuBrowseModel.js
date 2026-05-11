@@ -119,30 +119,16 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
 
     const catNames = categories.map((c) => c.category_name);
 
-    // 3) Get all mart menu items for this business
+    // 3) Get all mart menu items for this business WITH product info
+    // REMOVED select, ONLY using include
     const allItems = await prisma.mart_menu.findMany({
       where: {
         business_id: bid,
       },
-      orderBy: [{ sort_order: "asc" }, { item_name: "asc" }],
-      select: {
-        id: true,
-        business_id: true,
-        category_name: true,
-        item_name: true,
-        description: true,
-        item_image: true,
-        actual_price: true,
-        discount_percentage: true,
-        tax_rate: true,
-        is_veg: true,
-        spice_level: true,
-        is_available: true,
-        stock_limit: true,
-        sort_order: true,
-        created_at: true,
-        updated_at: true,
+      include: {
+        mart_product_info: true, // Include product info for sizes and images
       },
+      orderBy: [{ sort_order: "asc" }, { item_name: "asc" }],
     });
 
     // Filter items to only those in allowed categories
@@ -151,14 +137,26 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
       catNamesLower.includes((item.category_name || "").toLowerCase()),
     );
 
-    // Format items (convert boolean to 0/1)
+    // Format items (convert boolean to 0/1) and include product_info
     const formattedItems = filteredItems.map((item) => ({
-      ...item,
-      is_veg: item.is_veg ? 1 : 0,
-      is_available: item.is_available ? 1 : 0,
+      id: item.id,
+      business_id: item.business_id,
+      category_name: item.category_name,
+      item_name: item.item_name,
+      description: item.description,
+      item_image: item.item_image,
       actual_price: Number(item.actual_price),
       discount_percentage: Number(item.discount_percentage),
       tax_rate: Number(item.tax_rate),
+      is_veg: item.is_veg ? 1 : 0,
+      spice_level: item.spice_level,
+      is_available: item.is_available ? 1 : 0,
+      stock_limit: item.stock_limit,
+      sort_order: item.sort_order,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      // Include product info if exists, otherwise null
+      product_info: item.mart_product_info || null,
     }));
 
     // Group items under categories
@@ -184,7 +182,7 @@ async function getMartMenuGroupedByCategoryForBusiness(business_id) {
           business_type: cat.business_type,
           category_image: cat.category_image,
           description: cat.description,
-          items: categoryItems,
+          items: categoryItems, // Now includes product_info
         });
       }
     }

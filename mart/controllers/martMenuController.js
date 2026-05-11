@@ -9,6 +9,9 @@ const {
   listMartMenuByBusiness,
   updateMartMenuItem,
   deleteMartMenuItem,
+  upsertMartProductInfo,
+  getMartProductInfoByMenuId,
+  deleteMartProductInfoByMenuId,
 } = require("../models/martMenuModel");
 
 const { toWebPath, DEST } = require("../middlewares/uploadMartMenuImage");
@@ -74,11 +77,36 @@ function extractStorableImagePath(req) {
   return null;
 }
 
+// Helper to process product images (combine main image with additional images)
+function processProductImages(req, mainImagePath) {
+  const additionalImages = req.body.product_images || "";
+  const allImages = [];
+
+  // Add main image first if exists
+  if (mainImagePath) {
+    allImages.push(mainImagePath);
+  }
+
+  // Add additional comma-separated images
+  if (additionalImages && typeof additionalImages === "string") {
+    const extraImages = additionalImages
+      .split(",")
+      .map((img) => img.trim())
+      .filter((img) => img);
+    allImages.push(...extraImages);
+  }
+
+  return allImages.length > 0 ? allImages.join(",") : null;
+}
+
 // ------------- CREATE -------------
 async function createMartMenuCtrl(req, res) {
   try {
     const b = req.body || {};
     const img = extractStorableImagePath(req);
+
+    // Process all images (main + additional)
+    const allImages = processProductImages(req, img);
 
     const payload = {
       business_id: b.business_id,
@@ -98,11 +126,31 @@ async function createMartMenuCtrl(req, res) {
 
     const result = await createMartMenuItem(payload);
 
-    // ✅ Check if the operation was successful
     if (!result.success) {
       return res.status(400).json({
         success: false,
         message: result.message,
+      });
+    }
+
+    // Handle clothing/footwear specific fields
+    const menuId = result.data.id;
+    const sizeStandard = b.size_standard || null;
+    const availableSizes = b.available_sizes || null;
+
+    if (sizeStandard || availableSizes || allImages) {
+      await upsertMartProductInfo({
+        menu_id: menuId,
+        size_standard: sizeStandard,
+        available_sizes: availableSizes,
+        product_images: allImages,
+      });
+
+      const updatedResult = await getMartMenuItemById(menuId);
+      return res.status(201).json({
+        success: true,
+        message: "Mart item created successfully with size options.",
+        data: updatedResult.data,
       });
     }
 
@@ -241,6 +289,40 @@ async function updateMartMenuCtrl(req, res) {
       });
     }
 
+    // Update product info for clothing/footwear
+    const finalImage = newImg || result.data.item_image;
+    const allImages = processProductImages(req, finalImage);
+
+    // Get existing product info
+    const existingInfo = await getMartProductInfoByMenuId(id);
+
+    // Check if any clothing/footwear fields are being updated
+    const hasSizeFields =
+      b.size_standard !== undefined || b.available_sizes !== undefined;
+    const hasImageUpdate = allImages !== null;
+
+    if (hasSizeFields || hasImageUpdate || existingInfo) {
+      let sizeStandard = existingInfo?.size_standard || null;
+      let availableSizes = existingInfo?.available_sizes || null;
+      let productImages = existingInfo?.product_images || null;
+
+      if (b.size_standard !== undefined) sizeStandard = b.size_standard || null;
+      if (b.available_sizes !== undefined)
+        availableSizes = b.available_sizes || null;
+      if (allImages !== null) productImages = allImages;
+      else if (hasImageUpdate && !allImages && finalImage) {
+        // If only main image updated but no additional images
+        productImages = finalImage;
+      }
+
+      await upsertMartProductInfo({
+        menu_id: id,
+        size_standard: sizeStandard,
+        available_sizes: availableSizes,
+        product_images: productImages,
+      });
+    }
+
     // If image changed (or cleared), remove old file
     if (
       result.old_image &&
@@ -253,10 +335,12 @@ async function updateMartMenuCtrl(req, res) {
       safeDeleteFile(result.old_image);
     }
 
+    const updatedResult = await getMartMenuItemById(id);
+
     return res.status(200).json({
       success: true,
       message: "Mart item updated successfully.",
-      data: result.data,
+      data: updatedResult.data,
     });
   } catch (error) {
     console.error("Update mart menu error:", error);
@@ -271,6 +355,10 @@ async function updateMartMenuCtrl(req, res) {
 async function deleteMartMenuCtrl(req, res) {
   try {
     const id = Number(req.params.id);
+
+    // Get product info before deleting
+    const productInfo = await getMartProductInfoByMenuId(id);
+
     const result = await deleteMartMenuItem(id);
 
     if (!result.success) {
@@ -278,6 +366,11 @@ async function deleteMartMenuCtrl(req, res) {
         success: false,
         message: result.message,
       });
+    }
+
+    // Delete associated product info if exists
+    if (productInfo) {
+      await deleteMartProductInfoByMenuId(id);
     }
 
     if (result.old_image) safeDeleteFile(result.old_image);

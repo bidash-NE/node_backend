@@ -45,30 +45,34 @@ async function assertBusinessExists(business_id) {
 }
 
 async function getMerchantMartTypeNames(business_id) {
-  const rows = await prisma.merchant_business_types.findMany({
-    where: {
-      business_id: business_id,
-      business_types: {
-        types: {
-          equals: "mart",
-          mode: "insensitive",
+  try {
+    const rows = await prisma.merchant_business_types.findMany({
+      where: {
+        business_id: business_id,
+      },
+      include: {
+        business_types: {
+          select: { name: true, types: true },
         },
       },
-    },
-    include: {
-      business_types: {
-        select: { name: true },
-      },
-    },
-  });
+    });
 
-  return rows.map((r) => r.business_types?.name).filter(Boolean);
+    // Filter for mart-related business types (case-insensitive)
+    const martTypes = rows.filter(
+      (row) => row.business_types?.types?.toLowerCase() === "mart",
+    );
+
+    return martTypes.map((r) => r.business_types?.name).filter(Boolean);
+  } catch (error) {
+    console.error("Error getting merchant mart types:", error);
+    return []; // Return empty array instead of throwing
+  }
 }
 
 async function getMartCategoryByName(category_name) {
   const category = await prisma.mart_category.findFirst({
     where: {
-      category_name: category_name.toLowerCase(),
+      category_name: category_name.toLowerCase(), // Convert to lowercase
     },
   });
   return category;
@@ -110,10 +114,9 @@ async function assertUniquePerBusinessCategory(
 ) {
   const whereCondition = {
     business_id: business_id,
-    category_name: category_name.toLowerCase(),
+    category_name: category_name.toLowerCase(), // Convert to lowercase
     item_name: {
-      equals: item_name,
-      mode: "insensitive",
+      equals: item_name.toLowerCase(), // Convert to lowercase instead of using mode
     },
   };
 
@@ -156,6 +159,59 @@ function validateDiscount(discount) {
     throw new Error(`Discount percentage must be between 0 and 100.`);
   }
   return num;
+}
+
+/* -------- MART PRODUCT INFO CRUD -------- */
+
+async function upsertMartProductInfo(data) {
+  try {
+    const { menu_id, size_standard, available_sizes, product_images } = data;
+
+    const result = await prisma.mart_product_info.upsert({
+      where: { menu_id: menu_id },
+      update: {
+        size_standard: size_standard || null,
+        available_sizes: available_sizes || null,
+        product_images: product_images || null,
+        updated_at: new Date(),
+      },
+      create: {
+        menu_id: menu_id,
+        size_standard: size_standard || null,
+        available_sizes: available_sizes || null,
+        product_images: product_images || null,
+      },
+    });
+
+    return { success: true, data: result };
+  } catch (error) {
+    console.error("Upsert product info error:", error);
+    return { success: false, message: error.message };
+  }
+}
+
+async function getMartProductInfoByMenuId(menu_id) {
+  try {
+    const result = await prisma.mart_product_info.findUnique({
+      where: { menu_id: menu_id },
+    });
+    return result;
+  } catch (error) {
+    console.error("Get product info error:", error);
+    return null;
+  }
+}
+
+async function deleteMartProductInfoByMenuId(menu_id) {
+  try {
+    await prisma.mart_product_info.delete({
+      where: { menu_id: menu_id },
+    });
+    return { success: true };
+  } catch (error) {
+    console.error("Delete product info error:", error);
+    return { success: false, message: error.message };
+  }
 }
 
 /* -------- Main CRUD Operations -------- */
@@ -245,6 +301,9 @@ async function getMartMenuItemById(id) {
   try {
     const item = await prisma.mart_menu.findUnique({
       where: { id: id },
+      include: {
+        mart_product_info: true, // Always include if exists
+      },
     });
 
     if (!item) {
@@ -254,13 +313,21 @@ async function getMartMenuItemById(id) {
       };
     }
 
+    // Format the response
+    const formattedItem = {
+      ...item,
+      is_veg: item.is_veg ? 1 : 0,
+      is_available: item.is_available ? 1 : 0,
+      // If product info exists, include it, otherwise null
+      product_info: item.mart_product_info || null,
+    };
+
+    // Remove the raw relation from response
+    delete formattedItem.mart_product_info;
+
     return {
       success: true,
-      data: {
-        ...item,
-        is_veg: item.is_veg ? 1 : 0,
-        is_available: item.is_available ? 1 : 0,
-      },
+      data: formattedItem,
     };
   } catch (error) {
     console.error("Get mart item error:", error);
@@ -270,7 +337,6 @@ async function getMartMenuItemById(id) {
     };
   }
 }
-
 async function listMartMenuItems({ business_id, category_name } = {}) {
   try {
     const whereCondition = {};
@@ -285,6 +351,9 @@ async function listMartMenuItems({ business_id, category_name } = {}) {
 
     const rows = await prisma.mart_menu.findMany({
       where: whereCondition,
+      include: {
+        mart_product_info: true, // Include product info for all items
+      },
       orderBy: [{ sort_order: "asc" }, { item_name: "asc" }],
     });
 
@@ -292,7 +361,12 @@ async function listMartMenuItems({ business_id, category_name } = {}) {
       ...item,
       is_veg: item.is_veg ? 1 : 0,
       is_available: item.is_available ? 1 : 0,
+      // Include product info if exists, otherwise null
+      product_info: item.mart_product_info || null,
     }));
+
+    // Remove the raw relation from each item
+    formattedRows.forEach((row) => delete row.mart_product_info);
 
     return {
       success: true,
@@ -315,6 +389,9 @@ async function listMartMenuByBusiness(business_id) {
 
     const rows = await prisma.mart_menu.findMany({
       where: { business_id: bizId },
+      include: {
+        mart_product_info: true, // MAKE SURE THIS LINE EXISTS
+      },
       orderBy: [
         { category_name: "asc" },
         { sort_order: "asc" },
@@ -326,7 +403,11 @@ async function listMartMenuByBusiness(business_id) {
       ...item,
       is_veg: item.is_veg ? 1 : 0,
       is_available: item.is_available ? 1 : 0,
+      product_info: item.mart_product_info || null, // ADD THIS LINE
     }));
+
+    // Remove the raw relation
+    formattedRows.forEach((row) => delete row.mart_product_info);
 
     return {
       success: true,
@@ -488,4 +569,7 @@ module.exports = {
   listMartMenuByBusiness,
   updateMartMenuItem,
   deleteMartMenuItem,
+  upsertMartProductInfo,
+  getMartProductInfoByMenuId,
+  deleteMartProductInfoByMenuId,
 };
