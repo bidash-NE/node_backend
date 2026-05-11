@@ -15,18 +15,6 @@ class PDFReceiptService {
     return isNaN(num) ? defaultValue : num;
   }
 
-  // Calculate total height needed for all items
-  calculateItemsHeight(items, doc) {
-    let totalHeight = 0;
-    for (const item of items) {
-      const itemName = item.menu_name || "Item";
-      const itemHeight = doc.heightOfString(itemName, { width: 290 });
-      totalHeight += Math.max(itemHeight + 18, 30);
-    }
-    return totalHeight;
-  }
-
-  // Calculate totals height
   calculateTotalsHeight(orderData) {
     const platformFee = this.safeNumber(orderData.platform_fee);
     const discountAmount = this.safeNumber(orderData.discount_amount);
@@ -178,14 +166,13 @@ class PDFReceiptService {
 
         // ============ CALCULATE PAGE BREAKS ============
         const pageHeight = doc.page.height;
-        const bottomReserve = 120; // Reserve space for footer
+        const bottomReserve = 120;
         const availableHeight = pageHeight - currentY - bottomReserve;
 
         const items = orderData.items || [];
         const totalsHeight = this.calculateTotalsHeight(orderData);
         const maxItemsHeight = availableHeight - totalsHeight;
 
-        // Calculate how many items fit on first page
         let itemsOnFirstPage = 0;
         let usedHeight = 0;
 
@@ -203,7 +190,6 @@ class PDFReceiptService {
           }
         }
 
-        // Ensure at least 1 item per page
         if (itemsOnFirstPage === 0 && items.length > 0) itemsOnFirstPage = 1;
 
         const itemsOnFirst = items.slice(0, itemsOnFirstPage);
@@ -286,20 +272,10 @@ class PDFReceiptService {
           tableY += rowHeight;
         }
 
-        // ============ RENDER TOTALS ON FIRST PAGE ============
-        await this.renderTotals(
-          doc,
-          orderData,
-          tableLeft,
-          tableRight,
-          col1,
-          col4,
-          tableY,
-        );
-
         // ============ RENDER REMAINING ITEMS ON NEW PAGES ============
         if (itemsOnRest.length > 0) {
           let remainingItems = [...itemsOnRest];
+          let isLastPage = false;
 
           while (remainingItems.length > 0) {
             doc.addPage();
@@ -313,7 +289,6 @@ class PDFReceiptService {
               });
             newPageY = doc.y + 20;
 
-            // Calculate how many items fit on this page
             const pageAvailableHeight =
               doc.page.height - newPageY - bottomReserve - totalsHeight;
             let itemsOnThisPage = 0;
@@ -338,8 +313,8 @@ class PDFReceiptService {
 
             const itemsForPage = remainingItems.slice(0, itemsOnThisPage);
             remainingItems = remainingItems.slice(itemsOnThisPage);
+            isLastPage = remainingItems.length === 0;
 
-            // Draw table header
             let pageTableY = drawTableHeader(newPageY);
 
             for (const item of itemsForPage) {
@@ -390,8 +365,8 @@ class PDFReceiptService {
               pageTableY += rowHeight;
             }
 
-            // Only show totals on the last page
-            if (remainingItems.length === 0) {
+            // Only show totals on the LAST page
+            if (isLastPage) {
               await this.renderTotals(
                 doc,
                 orderData,
@@ -403,6 +378,17 @@ class PDFReceiptService {
               );
             }
           }
+        } else {
+          // If all items fit on first page, show totals on first page
+          await this.renderTotals(
+            doc,
+            orderData,
+            tableLeft,
+            tableRight,
+            col1,
+            col4,
+            tableY,
+          );
         }
 
         // ============ FOOTER ============
