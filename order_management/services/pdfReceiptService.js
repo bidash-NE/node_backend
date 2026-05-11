@@ -17,6 +17,13 @@ class PDFReceiptService {
     return isNaN(num) ? defaultValue : num;
   }
 
+  // Helper to check if there's enough space for totals
+  hasEnoughSpaceForTotals(doc, currentY, totalsHeight = 220) {
+    const pageHeight = doc.page.height;
+    const bottomMargin = 80;
+    return currentY + totalsHeight <= pageHeight - bottomMargin;
+  }
+
   async downloadImage(url) {
     return new Promise((resolve) => {
       if (!url) return resolve(null);
@@ -191,6 +198,22 @@ class PDFReceiptService {
         const tableLeft = 45;
         const tableRight = 555;
 
+        // Calculate totals height needed
+        const platformFee = this.safeNumber(orderData.platform_fee);
+        const discountAmount = this.safeNumber(orderData.discount_amount);
+        const customerDeliveryFee = this.safeNumber(orderData.delivery_fee);
+        const merchantDeliveryFee = this.safeNumber(
+          orderData.merchant_delivery_fee,
+        );
+
+        let totalsHeight = 100; // Base height for subtotal + grand total
+        if (platformFee > 0) totalsHeight += 26;
+        if (discountAmount > 0) totalsHeight += 26;
+        if (customerDeliveryFee > 0) totalsHeight += 26;
+        if (merchantDeliveryFee > 0 && customerDeliveryFee === 0)
+          totalsHeight += 26;
+
+        // Draw table header
         doc.rect(tableLeft, tableTop - 5, tableRight - tableLeft, 28).stroke();
         doc
           .moveTo(col2, tableTop - 5)
@@ -217,8 +240,11 @@ class PDFReceiptService {
           .stroke();
 
         let tableY = tableTop + 28;
+        let itemsRendered = false;
 
         if (orderData.items && orderData.items.length > 0) {
+          let itemsProcessed = 0;
+
           for (let i = 0; i < orderData.items.length; i++) {
             const item = orderData.items[i];
             const itemName = item.menu_name || "Item";
@@ -229,6 +255,58 @@ class PDFReceiptService {
             const itemHeight = doc.heightOfString(itemName, { width: 290 });
             const rowHeight = Math.max(itemHeight + 18, 30);
 
+            // Check if there's enough space for this item + totals
+            if (
+              !this.hasEnoughSpaceForTotals(
+                doc,
+                tableY + rowHeight,
+                totalsHeight,
+              )
+            ) {
+              // Start new page for remaining items
+              doc.addPage();
+              tableY = 40;
+
+              // Redraw header on new page
+              doc
+                .fontSize(12)
+                .font("Helvetica-Bold")
+                .text("ORDER RECEIPT (Continued)", 50, tableY, {
+                  align: "center",
+                });
+              tableY = doc.y + 15;
+
+              // Redraw table header
+              doc
+                .rect(tableLeft, tableY - 5, tableRight - tableLeft, 28)
+                .stroke();
+              doc
+                .moveTo(col2, tableY - 5)
+                .lineTo(col2, tableY + 23)
+                .stroke();
+              doc
+                .moveTo(col3, tableY - 5)
+                .lineTo(col3, tableY + 23)
+                .stroke();
+              doc
+                .moveTo(col4, tableY - 5)
+                .lineTo(col4, tableY + 23)
+                .stroke();
+
+              doc.font("Helvetica-Bold").fontSize(9);
+              doc.text("Item", col1, tableY + 5);
+              doc.text("Qty", col2 + 18, tableY + 5);
+              doc.text("Price", col3 + 12, tableY + 5);
+              doc.text("Total", col4, tableY + 5);
+
+              doc
+                .moveTo(tableLeft, tableY + 23)
+                .lineTo(tableRight, tableY + 23)
+                .stroke();
+              tableY = tableY + 28;
+            }
+
+            // Draw item row
             doc
               .rect(tableLeft, tableY - 5, tableRight - tableLeft, rowHeight)
               .stroke();
@@ -258,17 +336,12 @@ class PDFReceiptService {
             doc.text(totalText, col4 + 45 - totalWidth, tableY + 2);
 
             tableY += rowHeight;
+            itemsProcessed++;
           }
         }
 
         // ============ TOTALS SECTION ============
         const subtotal = this.safeNumber(orderData.subtotal);
-        const platformFee = this.safeNumber(orderData.platform_fee);
-        const discountAmount = this.safeNumber(orderData.discount_amount);
-        const customerDeliveryFee = this.safeNumber(orderData.delivery_fee); // Paid by customer
-        const merchantDeliveryFee = this.safeNumber(
-          orderData.merchant_delivery_fee,
-        ); // Paid by merchant (free delivery to customer)
         const grandTotal = this.safeNumber(orderData.grand_total) || subtotal;
 
         let totalsY = tableY;
@@ -326,7 +399,7 @@ class PDFReceiptService {
           totalsY += discountRowHeight;
         }
 
-        // ✅ Customer Delivery Fee (if greater than 0 - customer pays)
+        // Customer Delivery Fee (if greater than 0 - customer pays)
         if (customerDeliveryFee > 0) {
           const deliveryFeeRowHeight = 26;
           doc
@@ -344,7 +417,7 @@ class PDFReceiptService {
           totalsY += deliveryFeeRowHeight;
         }
 
-        // ✅ Merchant Delivery Fee (if greater than 0 - free delivery to customer, merchant pays)
+        // Merchant Delivery Fee (if greater than 0 - free delivery to customer)
         if (merchantDeliveryFee > 0 && customerDeliveryFee === 0) {
           const merchantFeeRowHeight = 26;
           doc
@@ -387,6 +460,7 @@ class PDFReceiptService {
           .stroke();
 
         currentY = totalsY + 15;
+
         // ============ SEAL SECTION ============
         const sealWidth = 60;
         const sealHeight = 60;
