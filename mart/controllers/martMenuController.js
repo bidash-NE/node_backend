@@ -77,9 +77,15 @@ function extractStorableImagePath(req) {
   return null;
 }
 
-// Helper to process product images (combine main image with additional images)
+// Add this new function to extract multiple image paths
+function extractStorableMultipleImagePaths(req) {
+  if (!req.additionalFiles || req.additionalFiles.length === 0) return [];
+
+  return req.additionalFiles.map((file) => toWebPath(file)).filter(Boolean);
+}
+
+// Update processProductImages function
 function processProductImages(req, mainImagePath) {
-  const additionalImages = req.body.product_images || "";
   const allImages = [];
 
   // Add main image first if exists
@@ -87,9 +93,14 @@ function processProductImages(req, mainImagePath) {
     allImages.push(mainImagePath);
   }
 
-  // Add additional comma-separated images
-  if (additionalImages && typeof additionalImages === "string") {
-    const extraImages = additionalImages
+  // Get additional images from uploaded files
+  const additionalFilePaths = extractStorableMultipleImagePaths(req);
+  allImages.push(...additionalFilePaths);
+
+  // Also check for product_images from form data (URLs)
+  const productImagesUrls = req.body.product_images || "";
+  if (productImagesUrls && typeof productImagesUrls === "string") {
+    const extraImages = productImagesUrls
       .split(",")
       .map((img) => img.trim())
       .filter((img) => img);

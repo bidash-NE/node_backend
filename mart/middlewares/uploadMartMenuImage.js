@@ -62,20 +62,22 @@ const fileFilter = (_req, file, cb) => {
   cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
 };
 
-/* underlying multer “fields” uploader, so we can normalize to req.file */
+/* Updated multer uploader - supports both single and multiple files */
 const fieldsUploader = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  limits: { fileSize: 5 * 1024 * 1024, files: 10 }, // Allow up to 10 files total
 }).fields([
   { name: "item_image", maxCount: 1 },
   { name: "image", maxCount: 1 },
   { name: "file", maxCount: 1 },
+  { name: "additional_images", maxCount: 9 }, // Support multiple additional images
 ]);
 
 /**
  * Ready-to-use middleware (NOT a factory). Attach directly in routes.
- * Puts the chosen file on req.file.
+ * Puts the chosen file on req.file (for single uploads) and
+ * req.additionalFiles for multiple uploads.
  */
 function uploadMartMenuImage(req, res, next) {
   fieldsUploader(req, res, (err) => {
@@ -83,12 +85,20 @@ function uploadMartMenuImage(req, res, next) {
       err.statusCode = 400;
       return next(err);
     }
+
     const any = req.files || {};
+
+    // Handle single file (for backward compatibility)
     req.file =
       (Array.isArray(any.item_image) && any.item_image[0]) ||
       (Array.isArray(any.image) && any.image[0]) ||
       (Array.isArray(any.file) && any.file[0]) ||
       null;
+
+    // Handle multiple additional images
+    req.additionalFiles =
+      (Array.isArray(any.additional_images) && any.additional_images) || [];
+
     return next();
   });
 }
@@ -99,9 +109,16 @@ function toWebPath(fileObj) {
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
+/* helper to get multiple file paths */
+function toWebPaths(fileObjs) {
+  if (!fileObjs || !fileObjs.length) return [];
+  return fileObjs.map((file) => `/uploads/${SUBFOLDER}/${file.filename}`);
+}
+
 module.exports = {
   uploadMartMenuImage, // <- middleware function
-  toWebPath, // <- function controllers can call
+  toWebPath, // <- function for single file
+  toWebPaths, // <- function for multiple files
   DEST,
   SUBFOLDER,
   UPLOAD_ROOT,
