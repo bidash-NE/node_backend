@@ -628,11 +628,8 @@ export function makeMatchingRouter(io, mysqlPool) {
           );
 
           if (ruleRows.length === 0) {
-            throw new Error(
-              `No cancellation rule found for ${cancelled_by} / ${prevStatus} / ${stage}`,
-            );
-          }
-
+            console.warn(`[/rides/match/cancel] no rule for ${cancelled_by}/${prevStatus}/${stage} — skipping fee`);
+          } else {
           const rule = ruleRows[0];
           let fee_cents = Math.round(
             estimated_fare_cents * (rule.fee_percent / 100),
@@ -650,71 +647,49 @@ export function makeMatchingRouter(io, mysqlPool) {
           policy.platform_share_cents = 0;
 
           // ----- Transfer passenger -> driver using walletTransfer -----
-          if (fee_cents > 0) {
-            if (!ride.driver_id) {
-              throw new Error(
-                "Cannot charge cancellation fee: no driver assigned",
+          if (fee_cents > 0 && ride.driver_id) {
+            try {
+              const [passengerWalletRows] = await conn.query(
+                `SELECT wallet_id FROM wallets WHERE user_id = ?`,
+                [ride.passenger_id],
               );
-            }
-
-            // 1. Get passenger's wallet ID
-            const [passengerWalletRows] = await conn.query(
-              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
-              [ride.passenger_id],
-            );
-            if (!passengerWalletRows?.length)
-              throw new Error("Passenger wallet not found");
-            const passengerWalletId = passengerWalletRows[0].wallet_id;
-
-            // 2. Get driver's user_id from drivers table
-            const [driverUserRows] = await conn.query(
-              `SELECT user_id FROM drivers WHERE driver_id = ?`,
-              [ride.driver_id],
-            );
-            if (!driverUserRows?.length)
-              throw new Error("Driver user record not found");
-            const driverUserId = driverUserRows[0].user_id;
-
-            // 3. Get driver's wallet ID
-            const [driverWalletRows] = await conn.query(
-              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
-              [driverUserId],
-            );
-            if (!driverWalletRows?.length)
-              throw new Error("Driver wallet not found");
-            const driverWalletId = driverWalletRows[0].wallet_id;
-
-            const fee_nu = fee_cents / 100; // convert cents to Ngultrum
-
-            const payload = {
-              from_wallet: passengerWalletId,
-              to_wallet: driverWalletId,
-              driver_credit_nu: fee_nu,
-              passenger_debit_nu: fee_nu,
-              reason: "cancellation_fee",
-              meta: {
-                ride_id,
-                stage: policy.stage,
-                cancelled_by,
-              },
-            };
-            console.log(
-              "[/rides/match/cancel] walletTransfer payload:",
-              payload,
-            );
-
-            const transferResult = await walletTransfer(conn, payload);
-
-            if (!transferResult.ok) {
-              throw new Error(
-                `Wallet transfer failed: ${transferResult.reason}`,
+              const [driverUserRows] = await conn.query(
+                `SELECT user_id FROM drivers WHERE driver_id = ?`,
+                [ride.driver_id],
               );
-            }
+              const driverUserId = driverUserRows?.[0]?.user_id;
+              const [driverWalletRows] = driverUserId
+                ? await conn.query(`SELECT wallet_id FROM wallets WHERE user_id = ?`, [driverUserId])
+                : [[]];
 
-            policy.transaction_id_dr = transferResult.transaction_id_dr;
-            policy.transaction_id_cr = transferResult.transaction_id_cr;
+              if (passengerWalletRows?.length && driverWalletRows?.length) {
+                const fee_nu = fee_cents / 100;
+                const transferResult = await walletTransfer(conn, {
+                  from_wallet: passengerWalletRows[0].wallet_id,
+                  to_wallet: driverWalletRows[0].wallet_id,
+                  driver_credit_nu: fee_nu,
+                  passenger_debit_nu: fee_nu,
+                  reason: "cancellation_fee",
+                  meta: { ride_id, stage: policy.stage, cancelled_by },
+                });
+                if (transferResult.ok) {
+                  policy.transaction_id_dr = transferResult.transaction_id_dr;
+                  policy.transaction_id_cr = transferResult.transaction_id_cr;
+                } else {
+                  console.warn("[/rides/match/cancel] cancellation fee transfer skipped:", transferResult.reason);
+                  policy.fee_transfer_skipped = true;
+                }
+              } else {
+                console.warn("[/rides/match/cancel] wallet not found — skipping fee transfer. passenger:", !!passengerWalletRows?.length, "driver:", !!driverWalletRows?.length);
+                policy.fee_transfer_skipped = true;
+              }
+            } catch (walletErr) {
+              console.warn("[/rides/match/cancel] wallet transfer error (non-fatal):", walletErr?.message);
+              policy.fee_transfer_skipped = true;
+            }
           }
-        }
+        } // end else (rule found)
+        } // end if (!isFreeCancellation)
       }
 
       // ----- Driver Cancellation (unjustified) -----
@@ -761,54 +736,42 @@ export function makeMatchingRouter(io, mysqlPool) {
 
           // ----- Transfer driver -> system wallet using walletTransfer -----
           if (fee_cents > 0 && ride.driver_id) {
-            // 1. Get driver's user_id from drivers table
-            const [driverUserRows] = await conn.query(
-              `SELECT user_id FROM drivers WHERE driver_id = ?`,
-              [ride.driver_id],
-            );
-            if (!driverUserRows?.length)
-              throw new Error("Driver user record not found");
-            const driverUserId = driverUserRows[0].user_id;
-
-            // 2. Get driver's wallet ID
-            const [driverWalletRows] = await conn.query(
-              `SELECT wallet_id FROM wallets WHERE user_id = ?`,
-              [driverUserId],
-            );
-            if (!driverWalletRows?.length)
-              throw new Error("Driver wallet not found");
-            const driverWalletId = driverWalletRows[0].wallet_id;
-
-            const fee_nu = fee_cents / 100;
-            const SYSTEM_WALLET_ID = "NET000001"; // Define your system wallet ID
-
-            const payload = {
-              from_wallet: driverWalletId,
-              to_wallet: SYSTEM_WALLET_ID,
-              driver_credit_nu: fee_nu,
-              passenger_debit_nu: fee_nu,
-              reason: "driver_penalty",
-              meta: {
-                ride_id,
-                stage: policy.stage,
-                cancelled_by,
-              },
-            };
-            console.log(
-              "[/rides/match/cancel] driver penalty walletTransfer payload:",
-              payload,
-            );
-
-            const transferResult = await walletTransfer(conn, payload);
-
-            if (!transferResult.ok) {
-              throw new Error(
-                `Driver penalty transfer failed: ${transferResult.reason}`,
+            try {
+              const [driverUserRows] = await conn.query(
+                `SELECT user_id FROM drivers WHERE driver_id = ?`,
+                [ride.driver_id],
               );
-            }
+              const driverUserId = driverUserRows?.[0]?.user_id;
+              const [driverWalletRows] = driverUserId
+                ? await conn.query(`SELECT wallet_id FROM wallets WHERE user_id = ?`, [driverUserId])
+                : [[]];
 
-            policy.transaction_id_dr = transferResult.transaction_id_dr;
-            policy.transaction_id_cr = transferResult.transaction_id_cr;
+              if (driverWalletRows?.length) {
+                const SYSTEM_WALLET_ID = "NET000001";
+                const fee_nu = fee_cents / 100;
+                const transferResult = await walletTransfer(conn, {
+                  from_wallet: driverWalletRows[0].wallet_id,
+                  to_wallet: SYSTEM_WALLET_ID,
+                  driver_credit_nu: fee_nu,
+                  passenger_debit_nu: fee_nu,
+                  reason: "driver_penalty",
+                  meta: { ride_id, stage: policy.stage, cancelled_by },
+                });
+                if (transferResult.ok) {
+                  policy.transaction_id_dr = transferResult.transaction_id_dr;
+                  policy.transaction_id_cr = transferResult.transaction_id_cr;
+                } else {
+                  console.warn("[/rides/match/cancel] driver penalty transfer skipped:", transferResult.reason);
+                  policy.fee_transfer_skipped = true;
+                }
+              } else {
+                console.warn("[/rides/match/cancel] driver wallet not found — skipping penalty transfer");
+                policy.fee_transfer_skipped = true;
+              }
+            } catch (walletErr) {
+              console.warn("[/rides/match/cancel] driver penalty error (non-fatal):", walletErr?.message);
+              policy.fee_transfer_skipped = true;
+            }
           }
         }
       }
