@@ -223,9 +223,23 @@ async function getPaymentSessions(req, res, next) {
     if (from_date) dateFilter.gte = new Date(from_date);
     if (to_date) dateFilter.lte = new Date(to_date);
 
+    // For organizers, restrict to sessions whose payment_context.event_id is one of their events
+    let eventIdFilter;
+    if (req.user.role === 'organizer') {
+      const orgEvents = await prisma.events.findMany({
+        where: { organizer_id: req.user.organizer_id },
+        select: { id: true },
+      });
+      const eventIds = orgEvents.map((e) => e.id);
+      eventIdFilter = eventIds.length
+        ? { OR: eventIds.map((id) => ({ payment_context: { path: ['event_id'], equals: id } })) }
+        : { id: 'none' }; // no events → return nothing
+    }
+
     const where = {
       ...(status && { status }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
+      ...(eventIdFilter && eventIdFilter),
     };
 
     const [sessions, total] = await prisma.$transaction([
