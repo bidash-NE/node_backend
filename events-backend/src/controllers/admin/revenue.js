@@ -257,7 +257,7 @@ async function getPaymentSessions(req, res, next) {
       id: s.id,
       order_no: s.order_no,
       bfs_txn_id: s.bfs_txn_id,
-      amount: s.amount,
+      amount: Number(s.amount),
       status: s.status,
       user_name: s.users.user_name,
       user_email: s.users.email,
