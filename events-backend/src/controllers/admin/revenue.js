@@ -309,4 +309,145 @@ async function getPaymentSessions(req, res, next) {
   }
 }
 
-module.exports = { getSummary, getEventRevenue, getPaymentSessions };
+// ─── CSV helpers ─────────────────────────────────────────────────────────────
+function escapeCsv(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+function buildCsv(rows, columns) {
+  const header = columns.map((c) => escapeCsv(c.label)).join(',');
+  const body = rows.map((row) =>
+    columns.map((c) => escapeCsv(c.value(row))).join(',')
+  );
+  return [header, ...body].join('\n');
+}
+
+// ─── Export: all bookings as CSV ──────────────────────────────────────────────
+// GET /admin/revenue/export?from_date=&to_date=&format=csv
+async function exportRevenue(req, res, next) {
+  try {
+    const { from_date, to_date } = req.query;
+
+    const dateFilter = {};
+    if (from_date) dateFilter.gte = new Date(from_date);
+    if (to_date) dateFilter.lte = new Date(to_date);
+
+    let eventIdFilter;
+    if (req.user.role === 'organizer') {
+      const orgEvents = await prisma.events.findMany({
+        where: { organizer_id: req.user.organizer_id },
+        select: { id: true },
+      });
+      eventIdFilter = { in: orgEvents.map((e) => e.id) };
+    }
+
+    const where = {
+      status: 'confirmed',
+      ...(eventIdFilter && { event_id: eventIdFilter }),
+      ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
+    };
+
+    const bookings = await prisma.event_bookings.findMany({
+      where,
+      orderBy: { created_at: 'desc' },
+      include: {
+        events: { select: { title: true, category: true, venue_name: true } },
+        event_ticket_tiers: { select: { name: true } },
+        users: { select: { user_name: true, email: true } },
+      },
+    });
+
+    const columns = [
+      { label: 'Booking ID',      value: (r) => r.id },
+      { label: 'Event',           value: (r) => r.events?.title },
+      { label: 'Category',        value: (r) => r.events?.category },
+      { label: 'Venue',           value: (r) => r.events?.venue_name },
+      { label: 'Tier',            value: (r) => r.event_ticket_tiers?.name },
+      { label: 'Quantity',        value: (r) => r.quantity },
+      { label: 'Total Amount',    value: (r) => r.total_amount },
+      { label: 'Payment Method',  value: (r) => r.payment_method },
+      { label: 'Payment Status',  value: (r) => r.payment_status },
+      { label: 'User Name',       value: (r) => r.users?.user_name },
+      { label: 'User Email',      value: (r) => r.users?.email },
+      { label: 'Ticket Code',     value: (r) => r.ticket_code },
+      { label: 'Created At',      value: (r) => r.created_at?.toISOString() },
+    ];
+
+    const csv = buildCsv(bookings, columns);
+    const filename = `revenue_export_${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Export: single event bookings as CSV ────────────────────────────────────
+// GET /admin/revenue/events/:id/export
+async function exportEventRevenue(req, res, next) {
+  try {
+    const { id } = req.params;
+
+    const event = await prisma.events.findUnique({
+      where: { id },
+      select: { id: true, title: true, category: true, venue_name: true, start_at: true },
+    });
+    if (!event) {
+      return res.status(404).json({ success: false, message: 'Event not found' });
+    }
+
+    if (req.user.role === 'organizer') {
+      const orgEvent = await prisma.events.findFirst({
+        where: { id, organizer_id: req.user.organizer_id },
+        select: { id: true },
+      });
+      if (!orgEvent) {
+        return res.status(403).json({ success: false, message: 'Forbidden' });
+      }
+    }
+
+    const bookings = await prisma.event_bookings.findMany({
+      where: { event_id: id, status: 'confirmed' },
+      orderBy: { created_at: 'desc' },
+      include: {
+        event_ticket_tiers: { select: { name: true } },
+        users: { select: { user_name: true, email: true } },
+      },
+    });
+
+    const columns = [
+      { label: 'Booking ID',      value: (r) => r.id },
+      { label: 'Ticket Code',     value: (r) => r.ticket_code },
+      { label: 'Tier',            value: (r) => r.event_ticket_tiers?.name },
+      { label: 'Quantity',        value: (r) => r.quantity },
+      { label: 'Total Amount',    value: (r) => r.total_amount },
+      { label: 'Payment Method',  value: (r) => r.payment_method },
+      { label: 'Payment Status',  value: (r) => r.payment_status },
+      { label: 'User Name',       value: (r) => r.users?.user_name },
+      { label: 'User Email',      value: (r) => r.users?.email },
+      { label: 'Attendee Names',  value: (r) => {
+        try { return JSON.parse(r.attendee_names || '[]').join('; '); } catch { return r.attendee_names; }
+      }},
+      { label: 'Created At',      value: (r) => r.created_at?.toISOString() },
+    ];
+
+    const csv = buildCsv(bookings, columns);
+    const slug = event.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const filename = `event_${slug}_revenue_${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getSummary, getEventRevenue, getPaymentSessions, exportRevenue, exportEventRevenue };
