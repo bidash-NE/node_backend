@@ -218,40 +218,77 @@ async function getEventRevenue(req, res, next) {
 async function getPaymentSessions(req, res, next) {
   try {
     const { status, from_date, to_date, page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+    const take = Number(limit);
 
     const dateFilter = {};
     if (from_date) dateFilter.gte = new Date(from_date);
     if (to_date) dateFilter.lte = new Date(to_date);
 
-    // For organizers, restrict to sessions whose payment_context.event_id is one of their events
-    let eventIdFilter;
+    // For organizers, get their event IDs and filter via JSON_EXTRACT raw SQL
+    let allowedEventIds = null;
     if (req.user.role === 'organizer') {
       const orgEvents = await prisma.events.findMany({
         where: { organizer_id: req.user.organizer_id },
         select: { id: true },
       });
-      const eventIds = orgEvents.map((e) => e.id);
-      eventIdFilter = eventIds.length
-        ? { OR: eventIds.map((id) => ({ payment_context: { path: ['event_id'], equals: id } })) }
-        : { id: 'none' }; // no events → return nothing
+      allowedEventIds = orgEvents.map((e) => e.id);
+      if (allowedEventIds.length === 0) {
+        return res.json({ success: true, data: [], total: 0, page: Number(page) });
+      }
     }
 
     const where = {
       ...(status && { status }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
-      ...(eventIdFilter && eventIdFilter),
     };
 
-    const [sessions, total] = await prisma.$transaction([
-      prisma.event_payment_sessions.findMany({
+    // Fetch sessions and total count separately (avoids $transaction timeout)
+    let sessions, total;
+
+    if (allowedEventIds) {
+      // Use raw query for JSON_EXTRACT filtering on organizer's event IDs
+      const placeholders = allowedEventIds.map(() => '?').join(', ');
+      const statusClause = status ? `AND status = ?` : '';
+      const fromClause = from_date ? `AND created_at >= ?` : '';
+      const toClause = to_date ? `AND created_at <= ?` : '';
+
+      const baseArgs = [
+        ...allowedEventIds,
+        ...(status ? [status] : []),
+        ...(from_date ? [new Date(from_date)] : []),
+        ...(to_date ? [new Date(to_date)] : []),
+      ];
+
+      sessions = await prisma.$queryRawUnsafe(
+        `SELECT eps.*, u.user_name, u.email AS user_email
+         FROM event_payment_sessions eps
+         JOIN users u ON u.user_id = eps.user_id
+         WHERE JSON_EXTRACT(eps.payment_context, '$.event_id') IN (${placeholders})
+         ${statusClause} ${fromClause} ${toClause}
+         ORDER BY eps.created_at DESC
+         LIMIT ? OFFSET ?`,
+        ...baseArgs, take, skip
+      );
+
+      const [countRow] = await prisma.$queryRawUnsafe(
+        `SELECT COUNT(*) AS total
+         FROM event_payment_sessions eps
+         WHERE JSON_EXTRACT(eps.payment_context, '$.event_id') IN (${placeholders})
+         ${statusClause} ${fromClause} ${toClause}`,
+        ...baseArgs
+      );
+      total = Number(countRow.total);
+    } else {
+      sessions = await prisma.event_payment_sessions.findMany({
         where,
-        skip: (Number(page) - 1) * Number(limit),
-        take: Number(limit),
-        orderBy: { created_at: "desc" },
+        skip,
+        take,
+        orderBy: { created_at: 'desc' },
         include: { users: { select: { user_name: true, email: true } } },
-      }),
-      prisma.event_payment_sessions.count({ where }),
-    ]);
+      });
+      total = await prisma.event_payment_sessions.count({ where });
+    }
 
     const data = sessions.map((s) => ({
       id: s.id,
@@ -259,8 +296,8 @@ async function getPaymentSessions(req, res, next) {
       bfs_txn_id: s.bfs_txn_id,
       amount: Number(s.amount),
       status: s.status,
-      user_name: s.users.user_name,
-      user_email: s.users.email,
+      user_name: s.user_name,
+      user_email: s.user_email || s.users?.email,
       payment_context: s.payment_context,
       created_at: s.created_at,
       updated_at: s.updated_at,
