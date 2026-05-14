@@ -149,7 +149,7 @@ async function verifyOtp(req, res, next) {
 
     // Payment succeeded — confirm the booking
     const ctx = session.payment_context;
-    const bookingResult = await confirmBookingFromSession(tx => tx, userId, ctx, session.amount, 'CARD', order_no);
+    const bookingResult = await confirmBookingFromSession(tx => tx, userId, ctx, session.amount, 'BANK', order_no);
 
     // Mark session as success
     await prisma.event_payment_sessions.update({

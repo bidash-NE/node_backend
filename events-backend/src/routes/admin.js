@@ -45,7 +45,9 @@ router.delete('/bookings/:id',     bookingsCtrl.deleteBooking);
 
 // ── Revenue ───────────────────────────────────────────────────────────────────
 router.get('/revenue/summary',              revenueCtrl.getSummary);
+router.get('/revenue/export',               revenueCtrl.exportRevenue);
 router.get('/revenue/events/:id',           revenueCtrl.getEventRevenue);
+router.get('/revenue/events/:id/export',    revenueCtrl.exportEventRevenue);
 router.get('/revenue/payment-sessions',     revenueCtrl.getPaymentSessions);
 
 // ── Banners ───────────────────────────────────────────────────────────────────
