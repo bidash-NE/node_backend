@@ -144,7 +144,7 @@ const server = http.createServer(app);
       () => {
         cleanupRejectedScheduledOrders();
       },
-      5 * 60 * 1000,
+      1 * 60 * 1000,
     );
 
     console.log(
