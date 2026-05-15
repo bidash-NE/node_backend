@@ -139,7 +139,7 @@ const server = http.createServer(app);
       intervalMs: 60000, // Check every minute
       batchSize: 50,
     });
-    // ✅ ADDED: auto cleanup rejected scheduled orders (every 5 minutes)
+    // ✅ ADDED: auto cleanup rejected scheduled orders (every 1 minute)
     setInterval(
       () => {
         cleanupRejectedScheduledOrders();
@@ -148,7 +148,7 @@ const server = http.createServer(app);
     );
 
     console.log(
-      "🧹 Rejected scheduled orders cleanup started (5 min interval)",
+      "🧹 Rejected scheduled orders cleanup started (1 min interval)",
     );
 
     const PORT = Number(process.env.PORT || 1001);
