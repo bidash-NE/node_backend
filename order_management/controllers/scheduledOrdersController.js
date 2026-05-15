@@ -657,6 +657,7 @@ exports.cancelScheduledOrder = async (req, res) => {
   }
 };
 
+// In controllers/scheduledOrdersController.js
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -677,13 +678,7 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     }
 
     const redis = require("../config/redis");
-    const {
-      buildJobKey,
-      ZSET_KEY,
-      buildLockKey,
-      buildAttemptsKey,
-      buildErrorKey,
-    } = require("../models/scheduledOrderModel");
+    const { buildJobKey, ZSET_KEY } = require("../models/scheduledOrderModel");
 
     const {
       sendUserNotification,
@@ -714,38 +709,32 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     if (status === "REJECTED") {
       const cleanReason = reason.trim();
 
-      // Update status and rejection info
+      // Update status
       data.order_payload.status = "REJECTED";
       data.order_payload.rejection_reason = cleanReason;
       data.order_payload.rejected_at = new Date().toISOString();
       data.updated_at = new Date().toISOString();
 
-      // IMPORTANT: Remove from scheduled queue (ZSET) so it won't be processed
-      await redis.zrem(ZSET_KEY, jobId);
+      // ✅ IMPORTANT: DO NOT remove from ZSET
+      // Keep it in ZSET so cleanup service can find it
+      // await redis.zrem(ZSET_KEY, jobId);  // ❌ DON'T DO THIS
 
-      // Save the updated data with REJECTED status
+      // ✅ Save the updated data
       await redis.set(jobKey, JSON.stringify(data));
 
-      // Set TTL to auto-delete after 30 minutes (1800 seconds)
-      // User can see the rejected status and reason during this time
-      await redis.expire(jobKey, 1800);
-
-      // Also expire related keys if they exist
-      await redis.expire(buildLockKey(jobId), 1800);
-      await redis.expire(buildAttemptsKey(jobId), 1800);
-      await redis.expire(buildErrorKey(jobId), 1800);
+      // ✅ DO NOT set short TTL (let cleanup service handle it)
+      // await redis.expire(jobKey, 1800);  // ❌ DON'T DO THIS
 
       // Send notification
       await sendUserNotification({
         user_id: userId,
         title: "Order Rejected",
-        body: `Your scheduled order has been rejected. Reason: ${cleanReason}. You can view the details for the next 30 minutes.`,
+        body: `Your scheduled order has been rejected. Reason: ${cleanReason}. This order will be automatically removed after 30 minutes.`,
       });
 
       return res.json({
         success: true,
-        message:
-          "Scheduled order rejected. User can view status and reason for 30 minutes.",
+        message: "Scheduled order rejected. Will be removed after 30 minutes.",
         job_id: jobId,
         status: "REJECTED",
         reason: cleanReason,
@@ -759,9 +748,6 @@ exports.updateScheduledOrderStatus = async (req, res) => {
       data.updated_at = new Date().toISOString();
 
       await redis.set(jobKey, JSON.stringify(data));
-
-      // Keep order in ZSET for scheduled processing
-      // No expiration for accepted orders
 
       await sendUserNotification({
         user_id: userId,
