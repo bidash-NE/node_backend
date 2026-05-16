@@ -1097,6 +1097,38 @@ async function getOrdersForUser(req, res) {
       }
     }
 
+    // ✅ If business_logo is missing, fetch it from merchant_business_details
+    if (data && data.length) {
+      const businessIds = new Set();
+      for (const order of data) {
+        if (order.business_details?.business_id) {
+          businessIds.add(order.business_details.business_id);
+        }
+      }
+
+      if (businessIds.size) {
+        const [logos] = await db.query(
+          `SELECT business_id, business_logo 
+           FROM merchant_business_details 
+           WHERE business_id IN (?)`,
+          [Array.from(businessIds)],
+        );
+
+        const logoMap = new Map();
+        for (const logo of logos) {
+          logoMap.set(Number(logo.business_id), logo.business_logo);
+        }
+
+        // Attach logo to each order
+        for (const order of data) {
+          if (order.business_details?.business_id) {
+            order.business_details.business_logo =
+              logoMap.get(order.business_details.business_id) || null;
+          }
+        }
+      }
+    }
+
     res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

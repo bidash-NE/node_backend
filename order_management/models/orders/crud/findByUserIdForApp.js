@@ -118,15 +118,17 @@ module.exports = async function findByUserIdForApp(
   const businessMap = new Map();
   const bizIds = Array.from(businessIdsSet);
 
+  // In findByUserIdForApp.js, update the business query section:
+
   if (bizIds.length) {
     try {
       const [colsRows] = await conn.query(
         `
-        SELECT COLUMN_NAME
-          FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = 'merchant_business_details'
-        `,
+      SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'merchant_business_details'
+      `,
       );
       const cols = new Set(colsRows.map((r) => String(r.COLUMN_NAME)));
 
@@ -153,6 +155,16 @@ module.exports = async function findByUserIdForApp(
         "delivery_lng",
       ].filter((c) => cols.has(c));
 
+      // ✅ ADD logo candidates
+      const logoCandidates = [
+        "business_logo",
+        "logo",
+        "logo_url",
+        "business_logo_url",
+        "image",
+        "logo_path",
+      ].filter((c) => cols.has(c));
+
       const addrExpr = addrCandidates.length
         ? `COALESCE(${addrCandidates.map((c) => `m.\`${c}\``).join(", ")})`
         : "NULL";
@@ -164,16 +176,22 @@ module.exports = async function findByUserIdForApp(
         ? `m.\`${lngCandidates[0]}\``
         : "NULL";
 
+      // ✅ ADD logo expression
+      const logoExpr = logoCandidates.length
+        ? `COALESCE(${logoCandidates.map((c) => `m.\`${c}\``).join(", ")})`
+        : "NULL";
+
       const [bizRows] = await conn.query(
         `
-        SELECT
-          m.business_id,
-          ${addrExpr} AS address,
-          ${latExpr}  AS lat,
-          ${lngExpr}  AS lng
-        FROM merchant_business_details m
-        WHERE m.business_id IN (?)
-        `,
+      SELECT
+        m.business_id,
+        ${addrExpr} AS address,
+        ${latExpr}  AS lat,
+        ${lngExpr}  AS lng,
+        ${logoExpr} AS business_logo
+      FROM merchant_business_details m
+      WHERE m.business_id IN (?)
+      `,
         [bizIds],
       );
 
@@ -191,13 +209,12 @@ module.exports = async function findByUserIdForApp(
             r.lng != null && r.lng !== "" && !Number.isNaN(Number(r.lng))
               ? Number(r.lng)
               : null,
+          business_logo:
+            r.business_logo != null ? String(r.business_logo).trim() : null, // ✅ ADD THIS
         });
       }
     } catch (e) {
-      console.error(
-        "[findByUserIdForApp] business address lookup failed:",
-        e?.message,
-      );
+      console.error("[findByUserIdForApp] business lookup failed:", e?.message);
     }
   }
 
@@ -277,6 +294,7 @@ module.exports = async function findByUserIdForApp(
             address: bizInfo?.address ?? null,
             lat: bizInfo?.lat ?? null,
             lng: bizInfo?.lng ?? null,
+            business_logo: bizInfo?.business_logo ?? null, // ✅ ADD THIS LINE
           }
         : null,
 
