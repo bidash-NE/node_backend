@@ -29,7 +29,7 @@ const rateLimiter = rateLimit({
 
 router.post(
   "/scheduled-orders",
-  rateLimiter,
+
   uploadDeliveryPhotos,
   scheduleOrder,
 );

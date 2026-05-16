@@ -22,7 +22,7 @@ const axios = require("axios");
 
 const EXPO_NOTIFICATION_URL =
   process.env.EXPO_NOTIFICATION_URL ||
-  "https://grab.newedge.bt/expo/api/push/send";
+  "https://backend.tabdhey.bt/expo/api/push/send";
 
 /* ============================================================
    Import model functions directly
