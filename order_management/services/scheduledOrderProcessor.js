@@ -21,6 +21,8 @@ const LOCK_TTL_SECONDS = 60;
 // retries
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_TTL_SECONDS = 7 * 24 * 3600; // 7 days
+const BASE_RETRY_DELAY_MS = 60000; // 1 minute base delay
+const MAX_RETRY_DELAY_MS = 3600000; // 1 hour max delay
 
 const buildAttemptsKey = (jobId) => `scheduled_order_attempts:${jobId}`;
 const buildErrorKey = (jobId) => `scheduled_order_error:${jobId}`;
@@ -44,12 +46,12 @@ function safeJsonParse(s) {
 }
 
 /**
- * ✅ FIXED: Properly handle nested payload string
+ * Normalize payload for order creation
  */
 function normalizeCreateOrderPayload(raw = {}) {
   const p = { ...(raw || {}) };
 
-  // ✅ CRITICAL FIX: Handle nested payload string
+  // Handle nested payload string
   if (typeof p.payload === "string" && p.payload.trim()) {
     try {
       const parsedPayload = JSON.parse(p.payload);
@@ -130,10 +132,10 @@ function normalizeCreateOrderPayload(raw = {}) {
   // priority should be boolean
   if (p.priority != null) p.priority = !!p.priority;
 
-  // status should be PENDING for creation
-  p.status = "PENDING";
+  // Set status to CONFIRMED for scheduled orders (merchant already accepted)
+  p.status = "CONFIRMED";
 
-  // ✅ PHOTO MAPPING
+  // PHOTO MAPPING
   const photos = Array.isArray(p.special_photos)
     ? p.special_photos
         .map((x) => (x == null ? "" : String(x).trim()))
@@ -173,6 +175,13 @@ async function createOrderFromScheduledPayload(orderPayload) {
     return orderId || null;
   } catch (err) {
     console.error("[SCHED] ❌ API Error:", err.message);
+    if (err.response) {
+      console.error("[SCHED] Status:", err.response.status);
+      console.error(
+        "[SCHED] Response:",
+        JSON.stringify(err.response.data, null, 2),
+      );
+    }
     throw err;
   }
 }
@@ -202,11 +211,12 @@ async function insertNotificationForScheduledOrder(
     }
 
     const type = "order_status";
-    const title = "Order scheduled";
-    const message = `Your order has been scheduled successfully for ${scheduledLocal}`;
+    const title = "Order Confirmed";
+    const message = `Your scheduled order has been confirmed for ${scheduledLocal}`;
+
     const dataJson = JSON.stringify({
       order_id: orderId || null,
-      status: "PENDING",
+      status: "CONFIRMED",
       scheduled_at: scheduledAt,
     });
 
@@ -265,7 +275,6 @@ async function tryClaimJob(jobId) {
     if (retry === "OK") return true;
   }
 
-  // Silent skip - don't log every locked job
   return false;
 }
 
@@ -287,13 +296,16 @@ async function markFailed(jobId, errMessage, errBody = null) {
 
 async function failAndMaybeStopRetry(jobId, err) {
   const attemptsKey = buildAttemptsKey(jobId);
-  const attempts = await redis.incr(attemptsKey);
-  await redis.expire(attemptsKey, ATTEMPT_TTL_SECONDS);
+  let attempts = await redis.get(attemptsKey);
+  attempts = attempts ? parseInt(attempts) + 1 : 1;
+  await redis.set(attemptsKey, attempts, "EX", ATTEMPT_TTL_SECONDS);
 
   const status = err?.response?.status;
   const body = err?.response?.data || null;
 
+  // 400 errors (validation) - permanent failure
   if (status === 400) {
+    console.error(`[SCHED] ❌ ${jobId} permanent failure (400 error)`);
     await redis.set(
       buildErrorKey(jobId),
       String(err.message).slice(0, 1000),
@@ -302,26 +314,48 @@ async function failAndMaybeStopRetry(jobId, err) {
     );
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
-    console.error(`[SCHED] ❌ ${jobId} failed (400 error)`);
     return;
   }
 
-  await redis.set(
-    buildErrorKey(jobId),
-    String(err.message).slice(0, 1000),
-    "EX",
-    ATTEMPT_TTL_SECONDS,
-  );
-
-  if (attempts >= MAX_ATTEMPTS) {
+  // 404 errors - not found
+  if (status === 404) {
+    console.error(`[SCHED] ❌ ${jobId} permanent failure (404 not found)`);
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
-    console.error(`[SCHED] ❌ ${jobId} failed after ${attempts} attempts`);
     return;
+  }
+
+  // Check max attempts
+  if (attempts >= MAX_ATTEMPTS) {
+    console.error(`[SCHED] ❌ ${jobId} failed after ${MAX_ATTEMPTS} attempts`);
+    await markFailed(jobId, err.message, body);
+    await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+    return;
+  }
+
+  // Calculate retry delay with exponential backoff
+  const delayMs = Math.min(
+    BASE_RETRY_DELAY_MS * Math.pow(2, attempts - 1),
+    MAX_RETRY_DELAY_MS,
+  );
+  const retryAt = Date.now() + delayMs;
+
+  // Update order score for retry
+  const jobKey = buildJobKey(jobId);
+  const raw = await redis.get(jobKey);
+  if (raw) {
+    const data = JSON.parse(raw);
+    data.retry_at = new Date(retryAt).toISOString();
+    data.retry_count = attempts;
+    data.last_error = err.message;
+    await redis.set(jobKey, JSON.stringify(data));
+    await redis.zadd(ZSET_KEY, retryAt, jobId);
   }
 
   await redis.del(buildLockKey(jobId));
-  console.warn(`[SCHED] ⚠️ ${jobId} retry ${attempts}/${MAX_ATTEMPTS}`);
+  console.warn(
+    `[SCHED] ⚠️ ${jobId} retry ${attempts}/${MAX_ATTEMPTS} in ${Math.round(delayMs / 1000)}s`,
+  );
 }
 
 /* ===================== Core processing ===================== */
@@ -343,6 +377,12 @@ async function processJob(jobId) {
       throw new Error("Missing order_payload in scheduled job");
     }
 
+    // Check if this is a retry
+    if (data.retry_at && new Date(data.retry_at).getTime() > Date.now()) {
+      await redis.del(buildLockKey(jobId));
+      return;
+    }
+
     const status = order_payload?.status || "PENDING";
 
     // REJECTED - skip
@@ -352,7 +392,7 @@ async function processJob(jobId) {
       return;
     }
 
-    // PENDING - wait (silent, no log)
+    // PENDING - wait
     if (status === "PENDING") {
       await redis.del(buildLockKey(jobId));
       return;
@@ -366,14 +406,20 @@ async function processJob(jobId) {
     }
 
     // ACCEPTED - process!
-    console.log(`[SCHED] ✅ Processing ${jobId} (ACCEPTED)`);
+    if (data.retry_count) {
+      console.log(
+        `[SCHED] 🔄 Retry ${data.retry_count}/${MAX_ATTEMPTS} for ${jobId}`,
+      );
+    } else {
+      console.log(`[SCHED] ✅ Processing ${jobId} (ACCEPTED)`);
+    }
 
-    // Reset status for order table
-    order_payload.status = "PENDING";
+    // Set status to CONFIRMED (merchant already accepted)
+    order_payload.status = "CONFIRMED";
 
     const orderId = await createOrderFromScheduledPayload(order_payload);
 
-    // Send notification after success
+    // Send notification
     if (data.user_id && (data.scheduled_at || data.scheduled_at_local)) {
       await insertNotificationForScheduledOrder(
         data.user_id,
@@ -392,7 +438,9 @@ async function processJob(jobId) {
       .del(buildErrorKey(jobId))
       .exec();
 
-    console.log(`[SCHED] ✅✅ ${jobId} → Order ${orderId || "created"}`);
+    console.log(
+      `[SCHED] ✅✅ ${jobId} → Order ${orderId || "created"} (CONFIRMED)`,
+    );
   } catch (err) {
     console.error(`[SCHED] ❌ ${jobId} error:`, err.message);
     await failAndMaybeStopRetry(jobId, err);
@@ -406,7 +454,6 @@ async function tick() {
 
     if (!jobIds || !jobIds.length) return;
 
-    // Only log once when there are due jobs
     console.log(`[SCHED] 🕐 Processing ${jobIds.length} due job(s)`);
 
     for (const jobId of jobIds) {

@@ -54,7 +54,7 @@ function parseScheduledToEpochMs(input) {
 
   // Otherwise treat as Bhutan local: "YYYY-MM-DDTHH:mm[:ss]" or "YYYY-MM-DD HH:mm[:ss]"
   const m = s.match(
-    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/,
   );
   if (!m) return NaN;
 
@@ -180,7 +180,7 @@ async function getScheduledOrdersByUser(userId) {
     "+inf",
     "LIMIT",
     0,
-    100
+    100,
   );
 
   if (!jobIds.length) return [];
@@ -205,7 +205,9 @@ async function getScheduledOrdersByUser(userId) {
     } catch {}
   }
 
-  list.sort((a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0));
+  list.sort(
+    (a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0),
+  );
   return list;
 }
 
@@ -218,7 +220,7 @@ async function getScheduledOrdersByBusiness(businessId) {
     "+inf",
     "LIMIT",
     0,
-    100
+    100,
   );
 
   if (!jobIds.length) return [];
@@ -241,7 +243,9 @@ async function getScheduledOrdersByBusiness(businessId) {
     } catch {}
   }
 
-  list.sort((a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0));
+  list.sort(
+    (a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0),
+  );
   return list;
 }
 
