@@ -45,7 +45,7 @@ const registerUser = async (req, res) => {
 
     const normalizedPhone = normalizeBhutanPhone(user.phone);
     const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
-    const requiresDevice = user?.role !== "admin";
+    const requiresDevice = !["admin", "finance"].includes(user?.role);
 
     if (requiresDevice && !deviceID) {
       return errorResponse(res, 400, "Device ID is required for registration");
@@ -262,7 +262,8 @@ const loginUser = async (req, res) => {
       r === "admin" ||
       r === "super admin" ||
       r === "super_admin" ||
-      r === "superadmin"
+      r === "superadmin" ||
+      r === "finance"
     );
   };
 
