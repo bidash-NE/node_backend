@@ -269,7 +269,8 @@ const loginUser = async (req, res) => {
       r === "admin" ||
       r === "super admin" ||
       r === "super_admin" ||
-      r === "superadmin"
+      r === "superadmin" ||
+      r === "finance"
     );
   };
 
