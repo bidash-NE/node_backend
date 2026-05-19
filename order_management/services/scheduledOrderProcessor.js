@@ -48,25 +48,50 @@ function safeJsonParse(s) {
 /**
  * Normalize payload for order creation
  */
+// services/scheduledOrderProcessor.js
+
 function normalizeCreateOrderPayload(raw = {}) {
   const p = { ...(raw || {}) };
 
-  // Handle nested payload string
+  // ✅ FIRST: Handle nested payload string (your Redis structure)
   if (typeof p.payload === "string" && p.payload.trim()) {
     try {
       const parsedPayload = JSON.parse(p.payload);
+
+      // Merge parsed payload into p, but preserve existing fields
       Object.keys(parsedPayload).forEach((key) => {
         if (p[key] === undefined || p[key] === null) {
           p[key] = parsedPayload[key];
         }
       });
+
+      // ✅ SPECIAL HANDLED: Process items from parsed payload
+      if (parsedPayload.items && Array.isArray(parsedPayload.items)) {
+        p.items = parsedPayload.items.map((item) => ({
+          ...item,
+          // ✅ CRITICAL: Map 'image' field to 'item_image'
+          item_image: item.image || item.item_image || null,
+          // Keep original image field if needed
+          image: item.image || null,
+        }));
+      }
+
       delete p.payload;
     } catch (err) {
       console.error("[SCHED] Failed to parse nested payload:", err.message);
     }
   }
 
-  // remove scheduler-only keys if present
+  // ✅ Process items if they exist in p (not in nested payload)
+  if (Array.isArray(p.items) && p.items.length > 0) {
+    p.items = p.items.map((item) => ({
+      ...item,
+      // ✅ Map image to item_image if not already present
+      item_image: item.item_image || item.image || null,
+    }));
+  }
+
+  // Remove scheduler-only keys
   delete p.scheduled_at;
   delete p.scheduled_at_local;
   delete p.scheduled_epoch_ms;
@@ -74,17 +99,17 @@ function normalizeCreateOrderPayload(raw = {}) {
   delete p.updated_at;
   delete p.job_id;
 
-  // normalize service_type
+  // Normalize service_type
   if (p.service_type != null) {
     p.service_type = String(p.service_type).trim().toUpperCase();
   }
 
-  // normalize payment method
+  // Normalize payment method
   if (p.payment_method != null) {
     p.payment_method = String(p.payment_method).trim().toUpperCase();
   }
 
-  // normalize fulfillment_type
+  // Normalize fulfillment_type
   if (p.fulfillment_type != null) {
     const f = String(p.fulfillment_type).trim();
     p.fulfillment_type = f.toLowerCase() === "pickup" ? "Pickup" : "Delivery";
@@ -92,16 +117,16 @@ function normalizeCreateOrderPayload(raw = {}) {
     p.fulfillment_type = "Delivery";
   }
 
-  // map deliver_to -> delivery_address
+  // Map deliver_to -> delivery_address
   if (!p.delivery_address && p.deliver_to) {
     p.delivery_address = p.deliver_to;
   }
 
-  // items
+  // Items validation
   const items = Array.isArray(p.items) ? p.items : [];
   p.items = items;
 
-  // delivery_fee
+  // Delivery fee calculation
   if (p.delivery_fee == null) {
     const perItem = items.map((it) => it?.delivery_fee);
     p.delivery_fee = Number(sum(perItem).toFixed(2));
@@ -116,7 +141,9 @@ function normalizeCreateOrderPayload(raw = {}) {
   p.discount_amount = Number(p.discount_amount);
 
   if (p.total_amount == null) {
-    const itemsSubtotal = sum(items.map((it) => it?.subtotal));
+    const itemsSubtotal = sum(
+      items.map((it) => it?.subtotal || it?.line_subtotal || 0),
+    );
     p.total_amount = Number(
       (
         itemsSubtotal +
@@ -129,7 +156,7 @@ function normalizeCreateOrderPayload(raw = {}) {
     p.total_amount = Number(p.total_amount);
   }
 
-  // priority should be boolean
+  // Priority should be boolean
   if (p.priority != null) p.priority = !!p.priority;
 
   // Set status to CONFIRMED for scheduled orders (merchant already accepted)
@@ -147,6 +174,23 @@ function normalizeCreateOrderPayload(raw = {}) {
   }
 
   p.special_photos = photos;
+
+  // ✅ LOG the items to verify item_image is present
+  if (p.items && p.items.length > 0) {
+    console.log(
+      "[SCHED] Items after normalization:",
+      JSON.stringify(
+        p.items.map((i) => ({
+          menu_id: i.menu_id,
+          name: i.name,
+          item_image: i.item_image,
+          image: i.image,
+        })),
+        null,
+        2,
+      ),
+    );
+  }
 
   return p;
 }
