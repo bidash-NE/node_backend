@@ -15,7 +15,7 @@ async function requireAdmin(req) {
     where: {
       user_id: Number(admin_user_id),
       role: {
-        in: ["admin", "superadmin", "super admin"],
+        in: ["admin", "superadmin", "super admin", "finance"],
       },
     },
     select: {
