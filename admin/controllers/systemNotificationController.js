@@ -253,6 +253,7 @@ async function createSystemNotification(req, res) {
     const createdBy = user_id || null;
     const adminName = user_name || "System";
 
+    // Validate title and message
     if (
       !title ||
       !String(title).trim() ||
@@ -265,6 +266,7 @@ async function createSystemNotification(req, res) {
       });
     }
 
+    // Validate delivery channels
     if (!Array.isArray(delivery_channels) || delivery_channels.length === 0) {
       return res.status(400).json({
         success: false,
@@ -272,10 +274,32 @@ async function createSystemNotification(req, res) {
       });
     }
 
+    // Validate target audience
     if (!Array.isArray(target_audience) || target_audience.length === 0) {
       return res.status(400).json({
         success: false,
         message: "At least one target audience is required.",
+      });
+    }
+
+    // ✅ Validate roles are allowed
+    const allowedRoles = [
+      "user",
+      "driver",
+      "merchant",
+      "admin",
+      "superadmin",
+      "finance",
+      "organizer",
+    ];
+    const invalidRoles = target_audience.filter(
+      (role) => !allowedRoles.includes(String(role).trim().toLowerCase()),
+    );
+
+    if (invalidRoles.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid target audience roles: ${invalidRoles.join(", ")}. Allowed roles are: ${allowedRoles.join(", ")}`,
       });
     }
 
@@ -285,7 +309,11 @@ async function createSystemNotification(req, res) {
         .toLowerCase();
     const lowerChannels = delivery_channels.map(norm);
     const roles = target_audience
-      .map((r) => String(r || "").trim())
+      .map((r) =>
+        String(r || "")
+          .trim()
+          .toLowerCase(),
+      )
       .filter(Boolean);
 
     const wantsInApp = lowerChannels.includes("in_app");
