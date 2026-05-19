@@ -45,7 +45,7 @@ function adminOnly(req, res, next) {
       });
     }
 
-    const allowedRoles = ["admin", "super admin"];
+    const allowedRoles = ["admin", "super admin", "finance", "organizer"];
     if (!allowedRoles.includes(decoded.role)) {
       return res.status(403).json({
         success: false,

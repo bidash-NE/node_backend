@@ -45,7 +45,12 @@ const registerUser = async (req, res) => {
 
     const normalizedPhone = normalizeBhutanPhone(user.phone);
     const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
-    const requiresDevice = user?.role !== "admin";
+
+    // Admin and finance roles don't require device
+    const requiresDevice =
+      user?.role !== "admin" &&
+      user?.role !== "finance" &&
+      user?.role !== "organizer";
 
     if (requiresDevice && !deviceID) {
       return errorResponse(res, 400, "Device ID is required for registration");
@@ -88,6 +93,7 @@ const registerUser = async (req, res) => {
         }
       }
 
+      // Driver-specific validation (skip for finance, admin, merchant)
       if (user.role === "driver") {
         if (
           !driver ||
@@ -161,6 +167,7 @@ const registerUser = async (req, res) => {
     let message = "Registration successful";
     if (user.role === "driver") message = "Driver registration successful";
     if (user.role === "admin") message = "Admin registration successful";
+    if (user.role === "finance") message = "Finance registration successful";
 
     return res.status(201).json({
       success: true,
@@ -375,10 +382,18 @@ const loginUser = async (req, res) => {
       .toLowerCase()
       .trim();
     const isMerchant = roleLower === "merchant";
+    const isFinance = roleLower === "finance";
     const adminNoDevice = isAdminRole(user.role);
     const merchantDesktopNoDevice = isMerchant && desktop === true;
+    const financeNoDevice = isFinance && desktop === true;
 
-    if (!adminNoDevice && !merchantDesktopNoDevice && !deviceId) {
+    // Device requirement check - finance and admin can skip device
+    if (
+      !adminNoDevice &&
+      !merchantDesktopNoDevice &&
+      !financeNoDevice &&
+      !deviceId
+    ) {
       return errorResponse(
         res,
         400,
@@ -386,9 +401,11 @@ const loginUser = async (req, res) => {
       );
     }
 
+    // Device conflict check - skip for finance and admin
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
+      !financeNoDevice &&
       user.is_verified === true
     ) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
@@ -409,7 +426,13 @@ const loginUser = async (req, res) => {
       }
     }
 
-    if (!adminNoDevice && !merchantDesktopNoDevice && deviceId) {
+    // Update device ID - skip for finance and admin
+    if (
+      !adminNoDevice &&
+      !merchantDesktopNoDevice &&
+      !financeNoDevice &&
+      deviceId
+    ) {
       try {
         await prisma.all_device_ids.upsert({
           where: { user_id: user.user_id },
@@ -495,31 +518,29 @@ const loginUser = async (req, res) => {
       expiresIn: "1440m",
     });
 
+    // Build user response object
+    const userResponse = {
+      user_id: toNumber(user.user_id),
+      user_name: user.user_name,
+      phone: user.phone,
+      role: user.role,
+      email: user.email,
+      is_verified: user.is_verified ? 1 : 0,
+    };
+
     if (isMerchant) {
-      return res.status(200).json({
-        success: true,
-        message: "Login successful",
-        token: {
-          access_token,
-          access_token_time: 60,
-          refresh_token,
-          refresh_token_time: 1440,
-        },
-        user: {
-          user_id: toNumber(user.user_id),
-          user_name: user.user_name,
-          phone: user.phone,
-          role: user.role,
-          email: user.email,
-          is_verified: user.is_verified ? 1 : 0,
-          device_id: adminNoDevice || merchantDesktopNoDevice ? null : deviceId,
-          owner_type,
-          business_id,
-          business_name,
-          business_logo,
-          address,
-        },
-      });
+      userResponse.owner_type = owner_type;
+      userResponse.business_id = business_id;
+      userResponse.business_name = business_name;
+      userResponse.business_logo = business_logo;
+      userResponse.address = address;
+      userResponse.device_id =
+        adminNoDevice || merchantDesktopNoDevice ? null : deviceId;
+    } else if (isFinance) {
+      userResponse.device_id =
+        adminNoDevice || financeNoDevice ? null : deviceId;
+    } else {
+      userResponse.device_id = adminNoDevice ? null : deviceId;
     }
 
     return res.status(200).json({
@@ -531,14 +552,7 @@ const loginUser = async (req, res) => {
         refresh_token,
         refresh_token_time: 1440,
       },
-      user: {
-        user_id: toNumber(user.user_id),
-        user_name: user.user_name,
-        phone: user.phone,
-        role: user.role,
-        email: user.email,
-        is_verified: user.is_verified ? 1 : 0,
-      },
+      user: userResponse,
     });
   } catch (err) {
     console.error("loginUser error:", err);
@@ -722,6 +736,24 @@ const verifyActiveSession = async (req, res) => {
       expiresIn: "1440m",
     });
 
+    const userResponse = {
+      user_id: toNumber(user.user_id),
+      user_name: user.user_name,
+      phone: user.phone,
+      role: user.role,
+      email: user.email,
+      is_verified: 1,
+      device_id: deviceId,
+    };
+
+    if (user.role === "merchant") {
+      userResponse.owner_type = owner_type;
+      userResponse.business_id = business_id;
+      userResponse.business_name = business_name;
+      userResponse.business_logo = business_logo;
+      userResponse.address = address;
+    }
+
     return res.status(200).json({
       success: true,
       message: "Session verified successfully",
@@ -729,20 +761,9 @@ const verifyActiveSession = async (req, res) => {
         access_token,
         access_token_time: 60,
         refresh_token,
-        refresh_token_time: 10,
+        refresh_token_time: 1440,
       },
-      user: {
-        user_id: toNumber(user.user_id),
-        user_name: user.user_name,
-        phone: user.phone,
-        role: user.role,
-        email: user.email,
-        is_verified: 1,
-        device_id: deviceId,
-        ...(user.role === "merchant"
-          ? { owner_type, business_id, business_name, business_logo, address }
-          : {}),
-      },
+      user: userResponse,
     });
   } catch (err) {
     console.error("verifyActiveSession error:", err);
@@ -815,19 +836,14 @@ const refreshAccessToken = async (req, res) => {
       );
     }
 
-    if (user.is_verified === false && user.role !== "admin") {
-      return errorResponse(
-        res,
-        401,
-        "Your session has expired. Please login again.",
-      );
-    }
-
+    // Allow token refresh for ALL roles regardless of is_verified status
+    // Only check if account is active
     const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
       phone: user.phone,
     };
+
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
       expiresIn: "60m",
     });
@@ -835,7 +851,11 @@ const refreshAccessToken = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Token refreshed successfully",
-      token: { access_token, access_token_time: 60 },
+      token: {
+        access_token,
+        access_token_time: 60,
+        refresh_token: refreshToken, // Return the same refresh token
+      },
     });
   } catch (err) {
     console.error("refreshAccessToken error:", err);

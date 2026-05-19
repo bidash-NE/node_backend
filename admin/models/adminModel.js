@@ -183,7 +183,7 @@ async function fetchAdmins() {
   const admins = await prisma.users.findMany({
     where: {
       role: {
-        in: ["admin", "superadmin"],
+        in: ["admin", "superadmin", "finance"],
       },
     },
     include: {
@@ -409,7 +409,49 @@ async function deleteUser(user_id, actorUserId = null, adminName = null) {
     throw error;
   }
 }
+// ✅ Organizers (role='organizer')
+async function fetchOrganizers() {
+  const organizers = await prisma.users.findMany({
+    where: {
+      role: "organizer",
+    },
+    orderBy: {
+      user_name: "asc",
+    },
+  });
 
+  // Fetch wallet info for all organizers
+  const organizersWithWallets = await Promise.all(
+    organizers.map(async (organizer) => {
+      let walletInfo = null;
+      try {
+        walletInfo = await prisma.wallets.findUnique({
+          where: { user_id: Number(organizer.user_id) },
+        });
+      } catch (error) {
+        // Wallet might not exist for this organizer
+      }
+
+      return {
+        user_id: Number(organizer.user_id),
+        user_name: organizer.user_name,
+        email: organizer.email,
+        phone: organizer.phone,
+        is_verified: organizer.is_verified,
+        is_active: organizer.is_active,
+        role: organizer.role,
+        profile_image: organizer.profile_image,
+        points: Number(organizer.points ?? 0),
+        wallet_id: walletInfo?.wallet_id || null,
+        wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
+        created_at: organizer.created_at,
+        updated_at: organizer.updated_at,
+      };
+    }),
+  );
+
+  return organizersWithWallets;
+}
 module.exports = {
   fetchUsersByRole,
   fetchDrivers,
@@ -418,4 +460,5 @@ module.exports = {
   deactivateUser,
   activateUser,
   deleteUser,
+  fetchOrganizers,
 };

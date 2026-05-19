@@ -166,3 +166,17 @@ exports.deleteUser = async (req, res) => {
       .json({ success: false, error: "Internal Server Error" });
   }
 };
+// Organizers list
+exports.getAllOrganizers = async (_req, res) => {
+  try {
+    const organizers = await adminModel.fetchOrganizers();
+    res.status(200).json({
+      success: true,
+      count: organizers.length,
+      data: organizers,
+    });
+  } catch (error) {
+    console.error("Error fetching organizers:", error);
+    res.status(500).json({ success: false, error: "Internal Server Error" });
+  }
+};

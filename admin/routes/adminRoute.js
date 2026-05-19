@@ -39,6 +39,7 @@ router.get("/users", adminController.getAllNormalUsers);
 router.get("/drivers", adminController.getAllDrivers);
 router.get("/admins", adminController.getAllAdmins);
 router.get("/merchants", adminController.getAllMerchantsWithDetails);
+router.get("/organizers", adminController.getAllOrganizers);
 
 // Mutations
 router.post(
