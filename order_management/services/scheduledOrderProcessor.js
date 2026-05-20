@@ -46,151 +46,119 @@ function safeJsonParse(s) {
 }
 
 /**
+ * Recursively extract all images from any nested structure
+ */
+function extractImagesFromItem(item) {
+  if (!item) return null;
+
+  // Direct image fields
+  if (item.item_image) return item.item_image;
+  if (item.image) return item.image;
+  if (item.image_url) return item.image_url;
+  if (item.photo) return item.photo;
+  if (item.url) return item.url;
+
+  // Check if item has a nested item object
+  if (item.item && typeof item.item === "object") {
+    return extractImagesFromItem(item.item);
+  }
+
+  // Check if item has product data
+  if (item.product && typeof item.product === "object") {
+    return extractImagesFromItem(item.product);
+  }
+
+  // Check if item has menu data
+  if (item.menu && typeof item.menu === "object") {
+    return extractImagesFromItem(item.menu);
+  }
+
+  return null;
+}
+
+/**
  * Normalize payload for order creation
  */
-// services/scheduledOrderProcessor.js
-
 function normalizeCreateOrderPayload(raw = {}) {
   const p = { ...(raw || {}) };
 
-  // ✅ FIRST: Handle nested payload string (your Redis structure)
+  // Handle nested payload string
   if (typeof p.payload === "string" && p.payload.trim()) {
     try {
       const parsedPayload = JSON.parse(p.payload);
-
-      // Merge parsed payload into p, but preserve existing fields
       Object.keys(parsedPayload).forEach((key) => {
         if (p[key] === undefined || p[key] === null) {
           p[key] = parsedPayload[key];
         }
       });
-
-      // ✅ SPECIAL HANDLED: Process items from parsed payload
-      if (parsedPayload.items && Array.isArray(parsedPayload.items)) {
-        p.items = parsedPayload.items.map((item) => ({
-          ...item,
-          // ✅ CRITICAL: Map 'image' field to 'item_image'
-          item_image: item.image || item.item_image || null,
-          // Keep original image field if needed
-          image: item.image || null,
-        }));
-      }
-
       delete p.payload;
     } catch (err) {
       console.error("[SCHED] Failed to parse nested payload:", err.message);
     }
   }
 
-  // ✅ Process items if they exist in p (not in nested payload)
+  // ✅ Extract business_details to add to each item
+  const businessDetails = p.business_details || {};
+  const defaultBusinessId = businessDetails.business_id
+    ? Number(businessDetails.business_id)
+    : p.business_id || null;
+  const defaultBusinessName = businessDetails.business_name || null;
+
+  // ✅ Transform items to match orders API format
   if (Array.isArray(p.items) && p.items.length > 0) {
     p.items = p.items.map((item) => ({
-      ...item,
-      // ✅ Map image to item_image if not already present
-      item_image: item.item_image || item.image || null,
+      // Required fields for orders API
+      business_id: item.business_id || defaultBusinessId,
+      business_name: item.business_name || defaultBusinessName,
+      menu_id: item.menu_id,
+      item_name: item.name || item.item_name,
+      item_image: item.image || item.item_image,
+      quantity: item.quantity,
+      price: item.unit_price || item.price,
+      subtotal: item.line_subtotal || item.subtotal,
+
+      // Optional fields
+      tax_rate: item.tax_rate || 0,
+      tax_amount: item.tax_amount || 0,
     }));
   }
 
-  // Remove scheduler-only keys
+  // ✅ Remove scheduler-only fields
   delete p.scheduled_at;
   delete p.scheduled_at_local;
   delete p.scheduled_epoch_ms;
   delete p.created_at;
   delete p.updated_at;
   delete p.job_id;
+  delete p.business_details;
+  delete p.payload;
 
-  // Normalize service_type
-  if (p.service_type != null) {
+  // ✅ Ensure status is CONFIRMED
+  p.status = "CONFIRMED";
+
+  // ✅ Normalize other fields
+  if (p.service_type) {
     p.service_type = String(p.service_type).trim().toUpperCase();
   }
 
-  // Normalize payment method
-  if (p.payment_method != null) {
-    p.payment_method = String(p.payment_method).trim().toUpperCase();
+  if (p.payment_method) {
+    p.payment_method = String(payment_method).trim().toUpperCase();
   }
 
-  // Normalize fulfillment_type
-  if (p.fulfillment_type != null) {
-    const f = String(p.fulfillment_type).trim();
-    p.fulfillment_type = f.toLowerCase() === "pickup" ? "Pickup" : "Delivery";
-  } else {
-    p.fulfillment_type = "Delivery";
+  // ✅ Handle delivery_address (ensure it's an object, not string)
+  if (p.delivery_address && typeof p.delivery_address === "string") {
+    try {
+      p.delivery_address = JSON.parse(p.delivery_address);
+    } catch (e) {
+      // Keep as is
+    }
   }
 
-  // Map deliver_to -> delivery_address
-  if (!p.delivery_address && p.deliver_to) {
-    p.delivery_address = p.deliver_to;
-  }
-
-  // Items validation
-  const items = Array.isArray(p.items) ? p.items : [];
-  p.items = items;
-
-  // Delivery fee calculation
-  if (p.delivery_fee == null) {
-    const perItem = items.map((it) => it?.delivery_fee);
-    p.delivery_fee = Number(sum(perItem).toFixed(2));
-  } else {
-    p.delivery_fee = Number(p.delivery_fee);
-  }
-
-  if (p.platform_fee == null) p.platform_fee = 0;
-  if (p.discount_amount == null) p.discount_amount = 0;
-
-  p.platform_fee = Number(p.platform_fee);
-  p.discount_amount = Number(p.discount_amount);
-
-  if (p.total_amount == null) {
-    const itemsSubtotal = sum(
-      items.map((it) => it?.subtotal || it?.line_subtotal || 0),
-    );
-    p.total_amount = Number(
-      (
-        itemsSubtotal +
-        (Number(p.delivery_fee) || 0) +
-        (Number(p.platform_fee) || 0) -
-        (Number(p.discount_amount) || 0)
-      ).toFixed(2),
-    );
-  } else {
-    p.total_amount = Number(p.total_amount);
-  }
-
-  // Priority should be boolean
-  if (p.priority != null) p.priority = !!p.priority;
-
-  // Set status to CONFIRMED for scheduled orders (merchant already accepted)
-  p.status = "CONFIRMED";
-
-  // PHOTO MAPPING
-  const photos = Array.isArray(p.special_photos)
-    ? p.special_photos
-        .map((x) => (x == null ? "" : String(x).trim()))
-        .filter(Boolean)
-    : [];
-
-  if (!p.delivery_photo_url) {
-    p.delivery_photo_url = photos[0] || null;
-  }
-
-  p.special_photos = photos;
-
-  // ✅ LOG the items to verify item_image is present
-  if (p.items && p.items.length > 0) {
-    console.log(
-      "[SCHED] Items after normalization:",
-      JSON.stringify(
-        p.items.map((i) => ({
-          menu_id: i.menu_id,
-          name: i.name,
-          item_image: i.item_image,
-          image: i.image,
-        })),
-        null,
-        2,
-      ),
-    );
-  }
+  // ✅ Log transformed items for debugging
+  console.log(
+    "[SCHED] Transformed items for orders API:",
+    JSON.stringify(p.items, null, 2),
+  );
 
   return p;
 }
@@ -200,8 +168,24 @@ function normalizeCreateOrderPayload(raw = {}) {
 async function createOrderFromScheduledPayload(orderPayload) {
   const payloadToSend = normalizeCreateOrderPayload(orderPayload);
 
+  // ✅ Additional validation before sending
+  if (!payloadToSend.items || payloadToSend.items.length === 0) {
+    console.error("[SCHED] ERROR: No items in payload after normalization!");
+    throw new Error("No items in order payload");
+  }
+
+  // Check if items have images
+  const itemsWithImages = payloadToSend.items.filter(
+    (i) => i.item_image || i.image,
+  );
+  console.log(
+    `[SCHED] Items with images: ${itemsWithImages.length}/${payloadToSend.items.length}`,
+  );
+
   try {
     console.log("[SCHED] 📦 Creating order for user:", payloadToSend.user_id);
+    console.log("[SCHED] Service type:", payloadToSend.service_type);
+    console.log("[SCHED] Total amount:", payloadToSend.total_amount);
 
     const response = await axios.post(ORDER_CREATE_URL, payloadToSend, {
       timeout: 15000,
@@ -216,6 +200,7 @@ async function createOrderFromScheduledPayload(orderPayload) {
 
     const orderId =
       data.order_id || data.id || (data.data && data.data.order_id);
+    console.log(`[SCHED] ✅ Order created successfully with ID: ${orderId}`);
     return orderId || null;
   } catch (err) {
     console.error("[SCHED] ❌ API Error:", err.message);
@@ -272,6 +257,7 @@ async function insertNotificationForScheduledOrder(
     `;
 
     await db.query(sql, [userId, type, title, message, dataJson]);
+    console.log(`[SCHED] Notification sent to user ${userId}`);
   } catch (err) {
     console.error("[SCHED] Failed to insert notification:", err.message);
   }
@@ -408,8 +394,13 @@ async function processJob(jobId) {
   const jobKey = buildJobKey(jobId);
 
   try {
+    console.log(`[SCHED] 🚀 Processing job: ${jobId}`);
+
     const raw = await redis.get(jobKey);
     if (!raw) {
+      console.log(
+        `[SCHED] Job ${jobId} not found in Redis, removing from ZSET`,
+      );
       await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
       return;
     }
@@ -421,8 +412,26 @@ async function processJob(jobId) {
       throw new Error("Missing order_payload in scheduled job");
     }
 
+    // Debug: Log the structure of order_payload
+    // console.log(
+    //   "[SCHED] order_payload structure:",
+    //   JSON.stringify(
+    //     {
+    //       has_payload_field: !!order_payload.payload,
+    //       payload_type: typeof order_payload.payload,
+    //       has_items: !!order_payload.items,
+    //       items_count: order_payload.items?.length,
+    //       has_order_payload: !!order_payload.order_payload,
+    //       status: order_payload.status,
+    //     },
+    //     null,
+    //     2,
+    //   ),
+    // );
+
     // Check if this is a retry
     if (data.retry_at && new Date(data.retry_at).getTime() > Date.now()) {
+      console.log(`[SCHED] Job ${jobId} is scheduled for retry later`);
       await redis.del(buildLockKey(jobId));
       return;
     }
@@ -438,6 +447,7 @@ async function processJob(jobId) {
 
     // PENDING - wait
     if (status === "PENDING") {
+      console.log(`[SCHED] ⏳ ${jobId} still pending, waiting...`);
       await redis.del(buildLockKey(jobId));
       return;
     }
@@ -456,6 +466,53 @@ async function processJob(jobId) {
       );
     } else {
       console.log(`[SCHED] ✅ Processing ${jobId} (ACCEPTED)`);
+    }
+
+    // ✅ Ensure items have item_image before processing
+    console.log("[SCHED] Checking order_payload for items...");
+
+    // Try to extract items from various possible locations
+    let itemsToProcess = null;
+
+    if (Array.isArray(order_payload.items) && order_payload.items.length > 0) {
+      itemsToProcess = order_payload.items;
+      console.log(
+        `[SCHED] Found ${itemsToProcess.length} items in order_payload.items`,
+      );
+    } else if (
+      order_payload.payload &&
+      typeof order_payload.payload === "string"
+    ) {
+      console.log("[SCHED] Looking for items in order_payload.payload string");
+      try {
+        const parsedPayload = JSON.parse(order_payload.payload);
+        if (Array.isArray(parsedPayload.items)) {
+          itemsToProcess = parsedPayload.items;
+          console.log(
+            `[SCHED] Found ${itemsToProcess.length} items in parsed payload`,
+          );
+        }
+      } catch (e) {
+        console.error("[SCHED] Failed to parse payload for items:", e.message);
+      }
+    }
+
+    if (itemsToProcess && itemsToProcess.length > 0) {
+      order_payload.items = itemsToProcess.map((item) => {
+        const imageUrl = extractImagesFromItem(item);
+        console.log(
+          `[SCHED] Item menu_id: ${item.menu_id}, image found: ${!!imageUrl}`,
+        );
+        return {
+          ...item,
+          item_image: imageUrl,
+          image: item.image || imageUrl,
+        };
+      });
+
+      console.log(
+        `[SCHED] Items prepared: ${order_payload.items.length}, with images: ${order_payload.items.filter((i) => i.item_image).length}`,
+      );
     }
 
     // Set status to CONFIRMED (merchant already accepted)
@@ -487,6 +544,7 @@ async function processJob(jobId) {
     );
   } catch (err) {
     console.error(`[SCHED] ❌ ${jobId} error:`, err.message);
+    console.error(`[SCHED] Error stack:`, err.stack);
     await failAndMaybeStopRetry(jobId, err);
   }
 }
