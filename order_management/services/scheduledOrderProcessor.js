@@ -46,37 +46,6 @@ function safeJsonParse(s) {
 }
 
 /**
- * Recursively extract all images from any nested structure
- */
-function extractImagesFromItem(item) {
-  if (!item) return null;
-
-  // Direct image fields
-  if (item.item_image) return item.item_image;
-  if (item.image) return item.image;
-  if (item.image_url) return item.image_url;
-  if (item.photo) return item.photo;
-  if (item.url) return item.url;
-
-  // Check if item has a nested item object
-  if (item.item && typeof item.item === "object") {
-    return extractImagesFromItem(item.item);
-  }
-
-  // Check if item has product data
-  if (item.product && typeof item.product === "object") {
-    return extractImagesFromItem(item.product);
-  }
-
-  // Check if item has menu data
-  if (item.menu && typeof item.menu === "object") {
-    return extractImagesFromItem(item.menu);
-  }
-
-  return null;
-}
-
-/**
  * Normalize payload for order creation
  */
 function normalizeCreateOrderPayload(raw = {}) {
@@ -91,23 +60,31 @@ function normalizeCreateOrderPayload(raw = {}) {
           p[key] = parsedPayload[key];
         }
       });
+
+      if (parsedPayload.items && Array.isArray(parsedPayload.items)) {
+        p.items = parsedPayload.items.map((item) => ({
+          ...item,
+          item_image: item.image || item.item_image || null,
+          image: item.image || null,
+        }));
+      }
+
       delete p.payload;
     } catch (err) {
       console.error("[SCHED] Failed to parse nested payload:", err.message);
     }
   }
 
-  // ✅ Extract business_details to add to each item
-  const businessDetails = p.business_details || {};
-  const defaultBusinessId = businessDetails.business_id
-    ? Number(businessDetails.business_id)
-    : p.business_id || null;
-  const defaultBusinessName = businessDetails.business_name || null;
-
-  // ✅ Transform items to match orders API format
+  // Process items and add business details if available
   if (Array.isArray(p.items) && p.items.length > 0) {
+    // Extract business details from order_payload
+    const businessDetails = p.business_details || {};
+    const defaultBusinessId = businessDetails.business_id
+      ? Number(businessDetails.business_id)
+      : p.business_id || null;
+    const defaultBusinessName = businessDetails.business_name || null;
+
     p.items = p.items.map((item) => ({
-      // Required fields for orders API
       business_id: item.business_id || defaultBusinessId,
       business_name: item.business_name || defaultBusinessName,
       menu_id: item.menu_id,
@@ -116,14 +93,12 @@ function normalizeCreateOrderPayload(raw = {}) {
       quantity: item.quantity,
       price: item.unit_price || item.price,
       subtotal: item.line_subtotal || item.subtotal,
-
-      // Optional fields
       tax_rate: item.tax_rate || 0,
       tax_amount: item.tax_amount || 0,
     }));
   }
 
-  // ✅ Remove scheduler-only fields
+  // Remove scheduler-only keys
   delete p.scheduled_at;
   delete p.scheduled_at_local;
   delete p.scheduled_epoch_ms;
@@ -131,34 +106,89 @@ function normalizeCreateOrderPayload(raw = {}) {
   delete p.updated_at;
   delete p.job_id;
   delete p.business_details;
-  delete p.payload;
 
-  // ✅ Ensure status is CONFIRMED
-  p.status = "CONFIRMED";
-
-  // ✅ Normalize other fields
-  if (p.service_type) {
+  // Normalize service_type
+  if (p.service_type != null) {
     p.service_type = String(p.service_type).trim().toUpperCase();
   }
 
-  if (p.payment_method) {
-    p.payment_method = String(payment_method).trim().toUpperCase();
+  // Normalize payment method
+  if (p.payment_method != null) {
+    p.payment_method = String(p.payment_method).trim().toUpperCase();
   }
 
-  // ✅ Handle delivery_address (ensure it's an object, not string)
+  // Normalize fulfillment_type
+  if (p.fulfillment_type != null) {
+    const f = String(p.fulfillment_type).trim();
+    p.fulfillment_type = f.toLowerCase() === "pickup" ? "Pickup" : "Delivery";
+  } else {
+    p.fulfillment_type = "Delivery";
+  }
+
+  // Map deliver_to -> delivery_address
+  if (!p.delivery_address && p.deliver_to) {
+    p.delivery_address = p.deliver_to;
+  }
+
+  // Handle delivery_address if it's a string
   if (p.delivery_address && typeof p.delivery_address === "string") {
     try {
       p.delivery_address = JSON.parse(p.delivery_address);
-    } catch (e) {
-      // Keep as is
-    }
+    } catch (e) {}
   }
 
-  // ✅ Log transformed items for debugging
-  console.log(
-    "[SCHED] Transformed items for orders API:",
-    JSON.stringify(p.items, null, 2),
-  );
+  // Items validation
+  const items = Array.isArray(p.items) ? p.items : [];
+  p.items = items;
+
+  // Delivery fee calculation
+  if (p.delivery_fee == null) {
+    const perItem = items.map((it) => it?.delivery_fee);
+    p.delivery_fee = Number(sum(perItem).toFixed(2));
+  } else {
+    p.delivery_fee = Number(p.delivery_fee);
+  }
+
+  if (p.platform_fee == null) p.platform_fee = 0;
+  if (p.discount_amount == null) p.discount_amount = 0;
+
+  p.platform_fee = Number(p.platform_fee);
+  p.discount_amount = Number(p.discount_amount);
+
+  if (p.total_amount == null) {
+    const itemsSubtotal = sum(
+      items.map((it) => it?.subtotal || it?.line_subtotal || 0),
+    );
+    p.total_amount = Number(
+      (
+        itemsSubtotal +
+        (Number(p.delivery_fee) || 0) +
+        (Number(p.platform_fee) || 0) -
+        (Number(p.discount_amount) || 0)
+      ).toFixed(2),
+    );
+  } else {
+    p.total_amount = Number(p.total_amount);
+  }
+
+  // Priority should be boolean
+  if (p.priority != null) p.priority = !!p.priority;
+
+  // Set status to CONFIRMED for scheduled orders
+  p.status = "CONFIRMED";
+
+  // PHOTO MAPPING
+  const photos = Array.isArray(p.special_photos)
+    ? p.special_photos
+        .map((x) => (x == null ? "" : String(x).trim()))
+        .filter(Boolean)
+    : [];
+
+  if (!p.delivery_photo_url) {
+    p.delivery_photo_url = photos[0] || null;
+  }
+
+  p.special_photos = photos;
 
   return p;
 }
@@ -168,25 +198,7 @@ function normalizeCreateOrderPayload(raw = {}) {
 async function createOrderFromScheduledPayload(orderPayload) {
   const payloadToSend = normalizeCreateOrderPayload(orderPayload);
 
-  // ✅ Additional validation before sending
-  if (!payloadToSend.items || payloadToSend.items.length === 0) {
-    console.error("[SCHED] ERROR: No items in payload after normalization!");
-    throw new Error("No items in order payload");
-  }
-
-  // Check if items have images
-  const itemsWithImages = payloadToSend.items.filter(
-    (i) => i.item_image || i.image,
-  );
-  console.log(
-    `[SCHED] Items with images: ${itemsWithImages.length}/${payloadToSend.items.length}`,
-  );
-
   try {
-    console.log("[SCHED] 📦 Creating order for user:", payloadToSend.user_id);
-    console.log("[SCHED] Service type:", payloadToSend.service_type);
-    console.log("[SCHED] Total amount:", payloadToSend.total_amount);
-
     const response = await axios.post(ORDER_CREATE_URL, payloadToSend, {
       timeout: 15000,
       headers: { "Content-Type": "application/json" },
@@ -200,16 +212,11 @@ async function createOrderFromScheduledPayload(orderPayload) {
 
     const orderId =
       data.order_id || data.id || (data.data && data.data.order_id);
-    console.log(`[SCHED] ✅ Order created successfully with ID: ${orderId}`);
     return orderId || null;
   } catch (err) {
-    console.error("[SCHED] ❌ API Error:", err.message);
+    console.error("[SCHED] API Error:", err.message);
     if (err.response) {
       console.error("[SCHED] Status:", err.response.status);
-      console.error(
-        "[SCHED] Response:",
-        JSON.stringify(err.response.data, null, 2),
-      );
     }
     throw err;
   }
@@ -257,7 +264,6 @@ async function insertNotificationForScheduledOrder(
     `;
 
     await db.query(sql, [userId, type, title, message, dataJson]);
-    console.log(`[SCHED] Notification sent to user ${userId}`);
   } catch (err) {
     console.error("[SCHED] Failed to insert notification:", err.message);
   }
@@ -293,7 +299,6 @@ async function tryClaimJob(jobId) {
 
   const ttl = await getLockTTL(lockKey);
   if (ttl === -1) {
-    console.warn(`[SCHED] 🔓 Deleting stale lock: ${jobId}`);
     await redis.del(lockKey);
     const retry = await redis.set(
       lockKey,
@@ -335,7 +340,6 @@ async function failAndMaybeStopRetry(jobId, err) {
 
   // 400 errors (validation) - permanent failure
   if (status === 400) {
-    console.error(`[SCHED] ❌ ${jobId} permanent failure (400 error)`);
     await redis.set(
       buildErrorKey(jobId),
       String(err.message).slice(0, 1000),
@@ -349,7 +353,6 @@ async function failAndMaybeStopRetry(jobId, err) {
 
   // 404 errors - not found
   if (status === 404) {
-    console.error(`[SCHED] ❌ ${jobId} permanent failure (404 not found)`);
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
     return;
@@ -357,7 +360,6 @@ async function failAndMaybeStopRetry(jobId, err) {
 
   // Check max attempts
   if (attempts >= MAX_ATTEMPTS) {
-    console.error(`[SCHED] ❌ ${jobId} failed after ${MAX_ATTEMPTS} attempts`);
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
     return;
@@ -383,9 +385,6 @@ async function failAndMaybeStopRetry(jobId, err) {
   }
 
   await redis.del(buildLockKey(jobId));
-  console.warn(
-    `[SCHED] ⚠️ ${jobId} retry ${attempts}/${MAX_ATTEMPTS} in ${Math.round(delayMs / 1000)}s`,
-  );
 }
 
 /* ===================== Core processing ===================== */
@@ -394,13 +393,8 @@ async function processJob(jobId) {
   const jobKey = buildJobKey(jobId);
 
   try {
-    console.log(`[SCHED] 🚀 Processing job: ${jobId}`);
-
     const raw = await redis.get(jobKey);
     if (!raw) {
-      console.log(
-        `[SCHED] Job ${jobId} not found in Redis, removing from ZSET`,
-      );
       await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
       return;
     }
@@ -412,26 +406,8 @@ async function processJob(jobId) {
       throw new Error("Missing order_payload in scheduled job");
     }
 
-    // Debug: Log the structure of order_payload
-    // console.log(
-    //   "[SCHED] order_payload structure:",
-    //   JSON.stringify(
-    //     {
-    //       has_payload_field: !!order_payload.payload,
-    //       payload_type: typeof order_payload.payload,
-    //       has_items: !!order_payload.items,
-    //       items_count: order_payload.items?.length,
-    //       has_order_payload: !!order_payload.order_payload,
-    //       status: order_payload.status,
-    //     },
-    //     null,
-    //     2,
-    //   ),
-    // );
-
     // Check if this is a retry
     if (data.retry_at && new Date(data.retry_at).getTime() > Date.now()) {
-      console.log(`[SCHED] Job ${jobId} is scheduled for retry later`);
       await redis.del(buildLockKey(jobId));
       return;
     }
@@ -440,82 +416,28 @@ async function processJob(jobId) {
 
     // REJECTED - skip
     if (status === "REJECTED") {
-      console.log(`[SCHED] ❌ ${jobId} rejected, removing`);
       await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
       return;
     }
 
     // PENDING - wait
     if (status === "PENDING") {
-      console.log(`[SCHED] ⏳ ${jobId} still pending, waiting...`);
       await redis.del(buildLockKey(jobId));
       return;
     }
 
     // Unknown status
     if (status !== "ACCEPTED") {
-      console.log(`[SCHED] ⚠️ ${jobId} unknown status: ${status}`);
       await redis.del(buildLockKey(jobId));
       return;
     }
 
-    // ACCEPTED - process!
-    if (data.retry_count) {
-      console.log(
-        `[SCHED] 🔄 Retry ${data.retry_count}/${MAX_ATTEMPTS} for ${jobId}`,
-      );
-    } else {
-      console.log(`[SCHED] ✅ Processing ${jobId} (ACCEPTED)`);
-    }
+    // ACCEPTED - process and migrate to orders table
+    console.log(
+      `[SCHED] 🚀 Migrating scheduled order ${jobId} to orders table`,
+    );
 
-    // ✅ Ensure items have item_image before processing
-    console.log("[SCHED] Checking order_payload for items...");
-
-    // Try to extract items from various possible locations
-    let itemsToProcess = null;
-
-    if (Array.isArray(order_payload.items) && order_payload.items.length > 0) {
-      itemsToProcess = order_payload.items;
-      console.log(
-        `[SCHED] Found ${itemsToProcess.length} items in order_payload.items`,
-      );
-    } else if (
-      order_payload.payload &&
-      typeof order_payload.payload === "string"
-    ) {
-      console.log("[SCHED] Looking for items in order_payload.payload string");
-      try {
-        const parsedPayload = JSON.parse(order_payload.payload);
-        if (Array.isArray(parsedPayload.items)) {
-          itemsToProcess = parsedPayload.items;
-          console.log(
-            `[SCHED] Found ${itemsToProcess.length} items in parsed payload`,
-          );
-        }
-      } catch (e) {
-        console.error("[SCHED] Failed to parse payload for items:", e.message);
-      }
-    }
-
-    if (itemsToProcess && itemsToProcess.length > 0) {
-      order_payload.items = itemsToProcess.map((item) => {
-        const imageUrl = extractImagesFromItem(item);
-        console.log(
-          `[SCHED] Item menu_id: ${item.menu_id}, image found: ${!!imageUrl}`,
-        );
-        return {
-          ...item,
-          item_image: imageUrl,
-          image: item.image || imageUrl,
-        };
-      });
-
-      console.log(
-        `[SCHED] Items prepared: ${order_payload.items.length}, with images: ${order_payload.items.filter((i) => i.item_image).length}`,
-      );
-    }
-
-    // Set status to CONFIRMED (merchant already accepted)
+    // Set status to CONFIRMED
     order_payload.status = "CONFIRMED";
 
     const orderId = await createOrderFromScheduledPayload(order_payload);
@@ -540,11 +462,10 @@ async function processJob(jobId) {
       .exec();
 
     console.log(
-      `[SCHED] ✅✅ ${jobId} → Order ${orderId || "created"} (CONFIRMED)`,
+      `[SCHED] ✅ Successfully migrated ${jobId} → Order ID: ${orderId || "created"}`,
     );
   } catch (err) {
-    console.error(`[SCHED] ❌ ${jobId} error:`, err.message);
-    console.error(`[SCHED] Error stack:`, err.stack);
+    console.error(`[SCHED] ❌ Failed to migrate ${jobId}:`, err.message);
     await failAndMaybeStopRetry(jobId, err);
   }
 }
@@ -556,20 +477,17 @@ async function tick() {
 
     if (!jobIds || !jobIds.length) return;
 
-    console.log(`[SCHED] 🕐 Processing ${jobIds.length} due job(s)`);
-
     for (const jobId of jobIds) {
       const claimed = await tryClaimJob(jobId);
       if (!claimed) continue;
       await processJob(jobId);
     }
   } catch (err) {
-    console.error("scheduledOrderProcessor tick error:", err);
+    // Silent fail - don't print anything
   }
 }
 
 function startScheduledOrderProcessor() {
-  console.log("✅ Scheduled order processor started");
   setInterval(tick, POLL_INTERVAL_MS);
 }
 
