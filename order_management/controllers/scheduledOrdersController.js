@@ -72,11 +72,21 @@ exports.scheduleOrder = async (req, res) => {
 
     // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
     // Merge it into body so special_photos doesn't get lost.
+    // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
     let mergedBody = { ...body };
     if (typeof body.payload === "string") {
       const parsed = safeJsonParse(body.payload);
       if (parsed && typeof parsed === "object") {
         mergedBody = { ...mergedBody, ...parsed };
+
+        // ✅ Also ensure items in parsed payload have business_name
+        if (Array.isArray(parsed.items)) {
+          mergedBody.items = parsed.items.map((item) => ({
+            ...item,
+            business_name: item.business_name || item.businessName || null,
+            business_id: item.business_id || item.businessId || null,
+          }));
+        }
       }
     }
 
@@ -169,7 +179,98 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
     orderPayload.service_type = serviceType;
+    // ---------- FETCH ITEM IMAGES ----------
+    if (Array.isArray(orderPayload.items) && orderPayload.items.length) {
+      const serviceType = orderPayload.service_type; // Already validated as FOOD or MART
+      const menuIds = orderPayload.items
+        .map((item) => item.menu_id)
+        .filter((id) => id != null && !isNaN(Number(id)));
 
+      if (menuIds.length) {
+        const tableName = serviceType === "FOOD" ? "food_menu" : "mart_menu";
+        const placeholders = menuIds.map(() => "?").join(",");
+
+        try {
+          const [menuItems] = await db.query(
+            `SELECT id, item_image FROM ${tableName} WHERE id IN (${placeholders})`,
+            menuIds,
+          );
+
+          const imageMap = new Map();
+          menuItems.forEach((item) => {
+            imageMap.set(Number(item.id), item.item_image);
+          });
+
+          // Add item_image to each item
+          orderPayload.items = orderPayload.items.map((item) => ({
+            ...item,
+            item_image: imageMap.get(Number(item.menu_id)) || null,
+          }));
+
+          console.log(
+            `[scheduleOrder] Added images to ${orderPayload.items.length} items`,
+          );
+        } catch (err) {
+          console.error("[scheduleOrder] Failed to fetch item images:", err);
+          // Continue without images - don't block the order
+        }
+      }
+    }
+    // After: orderPayload.items = safeJsonParse(orderPayload.items);
+
+    // ---------- ENSURE BUSINESS_NAME IN ITEMS ----------
+    if (Array.isArray(orderPayload.items) && orderPayload.items.length) {
+      // Get business_id from payload if not in items
+      const globalBusinessId = orderPayload.business_id || null;
+
+      orderPayload.items = orderPayload.items.map((item) => ({
+        ...item,
+        // Ensure business_id is set
+        business_id: item.business_id || globalBusinessId,
+        // Ensure business_name is set (prefer item's, then fetch from DB)
+        business_name: item.business_name || null,
+      }));
+
+      // Fetch missing business names from database
+      const missingBusinessIds = [
+        ...new Set(
+          orderPayload.items
+            .filter((item) => !item.business_name && item.business_id)
+            .map((item) => item.business_id),
+        ),
+      ];
+
+      if (missingBusinessIds.length) {
+        const placeholders = missingBusinessIds.map(() => "?").join(",");
+        const [businesses] = await db.query(
+          `SELECT business_id, business_name FROM merchant_business_details WHERE business_id IN (${placeholders})`,
+          missingBusinessIds,
+        );
+
+        const businessNameMap = new Map();
+        businesses.forEach((b) =>
+          businessNameMap.set(b.business_id, b.business_name),
+        );
+
+        orderPayload.items = orderPayload.items.map((item) => ({
+          ...item,
+          business_name:
+            item.business_name || businessNameMap.get(item.business_id) || null,
+        }));
+      }
+
+      console.log(
+        "[scheduleOrder] Items after business_name enrichment:",
+        JSON.stringify(
+          orderPayload.items.map((i) => ({
+            business_id: i.business_id,
+            business_name: i.business_name,
+          })),
+          null,
+          2,
+        ),
+      );
+    }
     // ---------- handle photos (URIs + uploaded files) ----------
     // 1) photos from body (JSON)
     let bodyUris = [];

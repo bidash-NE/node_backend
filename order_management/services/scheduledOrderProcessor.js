@@ -11,7 +11,7 @@ const {
 const BHUTAN_TZ = "Asia/Thimphu";
 
 const ORDER_CREATE_URL =
-  process.env.ORDER_CREATE_URL || "http://localhost:3001/orders";
+  process.env.ORDER_CREATE_URL || "http://localhost:1001/orders";
 
 const POLL_INTERVAL_MS = 5000;
 const BATCH_SIZE = 20;
@@ -48,24 +48,41 @@ function safeJsonParse(s) {
 /**
  * Normalize payload for order creation
  */
-function normalizeCreateOrderPayload(raw = {}) {
+async function normalizeCreateOrderPayload(raw = {}) {
   const p = { ...(raw || {}) };
 
   // Handle nested payload string
   if (typeof p.payload === "string" && p.payload.trim()) {
     try {
       const parsedPayload = JSON.parse(p.payload);
+
+      // Merge parsed payload, giving priority to existing fields
       Object.keys(parsedPayload).forEach((key) => {
         if (p[key] === undefined || p[key] === null) {
           p[key] = parsedPayload[key];
         }
       });
 
+      // Extract images from nested payload
+      if (
+        parsedPayload.special_photos &&
+        Array.isArray(parsedPayload.special_photos)
+      ) {
+        p.special_photos = parsedPayload.special_photos;
+      }
+
+      if (parsedPayload.delivery_photo_url) {
+        p.delivery_photo_url = parsedPayload.delivery_photo_url;
+      }
+
+      // Process items from nested payload
       if (parsedPayload.items && Array.isArray(parsedPayload.items)) {
         p.items = parsedPayload.items.map((item) => ({
           ...item,
-          item_image: item.image || item.item_image || null,
-          image: item.image || null,
+          business_name: item.business_name || item.businessName || null,
+          business_id: item.business_id || item.businessId || null,
+          item_image: item.item_image || item.image || null,
+          image: undefined,
         }));
       }
 
@@ -75,27 +92,60 @@ function normalizeCreateOrderPayload(raw = {}) {
     }
   }
 
-  // Process items and add business details if available
+  // Process items and ensure business_name is present
   if (Array.isArray(p.items) && p.items.length > 0) {
-    // Extract business details from order_payload
-    const businessDetails = p.business_details || {};
-    const defaultBusinessId = businessDetails.business_id
-      ? Number(businessDetails.business_id)
-      : p.business_id || null;
-    const defaultBusinessName = businessDetails.business_name || null;
+    // Get global business_id if not in items
+    const globalBusinessId = p.business_id || null;
+    const globalBusinessName = p.business_name || null;
 
+    // First pass: ensure basic fields
     p.items = p.items.map((item) => ({
-      business_id: item.business_id || defaultBusinessId,
-      business_name: item.business_name || defaultBusinessName,
+      ...item,
+      business_id: item.business_id || globalBusinessId,
+      business_name: item.business_name || globalBusinessName || null,
       menu_id: item.menu_id,
       item_name: item.name || item.item_name,
-      item_image: item.image || item.item_image,
-      quantity: item.quantity,
-      price: item.unit_price || item.price,
-      subtotal: item.line_subtotal || item.subtotal,
-      tax_rate: item.tax_rate || 0,
-      tax_amount: item.tax_amount || 0,
+      item_image: item.item_image || item.image || null,
+      quantity: Number(item.quantity) || 1,
+      price: Number(item.price || item.unit_price) || 0,
+      subtotal: Number(item.subtotal || item.line_subtotal || 0),
+      tax_rate: Number(item.tax_rate || 0),
+      tax_amount: Number(item.tax_amount || 0),
     }));
+
+    // Fetch missing business names from database
+    const missingBusinessIds = [
+      ...new Set(
+        p.items
+          .filter((item) => !item.business_name && item.business_id)
+          .map((item) => item.business_id),
+      ),
+    ];
+
+    if (missingBusinessIds.length) {
+      try {
+        const placeholders = missingBusinessIds.map(() => "?").join(",");
+        const [businesses] = await db.query(
+          `SELECT business_id, business_name FROM merchant_business_details WHERE business_id IN (${placeholders})`,
+          missingBusinessIds,
+        );
+
+        const businessNameMap = new Map();
+        businesses.forEach((b) =>
+          businessNameMap.set(b.business_id, b.business_name),
+        );
+
+        p.items = p.items.map((item) => ({
+          ...item,
+          business_name:
+            item.business_name ||
+            businessNameMap.get(item.business_id) ||
+            "Unknown Business",
+        }));
+      } catch (err) {
+        console.error("[SCHED] Failed to fetch business names:", err.message);
+      }
+    }
   }
 
   // Remove scheduler-only keys
@@ -106,6 +156,9 @@ function normalizeCreateOrderPayload(raw = {}) {
   delete p.updated_at;
   delete p.job_id;
   delete p.business_details;
+  delete p.retry_at;
+  delete p.retry_count;
+  delete p.last_error;
 
   // Normalize service_type
   if (p.service_type != null) {
@@ -190,15 +243,96 @@ function normalizeCreateOrderPayload(raw = {}) {
 
   p.special_photos = photos;
 
+  // Log final payload for debugging
+  console.log(
+    "[SCHED] Final normalized payload:",
+    JSON.stringify(
+      {
+        user_id: p.user_id,
+        business_id: p.business_id,
+        service_type: p.service_type,
+        items_count: p.items.length,
+        items_with_business_name: p.items.every((i) => i.business_name),
+        total_amount: p.total_amount,
+      },
+      null,
+      2,
+    ),
+  );
+
   return p;
 }
 
 /* ===================== Helper: call existing Order API ===================== */
 
 async function createOrderFromScheduledPayload(orderPayload) {
-  const payloadToSend = normalizeCreateOrderPayload(orderPayload);
+  const payloadToSend = await normalizeCreateOrderPayload(orderPayload);
+
+  // ✅ VALIDATE: Ensure all items have business_name before sending
+  if (Array.isArray(payloadToSend.items) && payloadToSend.items.length) {
+    const missingBusinessName = payloadToSend.items.some(
+      (item) => !item.business_name,
+    );
+    if (missingBusinessName) {
+      console.error(
+        "[SCHED] Missing business_name in items:",
+        JSON.stringify(
+          payloadToSend.items.map((i) => ({
+            menu_id: i.menu_id,
+            business_id: i.business_id,
+            business_name: i.business_name,
+          })),
+          null,
+          2,
+        ),
+      );
+
+      // Final attempt to fetch missing business names
+      const businessIds = [
+        ...new Set(
+          payloadToSend.items
+            .map((item) => item.business_id)
+            .filter((id) => id),
+        ),
+      ];
+      if (businessIds.length) {
+        const [businesses] = await db.query(
+          `SELECT business_id, business_name FROM merchant_business_details WHERE business_id IN (?)`,
+          [businessIds],
+        );
+        const businessMap = new Map(
+          businesses.map((b) => [b.business_id, b.business_name]),
+        );
+
+        payloadToSend.items = payloadToSend.items.map((item) => ({
+          ...item,
+          business_name:
+            item.business_name ||
+            businessMap.get(item.business_id) ||
+            "Unknown Business",
+        }));
+      }
+    }
+  }
 
   try {
+    console.log(
+      "[SCHED] Sending to orders API:",
+      JSON.stringify(
+        {
+          url: ORDER_CREATE_URL,
+          user_id: payloadToSend.user_id,
+          business_id: payloadToSend.business_id,
+          items_count: payloadToSend.items?.length,
+          has_business_names: payloadToSend.items?.every(
+            (i) => i.business_name,
+          ),
+        },
+        null,
+        2,
+      ),
+    );
+
     const response = await axios.post(ORDER_CREATE_URL, payloadToSend, {
       timeout: 15000,
       headers: { "Content-Type": "application/json" },
@@ -206,18 +340,23 @@ async function createOrderFromScheduledPayload(orderPayload) {
 
     const data = response.data || {};
 
-    if (data.success === false) {
-      throw new Error(data.message || "Order API returned success=false");
+    if (data.success === false || data.ok === false) {
+      throw new Error(
+        data.message || data.error || "Order API returned success=false",
+      );
     }
 
     const orderId =
       data.order_id || data.id || (data.data && data.data.order_id);
     return orderId || null;
   } catch (err) {
-    console.error("[SCHED] API Error:", err.message);
-    if (err.response) {
-      console.error("[SCHED] Status:", err.response.status);
-    }
+    console.error("[SCHED] API Error Details:");
+    console.error("- Message:", err.message);
+    console.error("- Status:", err.response?.status);
+    console.error(
+      "- Response data:",
+      JSON.stringify(err.response?.data, null, 2),
+    );
     throw err;
   }
 }
@@ -348,6 +487,7 @@ async function failAndMaybeStopRetry(jobId, err) {
     );
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+    console.log(`[SCHED] Permanent failure for ${jobId} due to 400 error`);
     return;
   }
 
@@ -355,6 +495,7 @@ async function failAndMaybeStopRetry(jobId, err) {
   if (status === 404) {
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+    console.log(`[SCHED] Permanent failure for ${jobId} due to 404 error`);
     return;
   }
 
@@ -362,6 +503,9 @@ async function failAndMaybeStopRetry(jobId, err) {
   if (attempts >= MAX_ATTEMPTS) {
     await markFailed(jobId, err.message, body);
     await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+    console.log(
+      `[SCHED] Permanent failure for ${jobId} after ${MAX_ATTEMPTS} attempts`,
+    );
     return;
   }
 
@@ -382,6 +526,9 @@ async function failAndMaybeStopRetry(jobId, err) {
     data.last_error = err.message;
     await redis.set(jobKey, JSON.stringify(data));
     await redis.zadd(ZSET_KEY, retryAt, jobId);
+    console.log(
+      `[SCHED] Retry ${attempts}/${MAX_ATTEMPTS} for ${jobId} scheduled at ${new Date(retryAt).toISOString()}`,
+    );
   }
 
   await redis.del(buildLockKey(jobId));
@@ -396,6 +543,7 @@ async function processJob(jobId) {
     const raw = await redis.get(jobKey);
     if (!raw) {
       await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
+      console.log(`[SCHED] Job ${jobId} not found, removing from queue`);
       return;
     }
 
@@ -408,39 +556,67 @@ async function processJob(jobId) {
 
     // Check if this is a retry
     if (data.retry_at && new Date(data.retry_at).getTime() > Date.now()) {
+      console.log(
+        `[SCHED] Job ${jobId} scheduled for retry at ${data.retry_at}, skipping`,
+      );
       await redis.del(buildLockKey(jobId));
       return;
     }
 
     const status = order_payload?.status || "PENDING";
 
-    // REJECTED - skip
+    // REJECTED - skip and cleanup
     if (status === "REJECTED") {
+      console.log(`[SCHED] Job ${jobId} is REJECTED, removing from queue`);
       await redis.multi().zrem(ZSET_KEY, jobId).del(buildLockKey(jobId)).exec();
       return;
     }
 
-    // PENDING - wait
+    // PENDING - wait for acceptance
     if (status === "PENDING") {
+      console.log(`[SCHED] Job ${jobId} is PENDING, waiting for acceptance`);
       await redis.del(buildLockKey(jobId));
       return;
     }
 
     // Unknown status
     if (status !== "ACCEPTED") {
+      console.log(`[SCHED] Job ${jobId} has unknown status: ${status}`);
       await redis.del(buildLockKey(jobId));
       return;
     }
 
     // ACCEPTED - process and migrate to orders table
+    console.log(`[SCHED] 🚀 Processing accepted scheduled order ${jobId}`);
+
+    // Create a complete order payload with all necessary fields
+    const completePayload = {
+      ...order_payload,
+      user_id: data.user_id,
+      business_id: data.business_id,
+      scheduled_at: data.scheduled_at,
+      scheduled_at_local: data.scheduled_at_local,
+    };
+
+    // Log the payload being sent
     console.log(
-      `[SCHED] 🚀 Migrating scheduled order ${jobId} to orders table`,
+      `[SCHED] Order payload for ${jobId}:`,
+      JSON.stringify(
+        {
+          user_id: completePayload.user_id,
+          business_id: completePayload.business_id,
+          service_type: completePayload.service_type,
+          items_count: completePayload.items?.length,
+          items_have_business_names: completePayload.items?.every(
+            (i) => i.business_name,
+          ),
+        },
+        null,
+        2,
+      ),
     );
 
-    // Set status to CONFIRMED
-    order_payload.status = "CONFIRMED";
-
-    const orderId = await createOrderFromScheduledPayload(order_payload);
+    const orderId = await createOrderFromScheduledPayload(completePayload);
 
     // Send notification
     if (data.user_id && (data.scheduled_at || data.scheduled_at_local)) {
@@ -449,6 +625,20 @@ async function processJob(jobId) {
         orderId,
         data.scheduled_at_local || data.scheduled_at,
       );
+    }
+
+    // Send push notification
+    try {
+      const {
+        sendUserNotification,
+      } = require("../services/expoNotificationService");
+      await sendUserNotification({
+        user_id: data.user_id,
+        title: "Order Confirmed",
+        body: `Your scheduled order ${orderId || jobId} has been confirmed and is being processed.`,
+      });
+    } catch (pushErr) {
+      console.error("[SCHED] Push notification failed:", pushErr.message);
     }
 
     // Cleanup Redis
@@ -462,10 +652,10 @@ async function processJob(jobId) {
       .exec();
 
     console.log(
-      `[SCHED] ✅ Successfully migrated ${jobId} → Order ID: ${orderId || "created"}`,
+      `[SCHED] ✅ Successfully processed ${jobId} → Order ID: ${orderId || "created"}`,
     );
   } catch (err) {
-    console.error(`[SCHED] ❌ Failed to migrate ${jobId}:`, err.message);
+    console.error(`[SCHED] ❌ Failed to process ${jobId}:`, err.message);
     await failAndMaybeStopRetry(jobId, err);
   }
 }
@@ -477,18 +667,34 @@ async function tick() {
 
     if (!jobIds || !jobIds.length) return;
 
+    console.log(`[SCHED] Found ${jobIds.length} due jobs`);
+
     for (const jobId of jobIds) {
       const claimed = await tryClaimJob(jobId);
       if (!claimed) continue;
       await processJob(jobId);
     }
   } catch (err) {
-    // Silent fail - don't print anything
+    console.error("[SCHED] Tick error:", err.message);
   }
 }
 
-function startScheduledOrderProcessor() {
-  setInterval(tick, POLL_INTERVAL_MS);
+async function processSingleJob(jobId) {
+  const claimed = await tryClaimJob(jobId);
+  if (claimed) {
+    await processJob(jobId);
+    return true;
+  }
+  return false;
 }
 
-module.exports = { startScheduledOrderProcessor };
+function startScheduledOrderProcessor() {
+  console.log("[SCHED] Starting scheduled order processor...");
+  setInterval(tick, POLL_INTERVAL_MS);
+  console.log(`[SCHED] Processor running every ${POLL_INTERVAL_MS}ms`);
+}
+
+module.exports = {
+  startScheduledOrderProcessor,
+  processSingleJob,
+};

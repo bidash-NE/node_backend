@@ -33,42 +33,40 @@ function buildErrorKey(jobId) {
  * If input has timezone info (Z or +06:00 etc) => Date.parse is fine.
  * If input has NO timezone => treat as BHUTAN LOCAL TIME.
  */
+// models/scheduledOrderModel.js
 function parseScheduledToEpochMs(input) {
   if (!input) return NaN;
-
-  // Date object
   if (input instanceof Date) return input.getTime();
-
-  // number (epoch ms)
   if (typeof input === "number") return Number.isFinite(input) ? input : NaN;
 
   const s = String(input).trim();
   if (!s) return NaN;
 
-  // If it includes timezone (Z or +hh:mm or -hh:mm), use native parse
-  const hasTZ = /([zZ]|[+\-]\d{2}:\d{2})$/.test(s);
+  // If it's already an ISO string with timezone (Z or +06:00), use native parse
+  const hasTZ = /([zZ]|[+\-]\d{2}:?\d{2})$/.test(s);
   if (hasTZ) {
     const t = Date.parse(s);
     return Number.isFinite(t) ? t : NaN;
   }
 
-  // Otherwise treat as Bhutan local: "YYYY-MM-DDTHH:mm[:ss]" or "YYYY-MM-DD HH:mm[:ss]"
-  const m = s.match(
-    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/,
+  // For local datetime without timezone, treat as Bhutan time
+  // Format: "2024-05-18T11:00:00" or "2024-05-18 11:00:00"
+  let normalized = s.replace(" ", "T");
+
+  // Ensure seconds are included
+  if (normalized.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)) {
+    normalized += ":00";
+  }
+
+  // Create date in Bhutan timezone
+  const bhutanDate = new Date(normalized + "+06:00");
+  const epochMs = bhutanDate.getTime();
+
+  console.log(
+    `[parseScheduled] Input: ${s}, Bhutan time: ${normalized}+06:00, Epoch: ${epochMs}, Now: ${Date.now()}`,
   );
-  if (!m) return NaN;
 
-  const year = Number(m[1]);
-  const month = Number(m[2]); // 1-12
-  const day = Number(m[3]);
-  const hour = Number(m[4]);
-  const minute = Number(m[5]);
-  const second = m[6] != null ? Number(m[6]) : 0;
-
-  // Convert Bhutan local => UTC epoch
-  // UTC time = local time - 6 hours
-  const utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
-  return utcMs - BHUTAN_OFFSET_MINUTES * 60 * 1000;
+  return Number.isFinite(epochMs) ? epochMs : NaN;
 }
 
 /**
