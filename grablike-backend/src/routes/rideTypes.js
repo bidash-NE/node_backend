@@ -7,7 +7,8 @@ import { withConn } from "../db/mysql.js";
 
 export const ridesTypesRouter = express.Router();
 
-const BASE_URL = process.env.BASE_URL || "https://backend.tabdhey.bt";
+const BASE_URL = (process.env.BASE_URL || "https://backend.tabdhey.bt").replace(/\/+$/, "");
+const UPLOADS_BASE = `${BASE_URL}/grablike/uploads`;
 
 /* ===================== Multer — ride type icons ===================== */
 const ICON_DIR = path.join(process.cwd(), "uploads", "ride-type-icons");
@@ -99,7 +100,7 @@ ridesTypesRouter.post("/add-ride-types", uploadIcon.single("icon"), async (req, 
 
   // icon_url: uploaded file takes priority, fallback to text field
   const icon_url = req.file
-    ? `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`
+    ? `${UPLOADS_BASE}/ride-type-icons/${req.file.filename}`
     : (req.body.icon_url || null);
 
   if (!name || !code) {
@@ -245,7 +246,7 @@ ridesTypesRouter.put("/edit-ride-type/:id", uploadIcon.single("icon"), async (re
 
   // uploaded file takes priority over text icon_url field
   const icon_url = req.file
-    ? `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`
+    ? `${UPLOADS_BASE}/ride-type-icons/${req.file.filename}`
     : req.body.icon_url;
 
   try {
@@ -449,7 +450,7 @@ ridesTypesRouter.post(
       }
 
       const { id } = req.params;
-      const iconUrl = `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`;
+      const iconUrl = `${UPLOADS_BASE}/ride-type-icons/${req.file.filename}`;
 
       await withConn(async (db) => {
         const [existing] = await db.query(
