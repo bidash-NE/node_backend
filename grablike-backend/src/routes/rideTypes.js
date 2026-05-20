@@ -1,7 +1,36 @@
+import path from "node:path";
+import fs from "node:fs";
 import express from "express";
+import multer from "multer";
+import mime from "mime-types";
 import { withConn } from "../db/mysql.js";
 
 export const ridesTypesRouter = express.Router();
+
+const BASE_URL = process.env.BASE_URL || "https://backend.tabdhey.bt";
+
+/* ===================== Multer — ride type icons ===================== */
+const ICON_DIR = path.join(process.cwd(), "uploads", "ride-type-icons");
+fs.mkdirSync(ICON_DIR, { recursive: true });
+
+const iconStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, ICON_DIR),
+  filename: (_req, file, cb) => {
+    const ext = mime.extension(file.mimetype) || "png";
+    cb(null, `ride-icon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+  },
+});
+
+const uploadIcon = multer({
+  storage: iconStorage,
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype?.startsWith("image/")) {
+      return cb(new Error("Only image files are allowed"));
+    }
+    cb(null, true);
+  },
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
+});
 
 /* ===================== money helpers ===================== */
 // Admin enters Nu (e.g. 10 or "10.00") -> store cents (1000)
@@ -54,29 +83,33 @@ function mapRideTypeRow(row) {
 }
 
 /* ===================== Add ride type ===================== */
-ridesTypesRouter.post("/add-ride-types", async (req, res) => {
+ridesTypesRouter.post("/add-ride-types", uploadIcon.single("icon"), async (req, res) => {
   const {
     name,
     code,
     description,
-    base_fare, // Nu
-    per_km_rate, // Nu
-    min_fare, // Nu
-    cancellation_fee, // Nu
+    base_fare,
+    per_km_rate,
+    min_fare,
+    cancellation_fee,
     capacity,
     vehicle_type,
-    icon_url,
     is_active = true,
   } = req.body;
 
+  // icon_url: uploaded file takes priority, fallback to text field
+  const icon_url = req.file
+    ? `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`
+    : (req.body.icon_url || null);
+
   if (!name || !code) {
+    if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(400).json({
       success: false,
       message: "name and code are required",
     });
   }
 
-  // Convert Nu -> cents for DB
   const base_fare_cents = toCents(base_fare) ?? 0;
   const per_km_rate_cents = toCents(per_km_rate) ?? 0;
   const min_fare_cents = toCents(min_fare) ?? 0;
@@ -104,7 +137,7 @@ ridesTypesRouter.post("/add-ride-types", async (req, res) => {
           cancellation_fee_cents,
           capacity ?? null,
           vehicle_type || null,
-          icon_url || null,
+          icon_url,
           is_active_int,
         ]
       );
@@ -113,10 +146,12 @@ ridesTypesRouter.post("/add-ride-types", async (req, res) => {
         success: true,
         message: "Ride type added successfully",
         id: result.insertId,
+        icon_url,
       });
     });
   } catch (err) {
     console.error("Error adding ride type:", err);
+    if (req.file) fs.unlink(req.file.path, () => {});
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -192,22 +227,26 @@ ridesTypesRouter.get("/get-ride-type/:user_id", async (req, res) => {
 });
 
 /* ===================== EDIT/UPDATE ride type by ID ===================== */
-ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
+ridesTypesRouter.put("/edit-ride-type/:id", uploadIcon.single("icon"), async (req, res) => {
   const { id } = req.params;
 
   const {
     name,
     code,
     description,
-    base_fare, // Nu
-    per_km_rate, // Nu
-    min_fare, // Nu
-    cancellation_fee, // Nu
+    base_fare,
+    per_km_rate,
+    min_fare,
+    cancellation_fee,
     capacity,
     vehicle_type,
-    icon_url,
     is_active,
   } = req.body;
+
+  // uploaded file takes priority over text icon_url field
+  const icon_url = req.file
+    ? `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`
+    : req.body.icon_url;
 
   try {
     await withConn(async (db) => {
@@ -298,6 +337,7 @@ ridesTypesRouter.put("/edit-ride-type/:id", async (req, res) => {
     });
   } catch (err) {
     console.error("Error updating ride type:", err);
+    if (req.file) fs.unlink(req.file.path, () => {});
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -397,3 +437,42 @@ ridesTypesRouter.get("/get-ride-type-by-id/:id", async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+/* ===================== Upload icon for a ride type ===================== */
+ridesTypesRouter.post(
+  "/ride-type-icon/:id",
+  uploadIcon.single("icon"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ success: false, message: "No file uploaded" });
+      }
+
+      const { id } = req.params;
+      const iconUrl = `${BASE_URL}/uploads/ride-type-icons/${req.file.filename}`;
+
+      await withConn(async (db) => {
+        const [existing] = await db.query(
+          "SELECT id FROM ride_types WHERE id = ?",
+          [id]
+        );
+
+        if (existing.length === 0) {
+          fs.unlink(req.file.path, () => {});
+          return res.status(404).json({ success: false, message: "Ride type not found" });
+        }
+
+        await db.query(
+          "UPDATE ride_types SET icon_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [iconUrl, id]
+        );
+
+        return res.status(200).json({ success: true, icon_url: iconUrl });
+      });
+    } catch (err) {
+      console.error("Error uploading ride type icon:", err);
+      if (req.file) fs.unlink(req.file.path, () => {});
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
