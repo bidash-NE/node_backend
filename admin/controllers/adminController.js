@@ -1,4 +1,5 @@
 const adminModel = require("../models/adminModel");
+const { sendNotificationSmsBulk } = require("../services/smsNotificationService");
 
 // helpers to extract acting admin for logs
 function toIntOrNull(v) {
@@ -233,6 +234,19 @@ exports.approveDriver = async (req, res) => {
 
     if (result.notFound) {
       return res.status(404).json({ success: false, message: "Driver not found" });
+    }
+
+    // Send SMS notification to driver (non-blocking)
+    if (result.phone) {
+      const smsText = action === "approved"
+        ? `Hi ${result.driver_name || "Driver"}, your TabDhey driver registration has been approved! You can now log in and start accepting rides.`
+        : `Hi ${result.driver_name || "Driver"}, your TabDhey driver registration was not approved. Reason: ${rejection_reason}. Please contact support for more information.`;
+
+      sendNotificationSmsBulk({
+        title: action === "approved" ? "Registration Approved" : "Registration Not Approved",
+        message: smsText,
+        recipients: [result.phone],
+      }).catch((err) => console.error("SMS send error:", err?.message));
     }
 
     return res.status(200).json({

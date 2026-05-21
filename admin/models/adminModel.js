@@ -196,7 +196,7 @@ async function setDriverApproval(
     select: {
       driver_id: true,
       approval_status: true,
-      users: { select: { user_name: true } },
+      users: { select: { user_name: true, phone: true } },
     },
   });
 
@@ -228,7 +228,12 @@ async function setDriverApproval(
     }`,
   );
 
-  return { updated: true, approval_status: newStatus };
+  return {
+    updated: true,
+    approval_status: newStatus,
+    phone: driver.users?.phone || null,
+    driver_name: driver.users?.user_name || null,
+  };
 }
 
 // ✅ Admins (role in 'admin','superadmin') + points
