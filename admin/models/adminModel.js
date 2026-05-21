@@ -79,103 +79,156 @@ async function fetchUsersByRole() {
   return usersWithWallets;
 }
 
-// ✅ Drivers (role='driver') + license/vehicles + avg_rating + points
+// ── shared helper: build detailed driver row ──────────────────────────────
+async function buildDriverRow(user) {
+  const driverInfo = user.drivers;
+  const driver_id = driverInfo?.driver_id ? Number(driverInfo.driver_id) : null;
+
+  // wallet
+  let walletInfo = null;
+  try {
+    walletInfo = await prisma.wallets.findUnique({
+      where: { user_id: Number(user.user_id) },
+    });
+  } catch (_) {}
+
+  // vehicles
+  let vehicles = [];
+  if (driver_id) {
+    const rows = await prisma.$queryRaw`
+      SELECT vehicle_id, make, model, year, color, license_plate, vehicle_type, features
+      FROM driver_vehicles
+      WHERE driver_id = ${driver_id}
+    `;
+    vehicles = rows.map((v) => ({
+      vehicle_id: Number(v.vehicle_id),
+      make: v.make,
+      model: v.model,
+      year: v.year ? Number(v.year) : null,
+      color: v.color,
+      license_plate: v.license_plate,
+      vehicle_type: v.vehicle_type,
+      features: v.features || null,
+    }));
+  }
+
+  // documents
+  let documents = [];
+  if (driver_id) {
+    const docs = await prisma.driver_documents.findMany({
+      where: { driver_id },
+      select: { document_id: true, document_type: true, document_url: true },
+    });
+    documents = docs.map((d) => ({
+      document_id: Number(d.document_id),
+      document_type: d.document_type,
+      document_url: d.document_url,
+    }));
+  }
+
+  // avg rating
+  let avg_rating = null;
+  if (driver_id) {
+    const agg = await prisma.ride_ratings.aggregate({
+      where: { driver_id, payment_status: true },
+      _avg: { rating: true },
+    });
+    if (agg._avg.rating !== null) avg_rating = Number(agg._avg.rating);
+  }
+
+  return {
+    user_id: Number(user.user_id),
+    user_name: user.user_name,
+    email: user.email,
+    phone: user.phone,
+    is_verified: user.is_verified,
+    is_active: user.is_active,
+    role: user.role,
+    profile_image: user.profile_image || null,
+    wallet_id: walletInfo?.wallet_id || null,
+    wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
+    points: Number(user.points ?? 0),
+    driver_id,
+    license_number: driverInfo?.license_number || null,
+    license_expiry: driverInfo?.license_expiry || null,
+    approval_status: driverInfo?.approval_status ?? "pending",
+    is_approved: driverInfo?.is_approved ?? false,
+    registered_at: driverInfo?.created_at || null,
+    vehicles,
+    documents,
+    avg_rating,
+  };
+}
+
+// ✅ Drivers (role='driver') + license/vehicles/documents/approval + avg_rating + points
 async function fetchDrivers() {
+  const users = await prisma.users.findMany({
+    where: { role: "driver" },
+    include: { drivers: true },
+    orderBy: { user_name: "asc" },
+  });
+  return Promise.all(users.map(buildDriverRow));
+}
+
+// ✅ Pending drivers only — for the approval queue
+async function fetchPendingDrivers() {
   const users = await prisma.users.findMany({
     where: {
       role: "driver",
+      drivers: { approval_status: "pending" },
     },
-    include: {
-      // wallet: true,  // ❌ REMOVED
-      drivers: true,
-    },
-    orderBy: {
-      user_name: "asc",
+    include: { drivers: true },
+    orderBy: { created_at: "asc" },
+  });
+  return Promise.all(users.map(buildDriverRow));
+}
+
+// ✅ Approve or reject a driver
+async function setDriverApproval(
+  driver_id,
+  action,
+  rejection_reason,
+  actorUserId,
+  adminName,
+) {
+  const driver = await prisma.drivers.findUnique({
+    where: { driver_id: Number(driver_id) },
+    select: {
+      driver_id: true,
+      approval_status: true,
+      users: { select: { user_name: true } },
     },
   });
 
-  const detailedDrivers = await Promise.all(
-    users.map(async (user) => {
-      const driverInfo = user.drivers;
-      const driver_id = driverInfo?.driver_id
-        ? Number(driverInfo.driver_id)
-        : null;
-      const license_number = driverInfo?.license_number || null;
+  if (!driver) return { notFound: true };
 
-      // Get wallet info
-      let walletInfo = null;
-      try {
-        walletInfo = await prisma.wallets.findUnique({
-          where: { user_id: Number(user.user_id) },
-        });
-      } catch (error) {
-        // Wallet might not exist for this user
-      }
+  const newStatus = action === "approved" ? "approved" : "rejected";
+  const isApproved = newStatus === "approved";
 
-      // Get vehicles using raw SQL to avoid features column issue
-      let vehicles = [];
-      if (driver_id) {
-        const vehicleRows = await prisma.$queryRaw`
-          SELECT 
-            vehicle_id, 
-            make, 
-            color, 
-            license_plate, 
-            vehicle_type,
-            features
-          FROM driver_vehicles 
-          WHERE driver_id = ${driver_id}
-        `;
+  await prisma.drivers.update({
+    where: { driver_id: Number(driver_id) },
+    data: {
+      approval_status: newStatus,
+      is_approved: isApproved,
+      ...(newStatus === "rejected" && rejection_reason
+        ? { rejection_reason: String(rejection_reason).trim() }
+        : {}),
+    },
+  });
 
-        vehicles = vehicleRows.map((v) => ({
-          vehicle_id: Number(v.vehicle_id),
-          make: v.make,
-          color: v.color,
-          license_plate: v.license_plate,
-          vehicle_type: v.vehicle_type,
-          features: v.features || null,
-        }));
-      }
-
-      // Get average rating using Prisma
-      let avg_rating = null;
-      if (driver_id) {
-        const ratings = await prisma.ride_ratings.aggregate({
-          where: {
-            driver_id: driver_id,
-            payment_status: true,
-          },
-          _avg: {
-            rating: true,
-          },
-        });
-
-        if (ratings._avg.rating !== null) {
-          avg_rating = Number(ratings._avg.rating);
-        }
-      }
-
-      return {
-        user_id: Number(user.user_id),
-        user_name: user.user_name,
-        email: user.email,
-        phone: user.phone,
-        is_verified: user.is_verified,
-        is_active: user.is_active,
-        role: user.role,
-        profile_image: user.profile_image || null,
-        wallet_id: walletInfo?.wallet_id || null,
-        wallet_amount: walletInfo?.amount ? Number(walletInfo.amount) : null,
-        points: Number(user.points ?? 0),
-        driver_id: driver_id,
-        license_number: license_number,
-        vehicles: vehicles,
-        avg_rating: avg_rating,
-      };
-    }),
+  const driverName = driver.users?.user_name || `driver_id:${driver_id}`;
+  await logAdmin(
+    null,
+    actorUserId,
+    adminName,
+    `${newStatus.toUpperCase()} driver "${driverName}" (driver_id: ${driver_id})${
+      newStatus === "rejected" && rejection_reason
+        ? ` — reason: ${rejection_reason}`
+        : ""
+    }`,
   );
 
-  return detailedDrivers;
+  return { updated: true, approval_status: newStatus };
 }
 
 // ✅ Admins (role in 'admin','superadmin') + points
@@ -455,6 +508,8 @@ async function fetchOrganizers() {
 module.exports = {
   fetchUsersByRole,
   fetchDrivers,
+  fetchPendingDrivers,
+  setDriverApproval,
   fetchAdmins,
   fetchMerchantsWithBusiness,
   deactivateUser,

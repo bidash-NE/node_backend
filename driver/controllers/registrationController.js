@@ -379,6 +379,32 @@ const loginUser = async (req, res) => {
       );
     }
 
+    // Block drivers whose registration has not yet been approved
+    if (user.role === "driver") {
+      const driverRecord = await prisma.drivers.findFirst({
+        where: { user_id: user.user_id },
+        select: { approval_status: true },
+      });
+
+      const status = driverRecord?.approval_status ?? "pending";
+
+      if (status === "pending") {
+        return errorResponse(
+          res,
+          403,
+          "Your registration is under review. You will be notified once approved.",
+        );
+      }
+
+      if (status === "rejected") {
+        return errorResponse(
+          res,
+          403,
+          "Your registration was not approved. Please contact support for more information.",
+        );
+      }
+    }
+
     const roleLower = String(user.role || "")
       .toLowerCase()
       .trim();
@@ -668,6 +694,32 @@ const verifyActiveSession = async (req, res) => {
         success: false,
         message: "Session expired. Please login again.",
       });
+    }
+
+    // Block drivers whose registration has not yet been approved
+    if (user.role === "driver") {
+      const driverRecord = await prisma.drivers.findFirst({
+        where: { user_id: uid },
+        select: { approval_status: true },
+      });
+
+      const status = driverRecord?.approval_status ?? "pending";
+
+      if (status === "pending") {
+        return res.status(200).json({
+          success: false,
+          message: "Your registration is under review. You will be notified once approved.",
+          approval_status: "pending",
+        });
+      }
+
+      if (status === "rejected") {
+        return res.status(200).json({
+          success: false,
+          message: "Your registration was not approved. Please contact support for more information.",
+          approval_status: "rejected",
+        });
+      }
     }
 
     const deviceRecord = await prisma.all_device_ids.findUnique({

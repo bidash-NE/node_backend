@@ -3,6 +3,8 @@ const express = require("express");
 const router = express.Router();
 const rateLimit = require("express-rate-limit");
 const adminController = require("../controllers/adminController");
+const auth = require("../middleware/auth");
+const ensureAdmin = require("../middleware/ensureAdmin");
 
 const makeLimiter = ({ windowMs, max, message }) =>
   rateLimit({
@@ -60,4 +62,21 @@ router.delete(
   validateUserIdParam,
   adminController.deleteUser,
 );
+
+// Driver approval queue
+router.get(
+  "/drivers/pending",
+  adminReadLimiter,
+  auth,
+  ensureAdmin,
+  adminController.getPendingDrivers,
+);
+router.patch(
+  "/drivers/:driver_id/approve",
+  adminWriteLimiter,
+  auth,
+  ensureAdmin,
+  adminController.approveDriver,
+);
+
 module.exports = router;
