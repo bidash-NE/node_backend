@@ -53,9 +53,10 @@ router.post("/upload-document", documentUpload.single("document"), (req, res) =>
   if (!req.file) {
     return res.status(400).json({ success: false, message: "No file uploaded" });
   }
-  const baseUrl = process.env.API_BASE_URL || `${req.protocol}://${req.get("host")}`;
-  const url = `${baseUrl}/uploads/documents/${req.file.filename}`;
-  return res.status(200).json({ success: true, url });
+  return res.status(200).json({
+    success: true,
+    path: `/uploads/documents/${req.file.filename}`,
+  });
 });
 
 // Registration endpoint
