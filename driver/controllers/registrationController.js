@@ -110,20 +110,30 @@ const registerUser = async (req, res) => {
         const lng = driver.current_location.coordinates[0];
         const lat = driver.current_location.coordinates[1];
 
-        const newDriver = await prismaTx.drivers.create({
-          data: {
-            user_id: newUser.user_id,
-            license_number: driver.license_number,
-            license_expiry: new Date(driver.license_expiry),
-            approval_status: "pending",
-            is_approved: false,
-            rating: 0,
-            total_rides: 0,
-            is_online: false,
-            current_location: `POINT(${lng} ${lat})`,
-            current_location_updated_at: new Date(),
-          },
+        // current_location is POINT SRID 4326 NOT NULL — Prisma skips
+        // Unsupported fields, so we use raw SQL for this INSERT.
+        await prismaTx.$executeRaw`
+          INSERT INTO drivers (
+            user_id, license_number, license_expiry,
+            approval_status, is_approved, rating, total_rides,
+            is_online, current_location, current_location_updated_at
+          ) VALUES (
+            ${newUser.user_id},
+            ${driver.license_number},
+            ${new Date(driver.license_expiry)},
+            'pending', 0, 0.00, 0, 0,
+            ST_GeomFromText(${`POINT(${lng} ${lat})`}, 4326),
+            NOW()
+          )
+        `;
+
+        const newDriver = await prismaTx.drivers.findFirst({
+          where: { user_id: newUser.user_id },
+          select: { driver_id: true },
+          orderBy: { driver_id: "desc" },
         });
+
+        if (!newDriver) throw new Error("driver_insert_failed");
 
         driverId = toNumber(newDriver.driver_id);
 
@@ -176,7 +186,8 @@ const registerUser = async (req, res) => {
       phone: normalizedPhone,
     });
   } catch (err) {
-    console.error("Registration error:", err);
+    console.error("Registration error:", err?.message || err);
+    console.error("Registration error code:", err?.code, "meta:", err?.meta);
 
     if (err.code === "P2002") {
       const target = err.meta?.target;
@@ -201,6 +212,10 @@ const registerUser = async (req, res) => {
         409,
         "Account already exists with this information.",
       );
+    }
+
+    if (err.message === "driver_insert_failed") {
+      return errorResponse(res, 500, "Failed to create driver record. Please try again.");
     }
 
     if (err.message === "missing_driver_fields") {
