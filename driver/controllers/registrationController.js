@@ -65,7 +65,7 @@ const registerUser = async (req, res) => {
           email: user.email ? user.email.toLowerCase() : null,
           phone: normalizedPhone,
           password_hash: hashedPassword,
-          is_verified: true,
+          is_verified: false,
           is_active: true,
           role: user.role,
         },
