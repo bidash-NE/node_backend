@@ -161,9 +161,13 @@ const registerUser = async (req, res) => {
               vehicle_type: vehicle.vehicle_type,
               actual_capacity: vehicle.capacity,
               available_capacity: vehicle.capacity,
-              features: Array.isArray(vehicle.features)
-                ? vehicle.features.join(",")
-                : null,
+              features: (() => {
+                const f = vehicle.features;
+                if (f == null) return null;
+                if (Array.isArray(f)) return f.join(",");
+                if (typeof f === "object") return Object.values(f).join(",");
+                return String(f);
+              })(),
               insurance_expiry: vehicle.insurance_expiry
                 ? new Date(vehicle.insurance_expiry)
                 : null,
