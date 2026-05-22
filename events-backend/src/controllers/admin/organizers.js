@@ -25,6 +25,17 @@ async function listOrganizers(req, res, next) {
       },
     });
 
+    const userIds = organizers
+      .filter((o) => o.users)
+      .map((o) => o.users.user_id);
+
+    const wallets = await prisma.wallets.findMany({
+      where: { user_id: { in: userIds } },
+      select: { user_id: true, wallet_id: true },
+    });
+
+    const walletMap = new Map(wallets.map((w) => [w.user_id.toString(), w.wallet_id]));
+
     res.json({
       success: true,
       data: organizers.map((o) => ({
@@ -42,6 +53,7 @@ async function listOrganizers(req, res, next) {
               is_verified: o.users.is_verified,
               is_active: o.users.is_active,
               last_login: o.users.last_login,
+              wallet_id: walletMap.get(o.users.user_id.toString()) ?? null,
             }
           : null,
       })),
