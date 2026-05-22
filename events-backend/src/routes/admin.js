@@ -61,9 +61,11 @@ router.get('/events/:eventId/reviews',  reviewsCtrl.listReviews);
 router.delete('/reviews/:reviewId',     reviewsCtrl.deleteReview);
 
 // ── Organizers ────────────────────────────────────────────────────────────────
-router.get('/organizers',              organizersCtrl.listOrganizers);
-router.post('/organizers',             organizersCtrl.createOrganizer);
-router.delete('/organizers/:id',       organizersCtrl.deleteOrganizer);
-router.get('/organizers/:id/revenue',  organizersCtrl.getOrganizerRevenue);
+router.get('/organizers',                             organizersCtrl.listOrganizers);
+router.post('/organizers',                            organizersCtrl.createOrganizer);
+router.delete('/organizers/:id',                      organizersCtrl.deleteOrganizer);
+router.get('/organizers/:id/revenue',                 organizersCtrl.getOrganizerRevenue);
+router.get('/organizers/:id/wallet',                  organizersCtrl.getOrganizerWallet);
+router.get('/organizers/:id/wallet/transactions',     organizersCtrl.getOrganizerWalletTransactions);
 
 module.exports = router;

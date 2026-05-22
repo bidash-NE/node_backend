@@ -193,4 +193,46 @@ async function deleteOrganizer(req, res, next) {
   }
 }
 
-module.exports = { listOrganizers, createOrganizer, deleteOrganizer, getOrganizerRevenue };
+async function getOrganizerWallet(req, res, next) {
+  try {
+    const { id } = req.params;
+    const organizer = await prisma.event_organizers.findUnique({
+      where: { id },
+      select: { name: true, user_id: true },
+    });
+    if (!organizer) return res.status(404).json({ success: false, message: 'Organizer not found' });
+    if (!organizer.user_id) return res.status(404).json({ success: false, message: 'Organizer has no linked user account' });
+
+    const walletData = await walletApi.getWalletByUser(organizer.user_id.toString());
+    res.json({
+      success: true,
+      data: {
+        organizer: { id, name: organizer.name },
+        wallet: walletData.data,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getOrganizerWalletTransactions(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { limit, cursor, start, end, direction } = req.query;
+
+    const organizer = await prisma.event_organizers.findUnique({
+      where: { id },
+      select: { user_id: true },
+    });
+    if (!organizer) return res.status(404).json({ success: false, message: 'Organizer not found' });
+    if (!organizer.user_id) return res.status(404).json({ success: false, message: 'Organizer has no linked user account' });
+
+    const data = await walletApi.getUserTransactions(organizer.user_id.toString(), { limit, cursor, start, end, direction });
+    res.json(data);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listOrganizers, createOrganizer, deleteOrganizer, getOrganizerRevenue, getOrganizerWallet, getOrganizerWalletTransactions };
