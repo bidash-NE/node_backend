@@ -898,13 +898,14 @@ model orders {
 }
 
 model event_organizers {
-  id           String        @id @db.Char(36)
-  name         String        @db.VarChar(255)
-  user_id      BigInt?       @unique @db.UnsignedBigInt
-  created_at   DateTime      @default(now()) @db.Timestamp(0)
-  events       events[]
-  event_halls  event_halls[]
-  users        users?        @relation(fields: [user_id], references: [user_id], onDelete: SetNull, map: "organizers_ibfk_user")
+  id                      String                    @id @db.Char(36)
+  name                    String                    @db.VarChar(255)
+  user_id                 BigInt?                   @unique @db.UnsignedBigInt
+  created_at              DateTime                  @default(now()) @db.Timestamp(0)
+  events                  events[]
+  event_halls             event_halls[]
+  users                   users?                    @relation(fields: [user_id], references: [user_id], onDelete: SetNull, map: "organizers_ibfk_user")
+  organizer_revenue_share organizer_revenue_share?
 }
 
 model places {
@@ -1510,6 +1511,7 @@ model users {
   event_review_helpful            event_review_helpful[]
   event_payment_sessions          event_payment_sessions[]
   event_organizers                event_organizers?
+  organizer_revenue_share         organizer_revenue_share[]
 
   @@index([email], map: "email_2")
   @@index([is_active], map: "is_active")
@@ -2225,4 +2227,19 @@ enum event_payment_session_status {
   success
   failed
   cancelled
+}
+
+model organizer_revenue_share {
+  id                   Int              @id @default(autoincrement()) @db.UnsignedInt
+  organizer_id         String           @unique @db.Char(36)
+  total_revenue        Decimal          @default(0.00) @db.Decimal(15, 2)
+  org_share_pct        Decimal          @default(80.00) @db.Decimal(5, 2)
+  tabdey_share_pct     Decimal          @default(20.00) @db.Decimal(5, 2)
+  total_org_revenue    Decimal          @default(0.00) @db.Decimal(15, 2)
+  total_tabdey_revenue Decimal          @default(0.00) @db.Decimal(15, 2)
+  created_at           DateTime         @default(now()) @db.Timestamp(0)
+  updated_at           DateTime         @default(now()) @updatedAt @db.Timestamp(0)
+  updated_by           BigInt?          @db.UnsignedBigInt
+  event_organizers     event_organizers @relation(fields: [organizer_id], references: [id], onDelete: Cascade)
+  users                users?           @relation(fields: [updated_by], references: [user_id], onDelete: SetNull)
 }
