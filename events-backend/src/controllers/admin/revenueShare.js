@@ -56,7 +56,13 @@ async function upsertRevenueShare(req, res, next) {
       },
     });
 
-    res.json({ success: true, data: share });
+    res.json({
+      success: true,
+      data: {
+        ...share,
+        updated_by: share.updated_by ? share.updated_by.toString() : null,
+      },
+    });
   } catch (err) {
     next(err);
   }
