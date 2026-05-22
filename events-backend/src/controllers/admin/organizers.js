@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const prisma = require('../../db');
+const walletApi = require('../../services/walletApi');
 
 const DEFAULT_PASSWORD = 'password123';
 
@@ -90,9 +91,18 @@ async function createOrganizer(req, res, next) {
       data: { id: uuidv4(), name, user_id: user.user_id },
     });
 
+    // Auto-provision wallet — non-fatal if the wallet service is unavailable
+    let wallet_id = null;
+    try {
+      const walletData = await walletApi.createWallet(user.user_id);
+      wallet_id = walletData.data.wallet_id;
+    } catch (walletErr) {
+      console.error(`Wallet creation failed for user ${user.user_id}:`, walletErr.message);
+    }
+
     res.status(201).json({
       success: true,
-      data: { id: organizer.id, name: organizer.name, email, phone, default_password: DEFAULT_PASSWORD },
+      data: { id: organizer.id, name: organizer.name, email, phone, default_password: DEFAULT_PASSWORD, wallet_id },
     });
   } catch (err) {
     next(err);
