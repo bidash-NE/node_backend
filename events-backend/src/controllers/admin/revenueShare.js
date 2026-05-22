@@ -1,5 +1,13 @@
 const prisma = require('../../db');
 
+function serializeShare(share) {
+  if (!share) return null;
+  return {
+    ...share,
+    updated_by: share.updated_by ? share.updated_by.toString() : null,
+  };
+}
+
 async function getRevenueShare(req, res, next) {
   try {
     const { id } = req.params;
@@ -18,7 +26,7 @@ async function getRevenueShare(req, res, next) {
       success: true,
       data: {
         organizer: { id: organizer.id, name: organizer.name },
-        share: organizer.organizer_revenue_share ?? null,
+        share: serializeShare(organizer.organizer_revenue_share),
       },
     });
   } catch (err) {
@@ -56,13 +64,7 @@ async function upsertRevenueShare(req, res, next) {
       },
     });
 
-    res.json({
-      success: true,
-      data: {
-        ...share,
-        updated_by: share.updated_by ? share.updated_by.toString() : null,
-      },
-    });
+    res.json({ success: true, data: serializeShare(share) });
   } catch (err) {
     next(err);
   }
