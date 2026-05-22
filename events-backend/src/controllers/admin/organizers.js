@@ -8,7 +8,21 @@ async function listOrganizers(req, res, next) {
   try {
     const organizers = await prisma.event_organizers.findMany({
       orderBy: { created_at: 'desc' },
-      include: { _count: { select: { events: true } } },
+      include: {
+        _count: { select: { events: true } },
+        users: {
+          select: {
+            user_id: true,
+            user_name: true,
+            email: true,
+            phone: true,
+            profile_image: true,
+            is_verified: true,
+            is_active: true,
+            last_login: true,
+          },
+        },
+      },
     });
 
     res.json({
@@ -18,6 +32,18 @@ async function listOrganizers(req, res, next) {
         name: o.name,
         event_count: o._count.events,
         created_at: o.created_at,
+        user: o.users
+          ? {
+              user_id: o.users.user_id.toString(),
+              user_name: o.users.user_name,
+              email: o.users.email,
+              phone: o.users.phone,
+              profile_image: o.users.profile_image,
+              is_verified: o.users.is_verified,
+              is_active: o.users.is_active,
+              last_login: o.users.last_login,
+            }
+          : null,
       })),
     });
   } catch (err) {
