@@ -21,32 +21,63 @@ function generateTicketCode() {
 
 const TX_OPTIONS = { timeout: 30000 };
 const CATEGORY_TO_TIER = { regular: 'Regular', premium: 'VIP', balcony: 'Balcony' };
+const TABDEY_WALLET_ID = process.env.TABDEY_WALLET_ID || 'TD00000001';
+const DEFAULT_ORG_SHARE = 80;
 
-// Resolve the wallet_id for an organizer via the wallet microservice
-async function getOrganizerWalletId(organizerId) {
+// Splits a wallet booking payment into organizer + tabdey shares.
+// Returns amounts, percentages, and journal codes for both transfers.
+async function processWalletPayment(userId, organizerId, totalAmount, eventTitle, tPin) {
+  // Fetch user wallet, organizer wallet, and share config in parallel
   const organizer = await prisma.event_organizers.findUnique({
     where: { id: organizerId },
     select: { user_id: true },
   });
-  if (!organizer?.user_id) {
-    throw Object.assign(new Error('Organizer has no linked user account'), { status: 503 });
-  }
-  const walletData = await walletApi.getWalletByUser(organizer.user_id.toString());
-  return walletData.data.wallet_id;
-}
+  if (!organizer?.user_id) throw Object.assign(new Error('Organizer has no linked user account'), { status: 503 });
 
-// Transfer from user wallet → organizer wallet via the wallet microservice.
-// Returns the journal_no from the receipt for storing on the booking.
-async function chargeWallet(userId, organizerWalletId, amount, note, tPin) {
-  const userWalletData = await walletApi.getWalletByUser(userId.toString());
-  const receipt = await walletApi.transfer({
-    senderWalletId: userWalletData.data.wallet_id,
-    recipientWalletId: organizerWalletId,
-    amount,
-    note,
-    tPin,
-  });
-  return receipt.receipt.journal_no;
+  const [userWalletData, orgWalletData, shareConfig] = await Promise.all([
+    walletApi.getWalletByUser(userId.toString()),
+    walletApi.getWalletByUser(organizer.user_id.toString()),
+    prisma.organizer_revenue_share.findUnique({ where: { organizer_id: organizerId } }),
+  ]);
+
+  const userWalletId = userWalletData.data.wallet_id;
+  const organizerWalletId = orgWalletData.data.wallet_id;
+
+  const orgPct = shareConfig ? Number(shareConfig.org_share_pct) : DEFAULT_ORG_SHARE;
+  const tabdeyPct = parseFloat((100 - orgPct).toFixed(2));
+  const orgAmount = parseFloat((totalAmount * orgPct / 100).toFixed(2));
+  const tabdeyAmount = parseFloat((totalAmount - orgAmount).toFixed(2));
+
+  let orgJournalCode = null;
+  let tabdeyJournalCode = null;
+
+  try {
+    const orgReceipt = await walletApi.transfer({
+      senderWalletId: userWalletId,
+      recipientWalletId: organizerWalletId,
+      amount: orgAmount,
+      note: `${eventTitle} — organizer share (${orgPct}%)`,
+      tPin,
+    });
+    orgJournalCode = orgReceipt.receipt.journal_no;
+
+    if (tabdeyAmount > 0) {
+      const tabdeyReceipt = await walletApi.transfer({
+        senderWalletId: userWalletId,
+        recipientWalletId: TABDEY_WALLET_ID,
+        amount: tabdeyAmount,
+        note: `${eventTitle} — platform share (${tabdeyPct}%)`,
+        tPin,
+      });
+      tabdeyJournalCode = tabdeyReceipt.receipt.journal_no;
+    }
+  } catch (payErr) {
+    const done = [orgJournalCode, tabdeyJournalCode].filter(Boolean);
+    if (done.length) payErr.message += ` Completed wallet journals: ${done.join(', ')}. Please contact support.`;
+    throw payErr;
+  }
+
+  return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId };
 }
 
 async function createBooking(req, res, next) {
@@ -93,13 +124,11 @@ async function createBooking(req, res, next) {
       });
       const primaryTier = seatDetails[0];
 
-      // 3. Charge wallet — happens before DB write so a failed hold re-check
-      //    can surface the journal code for reconciliation
-      let journalCode = null;
+      // 3. Process wallet payment (before DB write — split between organizer + tabdey)
+      let payResult = null;
       if (payment_method === 'WALLET') {
-        const organizerWalletId = await getOrganizerWalletId(event.organizer_id);
-        journalCode = await chargeWallet(
-          userId, organizerWalletId, totalAmount,
+        payResult = await processWalletPayment(
+          userId, event.organizer_id, totalAmount,
           `Event booking: ${event.title} — ${seat_ids.length} seat(s)`,
           t_pin,
         );
@@ -150,7 +179,7 @@ async function createBooking(req, res, next) {
               attendee_names: JSON.stringify(attendee_names || []),
               status: 'confirmed',
               payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-              wallet_journal_code: journalCode,
+              wallet_journal_code: payResult?.orgJournalCode ?? null,
             },
           });
 
@@ -175,6 +204,26 @@ async function createBooking(req, res, next) {
 
           await tx.event_seat_holds.deleteMany({ where: { screening_id, user_id: userId } });
 
+          // Update running revenue totals
+          if (payResult) {
+            await tx.organizer_revenue_share.upsert({
+              where: { organizer_id: event.organizer_id },
+              create: {
+                organizer_id: event.organizer_id,
+                org_share_pct: payResult.orgPct,
+                tabdey_share_pct: payResult.tabdeyPct,
+                total_revenue: totalAmount,
+                total_org_revenue: payResult.orgAmount,
+                total_tabdey_revenue: payResult.tabdeyAmount,
+              },
+              update: {
+                total_revenue: { increment: totalAmount },
+                total_org_revenue: { increment: payResult.orgAmount },
+                total_tabdey_revenue: { increment: payResult.tabdeyAmount },
+              },
+            });
+          }
+
           return {
             booking_id: bookingId,
             ticket_id: ticketId,
@@ -187,7 +236,7 @@ async function createBooking(req, res, next) {
             quantity: seat_ids.length,
             total_amount: totalAmount,
             payment_method,
-            wallet_journal_code: journalCode,
+            wallet_journal_code: payResult?.orgJournalCode ?? null,
             attendee_names: attendee_names || [],
             venue_name: event.venue_name,
             event_seats: seatDetails.map((s) => ({
@@ -203,8 +252,8 @@ async function createBooking(req, res, next) {
           };
         }, TX_OPTIONS);
       } catch (txErr) {
-        if (journalCode) {
-          txErr.message += ` Wallet was charged (journal: ${journalCode}). Please contact support.`;
+        if (payResult) {
+          txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
         }
         throw txErr;
       }
@@ -231,11 +280,10 @@ async function createBooking(req, res, next) {
 
     const totalAmount = tier.price * quantity;
 
-    let journalCode = null;
+    let payResult = null;
     if (payment_method === 'WALLET') {
-      const organizerWalletId = await getOrganizerWalletId(event.organizer_id);
-      journalCode = await chargeWallet(
-        userId, organizerWalletId, totalAmount,
+      payResult = await processWalletPayment(
+        userId, event.organizer_id, totalAmount,
         `Event booking: ${event.title} — ${quantity} ticket(s)`,
         t_pin,
       );
@@ -269,9 +317,29 @@ async function createBooking(req, res, next) {
             attendee_names: JSON.stringify(attendee_names || []),
             status: 'confirmed',
             payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-            wallet_journal_code: journalCode,
+            wallet_journal_code: payResult?.orgJournalCode ?? null,
           },
         });
+
+        // Update running revenue totals
+        if (payResult) {
+          await tx.organizer_revenue_share.upsert({
+            where: { organizer_id: event.organizer_id },
+            create: {
+              organizer_id: event.organizer_id,
+              org_share_pct: payResult.orgPct,
+              tabdey_share_pct: payResult.tabdeyPct,
+              total_revenue: totalAmount,
+              total_org_revenue: payResult.orgAmount,
+              total_tabdey_revenue: payResult.tabdeyAmount,
+            },
+            update: {
+              total_revenue: { increment: totalAmount },
+              total_org_revenue: { increment: payResult.orgAmount },
+              total_tabdey_revenue: { increment: payResult.tabdeyAmount },
+            },
+          });
+        }
 
         return {
           booking_id: bookingId,
@@ -284,7 +352,7 @@ async function createBooking(req, res, next) {
           quantity,
           total_amount: totalAmount,
           payment_method,
-          wallet_journal_code: journalCode,
+          wallet_journal_code: payResult?.orgJournalCode ?? null,
           attendee_names: attendee_names || [],
           event_start_at: event.start_at,
           venue_name: event.venue_name,
@@ -292,8 +360,8 @@ async function createBooking(req, res, next) {
         };
       }, TX_OPTIONS);
     } catch (txErr) {
-      if (journalCode) {
-        txErr.message += ` Wallet was charged (journal: ${journalCode}). Please contact support.`;
+      if (payResult) {
+        txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
       }
       throw txErr;
     }

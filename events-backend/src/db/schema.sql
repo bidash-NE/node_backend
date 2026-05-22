@@ -74,3 +74,18 @@ CREATE TABLE IF NOT EXISTS wishlists (
   FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
   FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS organizer_revenue_share (
+  id                    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  organizer_id          CHAR(36) NOT NULL UNIQUE,
+  total_revenue         DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  org_share_pct         DECIMAL(5,2)  NOT NULL DEFAULT 80.00,
+  tabdey_share_pct      DECIMAL(5,2)  NOT NULL DEFAULT 20.00,
+  total_org_revenue     DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  total_tabdey_revenue  DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_by            BIGINT UNSIGNED NULL,
+  FOREIGN KEY (organizer_id) REFERENCES event_organizers(id) ON DELETE CASCADE,
+  FOREIGN KEY (updated_by)   REFERENCES users(user_id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
