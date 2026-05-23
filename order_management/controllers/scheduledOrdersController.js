@@ -678,65 +678,8 @@ exports.cancelScheduledOrder = async (req, res) => {
       });
     }
 
-    const redis = require("../config/redis");
-    const { buildJobKey } = require("../models/scheduledOrderModel"); // ✅ only this
-
-    const jobKey = buildJobKey(jobId);
-    const raw = await redis.get(jobKey);
-
-    if (!raw) {
-      return res.status(404).json({
-        success: false,
-        message: "Scheduled order not found.",
-      });
-    }
-
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        message: "Corrupted scheduled order data.",
-      });
-    }
-
-    if (Number(data.user_id) !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to cancel this scheduled order.",
-      });
-    }
-
-    let epochMs = Number(data.scheduled_epoch_ms);
-    if (!Number.isFinite(epochMs)) {
-      const fromLocal = data.scheduled_at_local || null;
-      const fromUtc = data.scheduled_at || null;
-      epochMs = parseScheduledToEpochMs(fromLocal || fromUtc); // ✅ uses top import
-    }
-
-    if (!Number.isFinite(epochMs)) {
-      return res.status(500).json({
-        success: false,
-        message: "Unable to determine scheduled time for this order.",
-      });
-    }
-
-    const ONE_HOUR_MS = 0.5 * 60 * 1000;
-    const diffMs = epochMs - Date.now();
-
-    if (diffMs <= ONE_HOUR_MS) {
-      const minsLeft = Math.max(0, Math.floor(diffMs / (60 * 1000)));
-      return res.status(400).json({
-        success: false,
-        code: "CANCEL_WINDOW_CLOSED",
-        message:
-          "Scheduled order cannot be cancelled before 1 hour of the scheduled time.",
-        minutes_remaining: minsLeft,
-      });
-    }
-
     const ok = await cancelScheduledOrderForUser(jobId, userId);
+
     if (!ok) {
       return res.status(404).json({
         success: false,
