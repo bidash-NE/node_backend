@@ -1,5 +1,5 @@
 const prisma = require('../db');
-const walletService = require('../services/wallet');
+const walletApi = require('../services/walletApi');
 
 function generateBookingId() {
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -20,248 +20,351 @@ function generateTicketCode() {
 }
 
 const TX_OPTIONS = { timeout: 30000 };
-
-// Map seat category → tier name for price lookup
 const CATEGORY_TO_TIER = { regular: 'Regular', premium: 'VIP', balcony: 'Balcony' };
+const TABDEY_WALLET_ID = process.env.TABDEY_WALLET_ID || 'TD00000001';
+const DEFAULT_ORG_SHARE = 80;
+
+// Splits a wallet booking payment into organizer + tabdey shares.
+// Returns amounts, percentages, and journal codes for both transfers.
+async function processWalletPayment(userId, organizerId, totalAmount, eventTitle, tPin) {
+  // Fetch user wallet, organizer wallet, and share config in parallel
+  const organizer = await prisma.event_organizers.findUnique({
+    where: { id: organizerId },
+    select: { user_id: true },
+  });
+  if (!organizer?.user_id) throw Object.assign(new Error('Organizer has no linked user account'), { status: 503 });
+
+  const [userWalletData, orgWalletData, shareConfig] = await Promise.all([
+    walletApi.getWalletByUser(userId.toString()),
+    walletApi.getWalletByUser(organizer.user_id.toString()),
+    prisma.organizer_revenue_share.findUnique({ where: { organizer_id: organizerId } }),
+  ]);
+
+  const userWalletId = userWalletData.data.wallet_id;
+  const organizerWalletId = orgWalletData.data.wallet_id;
+
+  const orgPct = shareConfig ? Number(shareConfig.org_share_pct) : DEFAULT_ORG_SHARE;
+  const tabdeyPct = parseFloat((100 - orgPct).toFixed(2));
+  const orgAmount = parseFloat((totalAmount * orgPct / 100).toFixed(2));
+  const tabdeyAmount = parseFloat((totalAmount - orgAmount).toFixed(2));
+
+  let orgJournalCode = null;
+  let tabdeyJournalCode = null;
+
+  try {
+    const orgReceipt = await walletApi.transfer({
+      senderWalletId: userWalletId,
+      recipientWalletId: organizerWalletId,
+      amount: orgAmount,
+      note: `${eventTitle} — organizer share (${orgPct}%)`,
+      tPin,
+    });
+    orgJournalCode = orgReceipt.receipt.journal_no;
+
+    if (tabdeyAmount > 0) {
+      const tabdeyReceipt = await walletApi.transfer({
+        senderWalletId: userWalletId,
+        recipientWalletId: TABDEY_WALLET_ID,
+        amount: tabdeyAmount,
+        note: `${eventTitle} — platform share (${tabdeyPct}%)`,
+        tPin,
+      });
+      tabdeyJournalCode = tabdeyReceipt.receipt.journal_no;
+    }
+  } catch (payErr) {
+    const done = [orgJournalCode, tabdeyJournalCode].filter(Boolean);
+    if (done.length) payErr.message += ` Completed wallet journals: ${done.join(', ')}. Please contact support.`;
+    throw payErr;
+  }
+
+  return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId };
+}
 
 async function createBooking(req, res, next) {
   try {
-    const { event_id, tier_id, quantity, attendee_names, payment_method, seat_ids, screening_id } = req.body;
+    const { event_id, tier_id, quantity, attendee_names, payment_method, seat_ids, screening_id, t_pin } = req.body;
     const userId = BigInt(req.user.id);
 
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'payment_method is required' });
     }
 
-    // ── Seat-based booking (cinema with screening + seat map) ─────────────────
+    // ── Cinema booking (screening + seat map) ────────────────────────────────
     if (seat_ids?.length && screening_id) {
-      const result = await prisma.$transaction(async (tx) => {
-        // Verify screening exists and get event_id from it
-        const screening = await tx.event_screenings.findUnique({
-          where: { id: screening_id },
-          select: { id: true, event_id: true, hall_id: true, show_date: true, show_time: true, status: true },
-        });
-        if (!screening) {
-          const err = new Error('Screening not found'); err.status = 404; throw err;
-        }
-        if (screening.status === 'cancelled') {
-          const err = new Error('This screening has been cancelled'); err.status = 409; throw err;
-        }
-        const resolvedEventId = screening.event_id;
+      // 1. Fetch screening
+      const screening = await prisma.event_screenings.findUnique({
+        where: { id: screening_id },
+        select: { id: true, event_id: true, hall_id: true, show_date: true, show_time: true, status: true },
+      });
+      if (!screening) return res.status(404).json({ success: false, message: 'Screening not found' });
+      if (screening.status === 'cancelled') return res.status(409).json({ success: false, message: 'This screening has been cancelled' });
 
-        // 1. Verify user has active holds on ALL requested event_seats
-        const holds = await tx.event_seat_holds.findMany({
-          where: {
-            screening_id,
-            seat_id: { in: seat_ids },
-            user_id: userId,
-            expires_at: { gt: new Date() },
-          },
-        });
+      const resolvedEventId = screening.event_id;
 
-        if (holds.length !== seat_ids.length) {
-          const err = new Error('Seat hold expired or not found. Please select your event_seats again.');
-          err.status = 409; throw err;
-        }
-
-        // 2. Double-check none are already booked for THIS screening (race condition guard)
-        const alreadyBooked = await tx.event_booking_seats.findMany({
-          where: { screening_id, seat_id: { in: seat_ids } },
-          include: { event_bookings: { select: { status: true } } },
-        });
-        if (alreadyBooked.some((b) => b.event_bookings.status === 'confirmed')) {
-          const err = new Error('One or more event_seats were just booked by someone else.');
-          err.status = 409; throw err;
-        }
-
-        // 3. Fetch seat details to compute price per category
-        const event_seats = await tx.event_seats.findMany({
+      // 2. Fetch seat details, tiers, and event in parallel
+      const [event_seats, tiers, event] = await Promise.all([
+        prisma.event_seats.findMany({
           where: { id: { in: seat_ids } },
           select: { id: true, row_label: true, seat_number: true, category: true, section: true },
-        });
-
-        // 4. Look up tier prices for each category present
-        const tiers = await tx.event_ticket_tiers.findMany({ where: { event_id: resolvedEventId } });
-        const tierByName = new Map(tiers.map((t) => [t.name.toLowerCase(), t]));
-
-        let totalAmount = 0;
-        const seatDetails = event_seats.map((seat) => {
-          const tierName = CATEGORY_TO_TIER[seat.category] || 'Regular';
-          const tier = tierByName.get(tierName.toLowerCase()) || tiers[0];
-          totalAmount += tier.price;
-          return { ...seat, tier_id: tier.id, tier_name: tier.name, price: tier.price };
-        });
-
-        const primaryTier = seatDetails[0];
-
-        // 5. Fetch event info
-        const event = await tx.events.findUnique({
+        }),
+        prisma.event_ticket_tiers.findMany({ where: { event_id: resolvedEventId } }),
+        prisma.events.findUnique({
           where: { id: resolvedEventId },
-          select: { title: true, venue_name: true },
-        });
+          select: { title: true, venue_name: true, organizer_id: true },
+        }),
+      ]);
 
-        // 6. Process wallet payment if applicable
-        const journalCode = walletService.generateJournalCode();
-        if (payment_method === 'WALLET') {
-          await walletService.debitWallet(
-            tx, userId, totalAmount, journalCode,
-            `Event booking: ${event.title} — ${seat_ids.length} seat(s)`
+      const tierByName = new Map(tiers.map((t) => [t.name.toLowerCase(), t]));
+      let totalAmount = 0;
+      const seatDetails = event_seats.map((seat) => {
+        const tierName = CATEGORY_TO_TIER[seat.category] || 'Regular';
+        const tier = tierByName.get(tierName.toLowerCase()) || tiers[0];
+        totalAmount += tier.price;
+        return { ...seat, tier_id: tier.id, tier_name: tier.name, price: tier.price };
+      });
+      const primaryTier = seatDetails[0];
+
+      // 3. Process wallet payment (before DB write — split between organizer + tabdey)
+      let payResult = null;
+      if (payment_method === 'WALLET') {
+        payResult = await processWalletPayment(
+          userId, event.organizer_id, totalAmount,
+          `Event booking: ${event.title} — ${seat_ids.length} seat(s)`,
+          t_pin,
+        );
+      }
+
+      // 4. Atomic DB writes — re-validates race-condition-sensitive state
+      let result;
+      try {
+        result = await prisma.$transaction(async (tx) => {
+          // Re-validate holds
+          const holds = await tx.event_seat_holds.findMany({
+            where: { screening_id, seat_id: { in: seat_ids }, user_id: userId, expires_at: { gt: new Date() } },
+          });
+          if (holds.length !== seat_ids.length) {
+            throw Object.assign(
+              new Error('Seat hold expired or not found. Please select your seats again.'),
+              { status: 409 },
+            );
+          }
+
+          // Re-check none just got confirmed by another request
+          const alreadyBooked = await tx.event_booking_seats.findMany({
+            where: { screening_id, seat_id: { in: seat_ids } },
+            include: { event_bookings: { select: { status: true } } },
+          });
+          if (alreadyBooked.some((b) => b.event_bookings.status === 'confirmed')) {
+            throw Object.assign(
+              new Error('One or more seats were just booked by someone else.'),
+              { status: 409 },
+            );
+          }
+
+          const bookingId = generateBookingId();
+          const ticketCode = generateTicketCode();
+          const ticketId = generateTicketId();
+
+          await tx.event_bookings.create({
+            data: {
+              id: bookingId,
+              ticket_code: ticketCode,
+              user_id: userId,
+              event_id: resolvedEventId,
+              screening_id,
+              tier_id: primaryTier.tier_id,
+              quantity: seat_ids.length,
+              total_amount: totalAmount,
+              payment_method,
+              attendee_names: JSON.stringify(attendee_names || []),
+              status: 'confirmed',
+              payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
+              wallet_journal_code: payResult?.orgJournalCode ?? null,
+            },
+          });
+
+          await tx.event_booking_seats.createMany({
+            data: seat_ids.map((seat_id) => ({
+              booking_id: bookingId,
+              seat_id,
+              event_id: resolvedEventId,
+              screening_id,
+            })),
+          });
+
+          const tierDecrements = seatDetails.reduce((acc, s) => {
+            acc[s.tier_id] = (acc[s.tier_id] || 0) + 1;
+            return acc;
+          }, {});
+          await Promise.all(
+            Object.entries(tierDecrements).map(([tid, count]) =>
+              tx.event_ticket_tiers.update({ where: { id: tid }, data: { available_seats: { decrement: count } } }),
+            ),
           );
+
+          await tx.event_seat_holds.deleteMany({ where: { screening_id, user_id: userId } });
+
+          // Update running revenue totals
+          if (payResult) {
+            await tx.organizer_revenue_share.upsert({
+              where: { organizer_id: event.organizer_id },
+              create: {
+                organizer_id: event.organizer_id,
+                org_share_pct: payResult.orgPct,
+                tabdey_share_pct: payResult.tabdeyPct,
+                total_revenue: totalAmount,
+                total_org_revenue: payResult.orgAmount,
+                total_tabdey_revenue: payResult.tabdeyAmount,
+              },
+              update: {
+                total_revenue: { increment: totalAmount },
+                total_org_revenue: { increment: payResult.orgAmount },
+                total_tabdey_revenue: { increment: payResult.tabdeyAmount },
+              },
+            });
+          }
+
+          return {
+            booking_id: bookingId,
+            ticket_id: ticketId,
+            ticket_code: ticketCode,
+            event_id: resolvedEventId,
+            screening_id,
+            screening_date: screening.show_date.toISOString().slice(0, 10),
+            screening_time: screening.show_time.toISOString().slice(11, 16),
+            event_title: event.title,
+            quantity: seat_ids.length,
+            total_amount: totalAmount,
+            payment_method,
+            wallet_journal_code: payResult?.orgJournalCode ?? null,
+            attendee_names: attendee_names || [],
+            venue_name: event.venue_name,
+            event_seats: seatDetails.map((s) => ({
+              seat_id: s.id,
+              row: s.row_label,
+              number: s.seat_number,
+              section: s.section,
+              category: s.category,
+              tier_name: s.tier_name,
+              price: s.price,
+            })),
+            created_at: new Date().toISOString(),
+          };
+        }, TX_OPTIONS);
+      } catch (txErr) {
+        if (payResult) {
+          txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
+        }
+        throw txErr;
+      }
+
+      return res.status(201).json({ success: true, data: result });
+    }
+
+    // ── General admission (tier-based) ──────────────────────────────────────
+    if (!tier_id || !quantity) {
+      return res.status(400).json({ success: false, message: 'tier_id and quantity are required for general admission events' });
+    }
+
+    const [tier, event] = await Promise.all([
+      prisma.event_ticket_tiers.findUnique({ where: { id: tier_id } }),
+      prisma.events.findUnique({
+        where: { id: event_id },
+        select: { title: true, venue_name: true, start_at: true, organizer_id: true },
+      }),
+    ]);
+
+    if (!tier || tier.event_id !== event_id) return res.status(404).json({ success: false, message: 'Tier not found' });
+    if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
+    if (tier.available_seats < quantity) return res.status(409).json({ success: false, message: 'Not enough seats available' });
+
+    const totalAmount = tier.price * quantity;
+
+    let payResult = null;
+    if (payment_method === 'WALLET') {
+      payResult = await processWalletPayment(
+        userId, event.organizer_id, totalAmount,
+        `Event booking: ${event.title} — ${quantity} ticket(s)`,
+        t_pin,
+      );
+    }
+
+    let result;
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        // Re-check availability (race condition guard)
+        const freshTier = await tx.event_ticket_tiers.findUnique({ where: { id: tier_id } });
+        if (freshTier.available_seats < quantity) {
+          throw Object.assign(new Error('Not enough seats available'), { status: 409 });
         }
 
-        // 7. Create booking row
+        await tx.event_ticket_tiers.update({ where: { id: tier_id }, data: { available_seats: { decrement: quantity } } });
+
         const bookingId = generateBookingId();
-        const ticketCode = generateTicketCode();
         const ticketId = generateTicketId();
+        const ticketCode = generateTicketCode();
 
         await tx.event_bookings.create({
           data: {
             id: bookingId,
             ticket_code: ticketCode,
             user_id: userId,
-            event_id: resolvedEventId,
-            screening_id,
-            tier_id: primaryTier.tier_id,
-            quantity: seat_ids.length,
+            event_id,
+            tier_id,
+            quantity,
             total_amount: totalAmount,
             payment_method,
             attendee_names: JSON.stringify(attendee_names || []),
             status: 'confirmed',
             payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-            wallet_journal_code: payment_method === 'WALLET' ? journalCode : null,
+            wallet_journal_code: payResult?.orgJournalCode ?? null,
           },
         });
 
-        // 7. Insert event_booking_seats with screening_id — marks each seat as booked for this show
-        await tx.event_booking_seats.createMany({
-          data: seat_ids.map((seat_id) => ({
-            booking_id: bookingId,
-            seat_id,
-            event_id: resolvedEventId,
-            screening_id,
-          })),
-        });
-
-        // 8. Decrement available_seats per tier used
-        const tierDecrements = seatDetails.reduce((acc, s) => {
-          acc[s.tier_id] = (acc[s.tier_id] || 0) + 1;
-          return acc;
-        }, {});
-        await Promise.all(
-          Object.entries(tierDecrements).map(([tid, count]) =>
-            tx.event_ticket_tiers.update({
-              where: { id: tid },
-              data: { available_seats: { decrement: count } },
-            })
-          )
-        );
-
-        // 9. Release holds — confirmed, no longer needed
-        await tx.event_seat_holds.deleteMany({ where: { screening_id, user_id: userId } });
+        // Update running revenue totals
+        if (payResult) {
+          await tx.organizer_revenue_share.upsert({
+            where: { organizer_id: event.organizer_id },
+            create: {
+              organizer_id: event.organizer_id,
+              org_share_pct: payResult.orgPct,
+              tabdey_share_pct: payResult.tabdeyPct,
+              total_revenue: totalAmount,
+              total_org_revenue: payResult.orgAmount,
+              total_tabdey_revenue: payResult.tabdeyAmount,
+            },
+            update: {
+              total_revenue: { increment: totalAmount },
+              total_org_revenue: { increment: payResult.orgAmount },
+              total_tabdey_revenue: { increment: payResult.tabdeyAmount },
+            },
+          });
+        }
 
         return {
           booking_id: bookingId,
           ticket_id: ticketId,
           ticket_code: ticketCode,
-          event_id: resolvedEventId,
-          screening_id,
-          screening_date: screening.show_date.toISOString().slice(0, 10),
-          screening_time: screening.show_time.toISOString().slice(11, 16),
-          event_title: event.title,
-          quantity: seat_ids.length,
-          total_amount: totalAmount,
-          payment_method,
-          attendee_names: attendee_names || [],
-          venue_name: event.venue_name,
-          event_seats: seatDetails.map((s) => ({
-            seat_id: s.id,
-            row: s.row_label,
-            number: s.seat_number,
-            section: s.section,
-            category: s.category,
-            tier_name: s.tier_name,
-            price: s.price,
-          })),
-          created_at: new Date().toISOString(),
-        };
-      }, TX_OPTIONS);
-
-      return res.status(201).json({ success: true, data: result });
-    }
-
-    // ── Tier-based booking (general admission — concerts, festivals, etc.) ────
-    if (!tier_id || !quantity) {
-      return res.status(400).json({ success: false, message: 'tier_id and quantity are required for general admission events' });
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      const tier = await tx.event_ticket_tiers.findUnique({ where: { id: tier_id } });
-
-      if (!tier || tier.event_id !== event_id) {
-        const err = new Error('Tier not found'); err.status = 404; throw err;
-      }
-      if (tier.available_seats < quantity) {
-        const err = new Error('Not enough event_seats available'); err.status = 409; throw err;
-      }
-
-      await tx.event_ticket_tiers.update({
-        where: { id: tier_id },
-        data: { available_seats: { decrement: quantity } },
-      });
-
-      const event = await tx.events.findUnique({
-        where: { id: event_id },
-        select: { title: true, venue_name: true, start_at: true },
-      });
-
-      const bookingId = generateBookingId();
-      const ticketId = generateTicketId();
-      const ticketCode = generateTicketCode();
-      const totalAmount = tier.price * quantity;
-
-      // Process wallet payment
-      const journalCode = walletService.generateJournalCode();
-      if (payment_method === 'WALLET') {
-        await walletService.debitWallet(
-          tx, userId, totalAmount, journalCode,
-          `Event booking: ${event.title} — ${quantity} ticket(s)`
-        );
-      }
-
-      await tx.event_bookings.create({
-        data: {
-          id: bookingId,
-          ticket_code: ticketCode,
-          user_id: userId,
           event_id,
+          event_title: event.title,
           tier_id,
+          tier_name: tier.name,
           quantity,
           total_amount: totalAmount,
           payment_method,
-          attendee_names: JSON.stringify(attendee_names || []),
-          status: 'confirmed',
-          payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-          wallet_journal_code: payment_method === 'WALLET' ? journalCode : null,
-        },
-      });
-
-      return {
-        booking_id: bookingId,
-        ticket_id: ticketId,
-        ticket_code: ticketCode,
-        event_id,
-        event_title: event.title,
-        tier_id,
-        tier_name: tier.name,
-        quantity,
-        total_amount: totalAmount,
-        payment_method,
-        attendee_names: attendee_names || [],
-        event_start_at: event.start_at,
-        venue_name: event.venue_name,
-        created_at: new Date().toISOString(),
-      };
-    }, TX_OPTIONS);
+          wallet_journal_code: payResult?.orgJournalCode ?? null,
+          attendee_names: attendee_names || [],
+          event_start_at: event.start_at,
+          venue_name: event.venue_name,
+          created_at: new Date().toISOString(),
+        };
+      }, TX_OPTIONS);
+    } catch (txErr) {
+      if (payResult) {
+        txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
+      }
+      throw txErr;
+    }
 
     res.status(201).json({ success: true, data: result });
   } catch (err) {

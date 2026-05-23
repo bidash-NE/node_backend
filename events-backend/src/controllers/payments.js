@@ -192,10 +192,40 @@ async function checkStatus(req, res, next) {
   }
 }
 
+// ─── Internal: compute revenue split amounts from share config ────────────────
+async function getRevenueSplit(tx, organizerId, totalAmount) {
+  const shareConfig = await tx.organizer_revenue_share.findUnique({
+    where: { organizer_id: organizerId },
+  });
+  const orgPct     = shareConfig ? Number(shareConfig.org_share_pct) : 80;
+  const tabdeyPct  = parseFloat((100 - orgPct).toFixed(2));
+  const orgAmount  = parseFloat((totalAmount * orgPct / 100).toFixed(2));
+  const tabdeyAmount = parseFloat((totalAmount - orgAmount).toFixed(2));
+  return { orgPct, tabdeyPct, orgAmount, tabdeyAmount };
+}
+
+// ─── Internal: upsert organizer_revenue_share running totals ─────────────────
+async function trackRevenueShare(tx, organizerId, totalAmount, split) {
+  await tx.organizer_revenue_share.upsert({
+    where: { organizer_id: organizerId },
+    create: {
+      organizer_id:        organizerId,
+      org_share_pct:       split.orgPct,
+      tabdey_share_pct:    split.tabdeyPct,
+      total_revenue:       totalAmount,
+      total_org_revenue:   split.orgAmount,
+      total_tabdey_revenue: split.tabdeyAmount,
+    },
+    update: {
+      total_revenue:        { increment: totalAmount },
+      total_org_revenue:    { increment: split.orgAmount },
+      total_tabdey_revenue: { increment: split.tabdeyAmount },
+    },
+  });
+}
+
 // ─── Internal: create confirmed booking after BFS payment ────────────────────
 async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMethod, orderNo) {
-  const { v4: uuid } = require('uuid');
-
   function genBookingId() {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     return `BK-${today}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
@@ -207,7 +237,7 @@ async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMet
   }
 
   return prisma.$transaction(async (tx) => {
-    const bookingId = genBookingId();
+    const bookingId  = genBookingId();
     const ticketCode = genTicketCode();
 
     if (ctx.type === 'cinema' && ctx.seat_ids?.length) {
@@ -215,9 +245,12 @@ async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMet
       const tiers = await tx.event_ticket_tiers.findMany({ where: { event_id: ctx.event_id } });
       const seats = await tx.event_seats.findMany({ where: { id: { in: ctx.seat_ids } } });
       const CATEGORY_TO_TIER = { regular: 'regular', premium: 'vip', balcony: 'balcony' };
-      const tierByName = new Map(tiers.map(t => [t.name.toLowerCase(), t]));
+      const tierByName  = new Map(tiers.map(t => [t.name.toLowerCase(), t]));
       const primaryTier = tierByName.get(CATEGORY_TO_TIER[seats[0]?.category] || 'regular') || tiers[0];
-      const event = await tx.events.findUnique({ where: { id: ctx.event_id }, select: { title: true, venue_name: true } });
+      const event = await tx.events.findUnique({
+        where: { id: ctx.event_id },
+        select: { title: true, venue_name: true, organizer_id: true },
+      });
 
       await tx.event_bookings.create({
         data: {
@@ -237,24 +270,28 @@ async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMet
         })),
       });
 
-      // Decrement tier seats
-      const seatDetails = seats.map(s => {
-        const tier = tierByName.get(CATEGORY_TO_TIER[s.category] || 'regular') || tiers[0];
-        return tier.id;
-      });
-      const tierDecrements = seatDetails.reduce((acc, id) => { acc[id] = (acc[id] || 0) + 1; return acc; }, {});
+      const seatTierIds = seats.map(s => (tierByName.get(CATEGORY_TO_TIER[s.category] || 'regular') || tiers[0]).id);
+      const tierDecrements = seatTierIds.reduce((acc, id) => { acc[id] = (acc[id] || 0) + 1; return acc; }, {});
       await Promise.all(Object.entries(tierDecrements).map(([id, count]) =>
         tx.event_ticket_tiers.update({ where: { id }, data: { available_seats: { decrement: count } } })
       ));
 
-      // Release seat holds
       await tx.event_seat_holds.deleteMany({ where: { screening_id: ctx.screening_id, user_id: userId } });
+
+      // Track revenue split (no wallet transfer for bank — amounts recorded for admin payout)
+      if (event.organizer_id) {
+        const split = await getRevenueSplit(tx, event.organizer_id, totalAmount);
+        await trackRevenueShare(tx, event.organizer_id, totalAmount, split);
+      }
 
       return { booking_id: bookingId, ticket_code: ticketCode, event_title: event.title, total_amount: totalAmount, seats: ctx.seat_ids };
     } else {
       // General admission
-      const tier = await tx.event_ticket_tiers.findUnique({ where: { id: ctx.tier_id } });
-      const event = await tx.events.findUnique({ where: { id: ctx.event_id }, select: { title: true, venue_name: true, start_at: true } });
+      const tier  = await tx.event_ticket_tiers.findUnique({ where: { id: ctx.tier_id } });
+      const event = await tx.events.findUnique({
+        where: { id: ctx.event_id },
+        select: { title: true, venue_name: true, start_at: true, organizer_id: true },
+      });
 
       await tx.event_ticket_tiers.update({ where: { id: ctx.tier_id }, data: { available_seats: { decrement: ctx.quantity } } });
 
@@ -269,6 +306,12 @@ async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMet
           wallet_journal_code: orderNo,
         },
       });
+
+      // Track revenue split (no wallet transfer for bank — amounts recorded for admin payout)
+      if (event.organizer_id) {
+        const split = await getRevenueSplit(tx, event.organizer_id, totalAmount);
+        await trackRevenueShare(tx, event.organizer_id, totalAmount, split);
+      }
 
       return { booking_id: bookingId, ticket_code: ticketCode, event_title: event.title, tier_name: tier.name, quantity: ctx.quantity, total_amount: totalAmount };
     }

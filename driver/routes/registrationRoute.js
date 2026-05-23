@@ -10,6 +10,7 @@ const {
   verifyActiveSession,
   refreshAccessToken,
 } = require("../controllers/registrationController");
+const { documentUpload } = require("../middleware/upload");
 
 /* ---------------- rate limit helper ---------------- */
 const makeLimiter = ({ windowMs, max, message }) =>
@@ -45,6 +46,17 @@ const logoutLimiter = makeLimiter({
   windowMs: 2 * 60 * 1000, // 2 min
   max: 60,
   message: "Too many requests. Please slow down.",
+});
+
+// Document upload endpoint
+router.post("/upload-document", documentUpload.single("document"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ success: false, message: "No file uploaded" });
+  }
+  return res.status(200).json({
+    success: true,
+    path: `/uploads/documents/${req.file.filename}`,
+  });
 });
 
 // Registration endpoint

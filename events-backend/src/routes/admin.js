@@ -10,7 +10,8 @@ const bookingsCtrl    = require('../controllers/admin/bookings');
 const revenueCtrl     = require('../controllers/admin/revenue');
 const bannersCtrl     = require('../controllers/admin/banners');
 const reviewsCtrl     = require('../controllers/admin/reviews');
-const organizersCtrl  = require('../controllers/admin/organizers');
+const organizersCtrl    = require('../controllers/admin/organizers');
+const revenueShareCtrl  = require('../controllers/admin/revenueShare');
 
 // All admin routes require auth + admin role
 router.use(requireAuth, requireAdmin);
@@ -61,9 +62,13 @@ router.get('/events/:eventId/reviews',  reviewsCtrl.listReviews);
 router.delete('/reviews/:reviewId',     reviewsCtrl.deleteReview);
 
 // ── Organizers ────────────────────────────────────────────────────────────────
-router.get('/organizers',              organizersCtrl.listOrganizers);
-router.post('/organizers',             organizersCtrl.createOrganizer);
-router.delete('/organizers/:id',       organizersCtrl.deleteOrganizer);
-router.get('/organizers/:id/revenue',  organizersCtrl.getOrganizerRevenue);
+router.get('/organizers',                             organizersCtrl.listOrganizers);
+router.post('/organizers',                            organizersCtrl.createOrganizer);
+router.delete('/organizers/:id',                      organizersCtrl.deleteOrganizer);
+router.get('/organizers/:id/revenue',                 organizersCtrl.getOrganizerRevenue);
+router.get('/organizers/:id/wallet',                  organizersCtrl.getOrganizerWallet);
+router.get('/organizers/:id/wallet/transactions',     organizersCtrl.getOrganizerWalletTransactions);
+router.get('/organizers/:id/revenue-share',           revenueShareCtrl.getRevenueShare);
+router.put('/organizers/:id/revenue-share',           revenueShareCtrl.upsertRevenueShare);
 
 module.exports = router;
