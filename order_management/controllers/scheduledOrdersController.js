@@ -722,7 +722,7 @@ exports.cancelScheduledOrder = async (req, res) => {
       });
     }
 
-    const ONE_HOUR_MS = 60 * 60 * 1000;
+    const ONE_HOUR_MS = 0.5 * 60 * 1000;
     const diffMs = epochMs - Date.now();
 
     if (diffMs <= ONE_HOUR_MS) {
