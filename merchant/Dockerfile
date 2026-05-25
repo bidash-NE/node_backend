@@ -16,7 +16,7 @@ RUN npm ci --include=dev
 # Generate Prisma Client (creates /app/generated folder)
 RUN npx prisma generate
 
-# Copy the merchant service
+# Copy the merchant service (includes its own lib folder)
 COPY merchant ./merchant
 COPY lib ./lib
 
