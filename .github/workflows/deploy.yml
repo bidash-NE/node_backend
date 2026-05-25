@@ -144,7 +144,8 @@ jobs:
         if: needs.changes.outputs.merchant == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./merchant
+          context: .
+          file: ./merchant/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-merchant:latest
