@@ -1,4 +1,3 @@
-// controllers/categoryController.js
 const fs = require("fs");
 const path = require("path");
 const {
@@ -8,7 +7,7 @@ const {
   getCategoryById,
   updateCategory,
   deleteCategory,
-  getCategoriesForBusiness, // NEW
+  getCategoriesForBusiness,
 } = require("../models/categoryModel");
 
 const { toWebPathFromFile } = require("../middlewares/categoryImage");
@@ -31,22 +30,46 @@ function safeDeleteFile(oldWebPath) {
   });
 }
 
+// Helper to serialize BigInt
+function serializeBigInt(data) {
+  if (data === null || data === undefined) return data;
+  if (typeof data === "bigint") return Number(data);
+  if (Array.isArray(data)) return data.map(serializeBigInt);
+  if (typeof data === "object") {
+    const serialized = {};
+    for (const key in data) {
+      serialized[key] = serializeBigInt(data[key]);
+    }
+    return serialized;
+  }
+  return data;
+}
+
 /* ---------- CREATE ---------- */
 async function createCategoryCtrl(req, res) {
   try {
-    const kind = req.params.kind; // 'food' | 'mart'
+    const kind = req.params.kind;
     const body = req.body || {};
     const fileWebPath = toWebPathFromFile(req, req.file);
 
     const payload = {
       category_name: body.category_name,
-      business_type: body.business_type, // NAME
+      business_type: body.business_type,
       description: body.description || null,
       category_image: fileWebPath || body.category_image || null,
     };
 
     const out = await addCategory(kind, payload, body.user_id, body.admin_name);
-    return res.status(201).json({ message: out.message, data: out.data });
+
+    if (!out.success) {
+      return res.status(400).json({ error: out.message });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: out.message,
+      data: out.data,
+    });
   } catch (e) {
     return res.status(400).json({ error: e.message || "Create failed" });
   }
@@ -57,8 +80,8 @@ async function listCategoriesCtrl(req, res) {
   try {
     const kind = req.params.kind;
     const rows = await getAllCategories(kind);
-    if (!rows.success) return res.status(200).json([]);
-    return res.status(200).json(rows.data);
+    const serializedData = serializeBigInt(rows.data);
+    return res.status(200).json(serializedData);
   } catch (e) {
     return res.status(400).json({ error: e.message || "Fetch failed" });
   }
@@ -70,8 +93,8 @@ async function listByBusinessTypeCtrl(req, res) {
     const kind = req.params.kind;
     const name = req.query.business_type;
     const rows = await getCategoriesByBusinessType(kind, name);
-    if (!rows.success) return res.status(200).json([]);
-    return res.status(200).json(rows.data);
+    const serializedData = serializeBigInt(rows.data);
+    return res.status(200).json(serializedData);
   } catch (e) {
     return res.status(400).json({ error: e.message || "Fetch failed" });
   }
@@ -90,13 +113,26 @@ async function updateCategoryCtrl(req, res) {
     const fileWebPath = toWebPathFromFile(req, req.file);
 
     const fields = {};
-    if (body.category_name !== undefined) fields.category_name = body.category_name;
-    if (body.business_type !== undefined) fields.business_type = body.business_type;
+    if (body.category_name !== undefined)
+      fields.category_name = body.category_name;
+    if (body.business_type !== undefined)
+      fields.business_type = body.business_type;
     if (body.description !== undefined) fields.description = body.description;
     if (fileWebPath) fields.category_image = fileWebPath;
-    else if (body.category_image !== undefined) fields.category_image = body.category_image || null;
+    else if (body.category_image !== undefined)
+      fields.category_image = body.category_image || null;
 
-    const out = await updateCategory(kind, id, fields, body.user_id, body.admin_name);
+    const out = await updateCategory(
+      kind,
+      id,
+      fields,
+      body.user_id,
+      body.admin_name,
+    );
+
+    if (!out.success) {
+      return res.status(400).json({ error: out.message });
+    }
 
     if (out.old_image && out.new_image && out.old_image !== out.new_image) {
       safeDeleteFile(out.old_image);
@@ -105,7 +141,11 @@ async function updateCategoryCtrl(req, res) {
       safeDeleteFile(out.old_image);
     }
 
-    return res.status(200).json({ message: out.message, data: out.data });
+    return res.status(200).json({
+      success: true,
+      message: out.message,
+      data: out.data,
+    });
   } catch (e) {
     const code = /not found/i.test(e.message) ? 404 : 400;
     return res.status(code).json({ error: e.message || "Update failed" });
@@ -124,16 +164,23 @@ async function deleteCategoryCtrl(req, res) {
     const { user_id, admin_name } = req.body || {};
     const out = await deleteCategory(kind, id, user_id, admin_name);
 
+    if (!out.success) {
+      return res.status(404).json({ error: out.message });
+    }
+
     if (out.success && out.old_image) safeDeleteFile(out.old_image);
 
-    return res.status(200).json({ message: out.message });
+    return res.status(200).json({
+      success: true,
+      message: out.message,
+    });
   } catch (e) {
     const code = /not found/i.test(e.message) ? 404 : 400;
     return res.status(code).json({ error: e.message || "Delete failed" });
   }
 }
 
-/* ---------- NEW: FETCH categories for a business ---------- */
+/* ---------- GET categories for a business ---------- */
 async function getCategoriesForBusinessCtrl(req, res) {
   try {
     const businessId = Number(req.params.businessId);
@@ -141,7 +188,8 @@ async function getCategoriesForBusinessCtrl(req, res) {
       return res.status(400).json({ error: "Invalid businessId" });
     }
     const data = await getCategoriesForBusiness(businessId);
-    return res.status(200).json(data);
+    const serializedData = serializeBigInt(data);
+    return res.status(200).json(serializedData);
   } catch (e) {
     return res.status(400).json({ error: e.message || "Fetch failed" });
   }
@@ -153,5 +201,5 @@ module.exports = {
   listByBusinessTypeCtrl,
   updateCategoryCtrl,
   deleteCategoryCtrl,
-  getCategoriesForBusinessCtrl, // NEW
+  getCategoriesForBusinessCtrl,
 };

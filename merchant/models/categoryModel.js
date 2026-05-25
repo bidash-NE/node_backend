@@ -1,10 +1,13 @@
-// models/categoryModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 const moment = require("moment-timezone");
 
 /* ========== helpers ========== */
-const bhutanNow = () =>
-  moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
+
+// Format date to ISO string
+function formatDate(date) {
+  if (!date) return null;
+  return moment(date).tz("Asia/Thimphu").toISOString();
+}
 
 function toStrOrNull(v) {
   if (v === undefined || v === null) return null;
@@ -31,397 +34,636 @@ function tableForKind(kind) {
   return t;
 }
 
-/** Verify admin identity: user exists and user_name matches admin_name (case-insensitive). */
+/** Verify admin identity: user exists and user_name matches admin_name */
 async function verifyAdmin(user_id, admin_name) {
   if (!user_id || !admin_name) {
     throw new Error(
-      "admin verification failed: user_id and admin_name are required"
+      "Admin verification failed: user_id and admin_name are required",
     );
   }
-  const [rows] = await db.query(
-    `SELECT user_id, user_name FROM users WHERE user_id = ? LIMIT 1`,
-    [user_id]
-  );
-  if (!rows.length) {
-    throw new Error("admin verification failed: user not found");
+  const user = await prisma.users.findUnique({
+    where: { user_id: toIntOrThrow(user_id, "user_id") },
+    select: { user_id: true, user_name: true },
+  });
+  if (!user) {
+    throw new Error("Admin verification failed: user not found");
   }
   const matches =
-    rows[0].user_name?.toLowerCase() === String(admin_name).toLowerCase();
+    user.user_name?.toLowerCase() === String(admin_name).toLowerCase();
   if (!matches) {
-    throw new Error("admin verification failed: admin_name does not match user");
+    throw new Error(
+      "Admin verification failed: admin_name does not match user",
+    );
   }
-  return rows[0];
+  return user;
 }
 
-/** Resolve business type by NAME; ensure its 'types' matches :kind (food|mart). */
+/** Log admin action */
+async function logAdminActionSafe(user_id, admin_name, activity) {
+  try {
+    await prisma.admin_logs.create({
+      data: {
+        user_id: user_id ? toIntOrThrow(user_id) : null,
+        admin_name: toStrOrNull(admin_name),
+        activity: toStrOrNull(activity),
+        created_at: new Date(),
+      },
+    });
+  } catch (e) {
+    console.warn("admin_logs insert failed:", e.message);
+  }
+}
+
+/** Resolve business type by NAME - filter in JavaScript */
 async function resolveBusinessTypeByNameOrThrow(kind, business_type_name) {
   const name = String(business_type_name || "").trim();
   if (!name) throw new Error("business_type (name) is required");
   const k = String(kind).toLowerCase();
 
-  const [rows] = await db.query(
-    `SELECT id, name, types
-       FROM business_types
-      WHERE LOWER(name) = LOWER(?)
-        AND (types IS NULL OR LOWER(types) = ?)
-      LIMIT 1`,
-    [name, k]
-  );
-  if (!rows.length) {
-    throw new Error(`business_type "${name}" not found for kind "${k}"`);
-  }
-  return rows[0]; // {id, name, types}
-}
+  const allBusinessTypes = await prisma.business_types.findMany();
 
-/** admin_logs write; never throws */
-async function logAdminActionSafe(user_id, admin_name, activity) {
-  try {
-    await db.query(
-      `INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
-       VALUES (?, ?, ?, ?)`,
-      [user_id || null, toStrOrNull(admin_name), toStrOrNull(activity), bhutanNow()]
-    );
-  } catch (e) {
-    console.warn("admin_logs insert failed:", e.message);
+  const matched = allBusinessTypes.find(
+    (bt) =>
+      bt.name?.toLowerCase() === name.toLowerCase() &&
+      (!bt.types || bt.types.toLowerCase() === k),
+  );
+
+  if (!matched) {
+    throw new Error(`Business type "${name}" not found for kind "${k}"`);
   }
+  return matched;
 }
 
 /* ========== queries ========== */
 
 // List all (ordered by name)
 async function getAllCategories(kind) {
-  const table = tableForKind(kind);
-  const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
-      ORDER BY category_name ASC`
-  );
-  if (!rows.length)
-    return { success: false, message: "No categories found.", data: [] };
-  return { success: true, data: rows };
+  try {
+    const table = tableForKind(kind);
+    let rows = [];
+
+    if (table === "food_category") {
+      rows = await prisma.food_category.findMany({
+        orderBy: { category_name: "asc" },
+      });
+    } else {
+      rows = await prisma.mart_category.findMany({
+        orderBy: { category_name: "asc" },
+      });
+    }
+
+    if (!rows.length) {
+      return { success: false, message: "No categories found.", data: [] };
+    }
+
+    const formattedRows = rows.map((row) => ({
+      id: Number(row.id),
+      category_name: row.category_name,
+      business_type: row.business_type,
+      description: row.description,
+      category_image: row.category_image,
+      created_at: formatDate(row.created_at),
+      updated_at: formatDate(row.updated_at),
+    }));
+
+    return { success: true, data: formattedRows };
+  } catch (error) {
+    console.error("getAllCategories error:", error);
+    return { success: false, message: "Failed to fetch categories.", data: [] };
+  }
 }
 
 // Get one by id
 async function getCategoryById(kind, id) {
-  const table = tableForKind(kind);
-  const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
-      WHERE id = ?`,
-    [id]
-  );
-  if (!rows.length)
-    return { success: false, message: `Category (kind=${kind}) id ${id} not found.` };
-  return { success: true, data: rows[0] };
+  try {
+    const table = tableForKind(kind);
+    let row = null;
+
+    if (table === "food_category") {
+      row = await prisma.food_category.findUnique({
+        where: { id: Number(id) },
+      });
+    } else {
+      row = await prisma.mart_category.findUnique({
+        where: { id: Number(id) },
+      });
+    }
+
+    if (!row) {
+      return {
+        success: false,
+        message: `Category (kind=${kind}) id ${id} not found.`,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        id: Number(row.id),
+        category_name: row.category_name,
+        business_type: row.business_type,
+        description: row.description,
+        category_image: row.category_image,
+        created_at: formatDate(row.created_at),
+        updated_at: formatDate(row.updated_at),
+      },
+    };
+  } catch (error) {
+    console.error("getCategoryById error:", error);
+    return { success: false, message: "Failed to fetch category." };
+  }
 }
 
-// Get by business_type (name) within kind
+// Get by business_type (name) within kind - filter in JavaScript
 async function getCategoriesByBusinessType(kind, business_type_name) {
-  const table = tableForKind(kind);
-  const name = String(business_type_name || "").trim();
-  if (!name) {
-    return { success: false, message: "business_type (name) is required", data: [] };
-  }
-  const [rows] = await db.query(
-    `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-       FROM ${table}
-      WHERE LOWER(business_type) = LOWER(?)
-      ORDER BY category_name ASC`,
-    [name]
-  );
-  if (!rows.length)
+  try {
+    const table = tableForKind(kind);
+    const name = String(business_type_name || "").trim();
+    if (!name) {
+      return {
+        success: false,
+        message: "business_type (name) is required",
+        data: [],
+      };
+    }
+
+    let allRows = [];
+    if (table === "food_category") {
+      allRows = await prisma.food_category.findMany({
+        orderBy: { category_name: "asc" },
+      });
+    } else {
+      allRows = await prisma.mart_category.findMany({
+        orderBy: { category_name: "asc" },
+      });
+    }
+
+    // Filter in JavaScript for case-insensitive match
+    const filteredRows = allRows.filter(
+      (row) => row.business_type?.toLowerCase() === name.toLowerCase(),
+    );
+
+    if (!filteredRows.length) {
+      return {
+        success: false,
+        message: `No categories found for business_type "${name}" in ${table}.`,
+        data: [],
+      };
+    }
+
+    const formattedRows = filteredRows.map((row) => ({
+      id: Number(row.id),
+      category_name: row.category_name,
+      business_type: row.business_type,
+      description: row.description,
+      category_image: row.category_image,
+      created_at: formatDate(row.created_at),
+      updated_at: formatDate(row.updated_at),
+    }));
+
+    return { success: true, data: formattedRows };
+  } catch (error) {
+    console.error("getCategoriesByBusinessType error:", error);
     return {
       success: false,
-      message: `No categories found for business_type "${name}" in ${table}.`,
-      data: [],
+      message: "Failed to fetch categories by business type.",
     };
-  return { success: true, data: rows };
+  }
 }
 
-/* ========== create / update / delete with verifications and admin_logs ========== */
-
-// Create (requires valid admin + valid business_type name)
+/* ========== create ========== */
 async function addCategory(
   kind,
   { category_name, business_type, description, category_image },
   user_id,
-  admin_name
+  admin_name,
 ) {
-  const table = tableForKind(kind);
+  try {
+    const table = tableForKind(kind);
+    await verifyAdmin(user_id, admin_name);
+    const btRow = await resolveBusinessTypeByNameOrThrow(
+      kind,
+      business_type || kind,
+    );
 
-  // 1) verify admin
-  await verifyAdmin(user_id, admin_name);
+    const name = toStrOrNull(category_name);
+    const desc = toStrOrNull(description);
+    const img = toStrOrNull(category_image);
 
-  // 2) verify business_type name exists and matches kind
-  const btRow = await resolveBusinessTypeByNameOrThrow(kind, business_type || kind);
+    if (!name) {
+      return { success: false, message: "category_name is required." };
+    }
 
-  const name = toStrOrNull(category_name);
-  const desc = toStrOrNull(description);
-  const img = toStrOrNull(category_image);
+    // Check for duplicate - fetch all and filter in JavaScript
+    let existingRows = [];
+    if (table === "food_category") {
+      existingRows = await prisma.food_category.findMany();
+    } else {
+      existingRows = await prisma.mart_category.findMany();
+    }
 
-  if (!name) return { success: false, message: "category_name is required." };
+    const isDuplicate = existingRows.some(
+      (row) =>
+        row.business_type?.toLowerCase() === btRow.name.toLowerCase() &&
+        row.category_name?.toLowerCase() === name.toLowerCase(),
+    );
 
-  // uniqueness: (business_type NAME, category_name)
-  const [dups] = await db.query(
-    `SELECT 1 FROM ${table}
-      WHERE LOWER(business_type) = LOWER(?) AND LOWER(category_name) = LOWER(?)
-      LIMIT 1`,
-    [btRow.name, name]
-  );
-  if (dups.length) {
+    if (isDuplicate) {
+      return {
+        success: false,
+        message: `Category "${name}" already exists for business_type "${btRow.name}".`,
+      };
+    }
+
+    let result;
+    if (table === "food_category") {
+      result = await prisma.food_category.create({
+        data: {
+          category_name: name,
+          business_type: btRow.name,
+          description: desc,
+          category_image: img,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+    } else {
+      result = await prisma.mart_category.create({
+        data: {
+          category_name: name,
+          business_type: btRow.name,
+          description: desc,
+          category_image: img,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+    }
+
+    await logAdminActionSafe(
+      user_id,
+      admin_name,
+      `CREATE ${table}: "${name}" (business_type="${btRow.name}", kind=${btRow.types || kind}, image=${img || "-"})`,
+    );
+
+    return {
+      success: true,
+      message: `Category "${name}" created successfully.`,
+      data: {
+        id: Number(result.id),
+        category_name: result.category_name,
+        business_type: result.business_type,
+        description: result.description,
+        category_image: result.category_image,
+        created_at: formatDate(result.created_at),
+        updated_at: formatDate(result.updated_at),
+      },
+    };
+  } catch (error) {
+    console.error("addCategory error:", error);
     return {
       success: false,
-      message: `Category "${name}" already exists for business_type "${btRow.name}".`,
+      message: error.message || "Failed to create category.",
     };
   }
-
-  const now = bhutanNow();
-  const [res] = await db.query(
-    `INSERT INTO ${table} (category_name, business_type, description, category_image, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [name, btRow.name, desc, img, now, now]
-  );
-
-  await logAdminActionSafe(
-    user_id,
-    admin_name,
-    `CREATE ${table}: "${name}" (business_type="${btRow.name}", kind=${btRow.types || kind}, image=${img || "-"})`
-  );
-
-  const created = await getCategoryById(kind, res.insertId);
-  return {
-    success: true,
-    message: `Category "${name}" created successfully.`,
-    data: created.success
-      ? created.data
-      : { id: res.insertId, category_name: name, business_type: btRow.name, description: desc, category_image: img },
-  };
 }
 
-// Update (partial) — verifies admin, and if business_type provided, it must exist by name
+/* ========== update ========== */
 async function updateCategory(
   kind,
   id,
   { category_name, business_type, description, category_image },
   user_id,
-  admin_name
+  admin_name,
 ) {
-  const table = tableForKind(kind);
+  try {
+    const table = tableForKind(kind);
+    await verifyAdmin(user_id, admin_name);
 
-  // verify admin
-  await verifyAdmin(user_id, admin_name);
+    const existing = await getCategoryById(kind, id);
+    if (!existing.success) {
+      return { success: false, message: existing.message };
+    }
+    const prev = existing.data;
 
-  const existing = await getCategoryById(kind, id);
-  if (!existing.success) return { success: false, message: existing.message };
-  const prev = existing.data;
+    let btNameToStore;
+    if (business_type !== undefined) {
+      const btRow = await resolveBusinessTypeByNameOrThrow(kind, business_type);
+      btNameToStore = btRow.name;
+    }
 
-  let btNameToStore;
-  if (business_type !== undefined) {
-    // if provided, re-verify it
-    const btRow = await resolveBusinessTypeByNameOrThrow(kind, business_type);
-    btNameToStore = btRow.name;
-  }
+    const name =
+      category_name !== undefined ? toStrOrNull(category_name) : undefined;
+    const desc =
+      description !== undefined ? toStrOrNull(description) : undefined;
+    const img =
+      category_image !== undefined ? toStrOrNull(category_image) : undefined;
 
-  const name = category_name !== undefined ? toStrOrNull(category_name) : undefined;
-  const desc = description !== undefined ? toStrOrNull(description) : undefined;
-  const img  = category_image !== undefined ? toStrOrNull(category_image) : undefined;
+    if (name === null) {
+      return { success: false, message: "category_name cannot be empty." };
+    }
 
-  if (name === null) return { success: false, message: "category_name cannot be empty." };
+    const finalName = name !== undefined ? name : prev.category_name;
+    const finalBT =
+      btNameToStore !== undefined ? btNameToStore : prev.business_type;
 
-  // uniqueness check when either name or business_type changes
-  const finalName = name !== undefined ? name : prev.category_name;
-  const finalBT   = btNameToStore !== undefined ? btNameToStore : prev.business_type;
+    // Check for duplicate - fetch all except current and filter in JavaScript
+    let existingRows = [];
+    if (table === "food_category") {
+      existingRows = await prisma.food_category.findMany({
+        where: { id: { not: Number(id) } },
+      });
+    } else {
+      existingRows = await prisma.mart_category.findMany({
+        where: { id: { not: Number(id) } },
+      });
+    }
 
-  if (finalName && finalBT) {
-    const [dups] = await db.query(
-      `SELECT 1 FROM ${table}
-         WHERE LOWER(business_type) = LOWER(?) AND LOWER(category_name) = LOWER(?) AND id <> ?
-         LIMIT 1`,
-      [finalBT, finalName, id]
+    const isDuplicate = existingRows.some(
+      (row) =>
+        row.business_type?.toLowerCase() === finalBT.toLowerCase() &&
+        row.category_name?.toLowerCase() === finalName.toLowerCase(),
     );
-    if (dups.length) {
+
+    if (isDuplicate) {
       return {
         success: false,
         message: `Another category "${finalName}" already exists for business_type "${finalBT}".`,
       };
     }
-  }
 
-  const sets = [];
-  const params = [];
-  const setIf = (col, val) => {
-    if (val !== undefined) {
-      sets.push(`${col} = ?`);
-      params.push(val);
+    const updateData = {};
+    if (name !== undefined) updateData.category_name = name;
+    if (btNameToStore !== undefined) updateData.business_type = btNameToStore;
+    if (desc !== undefined) updateData.description = desc;
+    if (img !== undefined) updateData.category_image = img;
+    updateData.updated_at = new Date();
+
+    if (Object.keys(updateData).length === 1) {
+      return {
+        success: true,
+        message: "No changes.",
+        data: prev,
+        old_image: prev.category_image,
+        new_image: prev.category_image,
+      };
     }
-  };
 
-  setIf("category_name", name);
-  setIf("business_type", btNameToStore);
-  setIf("description", desc);
-  setIf("category_image", img);
+    let updated;
+    if (table === "food_category") {
+      updated = await prisma.food_category.update({
+        where: { id: Number(id) },
+        data: updateData,
+      });
+    } else {
+      updated = await prisma.mart_category.update({
+        where: { id: Number(id) },
+        data: updateData,
+      });
+    }
 
-  if (!sets.length) {
-    return { success: true, message: "No changes.", data: prev, old_image: prev.category_image, new_image: prev.category_image };
+    await logAdminActionSafe(
+      user_id,
+      admin_name,
+      `UPDATE ${table}: id=${id} "${finalName}" (business_type="${finalBT}", image=${img !== undefined ? img || "-" : "(unchanged)"})`,
+    );
+
+    return {
+      success: true,
+      message: "Category updated successfully.",
+      data: {
+        id: Number(updated.id),
+        category_name: updated.category_name,
+        business_type: updated.business_type,
+        description: updated.description,
+        category_image: updated.category_image,
+        created_at: formatDate(updated.created_at),
+        updated_at: formatDate(updated.updated_at),
+      },
+      old_image: prev.category_image,
+      new_image: updated.category_image,
+    };
+  } catch (error) {
+    console.error("updateCategory error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to update category.",
+    };
   }
-
-  sets.push("updated_at = ?");
-  params.push(bhutanNow(), id);
-
-  await db.query(`UPDATE ${table} SET ${sets.join(", ")} WHERE id = ?`, params);
-
-  const updated = await getCategoryById(kind, id);
-
-  await logAdminActionSafe(
-    user_id,
-    admin_name,
-    `UPDATE ${table}: id=${id} "${finalName}" (business_type="${finalBT}", image=${img !== undefined ? (img || "-") : "(unchanged)"})`
-  );
-
-  return {
-    success: true,
-    message: "Category updated successfully.",
-    data: updated.success ? updated.data : null,
-    old_image: prev.category_image,
-    new_image: updated.success ? updated.data.category_image : prev.category_image,
-  };
 }
 
-// Delete — verifies admin
+/** Delete */
 async function deleteCategory(kind, id, user_id, admin_name) {
-  const table = tableForKind(kind);
+  try {
+    const table = tableForKind(kind);
 
-  // verify admin
-  await verifyAdmin(user_id, admin_name);
+    // First, get the category before deletion (without using getCategoryById to avoid extra connection)
+    let category = null;
+    if (table === "food_category") {
+      category = await prisma.food_category.findUnique({
+        where: { id: Number(id) },
+      });
+    } else {
+      category = await prisma.mart_category.findUnique({
+        where: { id: Number(id) },
+      });
+    }
 
-  const cat = await getCategoryById(kind, id);
-  if (!cat.success) return { success: false, message: cat.message };
+    if (!category) {
+      return {
+        success: false,
+        message: `Category (kind=${kind}) id ${id} not found.`,
+      };
+    }
 
-  await db.query(`DELETE FROM ${table} WHERE id = ?`, [id]);
+    // Verify admin first (lightweight operation)
+    if (user_id && admin_name) {
+      const user = await prisma.users.findUnique({
+        where: { user_id: toIntOrThrow(user_id, "user_id") },
+        select: { user_id: true, user_name: true },
+      });
+      if (
+        !user ||
+        user.user_name?.toLowerCase() !== String(admin_name).toLowerCase()
+      ) {
+        return { success: false, message: "Admin verification failed." };
+      }
+    }
 
-  await logAdminActionSafe(
-    user_id,
-    admin_name,
-    `DELETE ${table}: id=${id} "${cat.data.category_name}" (business_type="${cat.data.business_type}")`
-  );
+    // Delete the category
+    if (table === "food_category") {
+      await prisma.food_category.delete({
+        where: { id: Number(id) },
+      });
+    } else {
+      await prisma.mart_category.delete({
+        where: { id: Number(id) },
+      });
+    }
 
-  return {
-    success: true,
-    message: `Category "${cat.data.category_name}" deleted successfully.`,
-    old_image: cat.data.category_image || null,
-  };
+    // Log action (don't wait for it - fire and forget)
+    if (user_id && admin_name) {
+      logAdminActionSafe(
+        user_id,
+        admin_name,
+        `DELETE ${table}: id=${id} "${category.category_name}" (business_type="${category.business_type}")`,
+      );
+    }
+
+    return {
+      success: true,
+      message: `Category "${category.category_name}" deleted successfully.`,
+      old_image: category.category_image || null,
+    };
+  } catch (error) {
+    console.error("deleteCategory error:", error);
+
+    // Check for foreign key constraint
+    if (error.code === "P2003") {
+      return {
+        success: false,
+        message:
+          "Cannot delete this category because it is being used by some menu items. Please remove all items from this category first.",
+      };
+    }
+
+    if (error.code === "P2025") {
+      return { success: false, message: `Category with ID ${id} not found.` };
+    }
+
+    return {
+      success: false,
+      message: error.message || "Failed to delete category. Please try again.",
+    };
+  }
 }
 
-/* ==================== NEW: categories by business_id flow ==================== */
-/**
- * 1) Find all business_type_ids for a business (merchant_business_types)
- * 2) Map to business_types rows → {id, name, types}
- * 3) For each kind (types=food|mart), fetch categories from the right table by NAME
- * Returns grouped structure:
- * {
- *   business_id,
- *   types: [
- *     {
- *       kind: 'food'|'mart',
- *       business_type_id,
- *       business_type_name,
- *       categories: [ { id, category_name, business_type, description, category_image, created_at, updated_at }, ... ]
- *     },
- *     ...
- *   ]
- * }
- */
+/* ==================== categories by business_id flow ==================== */
 async function getCategoriesForBusiness(business_id) {
-  const bid = toIntOrThrow(business_id, "business_id");
+  try {
+    const bid = toIntOrThrow(business_id, "business_id");
 
-  // ensure business exists
-  const [biz] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-    [bid]
-  );
-  if (!biz.length) throw new Error("Business not found");
+    const business = await prisma.merchant_business_details.findUnique({
+      where: { business_id: bid },
+    });
+    if (!business) throw new Error("Business not found");
 
-  // Step 1+2: get business_type (id, name, types)
-  const [btRows] = await db.query(
-    `SELECT mbt.business_type_id AS id, bt.name, LOWER(bt.types) AS kind
-       FROM merchant_business_types mbt
-       JOIN business_types bt ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id = ?`,
-    [bid]
-  );
-  if (!btRows.length) {
-    return { business_id: bid, types: [] };
-  }
-
-  // group names per kind
-  const byKind = { food: [], mart: [] };
-  for (const r of btRows) {
-    const kind = r.kind === "mart" ? "mart" : "food"; // default to food if null/other
-    byKind[kind].push({ id: r.id, name: r.name });
-  }
-
-  // helper: (?, ?, ?)
-  const makeQs = (n) => Array(n).fill("?").join(",");
-
-  const result = { business_id: bid, types: [] };
-
-  // FOOD categories
-  if (byKind.food.length) {
-    const names = byKind.food.map((x) => x.name.toLowerCase());
-    const [rows] = await db.query(
-      `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-         FROM ${TABLE_BY_KIND.food}
-        WHERE LOWER(business_type) IN (${makeQs(names.length)})
-        ORDER BY business_type ASC, category_name ASC`,
-      names
+    const merchantBusinessTypes = await prisma.merchant_business_types.findMany(
+      {
+        where: { business_id: bid },
+        include: {
+          business_types: {
+            select: { id: true, name: true, types: true },
+          },
+        },
+      },
     );
 
-    const map = new Map();
-    for (const { id, name } of byKind.food) {
-      map.set(name.toLowerCase(), {
-        kind: "food",
-        business_type_id: id,
-        business_type_name: name,
-        categories: [],
+    if (!merchantBusinessTypes.length) {
+      return { business_id: bid, types: [] };
+    }
+
+    const byKind = { food: [], mart: [] };
+    for (const mbt of merchantBusinessTypes) {
+      const kind =
+        mbt.business_types?.types?.toLowerCase() === "mart" ? "mart" : "food";
+      byKind[kind].push({
+        id: mbt.business_types?.id,
+        name: mbt.business_types?.name,
       });
     }
-    for (const r of rows) {
-      const key = String(r.business_type || "").toLowerCase();
-      const bucket = map.get(key);
-      if (bucket) bucket.categories.push(r);
-    }
-    result.types.push(...[...map.values()]);
-  }
 
-  // MART categories
-  if (byKind.mart.length) {
-    const names = byKind.mart.map((x) => x.name.toLowerCase());
-    const [rows] = await db.query(
-      `SELECT id, category_name, business_type, description, category_image, created_at, updated_at
-         FROM ${TABLE_BY_KIND.mart}
-        WHERE LOWER(business_type) IN (${makeQs(names.length)})
-        ORDER BY business_type ASC, category_name ASC`,
-      names
-    );
+    const result = { business_id: bid, types: [] };
 
-    const map = new Map();
-    for (const { id, name } of byKind.mart) {
-      map.set(name.toLowerCase(), {
-        kind: "mart",
-        business_type_id: id,
-        business_type_name: name,
-        categories: [],
+    // FOOD categories
+    if (byKind.food.length) {
+      const names = byKind.food.map((x) => x.name);
+      const allFoodCategories = await prisma.food_category.findMany({
+        orderBy: [{ business_type: "asc" }, { category_name: "asc" }],
       });
-    }
-    for (const r of rows) {
-      const key = String(r.business_type || "").toLowerCase();
-      const bucket = map.get(key);
-      if (bucket) bucket.categories.push(r);
-    }
-    result.types.push(...[...map.values()]);
-  }
 
-  return result;
+      // Filter in JavaScript
+      const filteredFoodCategories = allFoodCategories.filter((cat) =>
+        names.some(
+          (name) => name.toLowerCase() === cat.business_type?.toLowerCase(),
+        ),
+      );
+
+      const map = new Map();
+      for (const { id, name } of byKind.food) {
+        map.set(name.toLowerCase(), {
+          kind: "food",
+          business_type_id: id,
+          business_type_name: name,
+          categories: [],
+        });
+      }
+
+      for (const cat of filteredFoodCategories) {
+        const key = cat.business_type?.toLowerCase();
+        const bucket = map.get(key);
+        if (bucket) {
+          bucket.categories.push({
+            id: Number(cat.id),
+            category_name: cat.category_name,
+            business_type: cat.business_type,
+            description: cat.description,
+            category_image: cat.category_image,
+            created_at: formatDate(cat.created_at),
+            updated_at: formatDate(cat.updated_at),
+          });
+        }
+      }
+      result.types.push(...map.values());
+    }
+
+    // MART categories
+    if (byKind.mart.length) {
+      const names = byKind.mart.map((x) => x.name);
+      const allMartCategories = await prisma.mart_category.findMany({
+        orderBy: [{ business_type: "asc" }, { category_name: "asc" }],
+      });
+
+      // Filter in JavaScript
+      const filteredMartCategories = allMartCategories.filter((cat) =>
+        names.some(
+          (name) => name.toLowerCase() === cat.business_type?.toLowerCase(),
+        ),
+      );
+
+      const map = new Map();
+      for (const { id, name } of byKind.mart) {
+        map.set(name.toLowerCase(), {
+          kind: "mart",
+          business_type_id: id,
+          business_type_name: name,
+          categories: [],
+        });
+      }
+
+      for (const cat of filteredMartCategories) {
+        const key = cat.business_type?.toLowerCase();
+        const bucket = map.get(key);
+        if (bucket) {
+          bucket.categories.push({
+            id: Number(cat.id),
+            category_name: cat.category_name,
+            business_type: cat.business_type,
+            description: cat.description,
+            category_image: cat.category_image,
+            created_at: formatDate(cat.created_at),
+            updated_at: formatDate(cat.updated_at),
+          });
+        }
+      }
+      result.types.push(...map.values());
+    }
+
+    return result;
+  } catch (error) {
+    console.error("getCategoriesForBusiness error:", error);
+    throw error;
+  }
 }
 
 module.exports = {
@@ -431,6 +673,5 @@ module.exports = {
   addCategory,
   updateCategory,
   deleteCategory,
-  // NEW export
   getCategoriesForBusiness,
 };

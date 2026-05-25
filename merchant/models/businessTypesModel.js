@@ -1,9 +1,13 @@
-// models/businessTypesModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 const moment = require("moment-timezone");
 
 /* ========== helpers ========== */
-const bhutanNow = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
+
+// Format date to ISO string
+function formatDate(date) {
+  if (!date) return null;
+  return moment(date).tz("Asia/Thimphu").toISOString();
+}
 
 function toIntOrNull(v) {
   const n = Number(v);
@@ -20,7 +24,10 @@ function toStrOrNull(v) {
 function normalizeTypes(input) {
   if (input == null) return null;
   if (Array.isArray(input)) {
-    return input.map((x) => String(x).trim()).filter(Boolean).join(",");
+    return input
+      .map((x) => String(x).trim())
+      .filter(Boolean)
+      .join(",");
   }
   return (
     String(input)
@@ -31,22 +38,21 @@ function normalizeTypes(input) {
   );
 }
 
-/** Log admin action into admin_logs in Bhutan time; never throws */
+/** Log admin action into admin_logs using Prisma relation */
 async function logAdminAction(user_id, admin_name, activity) {
   try {
-    // Optional: ensure user_id exists; if not, store NULL
     let uid = toIntOrNull(user_id);
-    if (uid) {
-      const [chk] = await db.query(`SELECT 1 FROM users WHERE user_id = ? LIMIT 1`, [uid]);
-      if (!chk.length) uid = null;
-    }
-    await db.query(
-      `INSERT INTO admin_logs (user_id, admin_name, activity, created_at)
-       VALUES (?, ?, ?, ?)`,
-      [uid, toStrOrNull(admin_name), toStrOrNull(activity), bhutanNow()]
-    );
+
+    await prisma.admin_logs.create({
+      data: {
+        admin_name: toStrOrNull(admin_name),
+        activity: toStrOrNull(activity),
+        created_at: new Date(),
+        users: uid ? { connect: { user_id: uid } } : undefined,
+      },
+    });
   } catch (_e) {
-    // swallow
+    // swallow - don't let logging failures break the main operation
   }
 }
 
@@ -54,165 +60,292 @@ async function logAdminAction(user_id, admin_name, activity) {
 
 /** List all business types */
 async function getAllBusinessTypes() {
-  const [rows] = await db.query(
-    `SELECT id, name, image, description, types, created_at, updated_at
-       FROM business_types
-      ORDER BY name ASC`
-  );
-  if (!rows.length) return { success: false, message: "No business types found.", data: [] };
-  return { success: true, data: rows };
+  try {
+    const rows = await prisma.business_types.findMany({
+      orderBy: { name: "asc" },
+    });
+
+    if (!rows.length) {
+      return { success: false, message: "No business types found.", data: [] };
+    }
+
+    // Format dates and convert BigInt
+    const formattedRows = rows.map((row) => ({
+      id: Number(row.id),
+      name: row.name,
+      image: row.image,
+      description: row.description,
+      types: row.types,
+      created_at: formatDate(row.created_at),
+      updated_at: formatDate(row.updated_at),
+    }));
+
+    return { success: true, data: formattedRows };
+  } catch (error) {
+    console.error("getAllBusinessTypes error:", error);
+    return {
+      success: false,
+      message: "Failed to fetch business types.",
+      data: [],
+    };
+  }
 }
 
 /** Get one by ID */
 async function getBusinessTypeById(id) {
-  const [rows] = await db.query(
-    `SELECT id, name, image, description, types, created_at, updated_at
-       FROM business_types
-      WHERE id = ?`,
-    [id]
-  );
-  if (!rows.length) {
-    return { success: false, message: `Business type with ID ${id} not found.` };
+  try {
+    const row = await prisma.business_types.findUnique({
+      where: { id: Number(id) },
+    });
+
+    if (!row) {
+      return {
+        success: false,
+        message: `Business type with ID ${id} not found.`,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        id: Number(row.id),
+        name: row.name,
+        image: row.image,
+        description: row.description,
+        types: row.types,
+        created_at: formatDate(row.created_at),
+        updated_at: formatDate(row.updated_at),
+      },
+    };
+  } catch (error) {
+    console.error("getBusinessTypeById error:", error);
+    return { success: false, message: "Failed to fetch business type." };
   }
-  return { success: true, data: rows[0] };
 }
 
 /** Get business types filtered by single token in 'types' (e.g., 'food' or 'mart') */
 async function getBusinessTypesByType(typeToken) {
-  const token = String(typeToken || "").toLowerCase().trim();
-  if (!token) return { success: false, message: "Type is required.", data: [] };
+  try {
+    const token = String(typeToken || "")
+      .toLowerCase()
+      .trim();
+    if (!token) {
+      return { success: false, message: "Type is required.", data: [] };
+    }
 
-  // If your schema stores a single token like 'food' or 'mart' in types,
-  // equality is enough. If you sometimes store comma-separated values,
-  // you can switch to the LIKE pattern shown in older versions.
-  const [rows] = await db.query(
-    `SELECT id, name, image, description, types, created_at, updated_at
-       FROM business_types
-      WHERE types IS NOT NULL
-        AND LOWER(types) = ?`,
-    [token]
-  );
+    // Fetch all business types
+    const allTypes = await prisma.business_types.findMany();
 
-  if (!rows.length) {
-    return { success: false, message: `No business types found for type "${token}".`, data: [] };
+    // Filter case-insensitively in JavaScript
+    const filteredTypes = allTypes.filter(
+      (item) => item.types?.toLowerCase() === token,
+    );
+
+    if (!filteredTypes.length) {
+      return {
+        success: false,
+        message: `No business types found for type "${token}".`,
+        data: [],
+      };
+    }
+
+    // Format dates and convert BigInt
+    const formattedRows = filteredTypes.map((row) => ({
+      id: Number(row.id),
+      name: row.name,
+      image: row.image,
+      description: row.description,
+      types: row.types,
+      created_at: formatDate(row.created_at),
+      updated_at: formatDate(row.updated_at),
+    }));
+
+    return { success: true, data: formattedRows };
+  } catch (error) {
+    console.error("getBusinessTypesByType error:", error);
+    return {
+      success: false,
+      message: "Failed to fetch business types by type.",
+    };
   }
-  return { success: true, data: rows };
 }
 
 /** Create */
-async function addBusinessType(name, description, types, image, user_id, admin_name) {
-  const n = toStrOrNull(name);
-  const d = toStrOrNull(description);
-  // For your use-case, types should typically be 'food' or 'mart' (single token).
-  // We still normalize to be tolerant of input format.
-  const t = toStrOrNull(normalizeTypes(types));
-  const img = toStrOrNull(image);
+async function addBusinessType(
+  name,
+  description,
+  types,
+  image,
+  user_id,
+  admin_name,
+) {
+  try {
+    const n = toStrOrNull(name);
+    const d = toStrOrNull(description);
+    const t = toStrOrNull(normalizeTypes(types));
+    const img = toStrOrNull(image);
 
-  if (!n) return { success: false, message: "Name is required." };
+    if (!n) {
+      return { success: false, message: "Name is required." };
+    }
 
-  // uniqueness: block duplicate (name + types) ignoring case
-  const [dups] = await db.query(
-    `SELECT 1 FROM business_types
-      WHERE LOWER(name) = LOWER(?)
-        AND (
-             (types IS NULL AND ? IS NULL)
-          OR LOWER(types) = LOWER(?)
-        )
-      LIMIT 1`,
-    [n, t, t]
-  );
-  if (dups.length) {
+    // Fetch all business types and check for duplicate in JavaScript
+    const allTypes = await prisma.business_types.findMany({
+      select: { name: true, types: true },
+    });
+
+    const isDuplicate = allTypes.some(
+      (item) =>
+        item.name?.toLowerCase() === n.toLowerCase() &&
+        (item.types === t || (item.types === null && t === null)),
+    );
+
+    if (isDuplicate) {
+      return {
+        success: false,
+        message: `Business type "${n}" with types "${t || "-"}" already exists.`,
+      };
+    }
+
+    const result = await prisma.business_types.create({
+      data: {
+        name: n,
+        image: img,
+        description: d,
+        types: t,
+        created_at: new Date(),
+        updated_at: new Date(),
+      },
+    });
+
+    await logAdminAction(
+      user_id,
+      admin_name,
+      `CREATE business_types: "${n}" (types: ${t || "-"}, image: ${img || "-"})`,
+    );
+
+    return {
+      success: true,
+      message: `Business type "${n}" added successfully.`,
+      insertedId: Number(result.id),
+    };
+  } catch (error) {
+    console.error("addBusinessType error:", error);
     return {
       success: false,
-      message: `Business type "${n}" with types "${t || "-"}" already exists.`,
+      message: error.message || "Failed to add business type.",
     };
   }
-
-  const now = bhutanNow();
-  const [res] = await db.query(
-    `INSERT INTO business_types (name, image, description, types, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [n, img, d, t, now, now]
-  );
-
-  await logAdminAction(
-    user_id,
-    admin_name,
-    `CREATE business_types: "${n}" (types: ${t || "-"}, image: ${img || "-"})`
-  );
-
-  return {
-    success: true,
-    message: `Business type "${n}" added successfully.`,
-    insertedId: res.insertId,
-  };
 }
 
 /** Update */
-async function updateBusinessType(id, name, description, types, image, user_id, admin_name) {
-  const current = await getBusinessTypeById(id);
-  if (!current.success) return current;
+async function updateBusinessType(
+  id,
+  name,
+  description,
+  types,
+  image,
+  user_id,
+  admin_name,
+) {
+  try {
+    const current = await getBusinessTypeById(id);
+    if (!current.success) return current;
 
-  const n = toStrOrNull(name);
-  const d = toStrOrNull(description);
-  const t = toStrOrNull(normalizeTypes(types));
-  const img = toStrOrNull(image);
+    const n = toStrOrNull(name);
+    const d = toStrOrNull(description);
+    const t = toStrOrNull(normalizeTypes(types));
+    const img = toStrOrNull(image);
 
-  if (!n) return { success: false, message: "Name is required." };
+    if (!n) {
+      return { success: false, message: "Name is required." };
+    }
 
-  // uniqueness check excluding current row
-  const [dups] = await db.query(
-    `SELECT 1 FROM business_types
-      WHERE LOWER(name) = LOWER(?)
-        AND (
-             (types IS NULL AND ? IS NULL)
-          OR LOWER(types) = LOWER(?)
-        )
-        AND id <> ?
-      LIMIT 1`,
-    [n, t, t, id]
-  );
-  if (dups.length) {
+    // Fetch all business types except current and check for duplicate
+    const allTypes = await prisma.business_types.findMany({
+      where: { id: { not: Number(id) } },
+      select: { name: true, types: true },
+    });
+
+    const isDuplicate = allTypes.some(
+      (item) =>
+        item.name?.toLowerCase() === n.toLowerCase() &&
+        (item.types === t || (item.types === null && t === null)),
+    );
+
+    if (isDuplicate) {
+      return {
+        success: false,
+        message: `Another business type "${n}" with types "${t || "-"}" already exists.`,
+      };
+    }
+
+    await prisma.business_types.update({
+      where: { id: Number(id) },
+      data: {
+        name: n,
+        image: img,
+        description: d,
+        types: t,
+        updated_at: new Date(),
+      },
+    });
+
+    await logAdminAction(
+      user_id,
+      admin_name,
+      `UPDATE business_types: id=${id} -> name="${n}", types="${t || "-"}", image=${img || "-"}`,
+    );
+
+    return {
+      success: true,
+      message: `Business type "${n}" updated successfully.`,
+    };
+  } catch (error) {
+    console.error("updateBusinessType error:", error);
     return {
       success: false,
-      message: `Another business type "${n}" with types "${t || "-"}" already exists.`,
+      message: error.message || "Failed to update business type.",
     };
   }
-
-  const now = bhutanNow();
-  await db.query(
-    `UPDATE business_types
-        SET name = ?, image = ?, description = ?, types = ?, updated_at = ?
-      WHERE id = ?`,
-    [n, img, d, t, now, id]
-  );
-
-  await logAdminAction(
-    user_id,
-    admin_name,
-    `UPDATE business_types: id=${id} -> name="${n}", types="${t || "-"}", image=${img || "-"}`
-  );
-
-  return { success: true, message: `Business type "${n}" updated successfully.` };
 }
 
 /** Delete */
 async function deleteBusinessType(id, user_id, admin_name) {
-  const bt = await getBusinessTypeById(id);
-  if (!bt.success) return bt;
+  try {
+    const bt = await getBusinessTypeById(id);
+    if (!bt.success) return bt;
 
-  await db.query(`DELETE FROM business_types WHERE id = ?`, [id]);
+    await prisma.business_types.delete({
+      where: { id: Number(id) },
+    });
 
-  await logAdminAction(
-    user_id,
-    admin_name,
-    `DELETE business_types: id=${id} ("${bt.data.name}")`
-  );
+    await logAdminAction(
+      user_id,
+      admin_name,
+      `DELETE business_types: id=${id} ("${bt.data.name}")`,
+    );
 
-  return {
-    success: true,
-    message: `Business type "${bt.data.name}" deleted successfully.`,
-  };
+    return {
+      success: true,
+      message: `Business type "${bt.data.name}" deleted successfully.`,
+    };
+  } catch (error) {
+    console.error("deleteBusinessType error:", error);
+
+    // Check for foreign key constraint (Prisma error code P2003)
+    if (error.code === "P2003") {
+      return {
+        success: false,
+        message: "Cannot delete: business type is in use by merchants.",
+      };
+    }
+
+    return {
+      success: false,
+      message: error.message || "Failed to delete business type.",
+    };
+  }
 }
 
 module.exports = {

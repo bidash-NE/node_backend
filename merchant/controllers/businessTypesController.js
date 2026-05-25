@@ -1,4 +1,3 @@
-// controllers/businessTypesController.js
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
@@ -14,9 +13,23 @@ const {
 
 const { toWebPath } = require("../middlewares/businessTypesImage");
 
+// Helper function to convert BigInt to Number
+function serializeBigInt(data) {
+  if (data === null || data === undefined) return data;
+  if (typeof data === "bigint") return Number(data);
+  if (Array.isArray(data)) return data.map(serializeBigInt);
+  if (typeof data === "object") {
+    const serialized = {};
+    for (const key in data) {
+      serialized[key] = serializeBigInt(data[key]);
+    }
+    return serialized;
+  }
+  return data;
+}
+
 /* -------------------- helpers -------------------- */
 
-// Extract acting admin for logs
 function toIntOrNull(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -37,7 +50,6 @@ function actor(req) {
   };
 }
 
-// Prefer uploaded file; fallback to body.image
 function extractIncomingImage(req) {
   if (req.file) return toWebPath(req.file);
   const raw = (req.body?.image || "").toString().trim();
@@ -71,11 +83,15 @@ async function safeUnlink(absPath) {
 
 /* -------------------- routes -------------------- */
 
-// GET /api/business-types
 exports.listBusinessTypes = async (_req, res) => {
   try {
     const out = await getAllBusinessTypes();
-    res.status(out.success ? 200 : 404).json(out);
+    // Serialize BigInt values before sending response
+    const serializedData = serializeBigInt(out.data);
+    res.status(out.success ? 200 : 404).json({
+      success: out.success,
+      data: serializedData,
+    });
   } catch (e) {
     console.error("listBusinessTypes error:", e);
     res
@@ -84,11 +100,18 @@ exports.listBusinessTypes = async (_req, res) => {
   }
 };
 
-// GET /api/business-types/:id
 exports.getBusinessType = async (req, res) => {
   try {
     const out = await getBusinessTypeById(req.params.id);
-    res.status(out.success ? 200 : 404).json(out);
+    if (out.success && out.data) {
+      const serializedData = serializeBigInt(out.data);
+      res.status(200).json({
+        success: true,
+        data: serializedData,
+      });
+    } else {
+      res.status(404).json(out);
+    }
   } catch (e) {
     console.error("getBusinessType error:", e);
     res
@@ -97,11 +120,14 @@ exports.getBusinessType = async (req, res) => {
   }
 };
 
-// GET /api/business-types/type/food
 exports.listFoodBusinessTypes = async (_req, res) => {
   try {
     const out = await getBusinessTypesByType("food");
-    res.status(out.success ? 200 : 404).json(out);
+    const serializedData = serializeBigInt(out.data);
+    res.status(out.success ? 200 : 404).json({
+      success: out.success,
+      data: serializedData,
+    });
   } catch (e) {
     console.error("listFoodBusinessTypes error:", e);
     res.status(500).json({
@@ -111,11 +137,14 @@ exports.listFoodBusinessTypes = async (_req, res) => {
   }
 };
 
-// GET /api/business-types/type/mart
 exports.listMartBusinessTypes = async (_req, res) => {
   try {
     const out = await getBusinessTypesByType("mart");
-    res.status(out.success ? 200 : 404).json(out);
+    const serializedData = serializeBigInt(out.data);
+    res.status(out.success ? 200 : 404).json({
+      success: out.success,
+      data: serializedData,
+    });
   } catch (e) {
     console.error("listMartBusinessTypes error:", e);
     res.status(500).json({
@@ -125,7 +154,6 @@ exports.listMartBusinessTypes = async (_req, res) => {
   }
 };
 
-// POST /api/business-types
 exports.createBusinessType = async (req, res) => {
   const { user_id, admin_name } = actor(req);
   const { name, description, types } = req.body || {};
@@ -138,7 +166,7 @@ exports.createBusinessType = async (req, res) => {
       types,
       newImage,
       user_id,
-      admin_name
+      admin_name,
     );
     res.status(out.success ? 201 : 400).json(out);
   } catch (e) {
@@ -152,7 +180,6 @@ exports.createBusinessType = async (req, res) => {
   }
 };
 
-// PUT /api/business-types/:id
 exports.updateBusinessType = async (req, res) => {
   const { user_id, admin_name } = actor(req);
   const { name, description, types } = req.body || {};
@@ -189,7 +216,7 @@ exports.updateBusinessType = async (req, res) => {
       types,
       imageToStore,
       user_id,
-      admin_name
+      admin_name,
     );
 
     if (!out.success) {
@@ -219,7 +246,6 @@ exports.updateBusinessType = async (req, res) => {
   }
 };
 
-// DELETE /api/business-types/:id
 exports.removeBusinessType = async (req, res) => {
   const { user_id, admin_name } = actor(req);
   let current = null;
@@ -239,13 +265,10 @@ exports.removeBusinessType = async (req, res) => {
 
     res.status(200).json(out);
   } catch (e) {
-    if (
-      e &&
-      (e.code === "ER_ROW_IS_REFERENCED" || e.code === "ER_ROW_IS_REFERENCED_2")
-    ) {
+    if (e.message && e.message.includes("in use by merchants")) {
       return res.status(409).json({
         success: false,
-        message: "Cannot delete: business type is in use.",
+        message: "Cannot delete: business type is in use by merchants.",
       });
     }
     console.error("removeBusinessType error:", e);
