@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 const bcrypt = require("bcryptjs");
 
 /* ------------------------ helpers ------------------------ */
@@ -18,475 +18,297 @@ async function mapTypeNamesToIds(names) {
   if (!names || !names.length) return [];
   const trimmed = names.map((x) => String(x).trim()).filter(Boolean);
   if (!trimmed.length) return [];
-  const [rows] = await db.query(
-    `SELECT id, name FROM business_types
-       WHERE LOWER(name) IN (${trimmed.map(() => "LOWER(?)").join(",")})`,
-    trimmed,
+  
+  const allBusinessTypes = await prisma.business_types.findMany();
+  const matched = allBusinessTypes.filter((bt) =>
+    trimmed.some((name) => bt.name?.toLowerCase() === name.toLowerCase())
   );
-  return rows.map((r) => r.id);
+  return matched.map((bt) => bt.id);
 }
 
 async function filterValidTypeIds(typeIds) {
   if (!typeIds.length) return [];
-  const [rows] = await db.query(
-    `SELECT id FROM business_types WHERE id IN (${typeIds
-      .map(() => "?")
-      .join(",")})`,
-    typeIds,
-  );
-  const valid = new Set(rows.map((r) => r.id));
-  return typeIds.filter((id) => valid.has(id));
+  const numericIds = typeIds.map(id => Number(id));
+  const validTypes = await prisma.business_types.findMany({
+    where: { id: { in: numericIds } },
+    select: { id: true },
+  });
+  const validSet = new Set(validTypes.map((t) => Number(t.id)));
+  return numericIds.filter((id) => validSet.has(id));
 }
 
-/* ------------------------ create/register ------------------------ */
+async function checkScopedUsernameExists(user_name, role, ownerType) {
+  const allUsers = await prisma.users.findMany({
+    where: { user_name: user_name, role: role },
+    include: { merchant_business_details: true },
+  });
+  const matchingUsers = allUsers.filter(
+    (user) => user.user_name?.toLowerCase() === user_name.toLowerCase()
+  );
+  return matchingUsers.some((user) =>
+    user.merchant_business_details?.some(
+      (business) => business.owner_type?.toLowerCase() === ownerType.toLowerCase()
+    )
+  );
+}
+
+/* ------------------------ create/register with TRANSACTION ------------------------ */
 
 async function registerMerchantModel(data) {
-  const conn = await db.getConnection();
-  await conn.beginTransaction();
+  // Validate all inputs first (before transaction)
+  const {
+    user_name,
+    email,
+    phone,
+    cid,
+    password,
+    business_name,
+    business_type_ids,
+    business_types,
+    business_license_number,
+    license_image,
+    latitude,
+    longitude,
+    address,
+    business_logo,
+    delivery_option,
+    owner_type,
+    min_amount_for_fd,
+    bank_name,
+    account_holder_name,
+    account_number,
+    bank_qr_code_image,
+    special_celebration,
+    special_celebration_discount_percentage,
+  } = data;
 
-  try {
-    const {
-      user_name,
-      email,
-      phone,
-      cid,
-      password,
-      business_name,
-      business_type_ids,
-      business_types,
-      business_license_number,
-      license_image,
-      latitude,
-      longitude,
-      address,
-      business_logo,
-      delivery_option,
-      owner_type, // e.g., "food" / "mart"
-      min_amount_for_fd, // 🔹 free-delivery threshold
-      bank_name,
-      account_holder_name,
-      account_number,
-      bank_qr_code_image,
-      special_celebration, // New field for special celebration
-      special_celebration_discount_percentage, // New field for special celebration discount
-    } = data;
+  const role = (data.role || "merchant").toLowerCase();
+  const ownerType = String(owner_type || "").toLowerCase();
+  const cidStr = cid == null ? "" : String(cid).trim();
 
-    const role = (data.role || "merchant").toLowerCase();
-    const ownerType = String(owner_type || "").toLowerCase();
-    const cidStr = cid == null ? "" : String(cid).trim();
+  // Validation - all required fields
+  if (!user_name) throw new Error("user_name is required");
+  if (!email) throw new Error("email is required");
+  if (!phone) throw new Error("phone is required");
+  if (!cidStr) throw new Error("cid is required for merchants");
+  if (cidStr.length !== 11) throw new Error("cid must be exactly 11 characters long");
+  if (!password) throw new Error("password is required");
+  if (!business_name) throw new Error("business_name is required");
+  if (!ownerType) throw new Error("owner_type is required");
+  if (!bank_name) throw new Error("bank_name is required");
+  if (!account_holder_name) throw new Error("account_holder_name is required");
+  if (!account_number) throw new Error("account_number is required");
 
-    if (!user_name) throw new Error("user_name is required");
-    if (!email) throw new Error("email is required");
-    if (!phone) throw new Error("phone is required");
-    if (!cidStr) throw new Error("cid is required for merchants");
-    if (cidStr.length !== 11)
-      throw new Error("cid must be exactly 11 characters long");
-    if (!password) throw new Error("password is required");
-    if (!business_name) throw new Error("business_name is required");
-    if (!ownerType) throw new Error("owner_type is required");
-    if (!bank_name) throw new Error("bank_name is required");
-    if (!account_holder_name)
-      throw new Error("account_holder_name is required");
-    if (!account_number) throw new Error("account_number is required");
+  // Business type resolution
+  let incomingIds = toIdArray(business_type_ids);
+  if (!incomingIds.length && Array.isArray(business_types) && business_types.length) {
+    const mapped = await mapTypeNamesToIds(business_types);
+    incomingIds = toIdArray(mapped);
+  }
+  if (!incomingIds.length) {
+    throw new Error("At least one business type is required.");
+  }
 
-    // Business type resolution
-    let incomingIds = toIdArray(business_type_ids);
-    if (
-      !incomingIds.length &&
-      Array.isArray(business_types) &&
-      business_types.length
-    ) {
-      const mapped = await mapTypeNamesToIds(business_types);
-      incomingIds = toIdArray(mapped);
-    }
-    if (!incomingIds.length)
-      throw new Error(
-        "At least one business type is required (provide business_type_ids).",
-      );
+  // Validate all business type IDs exist
+  const validTypeIds = await filterValidTypeIds(incomingIds);
+  if (validTypeIds.length !== incomingIds.length) {
+    const invalidIds = incomingIds.filter(id => !validTypeIds.includes(Number(id)));
+    throw new Error(`Invalid business_type_ids: ${invalidIds.join(", ")}. These IDs do not exist.`);
+  }
 
-    // Duplicate checks
-    const [emailDup] = await conn.query(
-      `SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`,
-      [email],
-    );
-    if (emailDup.length)
-      throw new Error("Email already exists. Please use another email.");
+  // Check for existing email, phone, username before transaction
+  const existingEmail = await prisma.users.findFirst({ where: { email: email } });
+  if (existingEmail) throw new Error("Email already exists. Please use another email.");
 
-    const [phoneDup] = await conn.query(
-      `SELECT user_id FROM users WHERE phone = ? LIMIT 1`,
-      [phone],
-    );
-    if (phoneDup.length)
-      throw new Error("Phone number already exists. Please use another phone.");
+  const existingPhone = await prisma.users.findFirst({ where: { phone: phone } });
+  if (existingPhone) throw new Error("Phone number already exists. Please use another phone.");
 
-    // Username duplicate *scoped* by role+owner_type (case-sensitive username)
-    const [scopedUserDup] = await conn.query(
-      `
-      SELECT u.user_id
-        FROM users u
-        JOIN merchant_business_details mbd
-          ON mbd.user_id = u.user_id
-       WHERE BINARY TRIM(u.user_name) = BINARY TRIM(?)
-         AND LOWER(u.role) = LOWER(?)
-         AND LOWER(TRIM(mbd.owner_type)) = LOWER(TRIM(?))
-       LIMIT 1
-      `,
-      [user_name, role, ownerType],
-    );
-    if (scopedUserDup.length) {
-      throw new Error(
-        "Username already exists for this owner type. Choose another username or change owner_type.",
-      );
-    }
+  const usernameExists = await checkScopedUsernameExists(user_name, role, ownerType);
+  if (usernameExists) {
+    throw new Error("Username already exists for this owner type. Choose another username or change owner_type.");
+  }
 
+  // Start transaction for actual database writes
+  return await prisma.$transaction(async (tx) => {
     // Create user
     const password_hash = await bcrypt.hash(password, 10);
-    const [uRes] = await conn.query(
-      `INSERT INTO users (user_name, email, phone, cid, password_hash, role, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [user_name, email, phone, cidStr, password_hash, role],
-    );
-    const user_id = uRes.insertId;
+    const newUser = await tx.users.create({
+      data: {
+        user_name: user_name,
+        email: email,
+        phone: phone,
+        cid: cidStr,
+        password_hash: password_hash,
+        role: role,
+        is_active: true,
+      },
+    });
+    const user_id = newUser.user_id;
 
-    // Free-delivery threshold normalization (0 = feature disabled)
-    const minFD =
-      min_amount_for_fd !== undefined &&
-      min_amount_for_fd !== null &&
-      min_amount_for_fd !== ""
-        ? Number(min_amount_for_fd)
-        : 0;
+    const minFD = min_amount_for_fd !== undefined && min_amount_for_fd !== null && min_amount_for_fd !== ""
+      ? Number(min_amount_for_fd) : 0;
 
     // Create business
-    const [mbdRes] = await conn.query(
-      `INSERT INTO merchant_business_details
-        (user_id, business_name, business_license_number, license_image,
-         latitude, longitude, address, business_logo, delivery_option, owner_type,
-         min_amount_for_fd, special_celebration, special_celebration_discount_percentage)  -- Added special_celebration and special_celebration_discount_percentage
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        user_id,
-        business_name,
-        business_license_number || null,
-        license_image || null,
-        latitude ?? null,
-        longitude ?? null,
-        address || null,
-        business_logo || null,
-        delivery_option || "SELF",
-        ownerType || null,
-        minFD,
-        special_celebration || null, // Ensure to include special_celebration
-        special_celebration_discount_percentage || null, // Ensure to include special_celebration_discount_percentage
-      ],
-    );
-    const business_id = mbdRes.insertId;
+    const newBusiness = await tx.merchant_business_details.create({
+      data: {
+        user_id: user_id,
+        business_name: business_name,
+        business_license_number: business_license_number || null,
+        license_image: license_image || null,
+        latitude: latitude ?? null,
+        longitude: longitude ?? null,
+        address: address || null,
+        business_logo: business_logo || null,
+        delivery_option: delivery_option || "SELF",
+        owner_type: ownerType || null,
+        min_amount_for_fd: minFD,
+        special_celebration: special_celebration || null,
+        special_celebration_discount_percentage: special_celebration_discount_percentage || null,
+      },
+    });
+    const business_id = newBusiness.business_id;
 
-    const validTypeIds = await filterValidTypeIds(incomingIds);
-    if (!validTypeIds.length)
-      throw new Error("Provided business_type_ids are invalid.");
-    const values = validTypeIds.map((tid) => [business_id, tid]);
-    await conn.query(
-      `INSERT INTO merchant_business_types (business_id, business_type_id) VALUES ?`,
-      [values],
-    );
+    // Add business types
+    for (const typeId of validTypeIds) {
+      await tx.merchant_business_types.create({
+        data: { business_id: business_id, business_type_id: typeId },
+      });
+    }
 
-    // Bank details
-    await conn.query(
-      `INSERT INTO merchant_bank_details
-         (user_id, bank_name, account_holder_name, account_number, bank_qr_code_image)
-       VALUES (?, ?, ?, ?, ?)`,
-      [
-        user_id,
-        bank_name,
-        account_holder_name,
-        account_number,
-        bank_qr_code_image || null,
-      ],
-    );
-
-    await conn.commit();
-    conn.release();
+    // Create bank details
+    await tx.merchant_bank_details.create({
+      data: {
+        user_id: user_id,
+        bank_name: bank_name,
+        account_holder_name: account_holder_name,
+        account_number: account_number,
+        bank_qr_code_image: bank_qr_code_image || null,
+      },
+    });
 
     return {
-      user_id,
-      business_id,
-      business_type_ids: validTypeIds,
-      message: "Merchant registered successfully.",
+      user_id: Number(user_id),
+      business_id: Number(business_id),
+      business_type_ids: validTypeIds.map(id => Number(id)),
     };
-  } catch (err) {
-    await conn.rollback();
-    conn.release();
-    throw err;
-  }
+  });
 }
 
 /* ------------------------ UPDATE: business details ------------------------ */
 
 async function updateMerchantDetailsModel(business_id, data) {
-  const conn = await db.getConnection();
-  await conn.beginTransaction();
-  try {
-    // Check if the business exists
-    const [exists] = await conn.query(
-      `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-      [business_id],
-    );
-    if (!exists.length) throw new Error("Business not found");
+  return await prisma.$transaction(async (tx) => {
+    const existingBusiness = await tx.merchant_business_details.findUnique({
+      where: { business_id: business_id },
+    });
+    if (!existingBusiness) throw new Error("Business not found");
 
-    const sets = [];
-    const params = [];
+    const updateData = {};
 
-    // Helper to conditionally add columns to the update query
-    const setIfProvided = (col, val, tx = (v) => v) => {
-      if (val !== undefined) {
-        sets.push(`${col} = ?`);
-        params.push(tx(val));
-      }
+    const setIfProvided = (col, val, transform = (v) => v) => {
+      if (val !== undefined) updateData[col] = transform(val);
     };
 
-    // Handle existing fields
+    // Helper for time strings
+    const toDateTime = (timeStr) => {
+      if (!timeStr) return null;
+      const [hours, minutes, seconds = '00'] = timeStr.split(':');
+      const date = new Date();
+      date.setHours(parseInt(hours, 10));
+      date.setMinutes(parseInt(minutes, 10));
+      date.setSeconds(parseInt(seconds, 10));
+      date.setMilliseconds(0);
+      return date;
+    };
+
     setIfProvided("business_name", data.business_name);
     setIfProvided("business_license_number", data.business_license_number);
     setIfProvided("license_image", data.license_image);
-    setIfProvided("latitude", data.latitude, (v) =>
-      v === "" || v === null ? null : Number(v),
-    );
-    setIfProvided("longitude", data.longitude, (v) =>
-      v === "" || v === null ? null : Number(v),
-    );
+    setIfProvided("latitude", data.latitude, (v) => (v === "" || v === null ? null : Number(v)));
+    setIfProvided("longitude", data.longitude, (v) => (v === "" || v === null ? null : Number(v)));
     setIfProvided("address", data.address);
     setIfProvided("business_logo", data.business_logo);
     setIfProvided("delivery_option", data.delivery_option);
-    setIfProvided(
-      "owner_type",
-      data.owner_type ? String(data.owner_type).toLowerCase() : undefined,
-    );
-    setIfProvided("opening_time", data.opening_time);
-    setIfProvided("closing_time", data.closing_time);
-    setIfProvided("kitchen_closing_time", data.kitchen_closing_time);
-    // Handle new special_celebration and special_celebration_discount_percentage fields
+    setIfProvided("owner_type", data.owner_type, (v) => v ? String(v).toLowerCase() : undefined);
+    setIfProvided("opening_time", data.opening_time, toDateTime);
+    setIfProvided("closing_time", data.closing_time, toDateTime);
+    setIfProvided("kitchen_closing_time", data.kitchen_closing_time, toDateTime);
     setIfProvided("special_celebration", data.special_celebration);
-    setIfProvided(
-      "special_celebration_discount_percentage",
-      data.special_celebration_discount_percentage,
-    );
-
-    // Update free-delivery threshold (0 = disabled)
+    setIfProvided("special_celebration_discount_percentage", data.special_celebration_discount_percentage);
     setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (v) => {
       if (v === "" || v == null) return 0;
       return Number(v);
     });
 
-    // Handle holidays field (array of days)
+    // Handle holidays
     if (data.holidays !== undefined) {
       let arr = [];
       if (Array.isArray(data.holidays)) {
-        arr = data.holidays; // If holidays is already an array
+        arr = data.holidays;
       } else if (typeof data.holidays === "string") {
-        // If holidays is a string, split by commas and trim spaces
-        arr = String(data.holidays)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+        arr = data.holidays.split(",").map((s) => s.trim()).filter(Boolean);
       }
-      sets.push(`holidays = ?`);
-      params.push(JSON.stringify(arr)); // Convert array to JSON string
+      updateData.holidays = JSON.stringify(arr);
     }
 
-    // Execute the update query
-    if (sets.length) {
-      const sql = `UPDATE merchant_business_details SET ${sets.join(
-        ", ",
-      )}, updated_at = CURRENT_TIMESTAMP WHERE business_id = ?`;
-      params.push(business_id);
-      await conn.query(sql, params);
+    if (Object.keys(updateData).length > 0) {
+      updateData.updated_at = new Date();
+      await tx.merchant_business_details.update({
+        where: { business_id: business_id },
+        data: updateData,
+      });
     }
 
     // Update business type associations
     let incomingIds = toIdArray(data.business_type_ids);
-    if (
-      !incomingIds.length &&
-      Array.isArray(data.business_types) &&
-      data.business_types.length
-    ) {
+    if (!incomingIds.length && Array.isArray(data.business_types) && data.business_types.length) {
       const mapped = await mapTypeNamesToIds(data.business_types);
       incomingIds = toIdArray(mapped);
     }
-    if (
-      data.business_type_ids !== undefined ||
-      data.business_types !== undefined
-    ) {
+
+    if (data.business_type_ids !== undefined || data.business_types !== undefined) {
       const validIds = await filterValidTypeIds(incomingIds);
-      await conn.query(
-        `DELETE FROM merchant_business_types WHERE business_id = ?`,
-        [business_id],
-      );
-      if (validIds.length) {
-        const values = validIds.map((tid) => [business_id, tid]);
-        await conn.query(
-          `INSERT INTO merchant_business_types (business_id, business_type_id) VALUES ?`,
-          [values],
-        );
+      if (validIds.length !== incomingIds.length && incomingIds.length > 0) {
+        const invalidIds = incomingIds.filter(id => !validIds.includes(Number(id)));
+        throw new Error(`Invalid business_type_ids: ${invalidIds.join(", ")}. These IDs do not exist.`);
+      }
+
+      await tx.merchant_business_types.deleteMany({ where: { business_id: business_id } });
+      for (const typeId of validIds) {
+        await tx.merchant_business_types.create({
+          data: { business_id: business_id, business_type_id: typeId },
+        });
       }
     }
 
-    await conn.commit();
-    conn.release();
-    return { business_id };
-  } catch (err) {
-    await conn.rollback();
-    conn.release();
-    throw err;
-  }
+    return { business_id: Number(business_id) };
+  });
 }
 
 /* ------------------------ FINDERS ------------------------ */
 
-/**
- * Find by email (case-insensitive). We return most-recent accounts first.
- */
 async function findCandidatesByEmail(email) {
   const em = String(email || "").trim();
   if (!em) return [];
-  const [rows] = await db.query(
-    `
-    SELECT user_id, user_name, email, phone, role, password_hash, is_active
-      FROM users
-     WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
-     ORDER BY user_id DESC
-    `,
-    [em],
-  );
-  return rows || [];
-}
 
-/**
- * Owners by kind: returns basic business + user + business types +
- * ratings summary (uses new ratings tables with business_id).
- */
-async function getOwnersByKind(kind) {
-  const k = String(kind || "").toLowerCase();
-  if (!["food", "mart"].includes(k))
-    throw new Error("kind must be 'food' or 'mart'");
-
-  // Base business + user info (restricted to businesses that have a type of this 'k')
-  const [bizRows] = await db.query(
-    `SELECT
-        mbd.business_id, mbd.user_id, mbd.owner_type, mbd.business_name,
-        mbd.business_license_number, mbd.license_image,
-        mbd.latitude, mbd.longitude, mbd.address,
-        mbd.business_logo, mbd.delivery_option,
-        mbd.min_amount_for_fd, mbd.special_celebration, mbd.special_celebration_discount_percentage,  -- Added special_celebration and special_celebration_discount_percentage
-        mbd.opening_time, mbd.closing_time, mbd.holidays,
-        mbd.complementary AS complement, mbd.complementary_details AS complement_details,
-        mbd.created_at, mbd.updated_at,
-        u.user_name, u.email, u.phone, u.profile_image
-     FROM merchant_business_details mbd
-     JOIN users u ON u.user_id = mbd.user_id
-     WHERE EXISTS (
-       SELECT 1
-         FROM merchant_business_types mbt
-         JOIN business_types bt ON bt.id = mbt.business_type_id
-        WHERE mbt.business_id = mbd.business_id
-          AND LOWER(bt.types) = ?
-     )
-     ORDER BY mbd.business_name ASC`,
-    [k],
-  );
-
-  if (!bizRows.length) return [];
-
-  const ids = bizRows.map((b) => b.business_id);
-  const ph = ids.map(() => "?").join(",");
-
-  // Map business types (tags) filtered by 'k'
-  const [typeRows] = await db.query(
-    `SELECT mbt.business_id, bt.id AS business_type_id, bt.name
-       FROM merchant_business_types mbt
-       JOIN business_types bt ON bt.id = mbt.business_type_id
-      WHERE mbt.business_id IN (${ph})
-        AND LOWER(bt.types) = ?
-      ORDER BY bt.name ASC`,
-    [...ids, k],
-  );
-
-  const typesByBiz = new Map();
-  for (const r of typeRows) {
-    if (!typesByBiz.has(r.business_id)) typesByBiz.set(r.business_id, []);
-    typesByBiz
-      .get(r.business_id)
-      .push({ business_type_id: r.business_type_id, name: r.name });
-  }
-
-  // Ratings from new tables (food_ratings / mart_ratings) by business_id
-  const ratingsTable = k === "food" ? "food_ratings" : "mart_ratings";
-  const [ratingRows] = await db.query(
-    `SELECT
-        business_id,
-        COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
-        SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments
-     FROM ${ratingsTable}
-     WHERE business_id IN (${ph})
-     GROUP BY business_id`,
-    ids,
-  );
-
-  const ratingsByBiz = new Map();
-  for (const row of ratingRows) {
-    ratingsByBiz.set(row.business_id, {
-      avg_rating: Number(row.avg_rating || 0),
-      total_comments: Number(row.total_comments || 0),
-    });
-  }
-
-  // Combine
-  return bizRows.map((b) => ({
-    business_id: b.business_id,
-    owner_type: b.owner_type,
-    business_name: b.business_name,
-    business_license_number: b.business_license_number,
-    license_image: b.license_image,
-    latitude: b.latitude,
-    longitude: b.longitude,
-    address: b.address,
-    business_logo: b.business_logo,
-    delivery_option: b.delivery_option,
-    min_amount_for_fd: b.min_amount_for_fd, // 🔹 expose in API
-    special_celebration: b.special_celebration, // Added field
-    special_celebration_discount_percentage:
-      b.special_celebration_discount_percentage, // Added field
-    opening_time: b.opening_time,
-    closing_time: b.closing_time,
-    holidays: b.holidays,
-    complement: b.complement,
-    complement_details: b.complement_details,
-    created_at: b.created_at,
-    updated_at: b.updated_at,
-    user: {
-      user_id: b.user_id,
-      user_name: b.user_name,
-      email: b.email,
-      phone: b.phone,
-      profile_image: b.profile_image || null,
+  const allUsers = await prisma.users.findMany({
+    orderBy: { user_id: "desc" },
+    select: {
+      user_id: true,
+      user_name: true,
+      email: true,
+      phone: true,
+      role: true,
+      password_hash: true,
+      is_active: true,
     },
-    business_types: typesByBiz.get(b.business_id) || [],
-    avg_rating: ratingsByBiz.get(b.business_id)?.avg_rating || 0,
-    total_comments: ratingsByBiz.get(b.business_id)?.total_comments || 0,
-  }));
-}
+  });
 
-async function getFoodOwners() {
-  return getOwnersByKind("food");
-}
-async function getMartOwners() {
-  return getOwnersByKind("mart");
+  return allUsers.filter((user) => user.email?.toLowerCase() === em.toLowerCase());
 }
 
 module.exports = {
   registerMerchantModel,
   updateMerchantDetailsModel,
   findCandidatesByEmail,
-  getOwnersByKind,
-  getFoodOwners,
-  getMartOwners,
 };

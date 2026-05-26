@@ -1,14 +1,13 @@
-// controllers/merchantRegistrationController.js
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 const {
   registerMerchantModel,
   updateMerchantDetailsModel,
-  findCandidatesByEmail, // email-based finder
+  findCandidatesByEmail,
 } = require("../models/merchantRegistrationModel");
 
 /* ---------------- file path helpers ---------------- */
@@ -42,27 +41,13 @@ async function registerMerchant(req, res) {
     const f = req.files || {};
     const b = req.body || {};
 
-    // --- helpers ---
     const normalizeBhutanPhone = (raw) => {
       if (raw == null) return null;
-
-      let s = String(raw)
-        .trim()
-        .replace(/[^\d+]/g, "");
-
-      // Convert 00 to +
+      let s = String(raw).trim().replace(/[^\d+]/g, "");
       if (s.startsWith("00")) s = `+${s.slice(2)}`;
-
-      // Already +975 => ok
       if (s.startsWith("+975")) return s;
-
-      // Starts with 975 (no +) => add +
       if (s.startsWith("975")) return `+${s}`;
-
-      // Starts with + (other) => keep as-is (change this if you want to force +975)
       if (s.startsWith("+")) return s;
-
-      // Otherwise prepend +975
       return `+975${s}`;
     };
 
@@ -79,7 +64,6 @@ async function registerMerchant(req, res) {
       return (s || def).toLowerCase();
     };
 
-    // --- file paths ---
     const license_image = f.license_image?.[0]
       ? toRelPath(f.license_image[0])
       : fromBodyToStoredPath(b.license_image);
@@ -92,28 +76,21 @@ async function registerMerchant(req, res) {
       ? toRelPath(f.bank_qr_code_image[0])
       : fromBodyToStoredPath(b.bank_qr_code_image);
 
-    // ✅ Normalize phone (+975)
     const normalizedPhone = normalizeBhutanPhone(b.phone);
 
     const payload = {
-      // users
       user_name: b.user_name,
       email: b.email,
       phone: normalizedPhone,
       cid: b.cid,
       password: b.password,
       role: toLowerOrDefault(b.role, "merchant"),
-
-      // business
       business_name: b.business_name,
       business_type_ids: b.business_type_ids ?? null,
       business_types: Array.isArray(b.business_types)
         ? b.business_types
         : typeof b.business_types === "string" && b.business_types.trim()
-          ? b.business_types
-              .split(",")
-              .map((x) => x.trim())
-              .filter(Boolean)
+          ? b.business_types.split(",").map((x) => x.trim()).filter(Boolean)
           : undefined,
       business_license_number: b.business_license_number,
       license_image,
@@ -123,23 +100,13 @@ async function registerMerchant(req, res) {
       business_logo,
       delivery_option: b.delivery_option,
       owner_type: toLowerOrDefault(b.owner_type, "individual"),
-
-      // 🔹 free-delivery threshold (per merchant)
-      min_amount_for_fd:
-        b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== ""
-          ? Number(b.min_amount_for_fd)
-          : 0,
-
-      // Bank
+      min_amount_for_fd: b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== "" ? Number(b.min_amount_for_fd) : 0,
       bank_name: b.bank_name,
       account_holder_name: b.account_holder_name,
       account_number: b.account_number,
       bank_qr_code_image,
-
-      // special celebration and discount
       special_celebration: b.special_celebration || null,
-      special_celebration_discount_percentage:
-        b.special_celebration_discount_percentage || null,
+      special_celebration_discount_percentage: b.special_celebration_discount_percentage || null,
     };
 
     const result = await registerMerchantModel(payload);
@@ -149,13 +116,11 @@ async function registerMerchant(req, res) {
       user_id: result.user_id,
       business_id: result.business_id,
       business_type_ids: result.business_type_ids,
-      phone: normalizedPhone, // ✅ helpful to confirm normalization
+      phone: normalizedPhone,
     });
   } catch (err) {
-    console.error(err.message || err);
-    const isClientErr = /exists|required|invalid|username/i.test(
-      err.message || "",
-    );
+    console.error("Register error:", err.message);
+    const isClientErr = /exists|required|invalid|username|business_type_ids/i.test(err.message || "");
     return res
       .status(isClientErr ? 400 : 500)
       .json({ error: err.message || "Merchant registration failed" });
@@ -170,16 +135,6 @@ async function updateMerchant(req, res) {
     if (!Number.isInteger(business_id) || business_id <= 0) {
       return res.status(400).json({ error: "Invalid businessId" });
     }
-
-    const [rows] = await db.query(
-      `SELECT license_image, business_logo FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-      [business_id],
-    );
-    if (!rows.length)
-      return res.status(404).json({ error: "Business not found" });
-
-    const oldLicense = rows[0].license_image || null;
-    const oldLogo = rows[0].business_logo || null;
 
     const f = req.files || {};
     const b = req.body || {};
@@ -201,13 +156,12 @@ async function updateMerchant(req, res) {
       "owner_type",
       "opening_time",
       "closing_time",
-      "kitchen_closing_time", // ✅ ADDED HERE
+      "kitchen_closing_time",
       "special_celebration",
       "special_celebration_discount_percentage",
     ].forEach((k) => {
       if (b[k] !== undefined) {
-        updatePayload[k] =
-          k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
+        updatePayload[k] = k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
       }
     });
 
@@ -229,85 +183,37 @@ async function updateMerchant(req, res) {
 
     // Handle holidays field
     if (b.holidays !== undefined) {
-      const validDays = [
-        "Sunday",
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-      ];
-
+      const validDays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
       let holidays = [];
-
       if (Array.isArray(b.holidays)) {
         holidays = b.holidays.filter((day) => validDays.includes(day));
       } else if (typeof b.holidays === "string") {
-        holidays = b.holidays
-          .split(",")
-          .map((s) => s.trim())
-          .filter((day) => validDays.includes(day));
+        holidays = b.holidays.split(",").map((s) => s.trim()).filter((day) => validDays.includes(day));
       }
-
       updatePayload.holidays = JSON.stringify(holidays);
     }
 
-    if (b.business_type_ids !== undefined)
-      updatePayload.business_type_ids = b.business_type_ids;
+    if (b.business_type_ids !== undefined) updatePayload.business_type_ids = b.business_type_ids;
 
     if (b.business_types !== undefined) {
       updatePayload.business_types = Array.isArray(b.business_types)
         ? b.business_types
-        : String(b.business_types)
-            .split(",")
-            .map((x) => x.trim())
-            .filter(Boolean);
+        : String(b.business_types).split(",").map((x) => x.trim()).filter(Boolean);
     }
 
-    // 🔥 Call model update
+    if (b.min_amount_for_fd !== undefined) {
+      updatePayload.min_amount_for_fd = Number(b.min_amount_for_fd);
+    }
+
     const out = await updateMerchantDetailsModel(business_id, updatePayload);
-
-    const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
-
-    const isUploadsPath = (p) =>
-      typeof p === "string" && /^\/?uploads\//i.test(p.replace(/^\/+/, ""));
-
-    const toAbsPath = (webPath) =>
-      path.join(process.cwd(), webPath.replace(/^\//, ""));
-
-    const deleteIfReplaced = (oldPath, newPath) => {
-      if (!oldPath || !newPath) return;
-
-      const oldNorm = String(oldPath).trim();
-      const newNorm = String(newPath).trim();
-
-      if (!oldNorm || !isUploadsPath(oldNorm) || oldNorm === newNorm) return;
-
-      const abs = toAbsPath(oldNorm);
-      if (!abs.startsWith(UPLOAD_ROOT)) return;
-
-      fs.stat(abs, (err, st) => {
-        if (err || !st?.isFile()) return;
-        fs.unlink(abs, () => {});
-      });
-    };
-
-    if (updatePayload.license_image)
-      deleteIfReplaced(oldLicense, updatePayload.license_image);
-
-    if (updatePayload.business_logo)
-      deleteIfReplaced(oldLogo, updatePayload.business_logo);
 
     return res.status(200).json({
       message: "Business details updated",
       business_id: out.business_id,
     });
   } catch (err) {
-    console.error("updateMerchant error:", err);
-
+    console.error("updateMerchant error:", err.message);
     const isClientErr = /not found|invalid/i.test(err.message || "");
-
     return res
       .status(isClientErr ? 404 : 500)
       .json({ error: err.message || "Update failed" });
@@ -324,27 +230,24 @@ async function loginByEmail(req, res) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    const deviceId =
-      device_id && String(device_id).trim() ? String(device_id).trim() : null;
+    const deviceId = device_id && String(device_id).trim() ? String(device_id).trim() : null;
 
     if (!deviceId) {
       return res.status(400).json({ error: "device_id is required" });
     }
 
-    // 1) Fetch by email (case-insensitive) -> get newest matched user
     const candidates = await findCandidatesByEmail(email);
     if (!candidates.length) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // 2) Compare password against candidates
     let picked = null;
     for (const u of candidates) {
       if (!u?.password_hash) continue;
       const ok = await bcrypt.compare(password, u.password_hash);
       if (ok) {
         picked = u;
-        break; // newest first
+        break;
       }
     }
 
@@ -352,138 +255,77 @@ async function loginByEmail(req, res) {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    // 3) Fetch the user row using user_id (fresh data)
-    const [[user]] = await db.query(
-      `SELECT user_id, user_name, phone, email, role, is_active, is_verified
-         FROM users
-        WHERE user_id = ?
-        LIMIT 1`,
-      [picked.user_id],
-    );
+    const user = await prisma.users.findUnique({
+      where: { user_id: picked.user_id },
+      select: { user_id: true, user_name: true, phone: true, email: true, role: true, is_active: true, is_verified: true },
+    });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.is_active === false) return res.status(403).json({ error: "Account is deactivated. Please contact support." });
 
-    if (Number(user.is_active) === 0) {
-      return res
-        .status(403)
-        .json({ error: "Account is deactivated. Please contact support." });
-    }
-
-    // 4) If already logged in (is_verified=1), block when device differs.
-    // If is_verified=0, allow login and REPLACE device id.
-    if (Number(user.is_verified) === 1) {
-      const [drows] = await db.query(
-        `SELECT device_id
-           FROM all_device_ids
-          WHERE user_id = ?
-          LIMIT 1`,
-        [user.user_id],
-      );
-
-      const dbDeviceId = drows?.[0]?.device_id
-        ? String(drows[0].device_id)
-        : null;
-
+    if (user.is_verified === true) {
+      const deviceRecord = await prisma.all_device_ids.findUnique({
+        where: { user_id: user.user_id },
+        select: { device_id: true },
+      });
+      const dbDeviceId = deviceRecord?.device_id ? String(deviceRecord.device_id) : null;
       if (!dbDeviceId || dbDeviceId !== deviceId) {
         return res.status(409).json({
-          error:
-            "This account appears to be logged in on another device. Please log out from the other device and then try logging in again.",
+          error: "This account appears to be logged in on another device. Please log out from the other device first.",
         });
       }
-      // same device -> allow re-login
     }
 
-    // 5) Save/REPLACE device_id (always overwrite on login)
-    try {
-      await db.query(
-        `INSERT INTO all_device_ids (user_id, device_id, last_seen)
-         VALUES (?, ?, NOW())
-         ON DUPLICATE KEY UPDATE
-           device_id = VALUES(device_id),
-           last_seen = NOW();`,
-        [user.user_id, deviceId],
-      );
-    } catch (e) {
-      console.error("device_id save failed:", e?.message || e);
-    }
-
-    // 6) Mark verified on successful login
-    try {
-      await db.query(
-        `UPDATE users
-            SET is_verified = 1,
-                last_login = NOW()
-          WHERE user_id = ?`,
-        [user.user_id],
-      );
-    } catch (e) {
-      console.error("is_verified update failed:", e?.message || e);
-    }
-
-    // 7) Pull latest business attached to this user
-    const [[biz]] = await db.query(
-      `SELECT business_id, business_name, owner_type, business_logo, address
-         FROM merchant_business_details
-        WHERE user_id = ?
-        ORDER BY created_at DESC, business_id DESC
-        LIMIT 1`,
-      [user.user_id],
-    );
-
-    // 8) Issue tokens
-    const payload = {
-      user_id: user.user_id,
-      role: user.role,
-      user_name: user.user_name,
-    };
-
-    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "60m",
+    await prisma.all_device_ids.upsert({
+      where: { user_id: user.user_id },
+      update: { device_id: deviceId, last_seen: new Date() },
+      create: { user_id: user.user_id, device_id: deviceId, last_seen: new Date() },
     });
 
-    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "1440m",
+    await prisma.users.update({
+      where: { user_id: user.user_id },
+      data: { is_verified: true, last_login: new Date() },
     });
+
+    const business = await prisma.merchant_business_details.findFirst({
+      where: { user_id: user.user_id },
+      orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
+      select: { business_id: true, business_name: true, owner_type: true, business_logo: true, address: true },
+    });
+
+    const payload = { user_id: Number(user.user_id), role: user.role, user_name: user.user_name };
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: "60m" });
+    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: "1440m" });
 
     return res.status(200).json({
       message: "Login successful",
-      token: {
-        access_token,
-        access_token_time: 60,
-        refresh_token,
-        refresh_token_time: 10,
-      },
+      token: { access_token, access_token_time: 60, refresh_token, refresh_token_time: 10 },
       user: {
-        user_id: user.user_id,
+        user_id: Number(user.user_id),
         user_name: user.user_name,
         phone: user.phone,
         role: user.role,
         email: user.email,
         is_verified: 1,
         device_id: deviceId,
-        owner_type: biz?.owner_type ?? null,
-        business_id: biz?.business_id ?? null,
-        business_name: biz?.business_name ?? null,
-        business_logo: biz?.business_logo ?? null,
-        address: biz?.address ?? null,
+        owner_type: business?.owner_type ?? null,
+        business_id: business?.business_id ? Number(business.business_id) : null,
+        business_name: business?.business_name ?? null,
+        business_logo: business?.business_logo ?? null,
+        address: business?.address ?? null,
       },
     });
   } catch (err) {
-    console.error("loginByEmail error:", err);
+    console.error("loginByEmail error:", err.message);
     return res.status(500).json({ error: "Login failed due to server error" });
   }
 }
 
-/* ---------------- owners list (split by vertical) ---------------- */
+/* ---------------- owners list ---------------- */
 
 function parseOwnersQuery(req) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
-  const limit = Math.min(
-    Math.max(parseInt(req.query.limit || "50", 10), 1),
-    200,
-  );
+  const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10), 1), 200);
   const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
   return { q, limit, offset };
 }
@@ -491,256 +333,234 @@ function parseOwnersQuery(req) {
 async function listFoodOwners(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-
-    const params = [];
-    let whereSearch = "";
+    const whereCondition = {};
     if (q) {
-      whereSearch = ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
-      params.push(`%${q}%`, `%${q}%`);
+      whereCondition.OR = [
+        { business_name: { contains: q, mode: "insensitive" } },
+        { users: { user_name: { contains: q, mode: "insensitive" } } },
+      ];
     }
-    params.push(limit, offset);
 
-    // Ratings now come from food_ratings with business_id
-    const [rows] = await db.query(
-      `SELECT
-         mbd.business_id,
-         MAX(mbd.business_name) AS business_name,
-         MAX(mbd.owner_type) AS owner_type,
-         MAX(mbd.business_logo) AS business_logo,
-         MAX(mbd.address) AS address,
-         MAX(mbd.latitude) AS latitude,
-         MAX(mbd.longitude) AS longitude,
-         MAX(mbd.opening_time) AS opening_time,
-         MAX(mbd.closing_time) AS closing_time,
-         MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
-         MAX(u.user_id) AS user_id,
-         MAX(u.user_name) AS user_name,
-         MAX(u.email) AS email,
-         MAX(u.phone) AS phone,
-         MAX(u.profile_image) AS profile_image,
-         MAX(mbd.complementary) AS complement,
-         MAX(mbd.complementary_details) AS complement_details,
-         COALESCE(ROUND(AVG(fr.rating), 2), 0) AS avg_rating,
-         SUM(CASE WHEN fr.comment IS NOT NULL AND fr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-         GROUP_CONCAT(DISTINCT bt.name) AS tags,
-         MAX(mbd.special_celebration_discount_percentage) AS special_celebration_discount_percentage,
-         MAX(mbd.special_celebration) AS special_celebration -- Added special_celebration
-      FROM merchant_business_details mbd
-      JOIN users u ON u.user_id = mbd.user_id
-      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
-      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
-      LEFT JOIN food_ratings fr ON fr.business_id = mbd.business_id
-      WHERE TRIM(LOWER(mbd.owner_type)) = 'food'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?`,
-      params,
-    );
-
-    return res.status(200).json({
-      success: true,
-      kind: "food",
-      count: rows.length,
-      data: rows,
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: { owner_type: "food", ...whereCondition },
+      include: {
+        users: { select: { user_id: true, user_name: true, email: true, phone: true, profile_image: true } },
+        merchant_business_types: { include: { business_types: { select: { id: true, name: true } } } },
+      },
+      orderBy: { created_at: "desc" },
+      skip: offset,
+      take: limit,
     });
+
+    const businessIds = businesses.map(b => b.business_id);
+    const ratings = await prisma.food_ratings.groupBy({
+      by: ["business_id"],
+      where: { business_id: { in: businessIds } },
+      _avg: { rating: true },
+      _count: { rating: true },
+    });
+
+    const ratingsMap = new Map();
+    for (const rating of ratings) {
+      ratingsMap.set(rating.business_id, {
+        avg_rating: rating._avg.rating || 0,
+        total_comments: rating._count.rating || 0,
+      });
+    }
+
+    const data = businesses.map(b => ({
+      business_id: Number(b.business_id),
+      owner_type: b.owner_type,
+      business_name: b.business_name,
+      business_license_number: b.business_license_number,
+      license_image: b.license_image,
+      latitude: b.latitude,
+      longitude: b.longitude,
+      address: b.address,
+      business_logo: b.business_logo,
+      delivery_option: b.delivery_option,
+      min_amount_for_fd: b.min_amount_for_fd,
+      special_celebration: b.special_celebration,
+      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      opening_time: b.opening_time,
+      closing_time: b.closing_time,
+      holidays: b.holidays,
+      complement: b.complementary,
+      complement_details: b.complementary_details,
+      created_at: b.created_at,
+      updated_at: b.updated_at,
+      user: {
+        user_id: Number(b.users.user_id),
+        user_name: b.users.user_name,
+        email: b.users.email,
+        phone: b.users.phone,
+        profile_image: b.users.profile_image || null,
+      },
+      business_types: b.merchant_business_types.map(mbt => ({
+        business_type_id: Number(mbt.business_types.id),
+        name: mbt.business_types.name,
+      })),
+      avg_rating: ratingsMap.get(b.business_id)?.avg_rating || 0,
+      total_comments: ratingsMap.get(b.business_id)?.total_comments || 0,
+    }));
+
+    return res.status(200).json({ success: true, kind: "food", count: data.length, data });
   } catch (err) {
     console.error("listFoodOwners error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Failed to fetch food owners." });
+    return res.status(500).json({ success: false, message: "Failed to fetch food owners." });
   }
 }
 
 async function listMartOwners(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-
-    const params = [];
-    let whereSearch = "";
+    const whereCondition = {};
     if (q) {
-      whereSearch = ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
-      params.push(`%${q}%`, `%${q}%`);
+      whereCondition.OR = [
+        { business_name: { contains: q, mode: "insensitive" } },
+        { users: { user_name: { contains: q, mode: "insensitive" } } },
+      ];
     }
-    params.push(limit, offset);
 
-    // Ratings now come from mart_ratings with business_id
-    const [rows] = await db.query(
-      `SELECT
-         mbd.business_id,
-         MAX(mbd.business_name) AS business_name,
-         MAX(mbd.owner_type) AS owner_type,
-         MAX(mbd.business_logo) AS business_logo,
-         MAX(mbd.address) AS address,
-         MAX(mbd.latitude) AS latitude,
-         MAX(mbd.longitude) AS longitude,
-         MAX(mbd.opening_time) AS opening_time,
-         MAX(mbd.closing_time) AS closing_time,
-         MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
-         MAX(u.user_id) AS user_id,
-         MAX(u.user_name) AS user_name,
-         MAX(u.email) AS email,
-         MAX(u.phone) AS phone,
-         MAX(u.profile_image) AS profile_image,
-         MAX(mbd.complementary) AS complement,
-         MAX(mbd.complementary_details) AS complement_details,
-         COALESCE(ROUND(AVG(mr.rating), 2), 0) AS avg_rating,
-         SUM(CASE WHEN mr.comment IS NOT NULL AND mr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-         GROUP_CONCAT(DISTINCT bt.name) AS tags,
-         MAX(mbd.special_celebration_discount_percentage) AS special_celebration_discount_percentage,
-         MAX(mbd.special_celebration) AS special_celebration -- Added special_celebration
-      FROM merchant_business_details mbd
-      JOIN users u ON u.user_id = mbd.user_id
-      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
-      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
-      LEFT JOIN mart_ratings mr ON mr.business_id = mbd.business_id
-      WHERE TRIM(LOWER(mbd.owner_type)) = 'mart'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?`,
-      params,
-    );
-
-    return res.status(200).json({
-      success: true,
-      kind: "mart",
-      count: rows.length,
-      data: rows,
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: { owner_type: "mart", ...whereCondition },
+      include: {
+        users: { select: { user_id: true, user_name: true, email: true, phone: true, profile_image: true } },
+        merchant_business_types: { include: { business_types: { select: { id: true, name: true } } } },
+      },
+      orderBy: { created_at: "desc" },
+      skip: offset,
+      take: limit,
     });
+
+    const businessIds = businesses.map(b => b.business_id);
+    const ratings = await prisma.mart_ratings.groupBy({
+      by: ["business_id"],
+      where: { business_id: { in: businessIds } },
+      _avg: { rating: true },
+      _count: { rating: true },
+    });
+
+    const ratingsMap = new Map();
+    for (const rating of ratings) {
+      ratingsMap.set(rating.business_id, {
+        avg_rating: rating._avg.rating || 0,
+        total_comments: rating._count.rating || 0,
+      });
+    }
+
+    const data = businesses.map(b => ({
+      business_id: Number(b.business_id),
+      owner_type: b.owner_type,
+      business_name: b.business_name,
+      business_license_number: b.business_license_number,
+      license_image: b.license_image,
+      latitude: b.latitude,
+      longitude: b.longitude,
+      address: b.address,
+      business_logo: b.business_logo,
+      delivery_option: b.delivery_option,
+      min_amount_for_fd: b.min_amount_for_fd,
+      special_celebration: b.special_celebration,
+      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      opening_time: b.opening_time,
+      closing_time: b.closing_time,
+      holidays: b.holidays,
+      complement: b.complementary,
+      complement_details: b.complementary_details,
+      created_at: b.created_at,
+      updated_at: b.updated_at,
+      user: {
+        user_id: Number(b.users.user_id),
+        user_name: b.users.user_name,
+        email: b.users.email,
+        phone: b.users.phone,
+        profile_image: b.users.profile_image || null,
+      },
+      business_types: b.merchant_business_types.map(mbt => ({
+        business_type_id: Number(mbt.business_types.id),
+        name: mbt.business_types.name,
+      })),
+      avg_rating: ratingsMap.get(b.business_id)?.avg_rating || 0,
+      total_comments: ratingsMap.get(b.business_id)?.total_comments || 0,
+    }));
+
+    return res.status(200).json({ success: true, kind: "mart", count: data.length, data });
   } catch (err) {
     console.error("listMartOwners error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Failed to fetch mart owners." });
+    return res.status(500).json({ success: false, message: "Failed to fetch mart owners." });
   }
 }
 
 async function listFoodOwnersWithCelebration(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-
-    const params = [];
-    let whereSearch =
-      "AND mbd.special_celebration_discount_percentage IS NOT NULL";
+    const whereCondition = { special_celebration_discount_percentage: { not: null } };
     if (q) {
-      whereSearch += ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
-      params.push(`%${q}%`, `%${q}%`);
+      whereCondition.OR = [
+        { business_name: { contains: q, mode: "insensitive" } },
+        { users: { user_name: { contains: q, mode: "insensitive" } } },
+      ];
     }
-    params.push(limit, offset);
 
-    const [rows] = await db.query(
-      `SELECT
-        mbd.business_id,
-        MAX(mbd.business_name) AS business_name,
-        MAX(mbd.owner_type) AS owner_type,
-        MAX(mbd.business_logo) AS business_logo,
-        MAX(mbd.address) AS address,
-        MAX(mbd.latitude) AS latitude,
-        MAX(mbd.longitude) AS longitude,
-        MAX(mbd.opening_time) AS opening_time,
-        MAX(mbd.closing_time) AS closing_time,
-        MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
-        MAX(u.user_id) AS user_id,
-        MAX(u.user_name) AS user_name,
-        MAX(u.email) AS email,
-        MAX(u.phone) AS phone,
-        MAX(u.profile_image) AS profile_image,
-        MAX(mbd.complementary) AS complement,
-        MAX(mbd.complementary_details) AS complement_details,
-        COALESCE(ROUND(AVG(fr.rating), 2), 0) AS avg_rating,
-        SUM(CASE WHEN fr.comment IS NOT NULL AND fr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-        GROUP_CONCAT(DISTINCT bt.name) AS tags,
-        MAX(mbd.special_celebration_discount_percentage) AS special_celebration_discount_percentage,
-        MAX(mbd.special_celebration) AS special_celebration
-      FROM merchant_business_details mbd
-      JOIN users u ON u.user_id = mbd.user_id
-      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
-      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
-      LEFT JOIN food_ratings fr ON fr.business_id = mbd.business_id
-      WHERE TRIM(LOWER(mbd.owner_type)) = 'food'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?`,
-      params,
-    );
-
-    return res.status(200).json({
-      success: true,
-      kind: "food",
-      count: rows.length,
-      data: rows,
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: { owner_type: "food", ...whereCondition },
+      include: { users: { select: { user_id: true, user_name: true, phone: true } } },
+      orderBy: { created_at: "desc" },
+      skip: offset,
+      take: limit,
     });
+
+    const data = businesses.map(b => ({
+      business_id: Number(b.business_id),
+      business_name: b.business_name,
+      business_logo: b.business_logo,
+      special_celebration: b.special_celebration,
+      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      address: b.address,
+      phone: b.users?.phone || null,
+    }));
+
+    return res.status(200).json({ success: true, kind: "food", count: data.length, data });
   } catch (err) {
     console.error("listFoodOwnersWithCelebration error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Failed to fetch food owners." });
+    return res.status(500).json({ success: false, message: "Failed to fetch food owners." });
   }
 }
 
 async function listMartOwnersWithCelebration(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-
-    const params = [];
-    let whereSearch =
-      "AND mbd.special_celebration_discount_percentage IS NOT NULL";
+    const whereCondition = { special_celebration_discount_percentage: { not: null } };
     if (q) {
-      whereSearch += ` AND (LOWER(mbd.business_name) LIKE ? OR LOWER(u.user_name) LIKE ?)`;
-      params.push(`%${q}%`, `%${q}%`);
+      whereCondition.OR = [
+        { business_name: { contains: q, mode: "insensitive" } },
+        { users: { user_name: { contains: q, mode: "insensitive" } } },
+      ];
     }
-    params.push(limit, offset);
 
-    const [rows] = await db.query(
-      `SELECT
-        mbd.business_id,
-        MAX(mbd.business_name) AS business_name,
-        MAX(mbd.owner_type) AS owner_type,
-        MAX(mbd.business_logo) AS business_logo,
-        MAX(mbd.address) AS address,
-        MAX(mbd.latitude) AS latitude,
-        MAX(mbd.longitude) AS longitude,
-        MAX(mbd.opening_time) AS opening_time,
-        MAX(mbd.closing_time) AS closing_time,
-        MAX(mbd.min_amount_for_fd) AS min_amount_for_fd,
-        MAX(u.user_id) AS user_id,
-        MAX(u.user_name) AS user_name,
-        MAX(u.email) AS email,
-        MAX(u.phone) AS phone,
-        MAX(u.profile_image) AS profile_image,
-        MAX(mbd.complementary) AS complement,
-        MAX(mbd.complementary_details) AS complement_details,
-        COALESCE(ROUND(AVG(mr.rating), 2), 0) AS avg_rating,
-        SUM(CASE WHEN mr.comment IS NOT NULL AND mr.comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-        GROUP_CONCAT(DISTINCT bt.name) AS tags,
-        MAX(mbd.special_celebration_discount_percentage) AS special_celebration_discount_percentage,
-        MAX(mbd.special_celebration) AS special_celebration
-      FROM merchant_business_details mbd
-      JOIN users u ON u.user_id = mbd.user_id
-      LEFT JOIN merchant_business_types mbt ON mbt.business_id = mbd.business_id
-      LEFT JOIN business_types bt ON bt.id = mbt.business_type_id
-      LEFT JOIN mart_ratings mr ON mr.business_id = mbd.business_id
-      WHERE TRIM(LOWER(mbd.owner_type)) = 'mart'
-      ${whereSearch}
-      GROUP BY mbd.business_id
-      ORDER BY MAX(mbd.created_at) DESC, mbd.business_id DESC
-      LIMIT ? OFFSET ?`,
-      params,
-    );
-
-    return res.status(200).json({
-      success: true,
-      kind: "mart",
-      count: rows.length,
-      data: rows,
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: { owner_type: "mart", ...whereCondition },
+      include: { users: { select: { user_id: true, user_name: true, phone: true } } },
+      orderBy: { created_at: "desc" },
+      skip: offset,
+      take: limit,
     });
+
+    const data = businesses.map(b => ({
+      business_id: Number(b.business_id),
+      business_name: b.business_name,
+      business_logo: b.business_logo,
+      special_celebration: b.special_celebration,
+      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      address: b.address,
+      phone: b.users?.phone || null,
+    }));
+
+    return res.status(200).json({ success: true, kind: "mart", count: data.length, data });
   } catch (err) {
     console.error("listMartOwnersWithCelebration error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Failed to fetch mart owners." });
+    return res.status(500).json({ success: false, message: "Failed to fetch mart owners." });
   }
 }
 
