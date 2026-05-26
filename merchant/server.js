@@ -15,6 +15,10 @@ const salesRoutes = require("./routes/salesRoutes");
 const merchantEarningsRoutes = require("./routes/merchantEarningsRoutes");
 
 dotenv.config();
+
+BigInt.prototype.toJSON = function() {
+  return Number(this);
+};
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.set("trust proxy", 1);

@@ -1,5 +1,4 @@
-// models/merchantRatingsModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 const moment = require("moment-timezone");
 const { getRedis } = require("../config/redis");
 
@@ -11,25 +10,14 @@ function toIntOrThrow(v, msg) {
   if (!Number.isInteger(n) || n <= 0) throw new Error(msg);
   return n;
 }
+
 function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-async function assertBusinessExists(business_id) {
-  const [r] = await db.query(
-    `SELECT business_id FROM merchant_business_details WHERE business_id = ? LIMIT 1`,
-    [business_id]
-  );
-  if (!r.length) throw new Error("business not found");
-}
-
-/** hours since created_at in Asia/Thimphu */
-function hoursAgoBT(createdAt) {
-  const now = moment.tz("Asia/Thimphu");
-  const c = moment.tz(createdAt, "Asia/Thimphu");
-  if (!c.isValid()) return null;
-  const diff = now.diff(c, "hours");
-  return diff >= 0 ? diff : 0;
+function formatDate(date) {
+  if (!date) return null;
+  return moment(date).tz("Asia/Thimphu").toISOString();
 }
 
 function hoursAgoFromMillis(ms) {
@@ -41,9 +29,24 @@ function hoursAgoFromMillis(ms) {
   return diff >= 0 ? diff : 0;
 }
 
-/* We also reuse the table names in replies logic */
-const FOOD_TBL = "food_ratings";
-const MART_TBL = "mart_ratings";
+async function assertBusinessExists(business_id) {
+  const business = await prisma.merchant_business_details.findUnique({
+    where: { business_id: business_id },
+  });
+  if (!business) throw new Error("Business not found");
+  return business;
+}
+
+async function getOwnerTypeForBusiness(business_id) {
+  const business = await prisma.merchant_business_details.findUnique({
+    where: { business_id: business_id },
+    select: { owner_type: true },
+  });
+  if (!business) return "unknown";
+  const raw = String(business.owner_type || "").trim().toLowerCase();
+  if (raw === "food" || raw === "mart" || raw === "both") return raw;
+  return "unknown";
+}
 
 /* ---------- Redis keys (replies) ---------- */
 const REPLY_SEQ_KEY = "rating:reply:seq";
@@ -54,38 +57,31 @@ function replyIndexKey(rating_type, rating_id) {
   return `rating:replies:idx:${rating_type}:${rating_id}`;
 }
 
-/* ---------- ✅ Redis keys (reports) ---------- */
+/* ---------- Redis keys (reports) ---------- */
 const REPORT_SEQ_KEY = "rating:report:seq";
 function reportKey(id) {
   return `rating:report:${id}`;
 }
 function reportIndexKey(type, target) {
-  // target = comment | reply
   return `rating:reports:idx:${type}:${target}`;
 }
 function reportDedupKey(type, target, targetId, reporterUserId) {
-  // ✅ dedupe includes: food/mart + comment/reply + id + reporter
   return `rating:reports:dedup:${type}:${target}:${targetId}:${reporterUserId}`;
 }
 function reportByTargetKey(type, target, targetId) {
-  // to quickly mark/cleanup reports for a specific comment/reply later
   return `rating:reports:by_target:${type}:${target}:${targetId}`;
 }
 
-/**
- * Fetch replies for a list of rating rows from Redis + hydrate with user_name/profile_image.
- */
+/* ---------- fetch replies for ratings ---------- */
 async function fetchRepliesForRatings(ownerType, ratingRows) {
   const result = {};
   const allUserIds = new Set();
 
   for (const row of ratingRows) {
     const ratingId = row.id;
-
-    const t =
-      (row.owner_type && row.owner_type.toLowerCase()) ||
-      (ownerType && ownerType.toLowerCase()) ||
-      "food";
+    const t = (row.owner_type && row.owner_type.toLowerCase()) ||
+              (ownerType && ownerType.toLowerCase()) ||
+              "food";
 
     const idxKey = replyIndexKey(t, ratingId);
     const replyIds = await redis.zrevrange(idxKey, 0, -1);
@@ -110,9 +106,7 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
         id: Number(data.id || repId),
         rating_type: data.rating_type || t,
         rating_id: Number(data.rating_id || ratingId),
-        business_id: data.business_id
-          ? Number(data.business_id)
-          : Number(row.business_id),
+        business_id: data.business_id ? Number(data.business_id) : Number(row.business_id),
         user_id,
         text: data.text || "",
         ts,
@@ -126,18 +120,12 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
   }
 
   if (allUserIds.size > 0) {
-    const ids = Array.from(allUserIds);
-    const [userRows] = await db.query(
-      `
-      SELECT user_id, user_name, profile_image
-      FROM users
-      WHERE user_id IN (?)
-    `,
-      [ids]
-    );
-
+    const users = await prisma.users.findMany({
+      where: { user_id: { in: Array.from(allUserIds) } },
+      select: { user_id: true, user_name: true, profile_image: true },
+    });
     const userMap = {};
-    for (const u of userRows) {
+    for (const u of users) {
       userMap[u.user_id] = {
         user_id: u.user_id,
         user_name: u.user_name || null,
@@ -156,219 +144,181 @@ async function fetchRepliesForRatings(ownerType, ratingRows) {
   return result;
 }
 
-async function getOwnerTypeForBusiness(business_id) {
-  const [r] = await db.query(
-    `SELECT owner_type
-       FROM merchant_business_details
-      WHERE business_id = ? LIMIT 1`,
-    [business_id]
-  );
-  if (!r.length) return "unknown";
-  const raw = String(r[0].owner_type || "")
-    .trim()
-    .toLowerCase();
-  if (!raw) return "unknown";
-  if (raw === "food" || raw === "mart" || raw === "both") return raw;
-  return "unknown";
-}
-
 /* ---------- main ratings fetch ---------- */
-async function fetchBusinessRatingsAuto(
-  business_id,
-  { page = 1, limit = 20 } = {}
-) {
-  const bid = toIntOrThrow(
-    business_id,
-    "business_id must be a positive integer"
-  );
-  await assertBusinessExists(bid);
+async function fetchBusinessRatingsAuto(business_id, { page = 1, limit = 20 } = {}) {
+  try {
+    const bid = toIntOrThrow(business_id, "business_id must be a positive integer");
+    await assertBusinessExists(bid);
 
-  const p = clamp(Number(page) || 1, 1, 1e9);
-  const l = clamp(Number(limit) || 20, 1, 100);
-  const offset = (p - 1) * l;
+    const p = clamp(Number(page) || 1, 1, 1e9);
+    const l = clamp(Number(limit) || 20, 1, 100);
+    const offset = (p - 1) * l;
 
-  const ownerType = await getOwnerTypeForBusiness(bid);
+    const ownerType = await getOwnerTypeForBusiness(bid);
 
-  let aggSql, aggParams, listSql, listParams;
+    let ratings = [];
+    let agg = { avg_rating: 0, total_ratings: 0, total_comments: 0, stars_5: 0, stars_4: 0, stars_3: 0, stars_2: 0, stars_1: 0 };
 
-  if (ownerType === "mart") {
-    aggSql = `
-      SELECT
-        COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
-        COUNT(*) AS total_ratings,
-        SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-        SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS stars_5,
-        SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS stars_4,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS stars_3,
-        SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS stars_2,
-        SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS stars_1
-      FROM ${MART_TBL}
-      WHERE business_id = ?
-    `;
-    aggParams = [bid];
+    if (ownerType === "food") {
+      // Get ratings from food_ratings
+      ratings = await prisma.food_ratings.findMany({
+        where: { business_id: bid },
+        orderBy: { created_at: "desc" },
+        skip: offset,
+        take: l,
+        include: { users: { select: { user_name: true, profile_image: true } } }
+      });
 
-    listSql = `
-      SELECT
-        r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
-        u.user_name, u.profile_image
-      FROM ${MART_TBL} r
-      JOIN users u ON u.user_id = r.user_id
-      WHERE r.business_id = ?
-      ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?
-    `;
-    listParams = [bid, l, offset];
-  } else if (ownerType === "food") {
-    aggSql = `
-      SELECT
-        COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
-        COUNT(*) AS total_ratings,
-        SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-        SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS stars_5,
-        SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS stars_4,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS stars_3,
-        SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS stars_2,
-        SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS stars_1
-      FROM ${FOOD_TBL}
-      WHERE business_id = ?
-    `;
-    aggParams = [bid];
+      const allRatings = await prisma.food_ratings.findMany({
+        where: { business_id: bid },
+        select: { rating: true, comment: true }
+      });
+      agg = calculateAggregates(allRatings);
 
-    listSql = `
-      SELECT
-        r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
-        u.user_name, u.profile_image
-      FROM ${FOOD_TBL} r
-      JOIN users u ON u.user_id = r.user_id
-      WHERE r.business_id = ?
-      ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?
-    `;
-    listParams = [bid, l, offset];
-  } else {
-    aggSql = `
-      SELECT
-        COALESCE(ROUND(AVG(rating), 2), 0) AS avg_rating,
-        COUNT(*) AS total_ratings,
-        SUM(CASE WHEN comment IS NOT NULL AND comment <> '' THEN 1 ELSE 0 END) AS total_comments,
-        SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS stars_5,
-        SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS stars_4,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS stars_3,
-        SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS stars_2,
-        SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS stars_1
-      FROM (
-        SELECT rating, comment FROM ${FOOD_TBL} WHERE business_id = ?
-        UNION ALL
-        SELECT rating, comment FROM ${MART_TBL} WHERE business_id = ?
-      ) t
-    `;
-    aggParams = [bid, bid];
+    } else if (ownerType === "mart") {
+      ratings = await prisma.mart_ratings.findMany({
+        where: { business_id: bid },
+        orderBy: { created_at: "desc" },
+        skip: offset,
+        take: l,
+        include: { users: { select: { user_name: true, profile_image: true } } }
+      });
 
-    listSql = `
-      SELECT *
-      FROM (
-        SELECT
-          'food' AS owner_type,
-          r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
-          u.user_name, u.profile_image
-        FROM ${FOOD_TBL} r
-        JOIN users u ON u.user_id = r.user_id
-        WHERE r.business_id = ?
-        UNION ALL
-        SELECT
-          'mart' AS owner_type,
-          r.id, r.business_id, r.user_id, r.rating, r.comment, r.likes_count, r.created_at,
-          u.user_name, u.profile_image
-        FROM ${MART_TBL} r
-        JOIN users u ON u.user_id = r.user_id
-        WHERE r.business_id = ?
-      ) x
-      ORDER BY x.created_at DESC
-      LIMIT ? OFFSET ?
-    `;
-    listParams = [bid, bid, l, offset];
-  }
+      const allRatings = await prisma.mart_ratings.findMany({
+        where: { business_id: bid },
+        select: { rating: true, comment: true }
+      });
+      agg = calculateAggregates(allRatings);
 
-  const [[agg]] = await db.query(aggSql, aggParams);
-  const [rows] = await db.query(listSql, listParams);
+    } else {
+      // Both types - fetch from both tables
+      const foodRatings = await prisma.food_ratings.findMany({
+        where: { business_id: bid },
+        include: { users: { select: { user_name: true, profile_image: true } } }
+      });
+      const martRatings = await prisma.mart_ratings.findMany({
+        where: { business_id: bid },
+        include: { users: { select: { user_name: true, profile_image: true } } }
+      });
 
-  const repliesByRating = await fetchRepliesForRatings(ownerType, rows);
+      const allCombined = [...foodRatings, ...martRatings];
+      ratings = allCombined
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        .slice(offset, offset + l);
 
-  const items = rows.map((r) => {
-    const replies = repliesByRating[r.id] || [];
+      const allRatingsData = allCombined.map(r => ({ rating: r.rating, comment: r.comment }));
+      agg = calculateAggregates(allRatingsData);
+    }
 
-    return {
+    // Format ratings with user info
+    const formattedRatings = ratings.map(r => ({
       id: r.id,
       business_id: r.business_id,
-      owner_type: r.owner_type || ownerType,
+      owner_type: ownerType,
       user: {
         user_id: r.user_id,
-        user_name: r.user_name || null,
-        profile_image: r.profile_image || null,
+        user_name: r.users?.user_name || null,
+        profile_image: r.users?.profile_image || null,
       },
       rating: r.rating,
       comment: r.comment,
       likes_count: Number(r.likes_count ?? 0),
-      created_at: r.created_at,
-      hours_ago: hoursAgoBT(r.created_at),
+      created_at: formatDate(r.created_at),
+      hours_ago: hoursAgoFromMillis(new Date(r.created_at).getTime()),
+    }));
 
-      reply_count: replies.length,
-      replies,
-    };
-  });
+    const repliesByRating = await fetchRepliesForRatings(ownerType, formattedRatings);
 
-  return {
-    success: true,
-    data: items,
-    meta: {
-      business_id: bid,
-      owner_type: ownerType,
-      page: p,
-      limit: l,
-      totals: {
-        avg_rating: Number(agg?.avg_rating ?? 0),
-        total_ratings: Number(agg?.total_ratings ?? 0),
-        total_comments: Number(agg?.total_comments ?? 0),
-        by_stars: {
-          5: Number(agg?.stars_5 ?? 0),
-          4: Number(agg?.stars_4 ?? 0),
-          3: Number(agg?.stars_3 ?? 0),
-          2: Number(agg?.stars_2 ?? 0),
-          1: Number(agg?.stars_1 ?? 0),
+    const items = formattedRatings.map(r => ({
+      ...r,
+      reply_count: (repliesByRating[r.id] || []).length,
+      replies: repliesByRating[r.id] || [],
+    }));
+
+    return {
+      success: true,
+      data: items,
+      meta: {
+        business_id: bid,
+        owner_type: ownerType,
+        page: p,
+        limit: l,
+        totals: {
+          avg_rating: agg.avg_rating,
+          total_ratings: agg.total_ratings,
+          total_comments: agg.total_comments,
+          by_stars: {
+            5: agg.stars_5,
+            4: agg.stars_4,
+            3: agg.stars_3,
+            2: agg.stars_2,
+            1: agg.stars_1,
+          },
         },
       },
-    },
+    };
+  } catch (error) {
+    console.error("fetchBusinessRatingsAuto error:", error);
+    throw error;
+  }
+}
+
+function calculateAggregates(ratings) {
+  let totalRating = 0;
+  let totalRatings = ratings.length;
+  let totalComments = 0;
+  let stars_5 = 0, stars_4 = 0, stars_3 = 0, stars_2 = 0, stars_1 = 0;
+
+  for (const r of ratings) {
+    totalRating += r.rating;
+    if (r.comment && r.comment.trim()) totalComments++;
+    
+    switch (r.rating) {
+      case 5: stars_5++; break;
+      case 4: stars_4++; break;
+      case 3: stars_3++; break;
+      case 2: stars_2++; break;
+      case 1: stars_1++; break;
+    }
+  }
+
+  const avgRating = totalRatings > 0 ? totalRating / totalRatings : 0;
+
+  return {
+    avg_rating: parseFloat(avgRating.toFixed(2)),
+    total_ratings: totalRatings,
+    total_comments: totalComments,
+    stars_5,
+    stars_4,
+    stars_3,
+    stars_2,
+    stars_1,
   };
 }
 
 /* ---------- like / unlike ---------- */
-
 async function likeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
-  const [res] = await db.query(
-    `UPDATE ${FOOD_TBL}
-       SET likes_count = likes_count + 1
-     WHERE id = ?`,
-    [rid]
-  );
+  const rating = await prisma.food_ratings.findUnique({
+    where: { id: rid },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
-  if (res.affectedRows === 0) throw new Error("food rating not found");
+  if (!rating) throw new Error("Food rating not found");
 
-  const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count
-       FROM ${FOOD_TBL}
-      WHERE id = ?
-      LIMIT 1`,
-    [rid]
-  );
+  const updated = await prisma.food_ratings.update({
+    where: { id: rid },
+    data: { likes_count: { increment: 1 } },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
   return {
     success: true,
     data: {
-      id: row.id,
-      business_id: row.business_id,
-      likes_count: Number(row.likes_count ?? 0),
+      id: updated.id,
+      business_id: updated.business_id,
+      likes_count: Number(updated.likes_count ?? 0),
     },
   };
 }
@@ -376,29 +326,25 @@ async function likeFoodRating(rating_id) {
 async function unlikeFoodRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
-  const [res] = await db.query(
-    `UPDATE ${FOOD_TBL}
-       SET likes_count = GREATEST(likes_count - 1, 0)
-     WHERE id = ?`,
-    [rid]
-  );
+  const rating = await prisma.food_ratings.findUnique({
+    where: { id: rid },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
-  if (res.affectedRows === 0) throw new Error("food rating not found");
+  if (!rating) throw new Error("Food rating not found");
 
-  const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count
-       FROM ${FOOD_TBL}
-      WHERE id = ?
-      LIMIT 1`,
-    [rid]
-  );
+  const updated = await prisma.food_ratings.update({
+    where: { id: rid },
+    data: { likes_count: { decrement: 1 } },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
   return {
     success: true,
     data: {
-      id: row.id,
-      business_id: row.business_id,
-      likes_count: Number(row.likes_count ?? 0),
+      id: updated.id,
+      business_id: updated.business_id,
+      likes_count: Math.max(Number(updated.likes_count ?? 0), 0),
     },
   };
 }
@@ -406,29 +352,25 @@ async function unlikeFoodRating(rating_id) {
 async function likeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
-  const [res] = await db.query(
-    `UPDATE ${MART_TBL}
-       SET likes_count = likes_count + 1
-     WHERE id = ?`,
-    [rid]
-  );
+  const rating = await prisma.mart_ratings.findUnique({
+    where: { id: rid },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
-  if (res.affectedRows === 0) throw new Error("mart rating not found");
+  if (!rating) throw new Error("Mart rating not found");
 
-  const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count
-       FROM ${MART_TBL}
-      WHERE id = ?
-      LIMIT 1`,
-    [rid]
-  );
+  const updated = await prisma.mart_ratings.update({
+    where: { id: rid },
+    data: { likes_count: { increment: 1 } },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
   return {
     success: true,
     data: {
-      id: row.id,
-      business_id: row.business_id,
-      likes_count: Number(row.likes_count ?? 0),
+      id: updated.id,
+      business_id: updated.business_id,
+      likes_count: Number(updated.likes_count ?? 0),
     },
   };
 }
@@ -436,49 +378,52 @@ async function likeMartRating(rating_id) {
 async function unlikeMartRating(rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
 
-  const [res] = await db.query(
-    `UPDATE ${MART_TBL}
-       SET likes_count = GREATEST(likes_count - 1, 0)
-     WHERE id = ?`,
-    [rid]
-  );
+  const rating = await prisma.mart_ratings.findUnique({
+    where: { id: rid },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
-  if (res.affectedRows === 0) throw new Error("mart rating not found");
+  if (!rating) throw new Error("Mart rating not found");
 
-  const [[row]] = await db.query(
-    `SELECT id, business_id, likes_count
-       FROM ${MART_TBL}
-      WHERE id = ?
-      LIMIT 1`,
-    [rid]
-  );
+  const updated = await prisma.mart_ratings.update({
+    where: { id: rid },
+    data: { likes_count: { decrement: 1 } },
+    select: { id: true, business_id: true, likes_count: true }
+  });
 
   return {
     success: true,
     data: {
-      id: row.id,
-      business_id: row.business_id,
-      likes_count: Number(row.likes_count ?? 0),
+      id: updated.id,
+      business_id: updated.business_id,
+      likes_count: Math.max(Number(updated.likes_count ?? 0), 0),
     },
   };
 }
 
-/* ---------- replies ---------- */
-
+/* ---------- replies (Redis-backed) ---------- */
 async function assertRatingExistsAndGetBusiness(rating_type, rating_id) {
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
-  const tbl = rating_type === "mart" ? MART_TBL : FOOD_TBL;
+  let rating = null;
 
-  const [rows] = await db.query(
-    `SELECT id, business_id FROM ${tbl} WHERE id = ? LIMIT 1`,
-    [rid]
-  );
-  if (!rows.length) {
+  if (rating_type === "food") {
+    rating = await prisma.food_ratings.findUnique({
+      where: { id: rid },
+      select: { id: true, business_id: true }
+    });
+  } else {
+    rating = await prisma.mart_ratings.findUnique({
+      where: { id: rid },
+      select: { id: true, business_id: true }
+    });
+  }
+
+  if (!rating) {
     const err = new Error(`${rating_type} rating not found`);
     err.code = "RATING_NOT_FOUND";
     throw err;
   }
-  return { rating_id: rid, business_id: rows[0].business_id };
+  return { rating_id: rid, business_id: rating.business_id };
 }
 
 async function createRatingReply({ rating_type, rating_id, user_id, text }) {
@@ -488,8 +433,7 @@ async function createRatingReply({ rating_type, rating_id, user_id, text }) {
   }
 
   const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
-  const { rating_id: rid, business_id } =
-    await assertRatingExistsAndGetBusiness(type, rating_id);
+  const { rating_id: rid, business_id } = await assertRatingExistsAndGetBusiness(type, rating_id);
 
   const now = Date.now();
   const newId = await redis.incr(REPLY_SEQ_KEY);
@@ -526,12 +470,7 @@ async function createRatingReply({ rating_type, rating_id, user_id, text }) {
   };
 }
 
-async function listRatingReplies({
-  rating_type,
-  rating_id,
-  page = 1,
-  limit = 20,
-}) {
+async function listRatingReplies({ rating_type, rating_id, page = 1, limit = 20 }) {
   const type = String(rating_type || "").toLowerCase();
   if (type !== "food" && type !== "mart") {
     throw new Error("rating_type must be 'food' or 'mart'");
@@ -571,8 +510,7 @@ async function listRatingReplies({
 
   for (let i = 0; i < ids.length; i++) {
     const [err, row] = rowsArr[i];
-    if (err) continue;
-    if (!row || !row.id) continue;
+    if (err || !row || !row.id) continue;
 
     const createdAt = Number(row.created_at || Date.now());
     const item = {
@@ -593,18 +531,13 @@ async function listRatingReplies({
   }
 
   if (userIds.size > 0) {
-    const idsArr = Array.from(userIds);
-    const [userRows] = await db.query(
-      `
-      SELECT user_id, user_name, profile_image
-      FROM users
-      WHERE user_id IN (?)
-    `,
-      [idsArr]
-    );
+    const users = await prisma.users.findMany({
+      where: { user_id: { in: Array.from(userIds) } },
+      select: { user_id: true, user_name: true, profile_image: true },
+    });
 
     const userMap = {};
-    for (const u of userRows) {
+    for (const u of users) {
       userMap[u.user_id] = {
         user_id: u.user_id,
         user_name: u.user_name || null,
@@ -665,34 +598,41 @@ async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
 
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
   const uid = toIntOrThrow(user_id, "user_id must be a positive integer");
-  const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
 
-  const [rows] = await db.query(
-    `SELECT id, business_id, user_id FROM ${tbl} WHERE id = ? LIMIT 1`,
-    [rid]
-  );
-  if (!rows.length) {
+  let rating = null;
+  if (type === "food") {
+    rating = await prisma.food_ratings.findUnique({
+      where: { id: rid },
+      select: { id: true, business_id: true, user_id: true }
+    });
+  } else {
+    rating = await prisma.mart_ratings.findUnique({
+      where: { id: rid },
+      select: { id: true, business_id: true, user_id: true }
+    });
+  }
+
+  if (!rating) {
     const err = new Error(`${type} rating not found`);
     err.code = "NOT_FOUND";
     throw err;
   }
 
-  const ownerId = Number(rows[0].user_id || 0);
+  const ownerId = Number(rating.user_id || 0);
   if (ownerId !== uid) {
     const err = new Error("You are not allowed to delete this rating");
     err.code = "FORBIDDEN";
     throw err;
   }
 
-  const [delRes] = await db.query(`DELETE FROM ${tbl} WHERE id = ? LIMIT 1`, [
-    rid,
-  ]);
-  if (delRes.affectedRows === 0) {
-    const err = new Error(`${type} rating not found`);
-    err.code = "NOT_FOUND";
-    throw err;
+  // Delete from database
+  if (type === "food") {
+    await prisma.food_ratings.delete({ where: { id: rid } });
+  } else {
+    await prisma.mart_ratings.delete({ where: { id: rid } });
   }
 
+  // Delete replies from Redis
   const idxKey = replyIndexKey(type, rid);
   const replyIds = await redis.zrange(idxKey, 0, -1);
 
@@ -701,7 +641,6 @@ async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
     for (const replId of replyIds) multi.del(replyKey(replId));
   }
   multi.del(idxKey);
-
   await multi.exec();
 
   return {
@@ -715,20 +654,27 @@ async function deleteRatingWithReplies({ rating_type, rating_id, user_id }) {
   };
 }
 
-/* ---------- ✅ NEW: REPORTS (comment + reply) ---------- */
-
+/* ---------- reports ---------- */
 async function loadRatingRow(type, rating_id) {
-  const tbl = type === "mart" ? MART_TBL : FOOD_TBL;
-  const [rows] = await db.query(
-    `SELECT id, business_id, user_id, comment, created_at FROM ${tbl} WHERE id = ? LIMIT 1`,
-    [rating_id]
-  );
-  if (!rows.length) {
+  let rating = null;
+  if (type === "food") {
+    rating = await prisma.food_ratings.findUnique({
+      where: { id: rating_id },
+      select: { id: true, business_id: true, user_id: true, comment: true, created_at: true }
+    });
+  } else {
+    rating = await prisma.mart_ratings.findUnique({
+      where: { id: rating_id },
+      select: { id: true, business_id: true, user_id: true, comment: true, created_at: true }
+    });
+  }
+
+  if (!rating) {
     const err = new Error(`${type} rating not found`);
     err.code = "NOT_FOUND";
     throw err;
   }
-  return rows[0];
+  return rating;
 }
 
 async function loadReplyRow(reply_id) {
@@ -750,22 +696,14 @@ async function loadReplyRow(reply_id) {
   };
 }
 
-async function reportRating({
-  rating_type,
-  rating_id,
-  reporter_user_id,
-  reason,
-}) {
+async function reportRating({ rating_type, rating_id, reporter_user_id, reason }) {
   const type = String(rating_type || "").toLowerCase();
   if (type !== "food" && type !== "mart") {
     throw new Error("rating_type must be 'food' or 'mart'");
   }
 
   const rid = toIntOrThrow(rating_id, "rating_id must be a positive integer");
-  const uid = toIntOrThrow(
-    reporter_user_id,
-    "reporter_user_id must be a positive integer"
-  );
+  const uid = toIntOrThrow(reporter_user_id, "reporter_user_id must be a positive integer");
 
   const dedup = reportDedupKey(type, "comment", rid, uid);
   const already = await redis.get(dedup);
@@ -775,7 +713,7 @@ async function reportRating({
     throw err;
   }
 
-  const row = await loadRatingRow(type, rid);
+  const rating = await loadRatingRow(type, rid);
 
   const now = Date.now();
   const newId = await redis.incr(REPORT_SEQ_KEY);
@@ -786,20 +724,20 @@ async function reportRating({
 
   await redis
     .multi()
-    .set(dedup, "1", "EX", 60 * 60 * 24 * 30) // 30d
+    .set(dedup, "1", "EX", 60 * 60 * 24 * 30)
     .hmset(key, {
       id: String(newId),
-      type, // food/mart
+      type,
       target: "comment",
       rating_id: String(rid),
       reply_id: "",
-      business_id: String(row.business_id || ""),
-      reported_user_id: String(row.user_id || ""),
+      business_id: String(rating.business_id || ""),
+      reported_user_id: String(rating.user_id || ""),
       reporter_user_id: String(uid),
       reason: String(reason),
-      reported_text: String(row.comment || ""), // ✅ store actual comment
+      reported_text: String(rating.comment || ""),
       created_at: String(now),
-      status: "open", // open | ignored | deleted
+      status: "open",
     })
     .zadd(idxKey, now, String(newId))
     .sadd(byTarget, String(newId))
@@ -814,27 +752,19 @@ async function reportRating({
       target: "comment",
       rating_id: rid,
       reason,
-      reported_text: row.comment || "",
+      reported_text: rating.comment || "",
     },
   };
 }
 
-async function reportReply({
-  rating_type,
-  reply_id,
-  reporter_user_id,
-  reason,
-}) {
+async function reportReply({ rating_type, reply_id, reporter_user_id, reason }) {
   const type = String(rating_type || "").toLowerCase();
   if (type !== "food" && type !== "mart") {
     throw new Error("rating_type must be 'food' or 'mart'");
   }
 
   const repId = toIntOrThrow(reply_id, "reply_id must be a positive integer");
-  const uid = toIntOrThrow(
-    reporter_user_id,
-    "reporter_user_id must be a positive integer"
-  );
+  const uid = toIntOrThrow(reporter_user_id, "reporter_user_id must be a positive integer");
 
   const dedup = reportDedupKey(type, "reply", repId, uid);
   const already = await redis.get(dedup);
@@ -855,10 +785,10 @@ async function reportReply({
 
   await redis
     .multi()
-    .set(dedup, "1", "EX", 60 * 60 * 24 * 30) // 30d
+    .set(dedup, "1", "EX", 60 * 60 * 24 * 30)
     .hmset(key, {
       id: String(newId),
-      type, // food/mart
+      type,
       target: "reply",
       rating_id: String(replyRow.rating_id || ""),
       reply_id: String(repId),
@@ -866,9 +796,9 @@ async function reportReply({
       reported_user_id: String(replyRow.user_id || ""),
       reporter_user_id: String(uid),
       reason: String(reason),
-      reported_text: String(replyRow.text || ""), // ✅ store actual reply
+      reported_text: String(replyRow.text || ""),
       created_at: String(now),
-      status: "open", // open | ignored | deleted
+      status: "open",
     })
     .zadd(idxKey, now, String(newId))
     .sadd(byTarget, String(newId))
@@ -894,13 +824,10 @@ module.exports = {
   unlikeFoodRating,
   likeMartRating,
   unlikeMartRating,
-
   createRatingReply,
   listRatingReplies,
   deleteRatingReply,
   deleteRatingWithReplies,
-
-  // ✅ NEW reports
   reportRating,
   reportReply,
 };

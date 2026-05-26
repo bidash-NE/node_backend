@@ -1,126 +1,90 @@
-// models/merchantEarningsModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
-async function tableExists(tableName) {
-  const [rows] = await db.query(
-    `SELECT 1
-       FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
-      LIMIT 1`,
-    [tableName],
-  );
-  return rows.length > 0;
-}
-
-function defaultRange() {
-  // default: last 30 days including today
-  const now = new Date();
-  const to = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-  );
-  const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000);
-
-  const toStr = to.toISOString().slice(0, 10);
-  const fromStr = from.toISOString().slice(0, 10);
-  return { from: fromStr, to: toStr };
-}
-
-function normalizeRange(from, to) {
-  const def = defaultRange();
-  const f = from || def.from;
-  const t = to || def.to;
-
-  // if swapped, fix
-  if (f > t) return { from: t, to: f };
-  return { from: f, to: t };
-}
-
-function buildGroupExpr(groupBy) {
-  switch (groupBy) {
-    case "week":
-      // ISO-ish week key like 2026-04 (year-week)
-      // mode 3 = Monday first, range 1-53, ISO week
-      return {
-        select: `CONCAT(YEAR(DATE_SUB(\`date\`, INTERVAL (DAYOFWEEK(\`date\`) + 5) % 7 DAY)), '-', LPAD(WEEK(\`date\`, 3), 2, '0'))`,
-        label: "period",
-        orderBy: "period",
-      };
-    case "month":
-      return {
-        select: `DATE_FORMAT(\`date\`, '%Y-%m')`,
-        label: "period",
-        orderBy: "period",
-      };
-    case "year":
-      return {
-        select: `CAST(YEAR(\`date\`) AS CHAR)`,
-        label: "period",
-        orderBy: "period",
-      };
-    case "day":
-    default:
-      return {
-        select: `DATE(\`date\`)`,
-        label: "period",
-        orderBy: "period",
-      };
-  }
-}
-
+/**
+ * Get all earnings for a specific business
+ * Returns all earnings rows with summary statistics
+ */
 async function getEarningsByBusiness(business_id) {
-  // If table doesn't exist, return empty
-  const [t] = await db.query(
-    `SELECT 1
-       FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'merchant_earnings'
-      LIMIT 1`,
-  );
-  if (!t.length) {
+  try {
+    const bid = Number(business_id);
+    if (!Number.isInteger(bid) || bid <= 0) {
+      throw new Error("Business ID must be a positive integer");
+    }
+
+    // Check if business exists
+    const business = await prisma.merchant_business_details.findUnique({
+      where: { business_id: bid },
+      select: { business_id: true },
+    });
+
+    if (!business) {
+      return {
+        success: false,
+        message: "Business not found.",
+        summary: { total_amount: 0, orders_count: 0, rows_count: 0 },
+        rows: [],
+      };
+    }
+
+    // Fetch all earnings for this business
+    const earnings = await prisma.merchant_earnings.findMany({
+      where: { business_id: bid },
+      orderBy: [
+        { date: "desc" },
+        { order_id: "desc" },
+      ],
+      select: {
+        business_id: true,
+        date: true,
+        total_amount: true,
+        order_id: true,
+      },
+    });
+
+    if (!earnings.length) {
+      return {
+        success: true,
+        summary: { total_amount: 0, orders_count: 0, rows_count: 0 },
+        rows: [],
+      };
+    }
+
+    // Calculate summary
+    let totalAmount = 0;
+    const uniqueOrders = new Set();
+
+    for (const earning of earnings) {
+      totalAmount += Number(earning.total_amount || 0);
+      uniqueOrders.add(String(earning.order_id));
+    }
+
+    // Format rows
+    const formattedRows = earnings.map((earning) => ({
+      business_id: Number(earning.business_id),
+      date: earning.date instanceof Date ? earning.date.toISOString().split('T')[0] : String(earning.date),
+      total_amount: Number(Number(earning.total_amount || 0).toFixed(2)),
+      order_id: String(earning.order_id),
+    }));
+
     return {
+      success: true,
+      summary: {
+        total_amount: Number(totalAmount.toFixed(2)),
+        orders_count: uniqueOrders.size,
+        rows_count: earnings.length,
+      },
+      rows: formattedRows,
+    };
+  } catch (error) {
+    console.error("getEarningsByBusiness error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch earnings",
       summary: { total_amount: 0, orders_count: 0, rows_count: 0 },
       rows: [],
     };
   }
-
-  // ✅ Return all earnings rows for the business (latest first)
-  const [rows] = await db.query(
-    `
-    SELECT
-      business_id,
-      DATE(\`date\`) AS \`date\`,
-      total_amount,
-      order_id
-    FROM merchant_earnings
-    WHERE business_id = ?
-    ORDER BY \`date\` DESC, order_id DESC
-    `,
-    [business_id],
-  );
-
-  const total_amount = rows.reduce(
-    (s, r) => s + Number(r.total_amount || 0),
-    0,
-  );
-  const orders_count = new Set(rows.map((r) => String(r.order_id))).size;
-
-  return {
-    summary: {
-      total_amount: Number(total_amount.toFixed(2)),
-      orders_count,
-      rows_count: rows.length,
-    },
-    rows: rows.map((r) => ({
-      business_id: Number(r.business_id),
-      date: String(r.date),
-      total_amount: Number(Number(r.total_amount || 0).toFixed(2)),
-      order_id: String(r.order_id),
-    })),
-  };
 }
-
-module.exports = { getEarningsByBusiness };
 
 module.exports = {
   getEarningsByBusiness,
