@@ -572,13 +572,102 @@ async function processJob(jobId) {
       return;
     }
 
-    // PENDING - wait for acceptance
+    // PENDING - wait for acceptance, but expire after 30 minutes
     if (status === "PENDING") {
-      console.log(`[SCHED] Job ${jobId} is PENDING, waiting for acceptance`);
-      await redis.del(buildLockKey(jobId));
+      const createdAtMs = data.created_at
+        ? new Date(data.created_at).getTime()
+        : NaN;
+
+      const nowMs = Date.now();
+
+      const pendingAgeMs = Number.isFinite(createdAtMs)
+        ? nowMs - createdAtMs
+        : nowMs - (Number(data.scheduled_epoch_ms) || nowMs);
+
+      const PENDING_ACCEPT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+      if (pendingAgeMs >= PENDING_ACCEPT_TIMEOUT_MS) {
+        console.log(
+          `[SCHED] Job ${jobId} was PENDING for more than 30 minutes. Expiring scheduled order.`,
+        );
+
+        // Notify user before deleting the scheduled order
+        try {
+          const {
+            sendUserNotification,
+          } = require("../services/expoNotificationService");
+
+          await sendUserNotification({
+            user_id: data.user_id,
+            title: "Scheduled Order Expired",
+            body: "Your scheduled order was not accepted by the business within 30 minutes and has been cancelled.",
+          });
+        } catch (notifyErr) {
+          console.error(
+            "[SCHED] Failed to notify user about expired scheduled order:",
+            notifyErr.message,
+          );
+        }
+
+        // Optional: insert notification into notifications table also
+        try {
+          const notificationData = JSON.stringify({
+            job_id: jobId,
+            status: "EXPIRED",
+            reason: "Not accepted within 30 minutes",
+            scheduled_at: data.scheduled_at_local || data.scheduled_at || null,
+          });
+
+          await db.query(
+            `
+          INSERT INTO notifications
+            (user_id, type, title, message, data, status, created_at)
+          VALUES
+            (?, ?, ?, ?, ?, 'unread', NOW())
+        `,
+            [
+              data.user_id,
+              "order_status",
+              "Scheduled Order Expired",
+              "Your scheduled order was not accepted by the business within 30 minutes and has been cancelled.",
+              notificationData,
+            ],
+          );
+        } catch (dbNotifyErr) {
+          console.error(
+            "[SCHED] Failed to insert expiry notification:",
+            dbNotifyErr.message,
+          );
+        }
+
+        // Delete from Redis queue and scheduled job storage
+        await redis
+          .multi()
+          .zrem(ZSET_KEY, jobId)
+          .del(jobKey)
+          .del(buildLockKey(jobId))
+          .del(buildAttemptsKey(jobId))
+          .del(buildErrorKey(jobId))
+          .exec();
+
+        return;
+      }
+
+      console.log(
+        `[SCHED] Job ${jobId} is PENDING, waiting for acceptance. Will recheck later.`,
+      );
+
+      // Move pending job forward so old pending jobs do not block accepted jobs
+      const nextCheckAt = Date.now() + 60 * 1000; // recheck after 1 minute
+
+      await redis
+        .multi()
+        .zadd(ZSET_KEY, nextCheckAt, jobId)
+        .del(buildLockKey(jobId))
+        .exec();
+
       return;
     }
-
     // Unknown status
     if (status !== "ACCEPTED") {
       console.log(`[SCHED] Job ${jobId} has unknown status: ${status}`);
