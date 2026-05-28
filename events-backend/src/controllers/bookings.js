@@ -451,7 +451,6 @@ async function verifyTicket(req, res, next) {
       include: {
         events: { select: { title: true, venue_name: true, start_at: true } },
         event_ticket_tiers: { select: { name: true } },
-        users: { select: { first_name: true, last_name: true, user_name: true } },
       },
     });
 
@@ -473,7 +472,7 @@ async function verifyTicket(req, res, next) {
       event_start_at: booking.events.start_at,
       tier_name: booking.event_ticket_tiers.name,
       quantity: booking.quantity,
-      attendee_name: attendees[0] || null,
+      attendee_names: attendees,
       checked_in_at: booking.checked_in_at,
     };
 
