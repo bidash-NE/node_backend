@@ -85,6 +85,8 @@ async function createBooking(req, res, next) {
     const { event_id, tier_id, quantity, attendee_names, payment_method, seat_ids, screening_id, t_pin } = req.body;
     const userId = BigInt(req.user.id);
 
+    console.log("user id for wallet: ", userId);
+
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'payment_method is required' });
     }
