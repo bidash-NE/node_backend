@@ -1,11 +1,18 @@
 // models/scheduledOrderModel.js
 const redis = require("../config/redis");
 
-const ZSET_KEY = "scheduled_orders";
+const ZSET_KEY = "scheduled_orders"; // legacy key - keep for old data cleanup/migration
+const PENDING_ZSET_KEY = "scheduled_orders_pending";
+const ACCEPTED_ZSET_KEY = "scheduled_orders_accepted";
+const REJECTED_ZSET_KEY = "scheduled_orders_rejected";
+
 const COUNTER_KEY = "scheduled_order_counter";
 
-// Bhutan is UTC+6 (no DST)
+// Bhutan is UTC+6, no DST
 const BHUTAN_OFFSET_MINUTES = 6 * 60;
+
+// Merchant must accept/reject within 30 minutes
+const ACCEPT_TIMEOUT_MS = 30 * 60 * 1000;
 
 async function generateScheduledId() {
   const counter = await redis.incr(COUNTER_KEY);
@@ -29,11 +36,6 @@ function buildErrorKey(jobId) {
   return `scheduled_order_error:${jobId}`;
 }
 
-/**
- * If input has timezone info (Z or +06:00 etc) => Date.parse is fine.
- * If input has NO timezone => treat as BHUTAN LOCAL TIME.
- */
-// models/scheduledOrderModel.js
 function parseScheduledToEpochMs(input) {
   if (!input) return NaN;
   if (input instanceof Date) return input.getTime();
@@ -42,24 +44,21 @@ function parseScheduledToEpochMs(input) {
   const s = String(input).trim();
   if (!s) return NaN;
 
-  // If it's already an ISO string with timezone (Z or +06:00), use native parse
+  // If timezone is included, native parse is okay.
   const hasTZ = /([zZ]|[+\-]\d{2}:?\d{2})$/.test(s);
   if (hasTZ) {
     const t = Date.parse(s);
     return Number.isFinite(t) ? t : NaN;
   }
 
-  // For local datetime without timezone, treat as Bhutan time
-  // Format: "2024-05-18T11:00:00" or "2024-05-18 11:00:00"
+  // No timezone means Bhutan local time.
   let normalized = s.replace(" ", "T");
 
-  // Ensure seconds are included
-  if (normalized.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)) {
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized)) {
     normalized += ":00";
   }
 
-  // Create date in Bhutan timezone
-  const bhutanDate = new Date(normalized + "+06:00");
+  const bhutanDate = new Date(`${normalized}+06:00`);
   const epochMs = bhutanDate.getTime();
 
   console.log(
@@ -69,11 +68,7 @@ function parseScheduledToEpochMs(input) {
   return Number.isFinite(epochMs) ? epochMs : NaN;
 }
 
-/**
- * Build a Bhutan-local ISO-like string with +06:00 from epochMs
- */
 function epochToBhutanIso(epochMs) {
-  // shift to local by adding +6 hours, then format with UTC getters
   const d = new Date(epochMs + BHUTAN_OFFSET_MINUTES * 60 * 1000);
 
   const pad = (n) => String(n).padStart(2, "0");
@@ -115,39 +110,38 @@ function extractBusinessIdFromJob(data) {
   if (rawBizId == null) return null;
 
   const n = Number(rawBizId);
-  if (Number.isNaN(n)) return null;
-  return n;
+  return Number.isFinite(n) ? n : null;
 }
 
-/**
- * ✅ Stores:
- * - scheduled_at (UTC ISO) for machine
- * - scheduled_at_local (+06:00) for display
- * - score uses epochMs (Bhutan-correct trigger)
- */
 async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
   const jobId = await generateScheduledId();
   const now = new Date();
 
   const epochMs = parseScheduledToEpochMs(scheduledAtInput);
   if (!Number.isFinite(epochMs)) {
-    throw new Error("Invalid scheduled_at (cannot parse to time).");
+    throw new Error("Invalid scheduled_at. Cannot parse scheduled time.");
   }
 
-  const scheduled_at = new Date(epochMs).toISOString(); // UTC ISO (machine)
-  const scheduled_at_local = epochToBhutanIso(epochMs); // Bhutan wall clock +06:00 (display)
+  const scheduled_at = new Date(epochMs).toISOString();
+  const scheduled_at_local = epochToBhutanIso(epochMs);
 
   const tmpData = { order_payload: orderPayload };
   const businessId = extractBusinessIdFromJob(tmpData);
+
+  const accept_expires_at = new Date(Date.now() + ACCEPT_TIMEOUT_MS).toISOString();
+  const accept_expires_epoch_ms = Date.now() + ACCEPT_TIMEOUT_MS;
 
   const payload = {
     job_id: jobId,
     user_id: userId,
     business_id: businessId ?? null,
 
-    scheduled_at, // UTC ISO
-    scheduled_at_local, // +06:00 display
-    scheduled_epoch_ms: epochMs, // debug/trace
+    scheduled_at,
+    scheduled_at_local,
+    scheduled_epoch_ms: epochMs,
+
+    accept_expires_at,
+    accept_expires_epoch_ms,
 
     created_at: now.toISOString(),
 
@@ -163,93 +157,94 @@ async function addScheduledOrder(scheduledAtInput, orderPayload, userId) {
   await redis
     .multi()
     .set(jobKey, JSON.stringify(payload))
-    .zadd(ZSET_KEY, epochMs, jobId)
+    // Pending queue score = when merchant acceptance expires.
+    .zadd(PENDING_ZSET_KEY, accept_expires_epoch_ms, jobId)
+    // Legacy cleanup safety: remove from old mixed queue if accidentally present.
+    .zrem(ZSET_KEY, jobId)
+    .zrem(ACCEPTED_ZSET_KEY, jobId)
+    .zrem(REJECTED_ZSET_KEY, jobId)
     .exec();
 
   return payload;
 }
 
-async function getScheduledOrdersByUser(userId) {
+async function readJobsFromQueues(queueKeys, { futureOnly = false } = {}) {
   const nowTs = Date.now();
+  const ids = new Set();
 
-  const jobIds = await redis.zrangebyscore(
-    ZSET_KEY,
-    nowTs,
-    "+inf",
-    "LIMIT",
-    0,
-    100,
-  );
+  for (const key of queueKeys) {
+    let jobIds = [];
 
-  if (!jobIds.length) return [];
+    if (futureOnly) {
+      jobIds = await redis.zrangebyscore(key, nowTs, "+inf", "LIMIT", 0, 300);
+    } else {
+      jobIds = await redis.zrange(key, 0, -1);
+    }
+
+    jobIds.forEach((id) => ids.add(id));
+  }
+
+  const uniqueJobIds = [...ids];
+  if (!uniqueJobIds.length) return [];
 
   const pipeline = redis.pipeline();
-  jobIds.forEach((jobId) => pipeline.get(buildJobKey(jobId)));
+  uniqueJobIds.forEach((jobId) => pipeline.get(buildJobKey(jobId)));
 
   const results = await pipeline.exec();
 
   const list = [];
   for (const [err, raw] of results) {
     if (err || !raw) continue;
+
     try {
       const data = JSON.parse(raw);
-      if (data.user_id === userId) {
-        if (!data.business_id) {
-          const bizId = extractBusinessIdFromJob(data);
-          if (bizId != null) data.business_id = bizId;
-        }
-        list.push(data);
+      if (!data.business_id) {
+        const bizId = extractBusinessIdFromJob(data);
+        if (bizId != null) data.business_id = bizId;
       }
+
+      list.push(data);
     } catch {}
   }
 
-  list.sort(
-    (a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0),
-  );
+  list.sort((a, b) => {
+    const aTime = a.scheduled_epoch_ms ?? 0;
+    const bTime = b.scheduled_epoch_ms ?? 0;
+    return aTime - bTime;
+  });
+
   return list;
 }
 
+async function getScheduledOrdersByUser(userId) {
+  const allJobs = await readJobsFromQueues([
+    PENDING_ZSET_KEY,
+    ACCEPTED_ZSET_KEY,
+    REJECTED_ZSET_KEY,
+    ZSET_KEY, // legacy support
+  ]);
+
+  return allJobs.filter((job) => Number(job.user_id) === Number(userId));
+}
+
 async function getScheduledOrdersByBusiness(businessId) {
-  const nowTs = Date.now();
+  const allJobs = await readJobsFromQueues([
+    PENDING_ZSET_KEY,
+    ACCEPTED_ZSET_KEY,
+    REJECTED_ZSET_KEY,
+    ZSET_KEY, // legacy support
+  ]);
 
-  const jobIds = await redis.zrangebyscore(
-    ZSET_KEY,
-    nowTs,
-    "+inf",
-    "LIMIT",
-    0,
-    100,
-  );
-
-  if (!jobIds.length) return [];
-
-  const pipeline = redis.pipeline();
-  jobIds.forEach((jobId) => pipeline.get(buildJobKey(jobId)));
-
-  const results = await pipeline.exec();
-
-  const list = [];
-  for (const [err, raw] of results) {
-    if (err || !raw) continue;
-    try {
-      const data = JSON.parse(raw);
-      const jobBizId = extractBusinessIdFromJob(data);
-      if (jobBizId === businessId) {
-        data.business_id = jobBizId;
-        list.push(data);
-      }
-    } catch {}
-  }
-
-  list.sort(
-    (a, b) => (a.scheduled_epoch_ms ?? 0) - (b.scheduled_epoch_ms ?? 0),
-  );
-  return list;
+  return allJobs.filter((job) => {
+    const jobBizId = extractBusinessIdFromJob(job);
+    return Number(jobBizId) === Number(businessId);
+  });
 }
 
 async function cancelScheduledOrderForUser(jobId, userId) {
   const jobKey = buildJobKey(jobId);
   const raw = await redis.get(jobKey);
+
   if (!raw) return false;
 
   let data;
@@ -259,11 +254,14 @@ async function cancelScheduledOrderForUser(jobId, userId) {
     return false;
   }
 
-  if (data.user_id !== userId) return false;
+  if (Number(data.user_id) !== Number(userId)) return false;
 
   await redis
     .multi()
     .del(jobKey)
+    .zrem(PENDING_ZSET_KEY, jobId)
+    .zrem(ACCEPTED_ZSET_KEY, jobId)
+    .zrem(REJECTED_ZSET_KEY, jobId)
     .zrem(ZSET_KEY, jobId)
     .del(buildLockKey(jobId))
     .del(buildAttemptsKey(jobId))
@@ -280,12 +278,16 @@ module.exports = {
   cancelScheduledOrderForUser,
 
   ZSET_KEY,
+  PENDING_ZSET_KEY,
+  ACCEPTED_ZSET_KEY,
+  REJECTED_ZSET_KEY,
+
   buildJobKey,
   buildLockKey,
   buildAttemptsKey,
   buildErrorKey,
 
-  // exporting helpers is optional, but useful for testing
   parseScheduledToEpochMs,
   epochToBhutanIso,
+  extractBusinessIdFromJob,
 };

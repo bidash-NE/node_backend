@@ -1,5 +1,6 @@
 // controllers/scheduledOrdersController.js
 const db = require("../config/db");
+
 const {
   addScheduledOrder,
   getScheduledOrdersByUser,
@@ -7,79 +8,181 @@ const {
   getScheduledOrdersByBusiness,
   parseScheduledToEpochMs,
   epochToBhutanIso,
+
+  buildJobKey,
+  PENDING_ZSET_KEY,
+  ACCEPTED_ZSET_KEY,
+  REJECTED_ZSET_KEY,
+  ZSET_KEY,
 } = require("../models/scheduledOrderModel");
 
 const ALLOWED_SERVICE_TYPES = new Set(["FOOD", "MART"]);
-
 const MAX_PHOTOS = 6;
+const REJECTED_VISIBLE_MS = 30 * 60 * 1000;
 
-/**
- * ✅ Supports:
- * - JSON body (application/json)
- * - multipart/form-data (multer), where files come in req.files and body fields may be strings
- *
- * ✅ Enforces: max 6 photos total (uploaded files + any special_photos provided in body)
- *
- * NOTE:
- * - Make sure your route uses the upload middleware BEFORE this controller if using multipart:
- *   router.post("/scheduled-orders", uploadDeliveryPhotos, scheduleOrder);
- * - If you are only sending JSON with URIs (no files), this still works.
- */
-exports.scheduleOrder = async (req, res) => {
+function safeJsonParse(v) {
+  if (v == null) return v;
+  if (typeof v !== "string") return v;
+
+  const s = v.trim();
+  if (!s) return v;
+
+  if (
+    (s.startsWith("{") && s.endsWith("}")) ||
+    (s.startsWith("[") && s.endsWith("]"))
+  ) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return v;
+    }
+  }
+
+  return v;
+}
+
+function asNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function normalizeBool(v) {
+  if (typeof v === "boolean") return v;
+
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
+
+  if (s === "true" || s === "1" || s === "yes") return true;
+  if (s === "false" || s === "0" || s === "no") return false;
+
+  return v;
+}
+
+function getFilesFromRequest(req) {
+  return []
+    .concat(req.files?.delivery_photo || [])
+    .concat(req.files?.delivery_photos || [])
+    .concat(req.files?.image || [])
+    .concat(req.files?.images || []);
+}
+
+async function enrichItemsWithImages(orderPayload) {
+  if (!Array.isArray(orderPayload.items) || !orderPayload.items.length) {
+    return orderPayload;
+  }
+
+  const serviceType = String(orderPayload.service_type || "")
+    .trim()
+    .toUpperCase();
+
+  const menuIds = orderPayload.items
+    .map((item) => item.menu_id)
+    .filter((id) => id != null && !isNaN(Number(id)));
+
+  if (!menuIds.length) return orderPayload;
+
+  const tableName = serviceType === "FOOD" ? "food_menu" : "mart_menu";
+  const placeholders = menuIds.map(() => "?").join(",");
+
   try {
-    // ---------- helpers ----------
-    const safeJsonParse = (v) => {
-      if (v == null) return v;
-      if (typeof v !== "string") return v;
-      const s = v.trim();
-      if (!s) return v;
-      if (
-        (s.startsWith("{") && s.endsWith("}")) ||
-        (s.startsWith("[") && s.endsWith("]"))
-      ) {
-        try {
-          return JSON.parse(s);
-        } catch {
-          return v;
-        }
-      }
-      return v;
-    };
-
-    const asNumber = (v) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : NaN;
-    };
-
-    const normalizeBool = (v) => {
-      if (typeof v === "boolean") return v;
-      const s = String(v || "")
-        .trim()
-        .toLowerCase();
-      if (s === "true" || s === "1" || s === "yes") return true;
-      if (s === "false" || s === "0" || s === "no") return false;
-      return v;
-    };
-
-    // ---------- raw body ----------
-    const body = req.body || {};
-    console.log("[scheduleOrder] content-type:", req.headers["content-type"]);
-    console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
-    console.log(
-      "[scheduleOrder] req.files keys:",
-      Object.keys(req.files || {}),
+    const [menuItems] = await db.query(
+      `SELECT id, item_image FROM ${tableName} WHERE id IN (${placeholders})`,
+      menuIds,
     );
 
-    // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
-    // Merge it into body so special_photos doesn't get lost.
-    // ✅ IMPORTANT: your Redis sample shows body.payload is a JSON string.
+    const imageMap = new Map();
+    menuItems.forEach((item) => {
+      imageMap.set(Number(item.id), item.item_image);
+    });
+
+    orderPayload.items = orderPayload.items.map((item) => ({
+      ...item,
+      item_image: imageMap.get(Number(item.menu_id)) || item.item_image || null,
+    }));
+  } catch (err) {
+    console.error("[scheduleOrder] Failed to fetch item images:", err);
+  }
+
+  return orderPayload;
+}
+
+async function enrichItemsWithBusinessName(orderPayload) {
+  if (!Array.isArray(orderPayload.items) || !orderPayload.items.length) {
+    return orderPayload;
+  }
+
+  const globalBusinessId = orderPayload.business_id || null;
+  const globalBusinessName = orderPayload.business_name || null;
+
+  orderPayload.items = orderPayload.items.map((item) => ({
+    ...item,
+    business_id: item.business_id || item.businessId || globalBusinessId,
+    business_name:
+      item.business_name || item.businessName || globalBusinessName || null,
+  }));
+
+  const missingBusinessIds = [
+    ...new Set(
+      orderPayload.items
+        .filter((item) => !item.business_name && item.business_id)
+        .map((item) => item.business_id),
+    ),
+  ];
+
+  if (!missingBusinessIds.length) return orderPayload;
+
+  try {
+    const placeholders = missingBusinessIds.map(() => "?").join(",");
+    const [businesses] = await db.query(
+      `SELECT business_id, business_name
+         FROM merchant_business_details
+        WHERE business_id IN (${placeholders})`,
+      missingBusinessIds,
+    );
+
+    const businessNameMap = new Map();
+    businesses.forEach((b) => {
+      businessNameMap.set(Number(b.business_id), b.business_name);
+    });
+
+    orderPayload.items = orderPayload.items.map((item) => ({
+      ...item,
+      business_name:
+        item.business_name ||
+        businessNameMap.get(Number(item.business_id)) ||
+        null,
+    }));
+  } catch (err) {
+    console.error("[scheduleOrder] Failed to fetch business names:", err);
+  }
+
+  return orderPayload;
+}
+
+exports.scheduleOrder = async (req, res) => {
+  try {
+    const body = req.body || {};
+
+    console.log("[scheduleOrder] content-type:", req.headers["content-type"]);
+    console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
+    console.log("[scheduleOrder] req.files keys:", Object.keys(req.files || {}));
+
     let mergedBody = { ...body };
+
+    // Supports multipart FormData with payload as JSON string.
     if (typeof body.payload === "string") {
       const parsed = safeJsonParse(body.payload);
-      if (parsed && typeof parsed === "object") {
-        mergedBody = { ...mergedBody, ...parsed };
 
-        // ✅ Also ensure items in parsed payload have business_name
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        mergedBody = {
+          ...mergedBody,
+          ...parsed,
+        };
+
+        // Important: do not save escaped payload string into Redis.
+        delete mergedBody.payload;
+
         if (Array.isArray(parsed.items)) {
           mergedBody.items = parsed.items.map((item) => ({
             ...item,
@@ -90,13 +193,14 @@ exports.scheduleOrder = async (req, res) => {
       }
     }
 
-    // ---------- extract required fields ----------
     const user_id =
       mergedBody.user_id ?? mergedBody.userId ?? mergedBody.userid;
+
     const scheduled_at =
       mergedBody.scheduled_at ?? mergedBody.scheduledAt ?? mergedBody.scheduled;
 
     const userId = asNumber(user_id);
+
     if (!Number.isFinite(userId) || userId <= 0) {
       return res.status(400).json({
         success: false,
@@ -105,13 +209,14 @@ exports.scheduleOrder = async (req, res) => {
     }
 
     if (!scheduled_at) {
-      return res
-        .status(400)
-        .json({ success: false, message: "scheduled_at is required." });
+      return res.status(400).json({
+        success: false,
+        message: "scheduled_at is required.",
+      });
     }
 
-    // ✅ Bhutan-correct parsing (no timezone => treat as Bhutan local)
     const epochMs = parseScheduledToEpochMs(scheduled_at);
+
     if (!Number.isFinite(epochMs)) {
       return res.status(400).json({
         success: false,
@@ -127,8 +232,9 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
-    // ---------- build orderPayload ----------
     const orderPayload = { ...mergedBody };
+
+    delete orderPayload.payload;
 
     delete orderPayload.user_id;
     delete orderPayload.userId;
@@ -138,28 +244,27 @@ exports.scheduleOrder = async (req, res) => {
     delete orderPayload.scheduledAt;
     delete orderPayload.scheduled;
 
-    // Parse JSON-like string fields (common with multipart)
     orderPayload.items = safeJsonParse(orderPayload.items);
     orderPayload.totals = safeJsonParse(orderPayload.totals);
-    orderPayload.delivery_address = safeJsonParse(
-      orderPayload.delivery_address,
-    );
+    orderPayload.delivery_address = safeJsonParse(orderPayload.delivery_address);
     orderPayload.special_photos = safeJsonParse(orderPayload.special_photos);
 
-    // Normalize types if strings
-    if (orderPayload.priority != null)
+    if (orderPayload.priority != null) {
       orderPayload.priority = normalizeBool(orderPayload.priority);
+    }
 
-    if (orderPayload.delivery_lat != null)
+    if (orderPayload.delivery_lat != null) {
       orderPayload.delivery_lat = asNumber(orderPayload.delivery_lat);
+    }
 
-    if (orderPayload.delivery_lng != null)
+    if (orderPayload.delivery_lng != null) {
       orderPayload.delivery_lng = asNumber(orderPayload.delivery_lng);
+    }
 
-    if (orderPayload.business_id != null)
+    if (orderPayload.business_id != null) {
       orderPayload.business_id = asNumber(orderPayload.business_id);
+    }
 
-    // ---------- validate items ----------
     if (!Array.isArray(orderPayload.items) || !orderPayload.items.length) {
       return res.status(400).json({
         success: false,
@@ -167,7 +272,6 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
-    // ---------- service_type validation ----------
     const serviceType = String(orderPayload.service_type || "")
       .trim()
       .toUpperCase();
@@ -178,102 +282,14 @@ exports.scheduleOrder = async (req, res) => {
         message: "Invalid or missing service_type. Allowed: FOOD, MART",
       });
     }
+
     orderPayload.service_type = serviceType;
-    // ---------- FETCH ITEM IMAGES ----------
-    if (Array.isArray(orderPayload.items) && orderPayload.items.length) {
-      const serviceType = orderPayload.service_type; // Already validated as FOOD or MART
-      const menuIds = orderPayload.items
-        .map((item) => item.menu_id)
-        .filter((id) => id != null && !isNaN(Number(id)));
 
-      if (menuIds.length) {
-        const tableName = serviceType === "FOOD" ? "food_menu" : "mart_menu";
-        const placeholders = menuIds.map(() => "?").join(",");
+    await enrichItemsWithImages(orderPayload);
+    await enrichItemsWithBusinessName(orderPayload);
 
-        try {
-          const [menuItems] = await db.query(
-            `SELECT id, item_image FROM ${tableName} WHERE id IN (${placeholders})`,
-            menuIds,
-          );
-
-          const imageMap = new Map();
-          menuItems.forEach((item) => {
-            imageMap.set(Number(item.id), item.item_image);
-          });
-
-          // Add item_image to each item
-          orderPayload.items = orderPayload.items.map((item) => ({
-            ...item,
-            item_image: imageMap.get(Number(item.menu_id)) || null,
-          }));
-
-          console.log(
-            `[scheduleOrder] Added images to ${orderPayload.items.length} items`,
-          );
-        } catch (err) {
-          console.error("[scheduleOrder] Failed to fetch item images:", err);
-          // Continue without images - don't block the order
-        }
-      }
-    }
-    // After: orderPayload.items = safeJsonParse(orderPayload.items);
-
-    // ---------- ENSURE BUSINESS_NAME IN ITEMS ----------
-    if (Array.isArray(orderPayload.items) && orderPayload.items.length) {
-      // Get business_id from payload if not in items
-      const globalBusinessId = orderPayload.business_id || null;
-
-      orderPayload.items = orderPayload.items.map((item) => ({
-        ...item,
-        // Ensure business_id is set
-        business_id: item.business_id || globalBusinessId,
-        // Ensure business_name is set (prefer item's, then fetch from DB)
-        business_name: item.business_name || null,
-      }));
-
-      // Fetch missing business names from database
-      const missingBusinessIds = [
-        ...new Set(
-          orderPayload.items
-            .filter((item) => !item.business_name && item.business_id)
-            .map((item) => item.business_id),
-        ),
-      ];
-
-      if (missingBusinessIds.length) {
-        const placeholders = missingBusinessIds.map(() => "?").join(",");
-        const [businesses] = await db.query(
-          `SELECT business_id, business_name FROM merchant_business_details WHERE business_id IN (${placeholders})`,
-          missingBusinessIds,
-        );
-
-        const businessNameMap = new Map();
-        businesses.forEach((b) =>
-          businessNameMap.set(b.business_id, b.business_name),
-        );
-
-        orderPayload.items = orderPayload.items.map((item) => ({
-          ...item,
-          business_name:
-            item.business_name || businessNameMap.get(item.business_id) || null,
-        }));
-      }
-
-      console.log(
-        "[scheduleOrder] Items after business_name enrichment:",
-        JSON.stringify(
-          orderPayload.items.map((i) => ({
-            business_id: i.business_id,
-            business_name: i.business_name,
-          })),
-          null,
-          2,
-        ),
-      );
-    }
-    // ---------- handle photos (URIs + uploaded files) ----------
-    // 1) photos from body (JSON)
     let bodyUris = [];
+
     if (Array.isArray(orderPayload.special_photos)) {
       bodyUris = orderPayload.special_photos
         .map((u) => (u == null ? "" : String(u).trim()))
@@ -282,12 +298,7 @@ exports.scheduleOrder = async (req, res) => {
       bodyUris = [orderPayload.special_photos.trim()].filter(Boolean);
     }
 
-    // 2) uploaded files from multer (multipart)
-    const files = []
-      .concat(req.files?.delivery_photo || [])
-      .concat(req.files?.delivery_photos || [])
-      .concat(req.files?.image || [])
-      .concat(req.files?.images || []);
+    const files = getFilesFromRequest(req);
 
     const uploadedUris = files
       .map((f) =>
@@ -302,19 +313,11 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
-    const merged = [...bodyUris, ...uploadedUris].slice(0, MAX_PHOTOS);
+    const mergedPhotos = [...bodyUris, ...uploadedUris].slice(0, MAX_PHOTOS);
 
-    // keep array form
-    orderPayload.special_photos = merged;
+    orderPayload.special_photos = mergedPhotos;
+    orderPayload.delivery_photo_url = mergedPhotos[0] || null;
 
-    // ✅ IMPORTANT: your orders table column is delivery_photo_url (VARCHAR 500)
-    // Option A (safe): store ONLY first photo to avoid truncation
-    orderPayload.delivery_photo_url = merged[0] || null;
-
-    // Option B (if you change column to TEXT): store JSON string
-    // orderPayload.delivery_photo_url = merged.length ? JSON.stringify(merged) : null;
-
-    // ---------- save ----------
     const saved = await addScheduledOrder(scheduled_at, orderPayload, userId);
 
     return res.json({
@@ -323,9 +326,11 @@ exports.scheduleOrder = async (req, res) => {
       job_id: saved.job_id,
       scheduled_at_utc: saved.scheduled_at,
       scheduled_at_local: saved.scheduled_at_local,
+      accept_expires_at: saved.accept_expires_at,
+      queue: "PENDING",
       service_type: saved.order_payload?.service_type || serviceType,
-      photo_count: merged.length,
-      photos: merged,
+      photo_count: mergedPhotos.length,
+      photos: mergedPhotos,
     });
   } catch (err) {
     console.error("scheduleOrder error:", err);
@@ -339,16 +344,20 @@ exports.scheduleOrder = async (req, res) => {
 exports.listScheduledOrders = async (req, res) => {
   try {
     const userId = Number(req.params.user_id);
+
     if (!Number.isFinite(userId) || userId <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid user_id parameter." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user_id parameter.",
+      });
     }
 
     const list = await getScheduledOrdersByUser(userId);
-    if (!list.length) return res.json({ success: true, data: [] });
 
-    // -------- business enrichment (logo + address) --------
+    if (!list.length) {
+      return res.json({ success: true, data: [] });
+    }
+
     const businessIds = [
       ...new Set(
         list
@@ -359,6 +368,7 @@ exports.listScheduledOrders = async (req, res) => {
     ];
 
     let businessData = new Map();
+
     if (businessIds.length) {
       const placeholders = businessIds.map(() => "?").join(",");
       const [rows] = await db.query(
@@ -367,10 +377,10 @@ exports.listScheduledOrders = async (req, res) => {
           WHERE business_id IN (${placeholders})`,
         businessIds,
       );
+
       businessData = new Map(rows.map((r) => [Number(r.business_id), r]));
     }
 
-    // -------- collect menu ids by service type (bulk fetch) --------
     const foodMenuIds = new Set();
     const martMenuIds = new Set();
 
@@ -397,32 +407,31 @@ exports.listScheduledOrders = async (req, res) => {
     if (foodMenuIds.size) {
       const ids = [...foodMenuIds];
       const placeholders = ids.map(() => "?").join(",");
+
       const [rows] = await db.query(
-        `SELECT id, item_image
-           FROM food_menu
-          WHERE id IN (${placeholders})`,
+        `SELECT id, item_image FROM food_menu WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) =>
-        foodImageById.set(Number(r.id), r.item_image || null),
-      );
+
+      rows.forEach((r) => {
+        foodImageById.set(Number(r.id), r.item_image || null);
+      });
     }
 
     if (martMenuIds.size) {
       const ids = [...martMenuIds];
       const placeholders = ids.map(() => "?").join(",");
+
       const [rows] = await db.query(
-        `SELECT id, item_image
-           FROM mart_menu
-          WHERE id IN (${placeholders})`,
+        `SELECT id, item_image FROM mart_menu WHERE id IN (${placeholders})`,
         ids,
       );
-      rows.forEach((r) =>
-        martImageById.set(Number(r.id), r.item_image || null),
-      );
+
+      rows.forEach((r) => {
+        martImageById.set(Number(r.id), r.item_image || null);
+      });
     }
 
-    // -------- build response --------
     const enriched = list.map((job) => {
       const business = businessData.get(Number(job.business_id)) || {};
       const businessLogo = business.business_logo || null;
@@ -438,25 +447,23 @@ exports.listScheduledOrders = async (req, res) => {
 
       const enrichedItems = items.map((it) => {
         const mid = Number(it?.menu_id);
-        let itemImage = null;
+        let itemImage = it?.item_image || null;
 
         if (Number.isFinite(mid) && mid > 0) {
-          if (serviceType === "FOOD")
-            itemImage = foodImageById.get(mid) || null;
-          else if (serviceType === "MART")
-            itemImage = martImageById.get(mid) || null;
+          if (serviceType === "FOOD") {
+            itemImage = foodImageById.get(mid) || itemImage;
+          } else if (serviceType === "MART") {
+            itemImage = martImageById.get(mid) || itemImage;
+          }
         }
 
-        return { ...it, item_image: itemImage };
+        return {
+          ...it,
+          item_image: itemImage,
+        };
       });
 
-      const itemImages = enrichedItems.map((it) => it.item_image || null);
-
-      // ✅ extract status info
       const status = job?.order_payload?.status || "PENDING";
-      const rejectionReason = job?.order_payload?.rejection_reason || null;
-      const rejectedAt = job?.order_payload?.rejected_at || null;
-      const acceptedAt = job?.order_payload?.accepted_at || null;
 
       return {
         job_id: job.job_id,
@@ -472,24 +479,25 @@ exports.listScheduledOrders = async (req, res) => {
             ? epochToBhutanIso(job.scheduled_epoch_ms)
             : null),
 
+        accept_expires_at: job.accept_expires_at ?? null,
         created_at_utc: job.created_at ?? null,
 
         order_payload: {
           ...job.order_payload,
-
-          // ✅ explicitly include status fields
           status,
-          rejection_reason: rejectionReason,
-          rejected_at: rejectedAt,
-          accepted_at: acceptedAt,
-
+          rejection_reason: job?.order_payload?.rejection_reason || null,
+          rejected_at: job?.order_payload?.rejected_at || null,
+          accepted_at: job?.order_payload?.accepted_at || null,
           items: enrichedItems,
-          item_images: itemImages,
+          item_images: enrichedItems.map((it) => it.item_image || null),
         },
       };
     });
 
-    return res.json({ success: true, data: enriched });
+    return res.json({
+      success: true,
+      data: enriched,
+    });
   } catch (err) {
     console.error("listScheduledOrders error:", err);
     return res.status(500).json({
@@ -499,14 +507,10 @@ exports.listScheduledOrders = async (req, res) => {
   }
 };
 
-// controllers/scheduledOrdersController.js
-// ✅ Updated: listScheduledOrdersByBusiness
-// - Adds item_image per item (from food_menu or mart_menu based on service_type)
-// - Adds order_payload.item_images as list (same order as items)
-
 exports.listScheduledOrdersByBusiness = async (req, res) => {
   try {
     const businessId = Number(req.params.businessId);
+
     if (!Number.isFinite(businessId) || businessId <= 0) {
       return res.status(400).json({
         success: false,
@@ -515,9 +519,11 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     }
 
     const list = await getScheduledOrdersByBusiness(businessId);
-    if (!list.length) return res.json({ success: true, data: [] });
 
-    // -------- users enrichment (name) --------
+    if (!list.length) {
+      return res.json({ success: true, data: [] });
+    }
+
     const userIds = [
       ...new Set(
         list
@@ -528,64 +534,20 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     ];
 
     let userNameById = new Map();
+
     if (userIds.length) {
       const placeholders = userIds.map(() => "?").join(",");
+
       const [rows] = await db.query(
-        `SELECT user_id, user_name FROM users WHERE user_id IN (${placeholders})`,
+        `SELECT user_id, user_name
+           FROM users
+          WHERE user_id IN (${placeholders})`,
         userIds,
       );
+
       userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
     }
 
-    // -------- collect menu ids --------
-    const foodMenuIds = new Set();
-    const martMenuIds = new Set();
-
-    for (const job of list) {
-      const serviceType = String(job?.order_payload?.service_type || "")
-        .trim()
-        .toUpperCase();
-
-      const items = job?.order_payload?.items;
-      if (!Array.isArray(items)) continue;
-
-      for (const it of items) {
-        const mid = Number(it?.menu_id);
-        if (!Number.isFinite(mid) || mid <= 0) continue;
-
-        if (serviceType === "FOOD") foodMenuIds.add(mid);
-        else if (serviceType === "MART") martMenuIds.add(mid);
-      }
-    }
-
-    const foodImageById = new Map();
-    const martImageById = new Map();
-
-    if (foodMenuIds.size) {
-      const ids = [...foodMenuIds];
-      const placeholders = ids.map(() => "?").join(",");
-      const [rows] = await db.query(
-        `SELECT id, item_image FROM food_menu WHERE id IN (${placeholders})`,
-        ids,
-      );
-      rows.forEach((r) =>
-        foodImageById.set(Number(r.id), r.item_image || null),
-      );
-    }
-
-    if (martMenuIds.size) {
-      const ids = [...martMenuIds];
-      const placeholders = ids.map(() => "?").join(",");
-      const [rows] = await db.query(
-        `SELECT id, item_image FROM mart_menu WHERE id IN (${placeholders})`,
-        ids,
-      );
-      rows.forEach((r) =>
-        martImageById.set(Number(r.id), r.item_image || null),
-      );
-    }
-
-    // -------- sort + map --------
     const sorted = [...list].sort(
       (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0),
     );
@@ -593,35 +555,11 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     const mapped = sorted.map((job) => {
       const uid = Number(job.user_id);
 
-      const serviceType = String(job?.order_payload?.service_type || "")
-        .trim()
-        .toUpperCase();
-
       const items = Array.isArray(job?.order_payload?.items)
         ? job.order_payload.items
         : [];
 
-      const enrichedItems = items.map((it) => {
-        const mid = Number(it?.menu_id);
-        let itemImage = null;
-
-        if (Number.isFinite(mid) && mid > 0) {
-          if (serviceType === "FOOD")
-            itemImage = foodImageById.get(mid) || null;
-          else if (serviceType === "MART")
-            itemImage = martImageById.get(mid) || null;
-        }
-
-        return { ...it, item_image: itemImage };
-      });
-
-      const itemImages = enrichedItems.map((it) => it.item_image || null);
-
-      // ✅ status extraction
       const status = job?.order_payload?.status || "PENDING";
-      const rejectionReason = job?.order_payload?.rejection_reason || null;
-      const rejectedAt = job?.order_payload?.rejected_at || null;
-      const acceptedAt = job?.order_payload?.accepted_at || null;
 
       return {
         job_id: job.job_id,
@@ -636,24 +574,25 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
             ? epochToBhutanIso(job.scheduled_epoch_ms)
             : null),
 
+        accept_expires_at: job.accept_expires_at ?? null,
         created_at_utc: job.created_at ?? null,
 
         order_payload: {
           ...job.order_payload,
-
-          // ✅ added fields
           status,
-          rejection_reason: rejectionReason,
-          rejected_at: rejectedAt,
-          accepted_at: acceptedAt,
-
-          items: enrichedItems,
-          item_images: itemImages,
+          rejection_reason: job?.order_payload?.rejection_reason || null,
+          rejected_at: job?.order_payload?.rejected_at || null,
+          accepted_at: job?.order_payload?.accepted_at || null,
+          items,
+          item_images: items.map((it) => it.item_image || null),
         },
       };
     });
 
-    return res.json({ success: true, data: mapped });
+    return res.json({
+      success: true,
+      data: mapped,
+    });
   } catch (err) {
     console.error("listScheduledOrdersByBusiness error:", err);
     return res.status(500).json({
@@ -662,9 +601,6 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   }
 };
-
-// controllers/scheduledOrdersController.js
-// ✅ Replace your existing exports.cancelScheduledOrder with this one
 
 exports.cancelScheduledOrder = async (req, res) => {
   try {
@@ -701,7 +637,6 @@ exports.cancelScheduledOrder = async (req, res) => {
   }
 };
 
-// In controllers/scheduledOrdersController.js
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -710,19 +645,18 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid jobId or status (ACCEPTED / REJECTED required)",
+        message: "Invalid jobId or status. ACCEPTED or REJECTED required.",
       });
     }
 
-    if (status === "REJECTED" && (!reason || !reason.trim())) {
+    if (status === "REJECTED" && (!reason || !String(reason).trim())) {
       return res.status(400).json({
         success: false,
-        message: "Reason is required when rejecting a scheduled order",
+        message: "Reason is required when rejecting a scheduled order.",
       });
     }
 
     const redis = require("../config/redis");
-    const { buildJobKey, ZSET_KEY } = require("../models/scheduledOrderModel");
 
     const {
       sendUserNotification,
@@ -734,42 +668,91 @@ exports.updateScheduledOrderStatus = async (req, res) => {
     if (!raw) {
       return res.status(404).json({
         success: false,
-        message: "Scheduled order not found",
+        message: "Scheduled order not found.",
       });
     }
 
-    let data = JSON.parse(raw);
+    let data;
 
-    // Prevent double action
-    if (data.order_payload?.status !== "PENDING") {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        message: "Scheduled order data is corrupted.",
+      });
+    }
+
+    const currentStatus = data.order_payload?.status || "PENDING";
+
+    if (currentStatus !== "PENDING") {
       return res.status(400).json({
         success: false,
-        message: `Order already ${data.order_payload.status}`,
+        message: `Order already ${currentStatus}.`,
       });
     }
 
     const userId = data.user_id;
 
-    if (status === "REJECTED") {
-      const cleanReason = reason.trim();
+    if (status === "ACCEPTED") {
+      data.order_payload.status = "ACCEPTED";
+      data.order_payload.accepted_at = new Date().toISOString();
+      data.updated_at = new Date().toISOString();
 
-      // Update status
+      const scheduledScore = Number(data.scheduled_epoch_ms);
+
+      if (!Number.isFinite(scheduledScore)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid scheduled time for this scheduled order.",
+        });
+      }
+
+      await redis
+        .multi()
+        .set(jobKey, JSON.stringify(data))
+        .zrem(PENDING_ZSET_KEY, jobId)
+        .zrem(REJECTED_ZSET_KEY, jobId)
+        .zrem(ZSET_KEY, jobId) // legacy safety
+        .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId)
+        .exec();
+
+      await sendUserNotification({
+        user_id: userId,
+        title: "Order Accepted",
+        body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
+      });
+
+      return res.json({
+        success: true,
+        message: "Scheduled order accepted.",
+        job_id: jobId,
+        status: "ACCEPTED",
+        queue: "ACCEPTED",
+        scheduled_at_utc: data.scheduled_at,
+        scheduled_at_local: data.scheduled_at_local,
+      });
+    }
+
+    if (status === "REJECTED") {
+      const cleanReason = String(reason).trim();
+
       data.order_payload.status = "REJECTED";
       data.order_payload.rejection_reason = cleanReason;
       data.order_payload.rejected_at = new Date().toISOString();
       data.updated_at = new Date().toISOString();
 
-      // ✅ IMPORTANT: DO NOT remove from ZSET
-      // Keep it in ZSET so cleanup service can find it
-      // await redis.zrem(ZSET_KEY, jobId);  // ❌ DON'T DO THIS
+      const deleteAtMs = Date.now() + REJECTED_VISIBLE_MS;
 
-      // ✅ Save the updated data
-      await redis.set(jobKey, JSON.stringify(data));
+      await redis
+        .multi()
+        .set(jobKey, JSON.stringify(data))
+        .zrem(PENDING_ZSET_KEY, jobId)
+        .zrem(ACCEPTED_ZSET_KEY, jobId)
+        .zrem(ZSET_KEY, jobId) // legacy safety
+        .zadd(REJECTED_ZSET_KEY, deleteAtMs, jobId)
+        .exec();
 
-      // ✅ DO NOT set short TTL (let cleanup service handle it)
-      // await redis.expire(jobKey, 1800);  // ❌ DON'T DO THIS
-
-      // Send notification
       await sendUserNotification({
         user_id: userId,
         title: "Order Rejected",
@@ -782,35 +765,15 @@ exports.updateScheduledOrderStatus = async (req, res) => {
         job_id: jobId,
         status: "REJECTED",
         reason: cleanReason,
+        queue: "REJECTED",
         visible_until_minutes: 30,
-      });
-    }
-
-    if (status === "ACCEPTED") {
-      data.order_payload.status = "ACCEPTED";
-      data.order_payload.accepted_at = new Date().toISOString();
-      data.updated_at = new Date().toISOString();
-
-      await redis.set(jobKey, JSON.stringify(data));
-
-      await sendUserNotification({
-        user_id: userId,
-        title: "Order Accepted",
-        body: `Your scheduled order has been accepted and will be processed at the scheduled time.`,
-      });
-
-      return res.json({
-        success: true,
-        message: `Scheduled order ${status.toLowerCase()}`,
-        job_id: jobId,
-        status,
       });
     }
   } catch (err) {
     console.error("updateScheduledOrderStatus error:", err);
     return res.status(500).json({
       success: false,
-      message: "Internal server error",
+      message: "Internal server error.",
     });
   }
 };
