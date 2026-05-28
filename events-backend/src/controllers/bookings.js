@@ -486,13 +486,12 @@ async function verifyTicket(req, res, next) {
       return res.json({ success: true, data: { ...base, status: 'cancelled' } });
     }
 
-    // Valid — mark as used (raw SQL bypasses stale Prisma enum type)
+    // Valid — mark as used
     const now = new Date();
-    await prisma.$executeRawUnsafe(
-      `UPDATE event_bookings SET status = 'used', checked_in_at = ? WHERE ticket_code = ?`,
-      now,
-      ticket_code.trim(),
-    );
+    await prisma.event_bookings.update({
+      where: { ticket_code: ticket_code.trim() },
+      data: { status: 'used', checked_in_at: now },
+    });
 
     return res.json({ success: true, data: { ...base, status: 'confirmed', checked_in_at: now } });
   } catch (err) {
