@@ -85,8 +85,6 @@ async function createBooking(req, res, next) {
     const { event_id, tier_id, quantity, attendee_names, payment_method, seat_ids, screening_id, t_pin } = req.body;
     const userId = BigInt(req.user.id);
 
-    console.log("user id for wallet: ", userId);
-
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'payment_method is required' });
     }
@@ -441,4 +439,64 @@ async function deleteBooking(req, res, next) {
   }
 }
 
-module.exports = { createBooking, myTickets, deleteBooking };
+async function verifyTicket(req, res, next) {
+  try {
+    const { ticket_code } = req.body;
+    if (!ticket_code) {
+      return res.status(400).json({ success: false, message: 'ticket_code is required' });
+    }
+
+    const booking = await prisma.event_bookings.findUnique({
+      where: { ticket_code: ticket_code.trim() },
+      include: {
+        events: { select: { title: true, venue_name: true, start_at: true } },
+        event_ticket_tiers: { select: { name: true } },
+        users: { select: { first_name: true, last_name: true, user_name: true } },
+      },
+    });
+
+    if (!booking) {
+      return res.json({ success: true, data: { found: false } });
+    }
+
+    const attendees = typeof booking.attendee_names === 'string'
+      ? JSON.parse(booking.attendee_names)
+      : (booking.attendee_names || []);
+
+    const base = {
+      found: true,
+      booking_id: booking.id,
+      ticket_code: booking.ticket_code,
+      status: booking.status,
+      event_title: booking.events.title,
+      venue_name: booking.events.venue_name,
+      event_start_at: booking.events.start_at,
+      tier_name: booking.event_ticket_tiers.name,
+      quantity: booking.quantity,
+      attendee_name: attendees[0] || null,
+      checked_in_at: booking.checked_in_at,
+    };
+
+    // Already used — return info without marking again
+    if (booking.status === 'used') {
+      return res.json({ success: true, data: { ...base, status: 'used' } });
+    }
+
+    // Cancelled — do not allow entry
+    if (booking.status === 'cancelled') {
+      return res.json({ success: true, data: { ...base, status: 'cancelled' } });
+    }
+
+    // Valid — mark as used
+    await prisma.event_bookings.update({
+      where: { ticket_code: ticket_code.trim() },
+      data: { status: 'used', checked_in_at: new Date() },
+    });
+
+    return res.json({ success: true, data: { ...base, status: 'confirmed', checked_in_at: new Date() } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { createBooking, myTickets, deleteBooking, verifyTicket };
