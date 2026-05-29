@@ -1954,6 +1954,7 @@ enum ride_tips_status {
 enum bookings_status {
   confirmed
   cancelled
+  used
 }
 
 enum food_menu_spice_level {

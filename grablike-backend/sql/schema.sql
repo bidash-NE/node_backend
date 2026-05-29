@@ -533,3 +533,49 @@ CREATE TABLE IF NOT EXISTS ride_participants (
 ALTER TABLE rides
   MODIFY booking_type ENUM('INSTANT','SCHEDULED','GROUP')
   NOT NULL DEFAULT 'INSTANT';
+
+-- Extend rides.status ENUM to include 'scheduled' (required for SCHEDULED booking_type)
+ALTER TABLE rides
+  MODIFY COLUMN status ENUM(
+    'scheduled',
+    'requested',
+    'offered_to_driver',
+    'accepted',
+    'arrived_pickup',
+    'started',
+    'completed',
+    'cancelled_driver',
+    'cancelled_rider',
+    'cancelled_system'
+  ) NOT NULL;
+
+-- Extend rides.trip_type ENUM to include 'scheduled' and 'group' (used by matching.js)
+ALTER TABLE rides
+  MODIFY COLUMN trip_type ENUM('instant','pool','scheduled','group') NOT NULL DEFAULT 'instant';
+
+-- Inter-city fixed fare table
+CREATE TABLE IF NOT EXISTS inter_city_fares (
+  id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  from_city    VARCHAR(100) NOT NULL,
+  to_city      VARCHAR(100) NOT NULL,
+  reserve_fare DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  share_fare   DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  UNIQUE KEY uq_inter_city_route (from_city, to_city)
+);
+
+-- Intra-city fixed fare table (zone-to-zone within a city)
+CREATE TABLE IF NOT EXISTS intra_city_fares (
+  id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  from_zone    VARCHAR(100) NOT NULL,
+  to_zone      VARCHAR(100) NOT NULL,
+  reserve_fare DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  share_fare   DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+  is_share     TINYINT(1)   NOT NULL DEFAULT 0,
+  UNIQUE KEY uq_intra_city_route (from_zone, to_zone)
+);
+
+-- Airport / flight metadata (populated for rides booked via FlightArrival flow)
+ALTER TABLE rides
+  ADD COLUMN IF NOT EXISTS flight_number VARCHAR(20)  NULL DEFAULT NULL AFTER payment_method,
+  ADD COLUMN IF NOT EXISTS airport_code  VARCHAR(10)  NULL DEFAULT NULL AFTER flight_number,
+  ADD COLUMN IF NOT EXISTS airport_name  VARCHAR(100) NULL DEFAULT NULL AFTER airport_code;

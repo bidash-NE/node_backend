@@ -1,3 +1,4 @@
+const { Prisma } = require('@prisma/client');
 const prisma = require('../db');
 const walletApi = require('../services/walletApi');
 
@@ -376,42 +377,62 @@ async function myTickets(req, res, next) {
   try {
     const userId = BigInt(req.user.id);
 
-    const event_bookings = await prisma.event_bookings.findMany({
-      where: { user_id: userId },
-      orderBy: { created_at: 'desc' },
-      include: {
-        events: { select: { title: true, venue_name: true, start_at: true } },
-        event_ticket_tiers: { select: { name: true } },
-        event_booking_seats: {
-          include: {
-            event_seats: { select: { row_label: true, seat_number: true, section: true, category: true } },
-          },
-        },
-      },
-    });
+    const rows = await prisma.$queryRaw`
+      SELECT
+        b.id, b.ticket_code, b.event_id, b.tier_id, b.quantity,
+        b.total_amount, b.payment_method, b.attendee_names,
+        b.status, b.created_at, b.screening_id,
+        e.title  AS event_title,
+        e.venue_name,
+        e.start_at AS event_start_at,
+        t.name   AS tier_name
+      FROM event_bookings b
+      JOIN events               e ON e.id = b.event_id
+      JOIN event_ticket_tiers   t ON t.id = b.tier_id
+      WHERE b.user_id = ${userId}
+      ORDER BY b.created_at DESC
+    `;
 
-    const data = event_bookings.map((b) => ({
-      id: b.id,
-      ticket_code: b.ticket_code,
-      event_id: b.event_id,
-      event_title: b.events.title,
-      tier_id: b.tier_id,
-      tier_name: b.event_ticket_tiers.name,
-      quantity: b.quantity,
-      total_amount: b.total_amount,
+    const bookingIds = rows.map((r) => r.id);
+
+    let seatsByBooking = {};
+    if (bookingIds.length > 0) {
+      const seats = await prisma.$queryRaw`
+        SELECT
+          bs.booking_id, bs.seat_id,
+          s.row_label, s.seat_number, s.section, s.category
+        FROM event_booking_seats bs
+        JOIN event_seats s ON s.id = bs.seat_id
+        WHERE bs.booking_id IN (${Prisma.join(bookingIds)})
+      `;
+      seats.forEach((s) => {
+        if (!seatsByBooking[s.booking_id]) seatsByBooking[s.booking_id] = [];
+        seatsByBooking[s.booking_id].push({
+          seat_id:  s.seat_id,
+          row:      s.row_label,
+          number:   s.seat_number,
+          section:  s.section,
+          category: s.category,
+        });
+      });
+    }
+
+    const data = rows.map((b) => ({
+      id:             b.id,
+      ticket_code:    b.ticket_code,
+      event_id:       b.event_id,
+      event_title:    b.event_title,
+      tier_id:        b.tier_id,
+      tier_name:      b.tier_name,
+      quantity:       Number(b.quantity),
+      total_amount:   Number(b.total_amount),
       payment_method: b.payment_method,
-      attendee_names: typeof b.attendee_names === 'string' ? JSON.parse(b.attendee_names) : b.attendee_names,
-      event_start_at: b.events.start_at,
-      venue_name: b.events.venue_name,
-      created_at: b.created_at,
-      status: b.status,
-      event_seats: b.event_booking_seats.map((bs) => ({
-        seat_id: bs.seat_id,
-        row: bs.event_seats.row_label,
-        number: bs.event_seats.seat_number,
-        section: bs.event_seats.section,
-        category: bs.event_seats.category,
-      })),
+      attendee_names: typeof b.attendee_names === 'string' ? JSON.parse(b.attendee_names) : (b.attendee_names ?? []),
+      event_start_at: b.event_start_at,
+      venue_name:     b.venue_name,
+      created_at:     b.created_at,
+      status:         b.status,
+      event_seats:    seatsByBooking[b.id] ?? [],
     }));
 
     res.json({ success: true, data });
@@ -451,7 +472,6 @@ async function verifyTicket(req, res, next) {
       include: {
         events: { select: { title: true, venue_name: true, start_at: true } },
         event_ticket_tiers: { select: { name: true } },
-        users: { select: { first_name: true, last_name: true, user_name: true } },
       },
     });
 
@@ -473,7 +493,7 @@ async function verifyTicket(req, res, next) {
       event_start_at: booking.events.start_at,
       tier_name: booking.event_ticket_tiers.name,
       quantity: booking.quantity,
-      attendee_name: attendees[0] || null,
+      attendee_names: attendees,
       checked_in_at: booking.checked_in_at,
     };
 
@@ -487,13 +507,15 @@ async function verifyTicket(req, res, next) {
       return res.json({ success: true, data: { ...base, status: 'cancelled' } });
     }
 
-    // Valid — mark as used
-    await prisma.event_bookings.update({
-      where: { ticket_code: ticket_code.trim() },
-      data: { status: 'used', checked_in_at: new Date() },
-    });
+    // Valid — mark as used (checked_in_at not yet in generated client, use raw)
+    const now = new Date();
+    await prisma.$executeRawUnsafe(
+      `UPDATE event_bookings SET status = 'used', checked_in_at = ? WHERE ticket_code = ?`,
+      now,
+      ticket_code.trim(),
+    );
 
-    return res.json({ success: true, data: { ...base, status: 'confirmed', checked_in_at: new Date() } });
+    return res.json({ success: true, data: { ...base, status: 'confirmed', checked_in_at: now } });
   } catch (err) {
     next(err);
   }

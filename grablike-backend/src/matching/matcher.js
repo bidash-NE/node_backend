@@ -270,6 +270,9 @@ export const matcher = {
         job_type: jobType,
         batch_id: batchId,
         preferred,  // tells driver app "you were specifically requested"
+        flight_number: ride.flight_number || null,
+        airport_code: ride.airport_code || null,
+        airport_name: ride.airport_name || null,
       });
     };
 
@@ -549,6 +552,9 @@ export const matcher = {
 
         offer_code: offer_code ?? null,
         payment_method,
+        flight_number: ride?.flight_number || null,
+        airport_code: ride?.airport_code || null,
+        airport_name: ride?.airport_name || null,
       });
     }
 
