@@ -82,6 +82,11 @@ export function makeMatchingRouter(io, mysqlPool) {
 
       // preferred driver (from DriversNearby screen)
       preferred_driver_id: preferredDriverIdRaw = null,
+
+      // airport / flight metadata (optional, from FlightArrival flow)
+      flight_number: flightNumberRaw = null,
+      airport_code: airportCodeRaw = null,
+      airport_name: airportNameRaw = null,
     } = req.body || {};
 
     /* -------------------- basic validation -------------------- */
@@ -252,6 +257,19 @@ export function makeMatchingRouter(io, mysqlPool) {
         ? String(preferredDriverIdRaw).trim()
         : null;
 
+    const flight_number =
+      flightNumberRaw != null && String(flightNumberRaw).trim() !== ""
+        ? String(flightNumberRaw).trim().slice(0, 20)
+        : null;
+    const airport_code =
+      airportCodeRaw != null && String(airportCodeRaw).trim() !== ""
+        ? String(airportCodeRaw).trim().slice(0, 10).toUpperCase()
+        : null;
+    const airport_name =
+      airportNameRaw != null && String(airportNameRaw).trim() !== ""
+        ? String(airportNameRaw).trim().slice(0, 100)
+        : null;
+
     /* -------------------- waypoints normalize -------------------- */
     const MAX_WPS = 5;
     let waypoints = [];
@@ -335,8 +353,9 @@ export function makeMatchingRouter(io, mysqlPool) {
         distance_m, duration_s, currency,
         trip_type, pool_batch_id,
         fare_cents, base_fare_cents,
-        booking_type, scheduled_at, payment_method
-      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        booking_type, scheduled_at, payment_method,
+        flight_number, airport_code, airport_name
+      ) VALUES (?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         [
           passenger_id,
@@ -358,6 +377,9 @@ export function makeMatchingRouter(io, mysqlPool) {
           booking_type,
           scheduled_at ? new Date(scheduled_at) : null,
           payment_method,
+          flight_number,
+          airport_code,
+          airport_name,
         ],
       );
 
@@ -489,6 +511,11 @@ export function makeMatchingRouter(io, mysqlPool) {
         gst_cents: gstCents,
 
         preferred_driver_id,
+
+        // flight / airport metadata
+        flight_number,
+        airport_code,
+        airport_name,
       });
 
       return res.json({

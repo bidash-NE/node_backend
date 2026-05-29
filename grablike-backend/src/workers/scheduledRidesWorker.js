@@ -194,7 +194,10 @@ export function startScheduledRidesWorker({
             r.trip_type,
             r.pool_batch_id,
             r.scheduled_at,
-            r.dispatch_at
+            r.dispatch_at,
+            r.flight_number,
+            r.airport_code,
+            r.airport_name
           FROM rides r
           JOIN ride_types s ON s.name = r.service_type
           WHERE ride_id IN (${rideIds.map(() => "?").join(",")})
