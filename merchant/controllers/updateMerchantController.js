@@ -1,4 +1,3 @@
-// controllers/updateMerchantController.js
 const fs = require("fs");
 const path = require("path");
 const {
@@ -44,9 +43,10 @@ async function updateMerchantBusiness(req, res) {
   try {
     const currentBusiness = await getMerchantBusinessDetailsById(business_id);
     if (!currentBusiness) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Merchant business not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Merchant business not found.",
+      });
     }
 
     // upload.fields() => req.files[fieldname][0]
@@ -63,7 +63,7 @@ async function updateMerchantBusiness(req, res) {
       updateFields.license_image = toStoredPath(newLicenseImage.path);
     }
 
-    // ✅ NEW: normalize min_amount_for_fd (allow null / empty, keep numeric string)
+    // Normalize min_amount_for_fd (allow null / empty, keep numeric string)
     if (updateFields.min_amount_for_fd !== undefined) {
       const raw = String(updateFields.min_amount_for_fd ?? "").trim();
       updateFields.min_amount_for_fd = raw === "" ? null : raw;
@@ -71,8 +71,7 @@ async function updateMerchantBusiness(req, res) {
 
     // Special celebration validation
     if (updateFields.special_celebration !== undefined) {
-      updateFields.special_celebration =
-        updateFields.special_celebration || null;
+      updateFields.special_celebration = updateFields.special_celebration || null;
 
       if (
         updateFields.special_celebration &&
@@ -88,7 +87,7 @@ async function updateMerchantBusiness(req, res) {
 
     const updated = await updateMerchantBusinessDetails(
       business_id,
-      updateFields,
+      updateFields
     );
 
     if (!updated) {
@@ -107,6 +106,15 @@ async function updateMerchantBusiness(req, res) {
     });
   } catch (err) {
     console.error("[updateMerchantBusiness] error:", err);
+    
+    // Handle Prisma specific errors
+    if (err.code === "P2025") {
+      return res.status(404).json({
+        success: false,
+        message: "Merchant business not found.",
+      });
+    }
+    
     return res.status(500).json({
       success: false,
       message: err.message || "Update failed.",
@@ -175,6 +183,14 @@ async function removeSpecialCelebration(req, res) {
     });
   } catch (err) {
     console.error("[removeSpecialCelebration] error:", err);
+    
+    if (err.code === "P2025") {
+      return res.status(404).json({
+        success: false,
+        message: "Merchant business not found.",
+      });
+    }
+    
     return res.status(500).json({
       success: false,
       message: err.message || "Failed to remove special celebration.",

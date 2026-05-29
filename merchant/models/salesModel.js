@@ -1,5 +1,4 @@
-// models/salesModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 /**
  * Get today's sales for a given business (merchant).
@@ -14,68 +13,104 @@ const db = require("../config/db");
  *  - total_orders: number of distinct orders for this business today
  */
 async function getTodaySalesForBusiness(business_id) {
-  const bid = Number(business_id);
-  if (!Number.isFinite(bid) || bid <= 0) {
-    throw new Error("Invalid business_id");
-  }
-
-  const [rows] = await db.query(
-    `
-    SELECT
-      o.order_id,
-      o.total_amount,
-      o.platform_fee,
-      SUM(oi.subtotal + oi.delivery_fee) AS business_share
-    FROM orders o
-    JOIN order_items oi
-      ON oi.order_id = o.order_id
-    WHERE
-      oi.business_id = ?
-      AND o.status = 'COMPLETED'
-      AND DATE(o.created_at) = CURDATE()
-    GROUP BY
-      o.order_id,
-      o.total_amount,
-      o.platform_fee
-    `,
-    [bid]
-  );
-
-  if (!rows.length) {
-    return {
-      business_id: bid,
-      total_orders: 0,
-      gross_sales: 0,
-      net_sales: 0,
-      currency: "Nu",
-    };
-  }
-
-  let gross = 0;
-  let net = 0;
-
-  for (const row of rows) {
-    const share = Number(row.business_share || 0); // this biz's revenue in that order
-    const orderTotal = Number(row.total_amount || 0);
-    const platformFee = Number(row.platform_fee || 0);
-
-    gross += share;
-
-    let feeShare = 0;
-    if (orderTotal > 0 && platformFee > 0) {
-      feeShare = platformFee * (share / orderTotal);
+  try {
+    const bid = Number(business_id);
+    if (!Number.isFinite(bid) || bid <= 0) {
+      throw new Error("Invalid business_id. Must be a positive integer.");
     }
 
-    net += share - feeShare;
-  }
+    // Check if business exists
+    const business = await prisma.merchant_business_details.findUnique({
+      where: { business_id: bid },
+      select: { business_id: true },
+    });
 
-  return {
-    business_id: bid,
-    total_orders: rows.length,
-    gross_sales: Number(gross.toFixed(2)),
-    net_sales: Number(net.toFixed(2)),
-    currency: "Nu",
-  };
+    if (!business) {
+      throw new Error(`Business with ID ${bid} not found.`);
+    }
+
+    // Get today's date range (start to end of day)
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    // Fetch all completed orders for this business from today
+    const orders = await prisma.orders.findMany({
+      where: {
+        status: "COMPLETED",
+        created_at: {
+          gte: todayStart,
+          lte: todayEnd,
+        },
+        order_items: {
+          some: {
+            business_id: bid,
+          },
+        },
+      },
+      select: {
+        order_id: true,
+        total_amount: true,
+        platform_fee: true,
+        order_items: {
+          where: {
+            business_id: bid,
+          },
+          select: {
+            subtotal: true,
+            delivery_fee: true,
+          },
+        },
+      },
+    });
+
+    if (!orders.length) {
+      return {
+        business_id: bid,
+        total_orders: 0,
+        gross_sales: 0,
+        net_sales: 0,
+        currency: "Nu",
+      };
+    }
+
+    let gross = 0;
+    let net = 0;
+
+    for (const order of orders) {
+      // Calculate business share from this order
+      let businessShare = 0;
+      for (const item of order.order_items) {
+        businessShare += Number(item.subtotal || 0) + Number(item.delivery_fee || 0);
+      }
+
+      const orderTotal = Number(order.total_amount || 0);
+      const platformFee = Number(order.platform_fee || 0);
+
+      gross += businessShare;
+
+      // Calculate proportional platform fee share
+      let feeShare = 0;
+      if (orderTotal > 0 && platformFee > 0) {
+        feeShare = platformFee * (businessShare / orderTotal);
+      }
+
+      net += businessShare - feeShare;
+    }
+
+    return {
+      business_id: bid,
+      total_orders: orders.length,
+      gross_sales: Number(gross.toFixed(2)),
+      net_sales: Number(net.toFixed(2)),
+      currency: "Nu",
+    };
+  } catch (error) {
+    console.error("getTodaySalesForBusiness error:", error);
+    throw error;
+  }
 }
 
 module.exports = {
