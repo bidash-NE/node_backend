@@ -3,9 +3,8 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-const UPLOAD_ROOT =
-  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
-
+// ✅ Use a path within the app's working directory
+const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
 const SUBFOLDER = "order_delivery_photos";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
@@ -15,9 +14,18 @@ const MAX_BYTES = Number(
 ); // 5MB
 
 function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    console.log(`✅ Created directory: ${dir}`);
+  }
 }
-ensureDirSync(DEST);
+
+// Ensure directory exists
+try {
+  ensureDirSync(DEST);
+} catch (err) {
+  console.error(`❌ Failed to create directory ${DEST}:`, err.message);
+}
 
 function safeExt(originalName = "", mimetype = "") {
   const fromName = (path.extname(originalName || "") || "").toLowerCase();
@@ -56,12 +64,6 @@ const fileFilter = (_req, file, cb) => {
 
 /**
  * Accept up to MAX_PHOTOS images.
- * Supports field names from frontend:
- * - delivery_photo (single/multi)
- * - delivery_photos (multi)
- * - delivery_photo[] (some frontends append like this)
- * - image (single/multi)
- * - images (multi)
  */
 function uploadDeliveryPhotos() {
   const uploader = multer({
@@ -84,7 +86,7 @@ function uploadDeliveryPhotos() {
       if (err) {
         console.error("[uploadDeliveryPhotos] multer error:", err);
         return res.status(400).json({
-          ok: false,
+          success: false,
           message: err.message || "Upload failed",
           code: err.code,
           field: err.field,
@@ -104,7 +106,7 @@ function uploadDeliveryPhotos() {
       if (list.length > MAX_PHOTOS) {
         console.error("[uploadDeliveryPhotos] Too many files:", list.length);
         return res.status(400).json({
-          ok: false,
+          success: false,
           message: `You can upload up to ${MAX_PHOTOS} photos only.`,
           received: list.length,
         });
@@ -115,8 +117,7 @@ function uploadDeliveryPhotos() {
 
       console.log(
         "[uploadDeliveryPhotos] uploaded count:",
-        req.deliveryPhotos.length,
-        req.deliveryPhotos.map((f) => f.filename)
+        req.deliveryPhotos.length
       );
 
       next();
@@ -134,8 +135,11 @@ function toWebPaths(filesArr) {
   return arr.map(toWebPath).filter(Boolean).slice(0, MAX_PHOTOS);
 }
 
+// Export the middleware function (call it to get the middleware)
+const uploadMiddleware = uploadDeliveryPhotos();
+
 module.exports = {
-  uploadDeliveryPhotos: uploadDeliveryPhotos(),
+  uploadDeliveryPhotos: uploadMiddleware,
   toWebPath,
   toWebPaths,
   MAX_PHOTOS,

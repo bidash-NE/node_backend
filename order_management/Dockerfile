@@ -35,6 +35,10 @@ RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
+# ✅ Create uploads directory within the app directory
+RUN mkdir -p /app/order_management/uploads/order_delivery_photos && \
+    chown -R nodejs:nodejs /app/order_management/uploads
+
 # Copy from builder
 COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
@@ -52,6 +56,7 @@ WORKDIR /app/order_management
 # Environment variables
 ENV NODE_ENV=production
 ENV PORT=1001
+ENV UPLOAD_ROOT=/app/order_management/uploads
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
