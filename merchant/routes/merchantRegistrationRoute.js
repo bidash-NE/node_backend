@@ -43,7 +43,7 @@ const maybeMulter = (req, res, next) => {
 router.post("/register", rateLimiter, maybeMulter, registerMerchant);
 
 // Update business
-router.put("/update/:businessId", maybeMulter, updateMerchant);
+// router.put("/update/:businessId", maybeMulter, updateMerchant);
 
 // Login by username
 router.post("/login-email", rateLimiter, loginByEmail);

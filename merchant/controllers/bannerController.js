@@ -1,6 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { prisma } = require("../lib/prisma");
+const cache = require("../services/cacheService");
+
 const {
   createBannerWithWalletCharge,
   getBannerById,
@@ -9,7 +12,9 @@ const {
   listActiveByKind,
   updateBanner,
   deleteBanner,
+  getBannerBasePrice,
 } = require("../models/bannerModel");
+
 const {
   uploadBannerImage,
   toWebPath,
@@ -20,6 +25,7 @@ const isUploadsPath = (p) =>
   typeof p === "string" && /^\/?uploads\//i.test(String(p).replace(/^\/+/, ""));
 const toAbsPath = (webPath) =>
   path.join(process.cwd(), String(webPath).replace(/^\//, ""));
+
 function safeDeleteFile(oldWebPath) {
   if (!oldWebPath) return;
   const normalized = String(oldWebPath).trim();
@@ -34,6 +40,7 @@ function safeDeleteFile(oldWebPath) {
     fs.unlink(absNorm, () => {});
   });
 }
+
 function saveBase64ImageIfPresent(body) {
   const raw = (body?.banner_image || body?.image || "").toString().trim();
   const m = raw.match(
@@ -56,6 +63,7 @@ function saveBase64ImageIfPresent(body) {
   fs.writeFileSync(abs, buf);
   return `/uploads/banners/${fileName}`;
 }
+
 function extractStorableImagePath(req) {
   if (req.file) return toWebPath(req.file);
   const raw = (req.body?.banner_image || req.body?.image || "")
@@ -65,6 +73,27 @@ function extractStorableImagePath(req) {
   const saved = saveBase64ImageIfPresent(req.body);
   if (saved) return saved;
   return null;
+}
+
+// Helper to generate cache key
+function getCacheKey(...parts) {
+  return parts.map(p => String(p).toLowerCase().replace(/[^a-z0-9_-]/g, '_')).join(':');
+}
+
+// Helper to invalidate banner caches when data changes
+async function invalidateBannerCaches(business_id = null) {
+  // Clear all banner list caches
+  await cache.clearPattern("banners:list:*");
+  await cache.clearPattern("banners:food:*");
+  await cache.clearPattern("banners:mart:*");
+  await cache.clearPattern("banners:base_price:*");
+  
+  // Clear business-specific caches
+  if (business_id) {
+    await cache.clearPattern(`banners:business:${business_id}:*`);
+  }
+  
+  console.log(`🗑️ Banner caches invalidated${business_id ? ` for business ${business_id}` : ''}`);
 }
 
 // POST /api/banners
@@ -108,21 +137,14 @@ async function createBannerCtrl(req, res) {
 
     if (!out.success) return res.status(400).json(out);
 
+    // Invalidate caches after successful creation
+    await invalidateBannerCaches(b.business_id);
+
     // Format date and time for payment card
     const now = new Date();
     const months = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     const day = String(now.getDate()).padStart(2, "0");
     const month = months[now.getMonth()];
@@ -134,12 +156,8 @@ async function createBannerCtrl(req, res) {
     const seconds = String(now.getSeconds()).padStart(2, "0");
     const ampm = hours >= 12 ? "PM" : "AM";
     hours = hours % 12 || 12;
-    const timeStr = `${String(hours).padStart(
-      2,
-      "0"
-    )}:${minutes}:${seconds} ${ampm}`;
+    const timeStr = `${String(hours).padStart(2, "0")}:${minutes}:${seconds} ${ampm}`;
 
-    // Prepare clean payment object for UI
     const pay = out.payment;
     const purpose = `Banner Fee from Business #${out.data.business_id} (${out.data.owner_type})`;
 
@@ -159,106 +177,210 @@ async function createBannerCtrl(req, res) {
       data: out.data,
       payment,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("createBannerCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to create banner.",
+      message: error.message || "Failed to create banner.",
     });
   }
 }
 
-// Other controllers unchanged
+// GET /api/banners (with caching)
 async function listBannersCtrl(req, res) {
   try {
     const { business_id, active_only, owner_type } = req.query || {};
-    const out = await listBanners({ business_id, active_only, owner_type });
+    
+    // Generate cache key
+    const cacheKey = getCacheKey('banners', 'list', business_id || 'all', active_only || 'all', owner_type || 'all');
+    
+    // Try to get from cache
+    let data = await cache.get(cacheKey);
+    
+    if (!data) {
+      const out = await listBanners({ business_id, active_only, owner_type });
+      data = out.data;
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, data, 300);
+      console.log(`💾 Cached banners list: ${cacheKey}`);
+    } else {
+      console.log(`⚡ Cache HIT: ${cacheKey}`);
+    }
+    
     return res.status(200).json({
       success: true,
       message: "Banners fetched successfully.",
-      data: out.data,
+      data: data,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("listBannersCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch banners.",
+      message: error.message || "Failed to fetch banners.",
     });
   }
 }
+
+// GET /api/banners/business/:business_id (with caching)
 async function listAllBannersByBusinessCtrl(req, res) {
   try {
+    const business_id = req.params.business_id;
     const { owner_type } = req.query || {};
-    const out = await listAllBannersForBusiness(
-      req.params.business_id,
-      owner_type
-    );
+    
+    // Generate cache key
+    const cacheKey = getCacheKey('banners', 'business', business_id, owner_type || 'all');
+    
+    // Try to get from cache
+    let data = await cache.get(cacheKey);
+    
+    if (!data) {
+      const out = await listAllBannersForBusiness(business_id, owner_type);
+      data = out.data;
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, data, 300);
+      console.log(`💾 Cached business banners: ${cacheKey}`);
+    } else {
+      console.log(`⚡ Cache HIT: ${cacheKey}`);
+    }
+    
     return res.status(200).json({
       success: true,
       message: "All banners fetched successfully.",
-      data: out.data,
+      data: data,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("listAllBannersByBusinessCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch banners.",
+      message: error.message || "Failed to fetch banners.",
     });
   }
 }
+
+// GET /api/banners/food (with caching)
 async function listActiveFoodCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
-    const out = await listActiveByKind("food", business_id);
+    
+    // Generate cache key
+    const cacheKey = getCacheKey('banners', 'food', business_id || 'all');
+    
+    // Try to get from cache
+    let data = await cache.get(cacheKey);
+    
+    if (!data) {
+      const out = await listActiveByKind("food", business_id);
+      data = out.data;
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, data, 300);
+      console.log(`💾 Cached food banners: ${cacheKey}`);
+    } else {
+      console.log(`⚡ Cache HIT: ${cacheKey}`);
+    }
+    
     return res.status(200).json({
       success: true,
       message: "Active food banners fetched successfully.",
-      data: out.data,
+      data: data,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("listActiveFoodCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch food banners.",
+      message: error.message || "Failed to fetch food banners.",
     });
   }
 }
+
+// GET /api/banners/mart (with caching)
 async function listActiveMartCtrl(req, res) {
   try {
     const { business_id } = req.query || {};
-    const out = await listActiveByKind("mart", business_id);
+    
+    // Generate cache key
+    const cacheKey = getCacheKey('banners', 'mart', business_id || 'all');
+    
+    // Try to get from cache
+    let data = await cache.get(cacheKey);
+    
+    if (!data) {
+      const out = await listActiveByKind("mart", business_id);
+      data = out.data;
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, data, 300);
+      console.log(`💾 Cached mart banners: ${cacheKey}`);
+    } else {
+      console.log(`⚡ Cache HIT: ${cacheKey}`);
+    }
+    
     return res.status(200).json({
       success: true,
       message: "Active mart banners fetched successfully.",
-      data: out.data,
+      data: data,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("listActiveMartCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch mart banners.",
+      message: error.message || "Failed to fetch mart banners.",
     });
   }
 }
+
+// GET /api/banners/:id (with caching)
 async function getBannerCtrl(req, res) {
   try {
-    const out = await getBannerById(req.params.id);
-    return res.status(out.success ? 200 : 404).json(out);
-  } catch (e) {
+    const id = req.params.id;
+    
+    // Generate cache key
+    const cacheKey = getCacheKey('banner', 'single', id);
+    
+    // Try to get from cache
+    let data = await cache.get(cacheKey);
+    
+    if (!data) {
+      const out = await getBannerById(id);
+      if (!out.success) {
+        return res.status(404).json(out);
+      }
+      data = out.data;
+      
+      // Cache for 10 minutes (individual banner)
+      await cache.set(cacheKey, data, 600);
+      console.log(`💾 Cached banner ${id}: ${cacheKey}`);
+    } else {
+      console.log(`⚡ Cache HIT: ${cacheKey}`);
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: data,
+    });
+  } catch (error) {
+    console.error("getBannerCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to fetch banner.",
+      message: error.message || "Failed to fetch banner.",
     });
   }
 }
+
+// PUT /api/banners/:id
 async function updateBannerCtrl(req, res) {
   try {
     const id = Number(req.params.id);
     const b = req.body || {};
 
-    // same image handling as before
     const newImg = extractStorableImagePath(req);
     const wantsClear =
       b.banner_image === null ||
       b.banner_image === "null" ||
       b.banner_image === "";
 
-    // fields you want to update (same as before)
     const fields = {
       ...(b.business_id !== undefined && { business_id: b.business_id }),
       ...(b.title !== undefined && { title: b.title }),
@@ -271,30 +393,23 @@ async function updateBannerCtrl(req, res) {
     if (newImg) fields.banner_image = newImg;
     else if (wantsClear) fields.banner_image = null;
 
-    // NEW: optional wallet-charge inputs (only used if dates are being updated)
-    const payer_user_id =
-      b.user_id !== undefined ? Number(b.user_id) : undefined;
-    const total_amount =
-      b.total_amount !== undefined ? Number(b.total_amount) : undefined;
-    const auto_price =
-      String(b.auto_price || "").toLowerCase() === "true" ||
-      b.auto_price === true;
+    const payer_user_id = b.user_id !== undefined ? Number(b.user_id) : undefined;
+    const total_amount = b.total_amount !== undefined ? Number(b.total_amount) : undefined;
+    const auto_price = String(b.auto_price || "").toLowerCase() === "true" || b.auto_price === true;
 
-    // Delegate to model. The model decides whether to do a simple update
-    // or the date+wallet atomic flow (based on fields + options).
-    const out = await require("../models/bannerModel").updateBanner(
-      id,
-      fields,
-      {
-        payer_user_id,
-        total_amount,
-        auto_price,
-      }
-    );
+    const out = await updateBanner(id, fields, {
+      payer_user_id,
+      total_amount,
+      auto_price,
+    });
 
     if (!out.success) return res.status(400).json(out);
 
-    // If the model performed a wallet flow, it will include payment/pricing.
+    // Invalidate caches after update
+    await invalidateBannerCaches(fields.business_id || out.data?.business_id);
+    // Also clear single banner cache
+    await cache.del(getCacheKey('banner', 'single', id));
+
     return res.status(200).json({
       success: true,
       message: out.message || "Banner updated successfully.",
@@ -302,50 +417,81 @@ async function updateBannerCtrl(req, res) {
       ...(out.payment ? { payment: out.payment } : {}),
       ...(out.pricing ? { pricing: out.pricing } : {}),
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("updateBannerCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to update banner.",
+      message: error.message || "Failed to update banner.",
     });
   }
 }
 
+// DELETE /api/banners/:id
 async function deleteBannerCtrl(req, res) {
   try {
-    const out = await deleteBanner(req.params.id);
+    const id = req.params.id;
+    
+    // Get banner info before deletion for cache invalidation
+    const banner = await getBannerById(id);
+    
+    const out = await deleteBanner(id);
     if (!out.success) return res.status(404).json(out);
-    return res
-      .status(200)
-      .json({ success: true, message: "Banner deleted successfully." });
-  } catch (e) {
+    
+    if (out.old_image) safeDeleteFile(out.old_image);
+    
+    // Invalidate caches after deletion
+    if (banner.success && banner.data) {
+      await invalidateBannerCaches(banner.data.business_id);
+    }
+    await cache.del(getCacheKey('banner', 'single', id));
+    
+    return res.status(200).json({
+      success: true,
+      message: "Banner deleted successfully.",
+    });
+  } catch (error) {
+    console.error("deleteBannerCtrl error:", error);
     return res.status(400).json({
       success: false,
-      message: e.message || "Failed to delete banner.",
+      message: error.message || "Failed to delete banner.",
     });
   }
 }
 
-// GET /api/banners/base-price
+// GET /api/banners/base-price (with caching)
 async function getBannerBasePriceCtrl(req, res) {
   try {
-    const [rows] = await require("../config/db").query(
-      "SELECT amount_per_day FROM banners_base_prices LIMIT 1"
-    );
-
-    if (!rows.length)
-      return res.status(404).json({
-        success: false,
-        message: "No base price found in table.",
-      });
-
+    const cacheKey = getCacheKey('banners', 'base_price');
+    
+    // Try to get from cache
+    let result = await cache.get(cacheKey);
+    
+    if (!result) {
+      result = await getBannerBasePrice();
+      
+      if (!result.success) {
+        return res.status(404).json({
+          success: false,
+          message: result.message,
+        });
+      }
+      
+      // Cache for 1 hour (base price changes rarely)
+      await cache.set(cacheKey, result, 3600);
+      console.log(`💾 Cached banner base price`);
+    } else {
+      console.log(`⚡ Cache HIT: banner base price`);
+    }
+    
     return res.status(200).json({
       success: true,
-      amount_per_day: parseInt(rows[0].amount_per_day, 10),
+      amount_per_day: result.amount_per_day,
     });
-  } catch (e) {
+  } catch (error) {
+    console.error("getBannerBasePriceCtrl error:", error);
     return res.status(500).json({
       success: false,
-      message: e.message || "Failed to fetch banner base price.",
+      message: error.message || "Failed to fetch banner base price.",
     });
   }
 }

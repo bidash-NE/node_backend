@@ -157,7 +157,8 @@ jobs:
         if: needs.changes.outputs.order_management == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./order_management
+          context: .
+          file: ./order_management/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-order-management:latest

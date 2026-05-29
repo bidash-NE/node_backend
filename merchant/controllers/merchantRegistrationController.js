@@ -3,6 +3,7 @@ const path = require("path");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { prisma } = require("../lib/prisma");
+const cache = require("../services/cacheService");
 
 const {
   registerMerchantModel,
@@ -330,9 +331,126 @@ function parseOwnersQuery(req) {
   return { q, limit, offset };
 }
 
+// async function listFoodOwners(req, res) {
+//   try {
+//     const { q, limit, offset } = parseOwnersQuery(req);
+//     const whereCondition = {};
+//     if (q) {
+//       whereCondition.OR = [
+//         { business_name: { contains: q, mode: "insensitive" } },
+//         { users: { user_name: { contains: q, mode: "insensitive" } } },
+//       ];
+//     }
+
+//     const businesses = await prisma.merchant_business_details.findMany({
+//       where: { owner_type: "food", ...whereCondition },
+//       include: {
+//         users: { select: { user_id: true, user_name: true, email: true, phone: true, profile_image: true } },
+//         merchant_business_types: { include: { business_types: { select: { id: true, name: true } } } },
+//       },
+//       orderBy: { created_at: "desc" },
+//       skip: offset,
+//       take: limit,
+//     });
+
+//     const businessIds = businesses.map(b => b.business_id);
+//     const ratings = await prisma.food_ratings.groupBy({
+//       by: ["business_id"],
+//       where: { business_id: { in: businessIds } },
+//       _avg: { rating: true },
+//       _count: { rating: true },
+//     });
+
+//     const ratingsMap = new Map();
+//     for (const rating of ratings) {
+//       ratingsMap.set(rating.business_id, {
+//         avg_rating: rating._avg.rating || 0,
+//         total_comments: rating._count.rating || 0,
+//       });
+//     }
+
+//     const data = businesses.map(b => ({
+//       business_id: Number(b.business_id),
+//       owner_type: b.owner_type,
+//       business_name: b.business_name,
+//       business_license_number: b.business_license_number,
+//       license_image: b.license_image,
+//       latitude: b.latitude,
+//       longitude: b.longitude,
+//       address: b.address,
+//       business_logo: b.business_logo,
+//       delivery_option: b.delivery_option,
+//       min_amount_for_fd: b.min_amount_for_fd,
+//       special_celebration: b.special_celebration,
+//       special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+//       opening_time: b.opening_time,
+//       closing_time: b.closing_time,
+//       holidays: b.holidays,
+//       complement: b.complementary,
+//       complement_details: b.complementary_details,
+//       created_at: b.created_at,
+//       updated_at: b.updated_at,
+//       user: {
+//         user_id: Number(b.users.user_id),
+//         user_name: b.users.user_name,
+//         email: b.users.email,
+//         phone: b.users.phone,
+//         profile_image: b.users.profile_image || null,
+//       },
+//       business_types: b.merchant_business_types.map(mbt => ({
+//         business_type_id: Number(mbt.business_types.id),
+//         name: mbt.business_types.name,
+//       })),
+//       avg_rating: ratingsMap.get(b.business_id)?.avg_rating || 0,
+//       total_comments: ratingsMap.get(b.business_id)?.total_comments || 0,
+//     }));
+
+//     return res.status(200).json({ success: true, kind: "food", count: data.length, data });
+//   } catch (err) {
+//     console.error("listFoodOwners error:", err);
+//     return res.status(500).json({ success: false, message: "Failed to fetch food owners." });
+//   }
+// }
+
+// Add this at the top of the file to test
+let requestCount = 0;
+
 async function listFoodOwners(req, res) {
+  const startTime = Date.now();
+  requestCount++;
+  const requestNumber = requestCount;
+  
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
+    
+    // Generate unique cache key
+    const cacheKey = `food_owners:q:${q || 'none'}:limit:${limit}:offset:${offset}`;
+    
+    console.log(`\n📊 Request #${requestNumber} - ${new Date().toISOString()}`);
+    console.log(`🔍 Cache Key: ${cacheKey}`);
+    
+    // 🔍 TRY TO GET FROM CACHE FIRST
+    const cachedData = await cache.get(cacheKey);
+    
+    if (cachedData) {
+      const responseTime = Date.now() - startTime;
+      console.log(`✅ CACHE HIT! Response time: ${responseTime}ms 🚀`);
+      
+      return res.status(200).json({
+        success: true,
+        kind: "food",
+        count: cachedData.count,
+        data: cachedData.data,
+        fromCache: true,
+        responseTimeMs: responseTime,
+        requestNumber: requestNumber
+      });
+    }
+    
+    console.log(`❌ CACHE MISS! Fetching from database...`);
+    const dbStartTime = Date.now();
+    
+    // 📊 FETCH FROM DATABASE
     const whereCondition = {};
     if (q) {
       whereCondition.OR = [
@@ -404,13 +522,40 @@ async function listFoodOwners(req, res) {
       total_comments: ratingsMap.get(b.business_id)?.total_comments || 0,
     }));
 
-    return res.status(200).json({ success: true, kind: "food", count: data.length, data });
+    const dbTime = Date.now() - dbStartTime;
+    console.log(`📊 Database query took: ${dbTime}ms`);
+    
+    // 💾 STORE IN CACHE (5 minutes TTL)
+    const responseData = {
+      count: data.length,
+      data: data
+    };
+    
+    await cache.set(cacheKey, responseData, 300);
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`💾 Cached for next request. Total time: ${totalTime}ms`);
+    
+    return res.status(200).json({
+      success: true,
+      kind: "food",
+      count: data.length,
+      data: data,
+      fromCache: false,
+      dbTimeMs: dbTime,
+      totalTimeMs: totalTime,
+      requestNumber: requestNumber
+    });
+    
   } catch (err) {
     console.error("listFoodOwners error:", err);
-    return res.status(500).json({ success: false, message: "Failed to fetch food owners." });
+    return res.status(500).json({ 
+      success: false, 
+      message: "Failed to fetch food owners.",
+      error: err.message 
+    });
   }
 }
-
 async function listMartOwners(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);

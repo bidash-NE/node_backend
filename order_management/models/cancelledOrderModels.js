@@ -1,5 +1,4 @@
-// models/cancelledOrderModels.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -22,8 +21,7 @@ async function withRetry(fn, { retries = 2, baseDelayMs = 250 } = {}) {
     } catch (e) {
       lastErr = e;
       const code = e?.code;
-      if (code === "ER_LOCK_WAIT_TIMEOUT" || code === "ER_LOCK_DEADLOCK") {
-        // small backoff + retry
+      if (code === "P2034" || code === "P2028" || code?.includes("lock")) {
         await sleep(baseDelayMs * (attempt + 1));
         continue;
       }
@@ -33,51 +31,48 @@ async function withRetry(fn, { retries = 2, baseDelayMs = 250 } = {}) {
   throw lastErr;
 }
 
-// models/cancelledOrderModels.js
-async function getCancelledOrdersByUser(
-  user_id,
-  { limit = 50, offset = 0 } = {}
-) {
+/**
+ * Get cancelled orders for a specific user with pagination
+ */
+async function getCancelledOrdersByUser(user_id, { limit = 50, offset = 0 } = {}) {
   const lim = Math.min(200, Math.max(1, Number(limit) || 50));
   const off = Math.max(0, Number(offset) || 0);
 
-  const [orders] = await db.query(
-    `
-    SELECT
-      co.cancelled_id,
-      co.order_id,
-      co.user_id,
-      co.status,
-      co.status_reason,
-      co.total_amount,
-      co.discount_amount,
-      co.delivery_fee,
-      co.platform_fee,
-      co.merchant_delivery_fee,
-      co.payment_method,
-      co.delivery_address,
-      co.note_for_restaurant,
-      co.if_unavailable,
-      co.fulfillment_type,
-      co.priority,
-      co.estimated_arrivial_time,
-      co.cancelled_by,
-      co.cancelled_at,
-      co.original_created_at,
-      co.original_updated_at
-    FROM cancelled_orders co
-    WHERE co.user_id = ?
-    ORDER BY co.cancelled_at DESC
-    LIMIT ? OFFSET ?
-    `,
-    [user_id, lim, off]
-  );
+  // Fetch cancelled orders
+  const orders = await prisma.cancelled_orders.findMany({
+    where: { user_id: user_id },
+    orderBy: { cancelled_at: "desc" },
+    take: lim,
+    skip: off,
+    select: {
+      cancelled_id: true,
+      order_id: true,
+      user_id: true,
+      status: true,
+      status_reason: true,
+      total_amount: true,
+      discount_amount: true,
+      delivery_fee: true,
+      platform_fee: true,
+      merchant_delivery_fee: true,
+      payment_method: true,
+      delivery_address: true,
+      note_for_restaurant: true,
+      if_unavailable: true,
+      fulfillment_type: true,
+      priority: true,
+      estimated_arrivial_time: true,
+      cancelled_by: true,
+      cancelled_at: true,
+      original_created_at: true,
+      original_updated_at: true,
+    },
+  });
 
-  const [[cnt]] = await db.query(
-    `SELECT COUNT(*) AS total FROM cancelled_orders WHERE user_id = ?`,
-    [user_id]
-  );
-  const total = Number(cnt?.total || 0);
+  // Get total count
+  const total = await prisma.cancelled_orders.count({
+    where: { user_id: user_id },
+  });
 
   if (!orders.length) {
     return { rows: [], total, limit: lim, offset: off };
@@ -85,25 +80,23 @@ async function getCancelledOrdersByUser(
 
   const orderIds = orders.map((o) => o.order_id);
 
-  const [items] = await db.query(
-    `
-    SELECT
-      order_id,
-      business_id,
-      business_name,
-      menu_id,
-      item_name,
-      item_image,
-      quantity,
-      price,
-      subtotal,
-      created_at
-    FROM cancelled_order_items
-    WHERE order_id IN (?)
-    ORDER BY order_id, cancelled_item_id ASC
-    `,
-    [orderIds]
-  );
+  // Fetch cancelled items for these orders
+  const items = await prisma.cancelled_order_items.findMany({
+    where: { order_id: { in: orderIds } },
+    orderBy: { cancelled_item_id: "asc" },
+    select: {
+      order_id: true,
+      business_id: true,
+      business_name: true,
+      menu_id: true,
+      item_name: true,
+      item_image: true,
+      quantity: true,
+      price: true,
+      subtotal: true,
+      created_at: true,
+    },
+  });
 
   // Group items by order
   const itemsByOrder = new Map();
@@ -112,39 +105,22 @@ async function getCancelledOrdersByUser(
     itemsByOrder.get(it.order_id).push(it);
   }
 
-  // Collect all business_ids from items (because cancelled_orders has no service_type column)
-  const businessIds = Array.from(
-    new Set(
-      items
-        .map((it) => Number(it.business_id))
-        .filter((n) => Number.isFinite(n) && n > 0)
-    )
-  );
+  // Collect all business_ids from items
+  const businessIds = [...new Set(items.map((it) => Number(it.business_id)).filter((n) => n > 0))];
 
-  // Map business_id -> service_type derived from owner_type (MART/FOOD)
+  // Map business_id -> service_type from merchant_business_details
   const serviceTypeByBusiness = new Map();
 
   if (businessIds.length) {
-    // ✅ Adjust table/column name if your schema differs:
-    // - Table assumed: merchant_business_details
-    // - Columns assumed: business_id, owner_type (values like 'mart' / 'food')
-    const [bizRows] = await db.query(
-      `
-      SELECT business_id, owner_type
-      FROM merchant_business_details
-      WHERE business_id IN (?)
-      `,
-      [businessIds]
-    );
+    const businesses = await prisma.merchant_business_details.findMany({
+      where: { business_id: { in: businessIds } },
+      select: { business_id: true, owner_type: true },
+    });
 
-    for (const r of bizRows) {
-      const bid = Number(r.business_id);
-      const owner = String(r.owner_type || "")
-        .trim()
-        .toUpperCase();
-      if (!Number.isFinite(bid) || bid <= 0) continue;
-
-      // Normalize owner_type into exactly "MART" or "FOOD" when possible
+    for (const biz of businesses) {
+      const bid = Number(biz.business_id);
+      const owner = String(biz.owner_type || "").trim().toUpperCase();
+      
       let st = owner;
       if (owner === "MART" || owner === "FOOD") {
         st = owner;
@@ -153,33 +129,25 @@ async function getCancelledOrdersByUser(
       } else if (owner.includes("FOOD") || owner.includes("RESTAUR")) {
         st = "FOOD";
       } else {
-        // fallback: keep owner_type uppercased if it's something else
         st = owner || null;
       }
-
       serviceTypeByBusiness.set(bid, st);
     }
   }
 
-  // Build output rows: add service_type per order derived from item's business_id -> owner_type
+  // Build output rows
   const rows = orders.map((o) => {
     const orderItems = itemsByOrder.get(o.order_id) || [];
-
-    // Pick first business_id for service_type (most orders are single-business)
-    const firstBizId = orderItems.length
-      ? Number(orderItems[0].business_id)
+    const firstBizId = orderItems.length ? Number(orderItems[0].business_id) : null;
+    
+    let service_type = firstBizId && serviceTypeByBusiness.has(firstBizId)
+      ? serviceTypeByBusiness.get(firstBizId)
       : null;
 
-    let service_type =
-      Number.isFinite(firstBizId) && serviceTypeByBusiness.has(firstBizId)
-        ? serviceTypeByBusiness.get(firstBizId)
-        : null;
-
-    // If first item didn’t resolve, try any other item business_id
     if (!service_type && orderItems.length) {
       for (const it of orderItems) {
         const bid = Number(it.business_id);
-        if (Number.isFinite(bid) && serviceTypeByBusiness.has(bid)) {
+        if (serviceTypeByBusiness.has(bid)) {
           service_type = serviceTypeByBusiness.get(bid);
           break;
         }
@@ -188,7 +156,7 @@ async function getCancelledOrdersByUser(
 
     return {
       ...o,
-      service_type: service_type || null, // e.g., "MART" / "FOOD"
+      service_type: service_type || null,
       items: orderItems,
     };
   });
@@ -197,88 +165,74 @@ async function getCancelledOrdersByUser(
 }
 
 /**
- * Delete one cancelled order for a user (also deletes its cancelled items).
- * Uses a transaction + row lock to avoid race conditions.
+ * Delete one cancelled order for a user (also deletes its cancelled items)
  */
 async function deleteCancelledOrderByUser(user_id, order_id) {
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
+  // Use transaction for atomic operation
+  return await prisma.$transaction(async (tx) => {
+    // Check if order exists and belongs to user
+    const existingOrder = await tx.cancelled_orders.findFirst({
+      where: { user_id: user_id, order_id: order_id },
+      select: { order_id: true },
+    });
 
-    // fail fast instead of waiting 50s
-    await conn.query(`SET SESSION innodb_lock_wait_timeout = 3`);
+    if (!existingOrder) {
+      return { deleted: false };
+    }
 
-    // delete items first (works even if FK/cascade is missing)
-    await conn.query(`DELETE FROM cancelled_order_items WHERE order_id = ?`, [
-      order_id,
-    ]);
+    // Delete items first (handle cascade)
+    await tx.cancelled_order_items.deleteMany({
+      where: { order_id: order_id },
+    });
 
-    const [r] = await conn.query(
-      `DELETE FROM cancelled_orders WHERE user_id = ? AND order_id = ?`,
-      [user_id, order_id]
-    );
+    // Delete the order
+    const result = await tx.cancelled_orders.deleteMany({
+      where: { user_id: user_id, order_id: order_id },
+    });
 
-    await conn.commit();
-    return { deleted: r.affectedRows > 0 };
-  } catch (e) {
-    try {
-      await conn.rollback();
-    } catch {}
-    throw e;
-  } finally {
-    conn.release();
-  }
+    return { deleted: result.count > 0 };
+  });
 }
 
 /**
- * Delete many cancelled orders for a user (also deletes items).
- * Locks only the matching order_ids.
+ * Delete many cancelled orders for a user (also deletes items)
  */
 async function deleteManyCancelledOrdersByUser(user_id, order_ids = []) {
   const ids = uniqStrings(order_ids);
   if (!ids.length) return { ok: false, code: "EMPTY_LIST" };
 
-  // optional: chunk to avoid very large IN()
   const CHUNK = 200;
   let totalDeleted = 0;
 
-  return withRetry(async () => {
-    const conn = await db.getConnection();
-    try {
-      await conn.beginTransaction();
-
+  return await withRetry(async () => {
+    return await prisma.$transaction(async (tx) => {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
 
-        // Lock only rows that exist for this user
-        const [rows] = await conn.query(
-          `SELECT order_id FROM cancelled_orders WHERE user_id = ? AND order_id IN (?) FOR UPDATE`,
-          [user_id, chunk]
-        );
-        const found = rows.map((r) => r.order_id);
-        if (!found.length) continue;
+        // Find orders that exist for this user
+        const existingOrders = await tx.cancelled_orders.findMany({
+          where: { user_id: user_id, order_id: { in: chunk } },
+          select: { order_id: true },
+        });
 
-        await conn.query(
-          `DELETE FROM cancelled_order_items WHERE order_id IN (?)`,
-          [found]
-        );
-        const [del] = await conn.query(
-          `DELETE FROM cancelled_orders WHERE user_id = ? AND order_id IN (?)`,
-          [user_id, found]
-        );
-        totalDeleted += Number(del.affectedRows || 0);
+        const foundIds = existingOrders.map((o) => o.order_id);
+        if (!foundIds.length) continue;
+
+        // Delete items for these orders
+        await tx.cancelled_order_items.deleteMany({
+          where: { order_id: { in: foundIds } },
+        });
+
+        // Delete the orders
+        const result = await tx.cancelled_orders.deleteMany({
+          where: { user_id: user_id, order_id: { in: foundIds } },
+        });
+
+        totalDeleted += result.count;
       }
 
-      await conn.commit();
       return { ok: true, deleted: totalDeleted };
-    } catch (e) {
-      try {
-        await conn.rollback();
-      } catch {}
-      throw e;
-    } finally {
-      conn.release();
-    }
+    });
   });
 }
 

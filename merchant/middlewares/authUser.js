@@ -11,6 +11,8 @@ const jwt = require("jsonwebtoken");
 function authUser(req, res, next) {
   try {
     const hdr = req.headers.authorization || "";
+    console.log("[Auth] Authorization header present:", !!hdr);
+    
     if (!hdr.startsWith("Bearer ")) {
       return res.status(401).json({
         success: false,
@@ -19,14 +21,13 @@ function authUser(req, res, next) {
     }
 
     const token = hdr.slice(7).trim();
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Missing access token",
-      });
-    }
+    console.log("[Auth] Token length:", token.length);
+    console.log("[Auth] Token first 20 chars:", token.substring(0, 20));
 
     const secret = process.env.ACCESS_TOKEN_SECRET;
+    console.log("[Auth] Secret loaded:", !!secret);
+    console.log("[Auth] Secret length:", secret?.length);
+    
     if (!secret) {
       console.error("[authUser] ACCESS_TOKEN_SECRET is not set");
       return res
@@ -34,7 +35,19 @@ function authUser(req, res, next) {
         .json({ success: false, message: "Auth not configured" });
     }
 
+    // Decode without verification to see payload
+    const decodedWithoutVerify = jwt.decode(token);
+    console.log("[Auth] Decoded payload (unverified):", decodedWithoutVerify);
+    console.log("[Auth] Token exp:", decodedWithoutVerify?.exp);
+    console.log("[Auth] Current time:", Math.floor(Date.now() / 1000));
+    
+    if (decodedWithoutVerify?.exp && decodedWithoutVerify.exp < Math.floor(Date.now() / 1000)) {
+      console.log("[Auth] TOKEN IS EXPIRED!");
+    }
+
     const decoded = jwt.verify(token, secret);
+    console.log("[Auth] Verification successful!");
+    
     const user_id = decoded.user_id ?? decoded.uid ?? decoded.id ?? decoded.sub;
 
     if (!user_id) {
@@ -49,10 +62,15 @@ function authUser(req, res, next) {
     };
     return next();
   } catch (e) {
-    console.error("[authUser] error:", e?.message || e);
+    console.error("[authUser] error details:", {
+      name: e.name,
+      message: e.message,
+      expiredAt: e.expiredAt,
+      stack: e.stack
+    });
     return res
       .status(401)
-      .json({ success: false, message: "Invalid or expired token" });
+      .json({ success: false, message: e.name === "TokenExpiredError" ? "Token expired" : "Invalid token" });
   }
 }
 

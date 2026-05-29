@@ -1,4 +1,3 @@
-// controllers/cancelledOrderControllers.js
 const Cancelled = require("../models/cancelledOrderModels");
 
 async function getCancelledOrdersByUser(req, res) {
@@ -36,22 +35,20 @@ async function deleteCancelledOrder(req, res) {
     const out = await Cancelled.deleteCancelledOrderByUser(user_id, order_id);
 
     if (!out.deleted) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Order not found" });
+      return res.status(404).json({ success: false, message: "Order not found" });
     }
 
     return res.json({ success: true, message: "Deleted", order_id });
-  } catch (e) {
-    if (e?.code === "ER_LOCK_WAIT_TIMEOUT") {
+  } catch (err) {
+    if (err?.code === "P2034" || err?.code === "P2028" || err?.message?.includes("lock")) {
       return res.status(409).json({
         success: false,
         code: "ROW_LOCKED",
         message: "This cancelled order is busy (locked). Try again.",
       });
     }
-    console.error("[deleteCancelledOrder] Error:", e);
-    return res.status(500).json({ success: false, error: e.message });
+    console.error("[deleteCancelledOrder] Error:", err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 }
 
@@ -62,10 +59,7 @@ async function deleteManyCancelledOrders(req, res) {
     const body = req.body || {};
     const order_ids = Array.isArray(body.order_ids) ? body.order_ids : [];
 
-    const out = await Cancelled.deleteManyCancelledOrdersByUser(
-      user_id,
-      order_ids
-    );
+    const out = await Cancelled.deleteManyCancelledOrdersByUser(user_id, order_ids);
 
     if (!out.ok && out.code === "EMPTY_LIST") {
       return res.status(400).json({
@@ -81,14 +75,14 @@ async function deleteManyCancelledOrders(req, res) {
     });
   } catch (err) {
     console.error("[deleteManyCancelledOrders] Error:", err);
-    if (err?.code === "ER_LOCK_WAIT_TIMEOUT") {
+    if (err?.code === "P2034" || err?.message?.includes("lock")) {
       return res.status(409).json({
         success: false,
         code: "LOCK_WAIT_TIMEOUT",
         message: "Delete is busy (row locked). Try again in a moment.",
       });
     }
-    if (err?.code === "ER_LOCK_DEADLOCK") {
+    if (err?.code === "P2028" || err?.message?.includes("deadlock")) {
       return res.status(409).json({
         success: false,
         code: "DEADLOCK",
