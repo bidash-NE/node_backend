@@ -378,7 +378,7 @@ model driver_vehicles {
   is_approved        Boolean?  @default(false)
   actual_capacity    Int?      @default(0) @db.UnsignedInt
   available_capacity Int?      @default(0) @db.UnsignedInt
-  features           String?
+  features           String?   @db.VarChar(255)
   insurance_expiry   DateTime? @db.Date
   created_at         DateTime? @default(now()) @db.Timestamp(0)
   updated_at         DateTime? @default(now()) @db.Timestamp(0)
@@ -1156,6 +1156,9 @@ model rides {
   currency              String               @default("BTN") @db.Char(3)
   created_at            DateTime             @default(now()) @db.DateTime(0)
   payment_method        String?              @db.VarChar(20)
+  flight_number         String?              @db.VarChar(20)
+  airport_code          String?              @db.VarChar(10)
+  airport_name          String?              @db.VarChar(100)
   delivery_drops        delivery_drops[]
   driver_adjustments    driver_adjustments[]
   driver_earnings       driver_earnings[]
@@ -1351,6 +1354,7 @@ model users {
   admin_logs                admin_logs[]
   all_device_ids            all_device_ids?
   app_ratings               app_ratings[]
+  bookings                  bookings[]
   driver_devices            driver_devices[]
   drivers                   drivers?
   event_bookings            event_bookings[]
@@ -1364,9 +1368,12 @@ model users {
   mart_ratings              mart_ratings[]
   merchant_bank_details     merchant_bank_details[]
   merchant_business_details merchant_business_details[]
+  organizer_revenue_share   organizer_revenue_share[]
+  reviews                   reviews[]
   system_notifications      system_notifications[]
   user_devices              user_devices[]
   user_verification         user_verification[]
+  wishlists                 wishlists[]
 
   @@index([email], map: "email_2")
   @@index([is_active], map: "is_active")
@@ -1527,6 +1534,7 @@ model event_bookings {
   payment_status      event_bookings_payment_status @default(paid)
   wallet_journal_code String?                       @db.VarChar(36)
   created_at          DateTime                      @default(now()) @db.Timestamp(0)
+  checked_in_at       DateTime?                     @db.Timestamp(0)
   event_booking_seats event_booking_seats[]
   event_screenings    event_screenings?             @relation(fields: [screening_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "b_ibfk_screening")
   users               users                         @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_bookings_ibfk_1")
@@ -1555,13 +1563,14 @@ model event_halls {
 }
 
 model event_organizers {
-  id          String        @id @db.Char(36)
-  name        String        @db.VarChar(255)
-  created_at  DateTime      @default(now()) @db.Timestamp(0)
-  user_id     BigInt?       @unique(map: "uq_organizers_user_id") @db.UnsignedBigInt
-  event_halls event_halls[]
-  users       users?        @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "organizers_ibfk_user")
-  events      events[]
+  id                      String                   @id @db.Char(36)
+  name                    String                   @db.VarChar(255)
+  created_at              DateTime                 @default(now()) @db.Timestamp(0)
+  user_id                 BigInt?                  @unique(map: "uq_organizers_user_id") @db.UnsignedBigInt
+  event_halls             event_halls[]
+  users                   users?                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "organizers_ibfk_user")
+  events                  events[]
+  organizer_revenue_share organizer_revenue_share?
 }
 
 model event_payment_sessions {
@@ -1700,6 +1709,7 @@ model events {
   avg_rating          Decimal?              @default(0.00) @db.Decimal(3, 2)
   total_reviews       Int?                  @default(0)
   created_at          DateTime              @default(now()) @db.Timestamp(0)
+  bookings            bookings[]
   event_booking_seats event_booking_seats[]
   event_bookings      event_bookings[]
   event_reviews       event_reviews[]
@@ -1708,6 +1718,9 @@ model events {
   event_ticket_tiers  event_ticket_tiers[]
   event_wishlists     event_wishlists[]
   event_organizers    event_organizers?     @relation(fields: [organizer_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "events_ibfk_1")
+  reviews             reviews[]
+  ticket_tiers        ticket_tiers[]
+  wishlists           wishlists[]
 
   @@index([organizer_id], map: "organizer_id")
 }
@@ -1833,6 +1846,91 @@ model mart_product_info {
   mart_menu       mart_menu @relation(fields: [menu_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "mart_product_info_ibfk_1")
 
   @@index([menu_id], map: "idx_menu_id")
+}
+
+model bookings {
+  id             String                  @id @db.VarChar(50)
+  ticket_code    String                  @unique(map: "ticket_code") @db.VarChar(50)
+  user_id        BigInt                  @db.UnsignedBigInt
+  event_id       String                  @db.Char(36)
+  tier_id        String                  @db.Char(36)
+  quantity       Int
+  total_amount   Int
+  payment_method bookings_payment_method
+  attendee_names String                  @db.LongText
+  status         bookings_status         @default(confirmed)
+  created_at     DateTime                @default(now()) @db.Timestamp(0)
+  users          users                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "bookings_ibfk_1")
+  events         events                  @relation(fields: [event_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_2")
+  ticket_tiers   ticket_tiers            @relation(fields: [tier_id], references: [id], onUpdate: Restrict, map: "bookings_ibfk_3")
+
+  @@index([event_id], map: "event_id")
+  @@index([tier_id], map: "tier_id")
+  @@index([user_id], map: "user_id")
+}
+
+model image_and_icons {
+  id           Int      @id @default(autoincrement())
+  name         String   @unique(map: "unique_image_icon_name") @db.VarChar(255)
+  image_url    String   @db.VarChar(500)
+  created_at   DateTime @default(now()) @db.Timestamp(0)
+  updated_at   DateTime @default(now()) @db.Timestamp(0)
+  service_type String?  @db.VarChar(100)
+}
+
+model organizer_revenue_share {
+  id                   Int              @id @default(autoincrement()) @db.UnsignedInt
+  organizer_id         String           @unique(map: "organizer_id") @db.Char(36)
+  total_revenue        Decimal          @default(0.00) @db.Decimal(15, 2)
+  org_share_pct        Decimal          @default(80.00) @db.Decimal(5, 2)
+  tabdey_share_pct     Decimal          @default(20.00) @db.Decimal(5, 2)
+  total_org_revenue    Decimal          @default(0.00) @db.Decimal(15, 2)
+  total_tabdey_revenue Decimal          @default(0.00) @db.Decimal(15, 2)
+  created_at           DateTime         @default(now()) @db.Timestamp(0)
+  updated_at           DateTime         @default(now()) @db.Timestamp(0)
+  updated_by           BigInt?          @db.UnsignedBigInt
+  event_organizers     event_organizers @relation(fields: [organizer_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "organizer_revenue_share_ibfk_1")
+  users                users?           @relation(fields: [updated_by], references: [user_id], onUpdate: Restrict, map: "organizer_revenue_share_ibfk_2")
+
+  @@index([updated_by], map: "updated_by")
+}
+
+model reviews {
+  id         String   @id @db.Char(36)
+  event_id   String   @db.Char(36)
+  user_id    BigInt   @db.UnsignedBigInt
+  rating     Int      @db.TinyInt
+  comment    String?  @db.Text
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  events     events   @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "reviews_ibfk_1")
+  users      users    @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "reviews_ibfk_2")
+
+  @@unique([event_id, user_id], map: "uq_review")
+  @@index([user_id], map: "user_id")
+}
+
+model ticket_tiers {
+  id              String     @id @db.Char(36)
+  event_id        String     @db.Char(36)
+  name            String     @db.VarChar(100)
+  description     String?    @db.VarChar(255)
+  price           Int
+  available_seats Int        @default(0)
+  bookings        bookings[]
+  events          events     @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "ticket_tiers_ibfk_1")
+
+  @@index([event_id], map: "event_id")
+}
+
+model wishlists {
+  user_id    BigInt   @db.UnsignedBigInt
+  event_id   String   @db.Char(36)
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  users      users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: Restrict, map: "wishlists_ibfk_1")
+  events     events   @relation(fields: [event_id], references: [id], onDelete: Cascade, onUpdate: Restrict, map: "wishlists_ibfk_2")
+
+  @@id([user_id, event_id])
+  @@index([event_id], map: "event_id")
 }
 
 enum settlement_accounts_party_type {
@@ -2292,11 +2390,6 @@ enum event_bookings_payment_method {
   BANK
 }
 
-enum event_bookings_status {
-  confirmed
-  cancelled
-}
-
 enum event_bookings_payment_status {
   pending
   paid
@@ -2321,4 +2414,21 @@ enum receipt_email_email_status {
 enum receipt_email_delivery_method {
   DELIVERY
   PICKUP
+}
+
+enum bookings_payment_method {
+  WALLET
+  CARD
+  UPI
+}
+
+enum bookings_status {
+  confirmed
+  cancelled
+}
+
+enum event_bookings_status {
+  confirmed
+  cancelled
+  used
 }
