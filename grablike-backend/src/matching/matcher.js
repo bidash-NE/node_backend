@@ -394,6 +394,11 @@ export const matcher = {
     driverCodePrefix = "D",
     radiusM = 5000,
     count = 50,
+
+    // airport transfer fields (optional)
+    flight_number = null,
+    airport_code = null,
+    airport_name = null,
   }) {
     const wps = normalizeWaypoints(waypoints);
 
@@ -552,9 +557,9 @@ export const matcher = {
 
         offer_code: offer_code ?? null,
         payment_method,
-        flight_number: ride?.flight_number || null,
-        airport_code: ride?.airport_code || null,
-        airport_name: ride?.airport_name || null,
+        flight_number: flight_number || null,
+        airport_code: airport_code || null,
+        airport_name: airport_name || null,
       });
     }
 
