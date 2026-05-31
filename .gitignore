@@ -21,3 +21,8 @@ Thumbs.db
 .idea/
 
 /generated/prisma
+
+
+
+# Ignore uploaded runtime files
+**/uploads/
