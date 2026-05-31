@@ -379,6 +379,7 @@ model driver_vehicles {
   actual_capacity    Int?      @default(0) @db.UnsignedInt
   available_capacity Int?      @default(0) @db.UnsignedInt
   features           String?   @db.VarChar(255)
+  features           String?   @db.VarChar(255)
   insurance_expiry   DateTime? @db.Date
   created_at         DateTime? @default(now()) @db.Timestamp(0)
   updated_at         DateTime? @default(now()) @db.Timestamp(0)
@@ -1159,6 +1160,9 @@ model rides {
   flight_number         String?              @db.VarChar(20)
   airport_code          String?              @db.VarChar(10)
   airport_name          String?              @db.VarChar(100)
+  flight_number         String?              @db.VarChar(20)
+  airport_code          String?              @db.VarChar(10)
+  airport_name          String?              @db.VarChar(100)
   delivery_drops        delivery_drops[]
   driver_adjustments    driver_adjustments[]
   driver_earnings       driver_earnings[]
@@ -1355,6 +1359,7 @@ model users {
   all_device_ids            all_device_ids?
   app_ratings               app_ratings[]
   bookings                  bookings[]
+  bookings                  bookings[]
   driver_devices            driver_devices[]
   drivers                   drivers?
   event_bookings            event_bookings[]
@@ -1370,9 +1375,12 @@ model users {
   merchant_business_details merchant_business_details[]
   organizer_revenue_share   organizer_revenue_share[]
   reviews                   reviews[]
+  organizer_revenue_share   organizer_revenue_share[]
+  reviews                   reviews[]
   system_notifications      system_notifications[]
   user_devices              user_devices[]
   user_verification         user_verification[]
+  wishlists                 wishlists[]
   wishlists                 wishlists[]
 
   @@index([email], map: "email_2")
@@ -1535,6 +1543,7 @@ model event_bookings {
   wallet_journal_code String?                       @db.VarChar(36)
   created_at          DateTime                      @default(now()) @db.Timestamp(0)
   checked_in_at       DateTime?                     @db.Timestamp(0)
+  checked_in_at       DateTime?                     @db.Timestamp(0)
   event_booking_seats event_booking_seats[]
   event_screenings    event_screenings?             @relation(fields: [screening_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "b_ibfk_screening")
   users               users                         @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "event_bookings_ibfk_1")
@@ -1563,6 +1572,14 @@ model event_halls {
 }
 
 model event_organizers {
+  id                      String                   @id @db.Char(36)
+  name                    String                   @db.VarChar(255)
+  created_at              DateTime                 @default(now()) @db.Timestamp(0)
+  user_id                 BigInt?                  @unique(map: "uq_organizers_user_id") @db.UnsignedBigInt
+  event_halls             event_halls[]
+  users                   users?                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "organizers_ibfk_user")
+  events                  events[]
+  organizer_revenue_share organizer_revenue_share?
   id                      String                   @id @db.Char(36)
   name                    String                   @db.VarChar(255)
   created_at              DateTime                 @default(now()) @db.Timestamp(0)
@@ -1710,6 +1727,7 @@ model events {
   total_reviews       Int?                  @default(0)
   created_at          DateTime              @default(now()) @db.Timestamp(0)
   bookings            bookings[]
+  bookings            bookings[]
   event_booking_seats event_booking_seats[]
   event_bookings      event_bookings[]
   event_reviews       event_reviews[]
@@ -1718,6 +1736,9 @@ model events {
   event_ticket_tiers  event_ticket_tiers[]
   event_wishlists     event_wishlists[]
   event_organizers    event_organizers?     @relation(fields: [organizer_id], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "events_ibfk_1")
+  reviews             reviews[]
+  ticket_tiers        ticket_tiers[]
+  wishlists           wishlists[]
   reviews             reviews[]
   ticket_tiers        ticket_tiers[]
   wishlists           wishlists[]
@@ -2414,6 +2435,23 @@ enum receipt_email_email_status {
 enum receipt_email_delivery_method {
   DELIVERY
   PICKUP
+}
+
+enum bookings_payment_method {
+  WALLET
+  CARD
+  UPI
+}
+
+enum bookings_status {
+  confirmed
+  cancelled
+}
+
+enum event_bookings_status {
+  confirmed
+  cancelled
+  used
 }
 
 enum bookings_payment_method {
