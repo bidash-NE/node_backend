@@ -2,25 +2,46 @@ const fs = require("fs");
 const path = require("path");
 
 const LogoImageModel = require("../models/logoImageModel");
-const { UPLOAD_ROOT } = require("../middleware/upload");
+
+const {
+  UPLOAD_ROOT,
+  compressImageToTargetKB,
+  isValidImageFile,
+} = require("../middleware/upload");
+
+/* ---------------- helpers ---------------- */
 
 function toIntOrNull(value) {
   const num = Number(value);
   return Number.isInteger(num) && num > 0 ? num : null;
 }
 
+function cleanString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function getActor(req) {
+  const user = req.user || {};
+  const body = req.body || {};
+
   return {
     user_id:
-      toIntOrNull(req.user?.user_id) ||
+      toIntOrNull(user.user_id) ||
+      toIntOrNull(user.id) ||
+      toIntOrNull(user.userId) ||
+      toIntOrNull(user.admin_id) ||
       toIntOrNull(req.headers["x-admin-id"]) ||
-      toIntOrNull(req.body?.user_id) ||
+      toIntOrNull(body.user_id) ||
       null,
 
     admin_name:
-      req.user?.admin_name ||
+      user.admin_name ||
+      user.user_name ||
+      user.name ||
+      user.full_name ||
+      user.email ||
       req.headers["x-admin-name"] ||
-      req.body?.admin_name ||
+      body.admin_name ||
       null,
   };
 }
@@ -39,27 +60,133 @@ function deleteFileIfExists(filePath) {
 function imageUrlToFilePath(imageUrl) {
   if (!imageUrl) return null;
 
-  const relativePath = imageUrl.replace(/^\/uploads\//, "");
+  const cleanUrl = String(imageUrl).replace(/\\/g, "/");
+
+  /**
+   * DB image_url example:
+   * /uploads/logo_and_image/logo_123.webp
+   *
+   * UPLOAD_ROOT example:
+   * /admin/uploads
+   *
+   * final path:
+   * /admin/uploads/logo_and_image/logo_123.webp
+   */
+  const relativePath = cleanUrl.replace(/^\/uploads\//, "");
 
   return path.join(UPLOAD_ROOT, relativePath);
 }
 
-const LogoImageController = {
-  // Create new logo/image with file upload
-  async create(req, res) {
-    try {
-      const { name, service_type } = req.body;
-      const actor = getActor(req);
+function getUploadedImage(req) {
+  if (req.file) return req.file;
 
-      if (!req.file) {
+  if (Array.isArray(req.files)) {
+    return (
+      req.files.find((file) => file.fieldname === "image") ||
+      req.files[0] ||
+      null
+    );
+  }
+
+  if (req.files && typeof req.files === "object") {
+    const imageFiles = req.files.image;
+
+    if (Array.isArray(imageFiles) && imageFiles.length > 0) {
+      return imageFiles[0];
+    }
+  }
+
+  return null;
+}
+
+function debugLogoRequest(label, req, actor, imageFile) {
+  console.log(`[${label}]`, {
+    contentType: req.headers["content-type"],
+    body: req.body || {},
+    filesType: Array.isArray(req.files)
+      ? "array"
+      : req.files
+        ? "object"
+        : "none",
+    filesCount: Array.isArray(req.files) ? req.files.length : undefined,
+    file: imageFile
+      ? {
+          fieldname: imageFile.fieldname,
+          originalname: imageFile.originalname,
+          mimetype: imageFile.mimetype,
+          filename: imageFile.filename,
+          path: imageFile.path,
+          size: imageFile.size,
+        }
+      : null,
+    jwt_user: req.user || null,
+    actor,
+  });
+}
+
+async function compressLogoImageOrFail(imageFile) {
+  if (!imageFile?.path) {
+    throw new Error("Uploaded image path not found.");
+  }
+
+  return await compressImageToTargetKB(imageFile.path, {
+    targetKB: 100,
+    startQuality: 80,
+    minQuality: 35,
+    startWidth: 900,
+    startHeight: 900,
+    minWidth: 300,
+    minHeight: 300,
+  });
+}
+
+/* ---------------- controller ---------------- */
+
+const LogoImageController = {
+  /**
+   * POST /api/logo-images
+   *
+   * multipart/form-data:
+   * name = text
+   * service_type = text
+   * image = file
+   */
+  async create(req, res) {
+    let uploadedFilePath = null;
+
+    try {
+      const body = req.body || {};
+      const actor = getActor(req);
+      const imageFile = getUploadedImage(req);
+
+      debugLogoRequest("LOGO CREATE DEBUG", req, actor, imageFile);
+
+      const name = cleanString(body.name);
+      const service_type = cleanString(body.service_type);
+
+      if (imageFile?.path) {
+        uploadedFilePath = imageFile.path;
+      }
+
+      if (!imageFile) {
         return res.status(400).json({
           success: false,
-          message: "Image file is required",
+          message:
+            "Image file is required. Use multipart/form-data with file field name exactly 'image'.",
         });
       }
 
-      if (!name || !name.trim()) {
-        deleteFileIfExists(req.file.path);
+      if (!isValidImageFile(imageFile)) {
+        deleteFileIfExists(uploadedFilePath);
+
+        return res.status(400).json({
+          success: false,
+          message: `Only image files are allowed. Received field=${imageFile.fieldname}, originalname=${imageFile.originalname}, mimetype=${imageFile.mimetype}`,
+        });
+      }
+
+      if (!name) {
+        deleteFileIfExists(uploadedFilePath);
 
         return res.status(400).json({
           success: false,
@@ -67,8 +194,8 @@ const LogoImageController = {
         });
       }
 
-      if (!service_type || !service_type.trim()) {
-        deleteFileIfExists(req.file.path);
+      if (!service_type) {
+        deleteFileIfExists(uploadedFilePath);
 
         return res.status(400).json({
           success: false,
@@ -76,36 +203,41 @@ const LogoImageController = {
         });
       }
 
-      const image_url = `/uploads/logo_and_image/${req.file.filename}`;
+      const compression = await compressLogoImageOrFail(imageFile);
+
+      const image_url = `/uploads/logo_and_image/${imageFile.filename}`;
 
       const result = await LogoImageModel.create(
         {
-          name: name.trim(),
+          name,
           image_url,
-          service_type: service_type.trim(),
+          service_type,
         },
         actor.user_id,
-        actor.admin_name
+        actor.admin_name,
       );
 
-      if (result.duplicate) {
-        deleteFileIfExists(req.file.path);
+      if (result.validation || result.duplicate) {
+        deleteFileIfExists(uploadedFilePath);
 
-        return res.status(409).json({
+        return res.status(result.duplicate ? 409 : 400).json({
           success: false,
-          message: result.message || "Logo/Image name already exists",
+          message: result.message,
         });
       }
 
       return res.status(201).json({
         success: true,
         message: "Logo/Image created successfully",
+        actor_logged: {
+          user_id: actor.user_id,
+          admin_name: actor.admin_name,
+        },
+        compression,
         data: result.data,
       });
     } catch (error) {
-      if (req.file?.path) {
-        deleteFileIfExists(req.file.path);
-      }
+      deleteFileIfExists(uploadedFilePath);
 
       console.error("Error creating logo/image:", error);
 
@@ -117,7 +249,9 @@ const LogoImageController = {
     }
   },
 
-  // Get all logos/images
+  /**
+   * GET /api/logo-images
+   */
   async getAll(req, res) {
     try {
       const {
@@ -125,7 +259,7 @@ const LogoImageController = {
         limit = 10,
         search = "",
         service_type = "",
-      } = req.query;
+      } = req.query || {};
 
       const result = await LogoImageModel.findAll({
         page,
@@ -155,7 +289,9 @@ const LogoImageController = {
     }
   },
 
-  // Get single logo/image by ID
+  /**
+   * GET /api/logo-images/:id
+   */
   async getById(req, res) {
     try {
       const { id } = req.params;
@@ -184,141 +320,182 @@ const LogoImageController = {
     }
   },
 
-// Update logo/image
-async update(req, res) {
-  try {
-    const { id } = req.params;
-    const { name, service_type } = req.body;
-    const actor = getActor(req);
+  /**
+   * PUT /api/logo-images/:id
+   *
+   * multipart/form-data:
+   * name = text optional
+   * service_type = text optional
+   * image = file optional
+   *
+   * If image is uploaded:
+   * - DB image_url remains same.
+   * - Physical image file gets replaced.
+   */
+  async update(req, res) {
+    let uploadedFilePath = null;
 
-    const existingItem = await LogoImageModel.findById(id);
+    try {
+      const { id } = req.params;
+      const body = req.body || {};
+      const actor = getActor(req);
+      const imageFile = getUploadedImage(req);
 
-    if (!existingItem) {
-      if (req.file?.path) {
-        deleteFileIfExists(req.file.path);
+      debugLogoRequest("LOGO UPDATE DEBUG", req, actor, imageFile);
+
+      const name = cleanString(body.name);
+      const service_type = cleanString(body.service_type);
+
+      if (imageFile?.path) {
+        uploadedFilePath = imageFile.path;
       }
 
-      return res.status(404).json({
-        success: false,
-        message: "Logo/Image not found",
-      });
-    }
-
-    const updateData = {};
-
-    if (name && name.trim()) {
-      updateData.name = name.trim();
-    }
-
-    if (service_type && service_type.trim()) {
-      updateData.service_type = service_type.trim();
-    }
-
-    /*
-      IMPORTANT:
-      If a new image is uploaded during update,
-      we DO NOT change image_url in DB.
-      We replace the old physical file with the new uploaded file.
-    */
-    if (req.file) {
-      if (!existingItem.image_url) {
-        deleteFileIfExists(req.file.path);
+      if (imageFile && !isValidImageFile(imageFile)) {
+        deleteFileIfExists(uploadedFilePath);
 
         return res.status(400).json({
           success: false,
-          message: "Existing image URL not found. Cannot replace image.",
+          message: `Only image files are allowed. Received field=${imageFile.fieldname}, originalname=${imageFile.originalname}, mimetype=${imageFile.mimetype}`,
         });
       }
 
-      const oldImagePath = imageUrlToFilePath(existingItem.image_url);
+      const existingItem = await LogoImageModel.findById(id);
 
-      try {
-        // Make sure target folder exists
-        const oldImageDir = path.dirname(oldImagePath);
+      if (!existingItem) {
+        deleteFileIfExists(uploadedFilePath);
 
-        if (!fs.existsSync(oldImageDir)) {
-          fs.mkdirSync(oldImageDir, { recursive: true });
+        return res.status(404).json({
+          success: false,
+          message: "Logo/Image not found",
+        });
+      }
+
+      const updateData = {};
+
+      if (name) {
+        updateData.name = name;
+      }
+
+      if (service_type) {
+        updateData.service_type = service_type;
+      }
+
+      let compression = null;
+
+      if (imageFile) {
+        if (!existingItem.image_url) {
+          deleteFileIfExists(uploadedFilePath);
+
+          return res.status(400).json({
+            success: false,
+            message: "Existing image URL not found. Cannot replace image.",
+          });
         }
 
-        /*
-          Replace old image content with new uploaded image,
-          but keep the same old filename and same DB image_url.
-        */
-        fs.copyFileSync(req.file.path, oldImagePath);
+        const oldImagePath = imageUrlToFilePath(existingItem.image_url);
 
-        // Delete temporary newly uploaded file
-        deleteFileIfExists(req.file.path);
+        try {
+          const oldImageDir = path.dirname(oldImagePath);
 
-        console.log("✅ Replaced image but kept same URL:", existingItem.image_url);
-      } catch (fileError) {
-        console.error("Error replacing old image:", fileError);
+          if (!fs.existsSync(oldImageDir)) {
+            fs.mkdirSync(oldImageDir, { recursive: true });
+          }
 
-        deleteFileIfExists(req.file.path);
+          compression = await compressLogoImageOrFail(imageFile);
 
-        return res.status(500).json({
+          /**
+           * Replace old physical file with compressed new file.
+           * Keep same image_url in DB.
+           */
+          fs.copyFileSync(uploadedFilePath, oldImagePath);
+
+          deleteFileIfExists(uploadedFilePath);
+          uploadedFilePath = null;
+
+          console.log(
+            "✅ Replaced image but kept same URL:",
+            existingItem.image_url,
+          );
+        } catch (fileError) {
+          deleteFileIfExists(uploadedFilePath);
+
+          console.error("Error replacing old image:", fileError);
+
+          return res.status(500).json({
+            success: false,
+            message: "Failed to replace image file",
+            error: fileError.message,
+          });
+        }
+      }
+
+      if (!updateData.name && !updateData.service_type && !imageFile) {
+        return res.status(400).json({
           success: false,
-          message: "Failed to replace image file",
-          error: fileError.message,
+          message: "Nothing to update",
         });
       }
-    }
 
-    if (!updateData.name && !updateData.service_type && !req.file) {
-      return res.status(400).json({
+      const result = await LogoImageModel.update(
+        id,
+        updateData,
+        actor.user_id,
+        actor.admin_name,
+      );
+
+      if (result.notFound) {
+        return res.status(404).json({
+          success: false,
+          message: "Logo/Image not found",
+        });
+      }
+
+      if (result.validation || result.duplicate) {
+        return res.status(result.duplicate ? 409 : 400).json({
+          success: false,
+          message: result.message,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Logo/Image updated successfully",
+        actor_logged: {
+          user_id: actor.user_id,
+          admin_name: actor.admin_name,
+        },
+        compression,
+        data: {
+          ...result.data,
+          image_url: existingItem.image_url,
+        },
+      });
+    } catch (error) {
+      deleteFileIfExists(uploadedFilePath);
+
+      console.error("Error updating logo/image:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Nothing to update",
+        message: "Internal server error",
+        error: error.message,
       });
     }
+  },
 
-    const result = await LogoImageModel.update(
-      id,
-      updateData,
-      actor.user_id,
-      actor.admin_name
-    );
-
-    if (result.notFound) {
-      return res.status(404).json({
-        success: false,
-        message: "Logo/Image not found",
-      });
-    }
-
-    if (result.duplicate) {
-      return res.status(409).json({
-        success: false,
-        message: result.message || "Logo/Image name already exists",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Logo/Image updated successfully",
-      data: {
-        ...result.data,
-        image_url: existingItem.image_url,
-      },
-    });
-  } catch (error) {
-    if (req.file?.path) {
-      deleteFileIfExists(req.file.path);
-    }
-
-    console.error("Error updating logo/image:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-      error: error.message,
-    });
-  }
-},
-
-  // Delete logo/image
+  /**
+   * DELETE /api/logo-images/:id
+   */
   async delete(req, res) {
     try {
       const { id } = req.params;
       const actor = getActor(req);
+
+      console.log("[LOGO DELETE DEBUG]", {
+        id,
+        jwt_user: req.user || null,
+        actor,
+      });
 
       const existingItem = await LogoImageModel.findById(id);
 
@@ -332,7 +509,7 @@ async update(req, res) {
       const result = await LogoImageModel.delete(
         id,
         actor.user_id,
-        actor.admin_name
+        actor.admin_name,
       );
 
       if (result.notFound) {
@@ -348,6 +525,10 @@ async update(req, res) {
       return res.status(200).json({
         success: true,
         message: "Logo/Image deleted successfully",
+        actor_logged: {
+          user_id: actor.user_id,
+          admin_name: actor.admin_name,
+        },
       });
     } catch (error) {
       console.error("Error deleting logo/image:", error);
@@ -360,11 +541,20 @@ async update(req, res) {
     }
   },
 
-  // Bulk delete logos/images
+  /**
+   * POST /api/logo-images/bulk-delete
+   */
   async bulkDelete(req, res) {
     try {
-      const { ids } = req.body;
+      const body = req.body || {};
+      const { ids } = body;
       const actor = getActor(req);
+
+      console.log("[LOGO BULK DELETE DEBUG]", {
+        body,
+        jwt_user: req.user || null,
+        actor,
+      });
 
       if (!Array.isArray(ids) || ids.length === 0) {
         return res.status(400).json({
@@ -376,7 +566,7 @@ async update(req, res) {
       const result = await LogoImageModel.bulkDelete(
         ids,
         actor.user_id,
-        actor.admin_name
+        actor.admin_name,
       );
 
       if (result.items && result.items.length > 0) {
@@ -390,6 +580,10 @@ async update(req, res) {
         success: true,
         message: `${result.count} item(s) deleted successfully`,
         deletedCount: result.count,
+        actor_logged: {
+          user_id: actor.user_id,
+          admin_name: actor.admin_name,
+        },
       });
     } catch (error) {
       console.error("Error bulk deleting logos/images:", error);

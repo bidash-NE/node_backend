@@ -1,20 +1,6 @@
 const { prisma } = require("../lib/prisma.js");
 
-// Helper for logging admin actions
-async function logAdmin(actorUserId, adminName, activity) {
-  try {
-    await prisma.admin_logs.create({
-      data: {
-        user_id: actorUserId ? Number(actorUserId) : null,
-        admin_name: adminName || "System",
-        activity,
-        created_at: new Date(),
-      },
-    });
-  } catch (error) {
-    console.error("Error logging admin action:", error);
-  }
-}
+/* ---------------- helpers ---------------- */
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -24,15 +10,48 @@ function isPrismaUniqueError(error) {
   return error && error.code === "P2002";
 }
 
+function normalizeActorUserId(actorUserId) {
+  const n = Number(actorUserId);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function normalizeAdminName(adminName) {
+  const clean = normalizeText(adminName);
+  return clean || "System";
+}
+
+async function logAdmin(actorUserId, adminName, activity) {
+  try {
+    const cleanUserId = normalizeActorUserId(actorUserId);
+    const cleanAdminName = normalizeAdminName(adminName);
+
+    console.log("[ADMIN LOG INSERT]", {
+      user_id: cleanUserId,
+      admin_name: cleanAdminName,
+      activity,
+    });
+
+    await prisma.admin_logs.create({
+      data: {
+        user_id: cleanUserId,
+        admin_name: cleanAdminName,
+        activity,
+        created_at: new Date(),
+      },
+    });
+  } catch (error) {
+    console.error("Error logging admin action:", error);
+  }
+}
+
+/* ---------------- model ---------------- */
+
 const LogoImageModel = {
-  // Check duplicate by name
   async findByName(name) {
     try {
       const cleanName = normalizeText(name);
 
-      if (!cleanName) {
-        return null;
-      }
+      if (!cleanName) return null;
 
       return await prisma.image_and_icons.findFirst({
         where: {
@@ -45,14 +64,11 @@ const LogoImageModel = {
     }
   },
 
-  // Check duplicate name except the current row during update
   async findDuplicateName(name, excludeId = null) {
     try {
       const cleanName = normalizeText(name);
 
-      if (!cleanName) {
-        return null;
-      }
+      if (!cleanName) return null;
 
       const where = {
         name: cleanName,
@@ -75,11 +91,32 @@ const LogoImageModel = {
     }
   },
 
-  // Create new logo/image
   async create(data, actorUserId = null, adminName = null) {
     try {
       const cleanName = normalizeText(data.name);
       const cleanServiceType = normalizeText(data.service_type);
+      const cleanImageUrl = normalizeText(data.image_url);
+
+      if (!cleanName) {
+        return {
+          validation: true,
+          message: "Name is required",
+        };
+      }
+
+      if (!cleanServiceType) {
+        return {
+          validation: true,
+          message: "Service type is required",
+        };
+      }
+
+      if (!cleanImageUrl) {
+        return {
+          validation: true,
+          message: "Image URL is required",
+        };
+      }
 
       const existingName = await this.findByName(cleanName);
 
@@ -93,7 +130,7 @@ const LogoImageModel = {
       const newItem = await prisma.image_and_icons.create({
         data: {
           name: cleanName,
-          image_url: data.image_url,
+          image_url: cleanImageUrl,
           service_type: cleanServiceType,
         },
       });
@@ -121,7 +158,6 @@ const LogoImageModel = {
     }
   },
 
-  // Get all logos/images with pagination, search and service_type filter
   async findAll({ page = 1, limit = 10, search = "", service_type = "" }) {
     try {
       const currentPage = Math.max(parseInt(page, 10) || 1, 1);
@@ -152,7 +188,6 @@ const LogoImageModel = {
             created_at: "desc",
           },
         }),
-
         prisma.image_and_icons.count({
           where,
         }),
@@ -178,14 +213,11 @@ const LogoImageModel = {
     }
   },
 
-  // Get single logo/image by ID
   async findById(id) {
     try {
       const itemId = parseInt(id, 10);
 
-      if (!Number.isInteger(itemId)) {
-        return null;
-      }
+      if (!Number.isInteger(itemId)) return null;
 
       const item = await prisma.image_and_icons.findUnique({
         where: {
@@ -193,9 +225,7 @@ const LogoImageModel = {
         },
       });
 
-      if (!item) {
-        return null;
-      }
+      if (!item) return null;
 
       return {
         id: item.id,
@@ -211,7 +241,6 @@ const LogoImageModel = {
     }
   },
 
-  // Update logo/image
   async update(id, data, actorUserId = null, adminName = null) {
     try {
       const itemId = parseInt(id, 10);
@@ -254,7 +283,7 @@ const LogoImageModel = {
       }
 
       if (data.image_url) {
-        updateData.image_url = data.image_url;
+        updateData.image_url = normalizeText(data.image_url);
       }
 
       if (data.service_type) {
@@ -291,7 +320,6 @@ const LogoImageModel = {
     }
   },
 
-  // Delete logo/image
   async delete(id, actorUserId = null, adminName = null) {
     try {
       const itemId = parseInt(id, 10);
@@ -336,10 +364,9 @@ const LogoImageModel = {
     }
   },
 
-  // Bulk delete logos/images
   async bulkDelete(ids, actorUserId = null, adminName = null) {
     try {
-      const parsedIds = ids
+      const parsedIds = (ids || [])
         .map((id) => parseInt(id, 10))
         .filter((id) => Number.isInteger(id));
 

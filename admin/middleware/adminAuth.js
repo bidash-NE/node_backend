@@ -71,7 +71,7 @@ function adminOnly(req, res, next) {
     }
 
     const decoded = result.decoded;
-
+console.log("[ADMIN JWT DECODED]", decoded);
     if (!decoded || !decoded.role) {
       return res.status(403).json({
         success: false,
