@@ -166,7 +166,10 @@ exports.scheduleOrder = async (req, res) => {
 
     console.log("[scheduleOrder] content-type:", req.headers["content-type"]);
     console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
-    console.log("[scheduleOrder] req.files keys:", Object.keys(req.files || {}));
+    console.log(
+      "[scheduleOrder] req.files keys:",
+      Object.keys(req.files || {}),
+    );
 
     let mergedBody = { ...body };
 
@@ -246,7 +249,9 @@ exports.scheduleOrder = async (req, res) => {
 
     orderPayload.items = safeJsonParse(orderPayload.items);
     orderPayload.totals = safeJsonParse(orderPayload.totals);
-    orderPayload.delivery_address = safeJsonParse(orderPayload.delivery_address);
+    orderPayload.delivery_address = safeJsonParse(
+      orderPayload.delivery_address,
+    );
     orderPayload.special_photos = safeJsonParse(orderPayload.special_photos);
 
     if (orderPayload.priority != null) {
@@ -640,8 +645,7 @@ exports.cancelScheduledOrder = async (req, res) => {
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
-    const { status, reason } = req.body;
-
+const { status, reason, estimated_minutes } = req.body;
     if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
@@ -694,45 +698,60 @@ exports.updateScheduledOrderStatus = async (req, res) => {
 
     const userId = data.user_id;
 
-    if (status === "ACCEPTED") {
-      data.order_payload.status = "ACCEPTED";
-      data.order_payload.accepted_at = new Date().toISOString();
-      data.updated_at = new Date().toISOString();
+   if (status === "ACCEPTED") {
+  const estimatedMins = Number(estimated_minutes);
 
-      const scheduledScore = Number(data.scheduled_epoch_ms);
+  if (
+    estimated_minutes == null ||
+    !Number.isFinite(estimatedMins) ||
+    estimatedMins <= 0
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: "estimated_minutes is required and must be a positive number.",
+    });
+  }
 
-      if (!Number.isFinite(scheduledScore)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid scheduled time for this scheduled order.",
-        });
-      }
+  data.order_payload.status = "ACCEPTED";
+  data.order_payload.estimated_minutes = estimatedMins;
+  data.order_payload.accepted_at = new Date().toISOString();
+  data.updated_at = new Date().toISOString();
 
-      await redis
-        .multi()
-        .set(jobKey, JSON.stringify(data))
-        .zrem(PENDING_ZSET_KEY, jobId)
-        .zrem(REJECTED_ZSET_KEY, jobId)
-        .zrem(ZSET_KEY, jobId) // legacy safety
-        .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId)
-        .exec();
+  const scheduledScore = Number(data.scheduled_epoch_ms);
 
-      await sendUserNotification({
-        user_id: userId,
-        title: "Order Accepted",
-        body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
-      });
+  if (!Number.isFinite(scheduledScore)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid scheduled time for this scheduled order.",
+    });
+  }
 
-      return res.json({
-        success: true,
-        message: "Scheduled order accepted.",
-        job_id: jobId,
-        status: "ACCEPTED",
-        queue: "ACCEPTED",
-        scheduled_at_utc: data.scheduled_at,
-        scheduled_at_local: data.scheduled_at_local,
-      });
-    }
+  await redis
+    .multi()
+    .set(jobKey, JSON.stringify(data))
+    .zrem(PENDING_ZSET_KEY, jobId)
+    .zrem(REJECTED_ZSET_KEY, jobId)
+    .zrem(ZSET_KEY, jobId)
+    .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId)
+    .exec();
+
+  await sendUserNotification({
+    user_id: userId,
+    title: "Order Accepted",
+    body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
+  });
+
+  return res.json({
+    success: true,
+    message: "Scheduled order accepted.",
+    job_id: jobId,
+    status: "ACCEPTED",
+    queue: "ACCEPTED",
+    scheduled_at_utc: data.scheduled_at,
+    scheduled_at_local: data.scheduled_at_local,
+    estimated_minutes: estimatedMins,
+  });
+}
 
     if (status === "REJECTED") {
       const cleanReason = String(reason).trim();

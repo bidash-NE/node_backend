@@ -29,6 +29,8 @@ const ATTEMPT_TTL_SECONDS = 7 * 24 * 3600; // 7 days
 const BASE_RETRY_DELAY_MS = 60 * 1000; // 1 minute
 const MAX_RETRY_DELAY_MS = 60 * 60 * 1000; // 1 hour
 
+const BHUTAN_OFFSET_HOURS = 6;
+
 const buildFailedKey = (jobId) => `scheduled_order_failed:${jobId}`;
 
 function sum(nums) {
@@ -46,6 +48,104 @@ function safeJsonParse(s) {
   } catch {
     return null;
   }
+}
+
+/* ===================== ETA helpers ===================== */
+
+/**
+ * Rule:
+ * start time = scheduled_at_local
+ * end time   = scheduled_at_local + estimated_minutes + 30 minutes
+ *
+ * Example:
+ * scheduled_at_local = 2026-06-01T11:04:00+06:00
+ * estimated_minutes = 30
+ * result = 11:04 - 12:04 PM
+ */
+function formatScheduledEtaRange({
+  scheduledEpochMs,
+  scheduledAtLocal,
+  estimatedMinutes,
+  extraWindowMinutes = 30,
+}) {
+  const mins = Number(estimatedMinutes);
+
+  if (!Number.isFinite(mins) || mins <= 0) {
+    return null;
+  }
+
+  let startEpochMs = Number(scheduledEpochMs);
+
+  if (!Number.isFinite(startEpochMs) || startEpochMs <= 0) {
+    startEpochMs = Date.parse(String(scheduledAtLocal || ""));
+  }
+
+  if (!Number.isFinite(startEpochMs) || startEpochMs <= 0) {
+    return null;
+  }
+
+  const endEpochMs =
+    startEpochMs + (mins + Number(extraWindowMinutes || 30)) * 60 * 1000;
+
+  const startDate = new Date(startEpochMs);
+  const endDate = new Date(endEpochMs);
+
+  const toBhutanParts = (d) => {
+    const bhutanMs = d.getTime() + BHUTAN_OFFSET_HOURS * 60 * 60 * 1000;
+    const bhutanDate = new Date(bhutanMs);
+
+    const hour24 = bhutanDate.getUTCHours();
+    const minute = bhutanDate.getUTCMinutes();
+    const meridiem = hour24 >= 12 ? "PM" : "AM";
+    const hour12 = hour24 % 12 || 12;
+
+    return {
+      hour12,
+      minute,
+      meridiem,
+    };
+  };
+
+  const start = toBhutanParts(startDate);
+  const end = toBhutanParts(endDate);
+
+  const startText = `${start.hour12}:${String(start.minute).padStart(2, "0")}`;
+  const endText = `${end.hour12}:${String(end.minute).padStart(2, "0")}`;
+
+  if (start.meridiem === end.meridiem) {
+    return `${startText} - ${endText} ${end.meridiem}`;
+  }
+
+  return `${startText} ${start.meridiem} - ${endText} ${end.meridiem}`;
+}
+
+async function updateEstimatedArrivalTimeForScheduledOrder({
+  orderId,
+  scheduledEpochMs,
+  scheduledAtLocal,
+  estimatedMinutes,
+}) {
+  if (!orderId) return null;
+
+  const etaRange = formatScheduledEtaRange({
+    scheduledEpochMs,
+    scheduledAtLocal,
+    estimatedMinutes,
+    extraWindowMinutes: 30,
+  });
+
+  if (!etaRange) return null;
+
+  await db.query(
+    `
+      UPDATE orders
+         SET estimated_arrivial_time = ?
+       WHERE order_id = ?
+    `,
+    [etaRange, orderId],
+  );
+
+  return etaRange;
 }
 
 /* ===================== Payload normalization ===================== */
@@ -161,6 +261,10 @@ async function normalizeCreateOrderPayload(raw = {}) {
   delete p.last_error;
   delete p.accept_expires_at;
   delete p.accept_expires_epoch_ms;
+
+  // Do not send estimated_minutes to normal order creation API.
+  // We update orders.estimated_arrivial_time separately after order creation.
+  delete p.estimated_minutes;
 
   if (p.service_type != null) {
     p.service_type = String(p.service_type).trim().toUpperCase();
@@ -459,7 +563,12 @@ async function insertDbNotificationSafe({ user_id, title, message, data }) {
   }
 }
 
-async function notifyScheduledOrderProcessed({ data, orderId, jobId }) {
+async function notifyScheduledOrderProcessed({
+  data,
+  orderId,
+  jobId,
+  estimatedArrivalTime,
+}) {
   const customerUserId = Number(data?.user_id || data?.order_payload?.user_id);
 
   const businessId =
@@ -473,18 +582,21 @@ async function notifyScheduledOrderProcessed({ data, orderId, jobId }) {
   const scheduledAt = data?.scheduled_at_local || data?.scheduled_at || null;
 
   const customerTitle = "Scheduled Order Processed";
-  const customerMessage =
-    "Your scheduled order has been processed successfully. Please track the order accordingly.";
+  const customerMessage = estimatedArrivalTime
+    ? `Your scheduled order has been processed successfully. Estimated arrival time: ${estimatedArrivalTime}.`
+    : "Your scheduled order has been processed successfully. Please track the order accordingly.";
 
   const merchantTitle = "Scheduled Order Received";
-  const merchantMessage =
-    "A scheduled order has been processed successfully and is now active. Please prepare and manage it from your order dashboard.";
+  const merchantMessage = estimatedArrivalTime
+    ? `A scheduled order is now active. Estimated arrival time: ${estimatedArrivalTime}.`
+    : "A scheduled order has been processed successfully and is now active. Please prepare and manage it from your order dashboard.";
 
   const baseData = {
     job_id: jobId,
     order_id: orderId || null,
     business_id: businessId,
     scheduled_at: scheduledAt,
+    estimated_arrivial_time: estimatedArrivalTime || null,
     status: "CONFIRMED",
   };
 
@@ -788,6 +900,8 @@ async function processJob(jobId) {
             (i) => i.business_name,
           ),
           total_amount: completePayload.total_amount,
+          scheduled_at_local: data.scheduled_at_local,
+          estimated_minutes: order_payload.estimated_minutes,
         },
         null,
         2,
@@ -796,10 +910,29 @@ async function processJob(jobId) {
 
     const orderId = await createOrderFromScheduledPayload(completePayload);
 
+    const estimatedArrivalTime =
+      await updateEstimatedArrivalTimeForScheduledOrder({
+        orderId,
+        scheduledEpochMs: Number(data.scheduled_epoch_ms),
+        scheduledAtLocal: data.scheduled_at_local,
+        estimatedMinutes: order_payload.estimated_minutes,
+      });
+
+    if (estimatedArrivalTime) {
+      console.log(
+        `[SCHED] ETA updated for order ${orderId}: ${estimatedArrivalTime}`,
+      );
+    } else {
+      console.log(
+        `[SCHED] ETA not updated for ${jobId}. Missing orderId, scheduled time, or estimated_minutes.`,
+      );
+    }
+
     await notifyScheduledOrderProcessed({
       data,
       orderId,
       jobId,
+      estimatedArrivalTime,
     });
 
     await cleanupJobFromAllQueues(jobId, jobKey);
