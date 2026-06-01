@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const rateLimit = require("express-rate-limit");
+const multer = require("multer");
 
 const {
   registerUser,
@@ -10,7 +11,11 @@ const {
   verifyActiveSession,
   refreshAccessToken,
 } = require("../controllers/registrationController");
-const { documentUpload } = require("../middleware/upload");
+
+const {
+  documentUpload,
+  compressUploadedImages,
+} = require("../middleware/upload");
 
 /* ---------------- rate limit helper ---------------- */
 const makeLimiter = ({ windowMs, max, message }) =>
@@ -25,9 +30,52 @@ const makeLimiter = ({ windowMs, max, message }) =>
 /* ---------------- validators ---------------- */
 const validUserId = (req, res, next) => {
   const uid = Number(req.params.user_id);
+
   if (Number.isFinite(uid) && uid > 0) return next();
-  return res.status(400).json({ success: false, message: "Invalid user_id" });
+
+  return res.status(400).json({
+    success: false,
+    message: "Invalid user_id",
+  });
 };
+
+/* ---------------- multer error handler ---------------- */
+function handleUploadError(err, req, res, next) {
+  if (!err) return next();
+
+  console.error("[DOCUMENT UPLOAD ERROR]", {
+    code: err.code,
+    field: err.field,
+    message: err.message,
+    contentType: req.headers["content-type"],
+  });
+
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        message: "Document image must be less than 5MB.",
+      });
+    }
+
+    if (err.code === "LIMIT_UNEXPECTED_FILE") {
+      return res.status(400).json({
+        success: false,
+        message: `Unexpected file field: ${err.field}. Use field name 'document'.`,
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: err.message || "Upload error.",
+    });
+  }
+
+  return res.status(400).json({
+    success: false,
+    message: err.message || "File upload error.",
+  });
+}
 
 /* ---------------- limiters ---------------- */
 const registerLimiter = makeLimiter({
@@ -48,27 +96,63 @@ const logoutLimiter = makeLimiter({
   message: "Too many requests. Please slow down.",
 });
 
-// Document upload endpoint
-router.post("/upload-document", documentUpload.single("document"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: "No file uploaded" });
-  }
-  return res.status(200).json({
-    success: true,
-    path: `/uploads/documents/${req.file.filename}`,
-  });
-});
+/* ---------------- document upload endpoint ---------------- */
+/**
+ * POST /upload-document
+ *
+ * multipart/form-data:
+ * document = image file
+ *
+ * The uploaded image will be compressed to target 100 KB
+ * by compressUploadedImages().
+ */
+router.post(
+  "/upload-document",
+  documentUpload.single("document"),
+  handleUploadError,
+  compressUploadedImages({ targetKB: 100 }),
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded",
+      });
+    }
 
-// Registration endpoint
+    const compressedInfo =
+      Array.isArray(req.compressed_files) && req.compressed_files.length > 0
+        ? req.compressed_files[0]
+        : null;
+
+    return res.status(200).json({
+      success: true,
+      message: "Document uploaded successfully.",
+      path: `/uploads/documents/${req.file.filename}`,
+      compression: compressedInfo
+        ? {
+            sizeKB: compressedInfo.sizeKB,
+            quality: compressedInfo.quality,
+            width: compressedInfo.width,
+            height: compressedInfo.height,
+          }
+        : null,
+    });
+  },
+);
+
+/* ---------------- registration endpoint ---------------- */
 router.post("/register", registerLimiter, registerUser);
 
-// Login endpoint
+/* ---------------- login endpoint ---------------- */
 router.post("/login", loginLimiter, loginUser);
 
-// Logout
+/* ---------------- logout ---------------- */
 router.post("/logout/:user_id", logoutLimiter, validUserId, logoutUser);
 
+/* ---------------- verify active session ---------------- */
 router.post("/verify-session", loginLimiter, verifyActiveSession);
 
+/* ---------------- refresh token ---------------- */
 router.post("/refresh-token", loginLimiter, refreshAccessToken);
+
 module.exports = router;
