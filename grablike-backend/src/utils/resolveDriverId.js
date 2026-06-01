@@ -1,10 +1,11 @@
+
 // src/utils/resolveDriverId.js (ESM)
 export async function resolveDriverIdFromUserId({ userId, baseUrl }) {
   if (!userId) throw new Error("userId is required to resolve driver_id");
 
   const url = `${String(baseUrl || "").replace(
     /\/+$/,
-    "",
+    ""
   )}/api/drivers/by-user/${encodeURIComponent(String(userId))}`;
 
   const res = await fetch(url, { method: "GET" });
@@ -27,7 +28,7 @@ export async function resolveDriverIdFromUserId({ userId, baseUrl }) {
   return String(driverId);
 }
 
-export async function resolveUserIdFromDriverId({ mysqlPool, driverId }) {
+export async function resolveUserIdFromDriverId({mysqlPool,driverId}) {
   if (!driverId) throw new Error("driverId is required to resolve user_id");
   try {
     console.log("Driver Id: ", driverId);
@@ -42,7 +43,7 @@ export async function resolveUserIdFromDriverId({ mysqlPool, driverId }) {
     try {
       const [[row]] = await conn.query(
         "SELECT user_id FROM drivers WHERE driver_id = ? LIMIT 1",
-        [driverId],
+        [driverId]
       );
 
       if (!row) {
@@ -69,7 +70,7 @@ export async function resolveDriverDetailsFromOrderBatchedIds(db, { batchId }) {
   if (!batchId) throw new Error("batchId is required");
 
   let conn;
-  let isConnectionProvided = typeof db.query === "function"; // simple check for connection
+  let isConnectionProvided = typeof db.query === 'function'; // simple check for connection
 
   try {
     if (isConnectionProvided) {
@@ -82,7 +83,7 @@ export async function resolveDriverDetailsFromOrderBatchedIds(db, { batchId }) {
     // Use LIMIT 1 because all orders in a batch share the same driver
     const [[orderRow]] = await conn.query(
       `SELECT delivery_driver_id FROM orders WHERE batch_id = ? LIMIT 1`,
-      [batchId],
+      [batchId]
     );
 
     if (!orderRow || !orderRow.delivery_driver_id) return null;
@@ -100,7 +101,7 @@ export async function resolveDriverDetailsFromOrderBatchedIds(db, { batchId }) {
        FROM drivers d
        JOIN users u ON u.user_id = d.user_id
        WHERE d.driver_id = ?`,
-      [driverId],
+      [driverId]
     );
 
     if (!driverInfo) return null;
@@ -122,9 +123,7 @@ export async function resolveDriverDetailsFromOrderBatchedIds(db, { batchId }) {
   } finally {
     // Only release if we acquired the connection ourselves
     if (!isConnectionProvided && conn) {
-      try {
-        conn.release();
-      } catch {}
+      try { conn.release(); } catch {}
     }
   }
 }

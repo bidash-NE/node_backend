@@ -1,5 +1,5 @@
 // src/services/push.js
-import { Expo } from "expo-server-sdk";
+import { Expo } from 'expo-server-sdk';
 
 // Create a single instance of the Expo client
 let expo = new Expo();
@@ -28,7 +28,7 @@ export async function sendPushToTokens(pushTokens, message = {}) {
     }
     messages.push({
       to: token,
-      sound: message.sound || "default",
+      sound: message.sound || 'default',
       title: message.title,
       body: message.body,
       data: message.data,
@@ -49,7 +49,7 @@ export async function sendPushToTokens(pushTokens, message = {}) {
       // For a production system, you would want to store the tickets and later
       // check receipts to clean up invalid tokens.
     } catch (error) {
-      console.error("[push] Error sending notification chunk:", error);
+      console.error('[push] Error sending notification chunk:', error);
     }
   }
 }

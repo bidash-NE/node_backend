@@ -1,5 +1,6 @@
 // src/routes/driverLookup.js
 import express from "express";
+import { resolveDriverDetailsFromOrderBatchedIds } from "../utils/resolveDriverId.js";
 /**
  * Mount with:
  *   import makeMerchantLookupRouter from "./routes/merchantLookup.js";

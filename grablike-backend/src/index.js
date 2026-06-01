@@ -41,6 +41,7 @@ import guestWaypointsRouter from "./routes/guestWaypoints.routes.js";
 // ⬇️ chat upload/list routes
 import { makeChatUploadRouter } from "../src/routes/chatUpload.js";
 import { makeChatListRouter } from "../src/routes/chatList.js";
+import agoraRouter from "./routes/agora.js";
 import driverDeliveryRoutes from "./routes/driverDelivery.js";
 import  {getDeliveryRideId}  from "./routes/getDeliveryRideId.js";
 import { getBatchAndRideId } from "./routes/getBatchId&RideId.js";
@@ -119,6 +120,7 @@ app.use("/api/batch-ride", getBatchAndRideId());
 
 // chat upload route
 app.use("/chat", makeChatUploadRouter("/uploads"));
+app.use("/api/agora", agoraRouter);
 
 /* ========================= HTTP + Socket.IO =========================== */
 const server = http.createServer(app);

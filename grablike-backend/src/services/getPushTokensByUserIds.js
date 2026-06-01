@@ -9,14 +9,14 @@ import { mysqlPool } from "../db/mysql.js";
 export async function getUserIdsByDriverIds(driverIds) {
   if (!driverIds.length) return [];
 
-  const placeholders = driverIds.map(() => "?").join(",");
+  const placeholders = driverIds.map(() => '?').join(',');
   const sql = `
     SELECT user_id
     FROM drivers
     WHERE driver_id IN (${placeholders})
   `;
   const [rows] = await mysqlPool.query(sql, driverIds);
-  return rows.map((row) => row.user_id);
+  return rows.map(row => row.user_id);
 }
 
 /**
@@ -27,7 +27,7 @@ export async function getUserIdsByDriverIds(driverIds) {
 export async function getPushTokensByUserIds(userIds) {
   if (!userIds.length) return [];
 
-  const placeholders = userIds.map(() => "?").join(",");
+  const placeholders = userIds.map(() => '?').join(',');
   const sql = `
     SELECT device_id
     FROM all_device_ids
@@ -36,7 +36,7 @@ export async function getPushTokensByUserIds(userIds) {
       AND device_id != ''
   `;
   const [rows] = await mysqlPool.query(sql, userIds);
-  return rows.map((row) => row.device_id);
+  return rows.map(row => row.device_id);
 }
 
 /**

@@ -5,18 +5,10 @@ import {
   currentRidesKey as keyFor,
   currentPassengerRideKey,
 } from "../matching/redisKeys.js";
-
-const ACTIVE_STATES = [
-  "started",
-  "arrived_pickup",
-  "accepted",
-  "offered_to_driver",
-  "requested",
-  "scheduled",
-];
+import { ACTIVE_RIDE_STATUSES } from "../constants/rideTypes.js";
 
 const isActiveStatus = (s) =>
-  ACTIVE_STATES.includes(String(s || "").toLowerCase());
+  ACTIVE_RIDE_STATUSES.includes(String(s || "").toLowerCase());
 
 /**
  * Build the router so we can use mysqlPool (needed for passenger lookup fallback).

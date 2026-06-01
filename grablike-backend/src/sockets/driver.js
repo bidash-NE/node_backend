@@ -9,6 +9,7 @@ import {
   currentPassengerRideKey,
 } from "../matching/redisKeys.js";
 import { initRideChat } from "./chat.js";
+import { initCallEvents } from "./calls.js";
 import { computePlatformFeeAndGST } from "../services/pricing/rulesEngine.js";
 import { getVehicleTypeByServiceName } from "../utils/getVehicleTypeUsingServiceTypeName.js";
 import { getPushTokensByUserIds, getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
@@ -684,6 +685,7 @@ export function initDriverSocket(io, mysqlPool) {
     }
 
     initRideChat(io, mysqlPool, socket);
+    initCallEvents(io, socket);
 
     /* -------- Optional explicit identity event -------- */
     socket.on(

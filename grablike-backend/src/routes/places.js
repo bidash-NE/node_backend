@@ -1,34 +1,28 @@
 // routes/places.js (ESM)
-// Free OSM suggestions via Photon (default) or Nominatim.
+// Serves place autocomplete from local MySQL (OSM data).
 // Normalizes to: { place_id, description, coords: { latitude, longitude }, raw }
 
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import Redis from 'ioredis';
-
-// If you’re on Node 18+, global fetch exists. If not, uncomment:
-// import fetch from 'node-fetch';
+import { mysqlPool } from '../db/mysql.js';
 
 const router = express.Router();
 
 /* ====== ENV ====== */
-const OSM_PROVIDER   = (process.env.OSM_PROVIDER || 'photon').toLowerCase(); // 'photon' | 'nominatim'
-const PHOTON_URL     = process.env.PHOTON_URL    || 'https://photon.komoot.io/api';
-const NOMINATIM_URL  = process.env.NOMINATIM_URL || 'https://nominatim.openstreetmap.org/search';
-const OSM_USER_AGENT = process.env.OSM_USER_AGENT || 'YourApp/1.0 (contact@example.com)';
-const REDIS_URL      = process.env.REDIS_URL || '';            // optional
-const CACHE_TTL      = Number(process.env.CACHE_TTL || 180);   // seconds
+const REDIS_URL  = process.env.REDIS_URL || '';
+const CACHE_TTL  = Number(process.env.CACHE_TTL || 180); // seconds
 
 /* ====== Rate limit only this router ====== */
 const limiter = rateLimit({
-  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 30_000), // 30s
-  max: Number(process.env.RATE_LIMIT_MAX || 60),                // 60 requests / window / IP
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 30_000),
+  max:      Number(process.env.RATE_LIMIT_MAX       || 60),
 });
 router.use(limiter);
 
 /* ====== Cache (Redis if provided; else in-memory) ====== */
 let memCache = new Map();
-let redis = null;
+let redis    = null;
 if (REDIS_URL) {
   redis = new Redis(REDIS_URL);
 }
@@ -40,10 +34,7 @@ async function cacheGet(key) {
   }
   const entry = memCache.get(key);
   if (!entry) return null;
-  if (Date.now() > entry.expires) {
-    memCache.delete(key);
-    return null;
-  }
+  if (Date.now() > entry.expires) { memCache.delete(key); return null; }
   return entry.value;
 }
 
@@ -63,61 +54,51 @@ function clamp(n, min, max) {
   return Math.max(min, Math.min(max, x));
 }
 
-function normalizePhoton(json) {
-  const features = json?.features || [];
-  return features.map((f, i) => {
-    const p = f.properties || {};
-    const coords = f.geometry?.coordinates || [];
-    const lon = coords[0], lat = coords[1];
-    const parts = [p.name, p.street, p.city, p.state, p.country].filter(Boolean);
-    const description = Array.from(new Set(parts)).join(', ') || p.type || 'Unnamed place';
-    return {
-      place_id: p.osm_id ? `osm:${p.osm_id}` : `photon:${i}`,
-      description,
-      coords: (lat != null && lon != null) ? { latitude: lat, longitude: lon } : null,
-      raw: p,
-    };
-  });
-}
+/* ====== MySQL queries ====== */
+async function queryLocal({ q, lat, lon, limit }) {
+  const booleanQ = q.split(/\s+/).filter(Boolean).map(w => `+${w}*`).join(' ');
+  const likeQ    = `%${q}%`;
 
-function normalizeNominatim(json) {
-  const arr = Array.isArray(json) ? json : [];
-  return arr.map((item) => ({
-    place_id: String(item.place_id ?? item.osm_id ?? ''),
-    description: item.display_name || item.name || 'Unnamed place',
-    coords: (item.lat != null && item.lon != null)
-      ? { latitude: Number(item.lat), longitude: Number(item.lon) }
-      : null,
-    raw: item,
+  let rows;
+
+  if (lat != null && lon != null) {
+    // Sort by distance from user location — Haversine (MariaDB-compatible)
+    [rows] = await mysqlPool.query(
+      `SELECT
+         id, name, amenity, tourism, shop, place, lat, lon,
+         (6371000 * ACOS(
+           LEAST(1,
+             COS(RADIANS(?)) * COS(RADIANS(lat)) * COS(RADIANS(lon) - RADIANS(?)) +
+             SIN(RADIANS(?)) * SIN(RADIANS(lat))
+           )
+         )) AS distance_m
+       FROM places
+       WHERE MATCH(name) AGAINST (? IN BOOLEAN MODE)
+          OR name LIKE ?
+       ORDER BY distance_m ASC
+       LIMIT ?`,
+      [lat, lon, lat, booleanQ, likeQ, limit]
+    );
+  } else {
+    // Sort by fulltext relevance
+    [rows] = await mysqlPool.query(
+      `SELECT id, name, amenity, tourism, shop, place, lat, lon
+       FROM places
+       WHERE MATCH(name) AGAINST (? IN BOOLEAN MODE)
+          OR name LIKE ?
+       ORDER BY MATCH(name) AGAINST (? IN BOOLEAN MODE) DESC
+       LIMIT ?`,
+      [booleanQ, likeQ, booleanQ, limit]
+    );
+  }
+
+  return rows.map(r => ({
+    place_id:    `local:${r.id}`,
+    description: [r.name, r.amenity || r.tourism || r.shop || r.place]
+                   .filter(Boolean).join(' · '),
+    coords:      { latitude: r.lat, longitude: r.lon },
+    raw:         r,
   }));
-}
-
-/* ====== Provider calls ====== */
-async function queryPhoton({ q, lat, lon, limit }) {
-  const url = new URL(PHOTON_URL);
-  url.searchParams.set('q', q);
-  if (lat != null && lon != null) {
-    url.searchParams.set('lat', lat);
-    url.searchParams.set('lon', lon);
-  }
-  url.searchParams.set('limit', limit);
-  const res = await fetch(url.toString(), { headers: { 'User-Agent': OSM_USER_AGENT } });
-  if (!res.ok) throw new Error(`Photon error ${res.status}`);
-  return normalizePhoton(await res.json());
-}
-
-async function queryNominatim({ q, lat, lon, limit }) {
-  const url = new URL(NOMINATIM_URL);
-  url.searchParams.set('format', 'jsonv2');
-  url.searchParams.set('q', q);
-  url.searchParams.set('limit', limit);
-  if (lat != null && lon != null) {
-    url.searchParams.set('lat', lat);
-    url.searchParams.set('lon', lon);
-  }
-  const res = await fetch(url.toString(), { headers: { 'User-Agent': OSM_USER_AGENT } });
-  if (!res.ok) throw new Error(`Nominatim error ${res.status}`);
-  return normalizeNominatim(await res.json());
 }
 
 /* ====== GET /api/places/suggest?q=&lat=&lon=&limit= ====== */
@@ -128,39 +109,25 @@ router.get('/suggest', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'q must be >= 2 chars' });
     }
 
-    const lat = req.query.lat != null ? Number(req.query.lat) : null;
-    const lon = req.query.lon != null ? Number(req.query.lon) : null;
+    const lat   = req.query.lat != null ? Number(req.query.lat) : null;
+    const lon   = req.query.lon != null ? Number(req.query.lon) : null;
     const limit = clamp(req.query.limit ?? 8, 1, 15);
 
-    const cacheKey = `places:suggest:${OSM_PROVIDER}:${qRaw}:${lat ?? ''}:${lon ?? ''}:${limit}`;
-    const cached = await cacheGet(cacheKey);
+    const cacheKey = `places:suggest:local:${qRaw}:${lat ?? ''}:${lon ?? ''}:${limit}`;
+    const cached   = await cacheGet(cacheKey);
     if (cached) {
-      return res.json({
-        ok: true,
-        provider: OSM_PROVIDER,
-        attribution: OSM_PROVIDER === 'nominatim'
-          ? 'Data © OpenStreetMap contributors, search by Nominatim'
-          : 'Data © OpenStreetMap contributors, search by Photon (Komoot)',
-        items: cached,
-        cached: true,
-      });
+      return res.json({ ok: true, provider: 'local-osm', items: cached, cached: true });
     }
 
-    const args = { q: qRaw, lat, lon, limit };
-    const items = (OSM_PROVIDER === 'nominatim')
-      ? await queryNominatim(args)
-      : await queryPhoton(args);
-
+    const items = await queryLocal({ q: qRaw, lat, lon, limit });
     await cacheSet(cacheKey, items, CACHE_TTL);
 
     res.json({
-      ok: true,
-      provider: OSM_PROVIDER,
-      attribution: OSM_PROVIDER === 'nominatim'
-        ? 'Data © OpenStreetMap contributors, search by Nominatim'
-        : 'Data © OpenStreetMap contributors, search by Photon (Komoot)',
+      ok:          true,
+      provider:    'local-osm',
+      attribution: 'Data © OpenStreetMap contributors',
       items,
-      cached: false,
+      cached:      false,
     });
   } catch (e) {
     console.error('places/suggest error', e);

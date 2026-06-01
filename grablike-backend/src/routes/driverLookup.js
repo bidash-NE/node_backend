@@ -11,22 +11,20 @@ export default function makeDriverLookupRouter(mysqlPool) {
 
   // GET driver details using driverId /api/driver_id?driverId=12
   router.get("/driver_id", async (req, res) => {
-    try {
+   try {
       const raw = req.query.driverId;
       const driverId = Number(raw);
       console.log("Driver Id: ", driverId);
 
       if (!Number.isFinite(driverId) || driverId <= 0) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Valid driverId is required" });
+        return res.status(400).json({ ok: false, error: "Valid driverId is required" });
       }
-
+      
       const conn = await mysqlPool.getConnection();
       try {
         const [[row]] = await conn.query(
-          "SELECT user_id FROM drivers WHERE driver_id = ? LIMIT 1",
-          [driverId],
+         "SELECT user_id FROM drivers WHERE driver_id = ? LIMIT 1",
+          [driverId]
         );
 
         if (!row) {
@@ -39,8 +37,8 @@ export default function makeDriverLookupRouter(mysqlPool) {
         const userId = row.user_id;
 
         const [[userDetails]] = await conn.query(
-          "SELECT * FROM users WHERE user_id = ? LIMIT 1",
-          [userId],
+         "SELECT * FROM users WHERE user_id = ? LIMIT 1",
+          [userId]
         );
 
         return res.json({
@@ -48,9 +46,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
           details: userDetails || null,
         });
       } finally {
-        try {
-          conn.release();
-        } catch {}
+        try { conn.release(); } catch {}
       }
     } catch (err) {
       console.error("[GET /api/driver_id] error:", err);
@@ -64,16 +60,14 @@ export default function makeDriverLookupRouter(mysqlPool) {
       const userId = Number(raw);
 
       if (!Number.isFinite(userId) || userId <= 0) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Valid userId is required" });
+        return res.status(400).json({ ok: false, error: "Valid userId is required" });
       }
 
       const conn = await mysqlPool.getConnection();
       try {
         const [[row]] = await conn.query(
           "SELECT driver_id FROM drivers WHERE user_id = ? LIMIT 1",
-          [userId],
+          [userId]
         );
 
         if (!row) {
@@ -89,9 +83,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
           driver_id: row.driver_id,
         });
       } finally {
-        try {
-          conn.release();
-        } catch {}
+        try { conn.release(); } catch {}
       }
     } catch (err) {
       console.error("[GET /api/driver-id] error:", err);
@@ -105,16 +97,14 @@ export default function makeDriverLookupRouter(mysqlPool) {
     try {
       const userId = Number(req.params.userId);
       if (!Number.isFinite(userId) || userId <= 0) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Valid userId is required" });
+        return res.status(400).json({ ok: false, error: "Valid userId is required" });
       }
 
       const conn = await mysqlPool.getConnection();
       try {
         const [[row]] = await conn.query(
           "SELECT driver_id FROM drivers WHERE user_id = ? LIMIT 1",
-          [userId],
+          [userId]
         );
 
         if (!row) {
@@ -130,9 +120,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
           driver_id: row.driver_id,
         });
       } finally {
-        try {
-          conn.release();
-        } catch {}
+        try { conn.release(); } catch {}
       }
     } catch (err) {
       console.error("[GET /api/drivers/by-user/:userId] error:", err);
@@ -147,9 +135,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
       const driverId = Number(raw);
 
       if (!Number.isFinite(driverId) || driverId <= 0) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "Valid driverId is required" });
+        return res.status(400).json({ ok: false, error: "Valid driverId is required" });
       }
 
       const conn = await mysqlPool.getConnection();
@@ -159,7 +145,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
            FROM driver_vehicles v
            JOIN drivers d ON v.driver_id = d.driver_id
            WHERE d.driver_id = ? LIMIT 1`,
-          [driverId],
+          [driverId]
         );
 
         if (!row) {
@@ -171,7 +157,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
 
         return res.json({
           ok: true,
-          details: {
+          details:{
             vehicle_id: row.vehicle_id,
             make: row.make,
             model: row.model,
@@ -186,9 +172,7 @@ export default function makeDriverLookupRouter(mysqlPool) {
           },
         });
       } finally {
-        try {
-          conn.release();
-        } catch {}
+        try { conn.release(); } catch {}
       }
     } catch (err) {
       console.error("Error getting the vehicle details:", err);
@@ -197,45 +181,39 @@ export default function makeDriverLookupRouter(mysqlPool) {
   });
 
   // get driver details (including user details) from batch_id
-  router.get("/order/:batchId/driver", async (req, res) => {
-    try {
-      const batchId = req.params.batchId;
-      console.log("Batch Id: ", batchId);
-      if (!batchId) {
-        return res
-          .status(400)
-          .json({ ok: false, error: "batchId is required" });
-      }
-
-      const conn = await mysqlPool.getConnection();
-      try {
-        const result = await resolveDriverDetailsFromOrderBatchedIds(conn, {
-          batchId: batchId,
-        });
-
-        if (!result) {
-          return res.status(404).json({
-            ok: false,
-            error: `No driver found for batch_id=${batchId}`,
-          });
-        }
-
-        return res.json({
-          ok: true,
-          details: result.user_details || null,
-          driver_id: result.driver_id,
-          rating: result.rating,
-          comment: result.comment,
-        });
-      } finally {
-        try {
-          conn.release();
-        } catch {}
-      }
-    } catch (err) {
-      console.error("Error getting the driver details from batchId:", err);
-      return res.status(500).json({ ok: false, error: "Server error" });
+router.get("/order/:batchId/driver", async (req, res) => {
+  try {
+    const batchId = req.params.batchId;
+    console.log("Batch Id: ", batchId);
+    if (!batchId) {
+      return res.status(400).json({ ok: false, error: "batchId is required" });
     }
-  });
+
+    const conn = await mysqlPool.getConnection();
+    try {
+      const result = await resolveDriverDetailsFromOrderBatchedIds(conn, { batchId: batchId });
+
+      if (!result) {
+        return res.status(404).json({
+          ok: false,
+          error: `No driver found for batch_id=${batchId}`,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        details: result.user_details || null,
+        driver_id: result.driver_id,
+        rating: result.rating,
+        comment: result.comment,
+      });
+    } finally {
+      try { conn.release(); } catch {}
+    }
+  } catch (err) {
+    console.error("Error getting the driver details from batchId:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
   return router;
 }

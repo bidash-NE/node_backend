@@ -208,46 +208,6 @@ function computeGstCents(taxRule, platformFeeCents) {
   };
 }
 
-/* ---------------- fare table lookup ---------------- */
-async function lookupFareFromTable(conn, { trip_category, from_location, to_location, trip_type }) {
-  if (trip_category === "inter_city") {
-    const rows = await qConn(
-      conn,
-      `SELECT reserve_fare, share_fare
-       FROM inter_city_fares
-       WHERE LOWER(from_city) = LOWER(?) AND LOWER(to_city) = LOWER(?)
-       LIMIT 1`,
-      [from_location, to_location],
-    );
-    if (!rows[0]) return null;
-    const row = rows[0];
-    const isPool = String(trip_type || "").toLowerCase() === "pool";
-    const fareNu = isPool ? Number(row.share_fare) : Number(row.reserve_fare);
-    return {
-      subtotal_cents: Math.round(fareNu * 100),
-      is_share_allowed: null, // inter-city doesn't restrict sharing
-    };
-  } else if (trip_category === "intra_city") {
-    const rows = await qConn(
-      conn,
-      `SELECT reserve_fare, share_fare, is_share
-       FROM intra_city_fares
-       WHERE LOWER(from_zone) = LOWER(?) AND LOWER(to_zone) = LOWER(?)
-       LIMIT 1`,
-      [from_location, to_location],
-    );
-    if (!rows[0]) return null;
-    const row = rows[0];
-    const isPool = String(trip_type || "").toLowerCase() === "pool";
-    const fareNu = isPool ? Number(row.share_fare) : Number(row.reserve_fare);
-    return {
-      subtotal_cents: Math.round(fareNu * 100),
-      is_share_allowed: Boolean(row.is_share),
-    };
-  }
-  return null;
-}
-
 /* ---------------- public API ---------------- */
 async function validateAndComputeDiscount(
   conn,
@@ -374,34 +334,9 @@ async function validateAndComputeDiscount(
 
 export async function computePlatformFeeAndGST(input) {
   const at = safeStr(input.at) || nowSqlUtc(new Date());
-  const { offer_code, user_id, service_type } = input;
-  const trip_category  = safeStr(input.trip_category)  || null;
-  const from_location  = safeStr(input.from_location)  || null;
-  const to_location    = safeStr(input.to_location)    || null;
+  const { offer_code, user_id, service_type, subtotal_cents } = input;
 
   return await withConn(async (conn) => {
-    // Resolve subtotal: fare table lookup takes priority over caller-supplied cents
-    let subtotal_cents = toInt(input.subtotal_cents, 0);
-    let is_share_allowed = null;
-
-    if (trip_category) {
-      const fareRow = await lookupFareFromTable(conn, {
-        trip_category,
-        from_location,
-        to_location,
-        trip_type: input.trip_type,
-      });
-      if (!fareRow) {
-        const err = new Error(
-          `No fare found for ${trip_category} route: ${from_location} → ${to_location}`,
-        );
-        err.status = 404;
-        throw err;
-      }
-      subtotal_cents    = fareRow.subtotal_cents;
-      is_share_allowed  = fareRow.is_share_allowed;
-    }
-
     let discountCents = 0;
     let appliedOffer = null;
 
@@ -544,13 +479,6 @@ export async function computePlatformFeeAndGST(input) {
 
       fee_breakdown: feeRes.fee_breakdown,
       gst_breakdown: gstRes.gst_breakdown,
-
-      ...(trip_category != null && {
-        trip_category,
-        from_location,
-        to_location,
-        is_share_allowed,
-      }),
     };
   });
 }

@@ -1,27 +1,14 @@
 // src/controllers/scheduledRides.controller.js
 import { mysqlPool } from "../db/mysql.js";
+import { RIDE_STATUS_LIST } from "../constants/rideTypes.js";
 
 /* ================= CONFIG ================= */
 const RESERVE_TTL_MIN = 30; // initial hold
 const DISPATCH_BEFORE_MIN = 15; // dispatch T-15
 const RECONFIRM_BEFORE_MIN = 30; // reconfirm T-30
 
-// ✅ MUST match rides.status enum exactly
-const RIDE_STATUSES = [
-  "scheduled",
-  "reserved",
-  "matching",
-  "requested",
-  "offered_to_driver",
-  "accepted",
-  "arrived_pickup",
-  "started",
-  "completed",
-  "cancelled_driver",
-  "cancelled_rider",
-  "cancelled_system",
-  "failed",
-];
+// Matches rides.status DB ENUM exactly (via shared constants)
+const RIDE_STATUSES = RIDE_STATUS_LIST;
 
 /* ================= HELPERS ================= */
 function toIsoSafe(d) {

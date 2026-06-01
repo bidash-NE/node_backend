@@ -13,7 +13,7 @@ const RTIPS_TBL = "ride_tips"; // ✅ NEW: ride_tips table
 
 /* External ID service used in your driver.js */
 const WALLET_IDS_ENDPOINT = (
-  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
+  process.env.WALLET_IDS_ENDPOINT || "https://backend.tabdhey.bt/wallet/ids/both"
 ).trim();
 
 /* ========= Socket room helpers (match your driver.js) ========= */

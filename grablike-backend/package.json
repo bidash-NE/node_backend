@@ -9,6 +9,7 @@
     "lint": "echo \"no lint configured yet\""
   },
   "dependencies": {
+    "agora-token": "^2.0.5",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",
