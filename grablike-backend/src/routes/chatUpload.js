@@ -14,23 +14,24 @@ export function makeChatUploadRouter(publicBase = "grablike/uploads") {
   const storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UP_DIR),
     filename: (_req, file, cb) => {
-      const ext = mime.extension(file.mimetype) || "jpg";
+      const ext = mime.extension(file.mimetype) || "bin";
       const name = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       cb(null, name);
     },
   });
 
+  const ALLOWED_PREFIXES = ["image/", "audio/"];
+
   const fileFilter = (_req, file, cb) => {
-    if (!file.mimetype?.startsWith("image/")) {
-      return cb(new Error("Only image files are allowed"));
-    }
+    const ok = ALLOWED_PREFIXES.some((p) => file.mimetype?.startsWith(p));
+    if (!ok) return cb(new Error("Only image and audio files are allowed"));
     cb(null, true);
   };
 
   const upload = multer({
     storage,
     fileFilter,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+    limits: { fileSize: 1024 * 1024 }, // 1024 KB — ~1 min of high-quality voice
   });
 
   // POST /chat/upload  (form field: "file")
