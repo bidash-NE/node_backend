@@ -3,6 +3,7 @@ import { withConn } from "../db/mysql.js";
 import { computeFareCents } from "../utils/fare.js";
 import { getPushTokensByUserIds, getPushTokensByDriverIds } from "../services/getPushTokensByUserIds.js";
 import { sendPushToTokens } from "../services/push.js";
+import { creditReferral } from "./referralRoutes.js";
 
 export const ridesRouter = express.Router();
 
@@ -173,6 +174,12 @@ ridesRouter.post("/driver/ride/:id/complete", async (req, res) => {
       driverIdForPush = ride.driver_id;
       passengerIdForPush = ride.passenger_id;
       earningsCentsForPush = cents;
+
+      // Credit referral if this is the passenger's first completed ride.
+      // Uses the same connection (already committed), never throws.
+      if (ride.passenger_id) {
+        await creditReferral(conn, ride.passenger_id);
+      }
     });
 
     if (passengerIdForPush) {

@@ -10,6 +10,7 @@ import { startScheduledRidesWorker } from "./workers/scheduledRidesWorker.js";
 import scheduledRoutes from "./routes/scheduledRides.routes.js";
 import offerRoutes from './routes/offerRoutes.js';
 import adminOfferRoutes from './routes/admin/offerRoutes.js';
+import { makeReferralRouter } from "./routes/referralRoutes.js";
 
 import matchRoutes from "./routes/match.routes.js";
 import { makeDbOfferAdapter } from "./matching/dbOfferAdapter.js";
@@ -27,6 +28,7 @@ import { makeOfferAdapter } from "./services/offerAdapter.js";
 import { configureMatcher } from "./matching/matcher.js";
 import nearbyDriversApi from "./routes/nearbyDriversApi.js";
 import makePassengerNearbyDriversRouter from "./routes/passengerNearbyDrivers.js";
+import makeProfileImageRouter from "./routes/profileImage.js";
 import locationsRouter from "./routes/locations.js";
 import places from "./routes/places.js";
 import makeDriverLookupRouter from "./routes/driverLookup.js";
@@ -82,6 +84,7 @@ app.use("/api/driver", earningsRouter(mysqlPool));
 app.use("/api", ratingsRouter(mysqlPool));
 app.use("/api", nearbyDriversApi(mysqlPool));
 app.use("/api", makePassengerNearbyDriversRouter(mysqlPool));
+app.use("/api", makeProfileImageRouter());
 app.use("/api", ridesTypesRouter);
 app.use("/api/rides/locations", locationsRouter);
 app.use("/api/places", places);
@@ -96,6 +99,7 @@ app.use("/api", rideGroupRoutes);
 app.use("/api", guestWaypointsRouter(mysqlPool));
 app.use('/api/offers', offerRoutes);
 app.use('/admin/offers', adminOfferRoutes);
+app.use('/api/referrals', makeReferralRouter(mysqlPool));
 
 
 // tax and platform fee rules routes
