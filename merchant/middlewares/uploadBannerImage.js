@@ -1,37 +1,24 @@
-// merchant/middlewares/uploadBannerImage.js
+// middlewares/uploadBannerImage.js
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-// ✅ Root upload dir: use env (k8s mounts /uploads) or fallback to ./uploads locally
+const {
+  ensureDirSync,
+  isLikelyImage,
+  compressFilesFromRequest,
+} = require("./imageCompression");
+
+// ✅ Root upload dir
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+
 const SUBFOLDER = "banners";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
-// Ensure dir exists
-function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 ensureDirSync(DEST);
 
-// Pick a safe extension if missing/odd
-function safeExt(originalName = "", mimetype = "") {
-  const fromName = (path.extname(originalName || "") || "").toLowerCase();
-  if (fromName && fromName.length <= 6) return fromName;
-  const map = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/svg+xml": ".svg",
-  };
-  return map[mimetype] || ".jpg";
-}
-
-// Slugify part of filename
 function slugBase(v = "banner") {
   return (
     (String(v) || "banner")
@@ -43,7 +30,6 @@ function slugBase(v = "banner") {
   );
 }
 
-// Multer storage
 const storage = multer.diskStorage({
   destination: function (_req, _file, cb) {
     try {
@@ -53,27 +39,30 @@ const storage = multer.diskStorage({
       cb(e);
     }
   },
+
   filename: function (req, file, cb) {
-    const ext = safeExt(file.originalname, file.mimetype);
     const base = slugBase(req.body?.title || "banner");
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
-    cb(null, `${unique}-${base}${ext}`);
+
+    // Save compressed output as webp
+    cb(null, `${unique}-${base}.webp`);
   },
 });
 
-// Allow only images
-const allowedMimes = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "image/gif",
-  "image/svg+xml",
-]);
-
 const fileFilter = (_req, file, cb) => {
-  if (allowedMimes.has(file.mimetype)) return cb(null, true);
-  cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
+  console.log("[BANNER IMAGE RECEIVED]", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  if (isLikelyImage(file)) return cb(null, true);
+
+  return cb(
+    new Error(
+      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`,
+    ),
+  );
 };
 
 /**
@@ -90,25 +79,39 @@ function uploadBannerImage() {
   ]);
 
   return (req, res, next) => {
-    uploader(req, res, (err) => {
+    uploader(req, res, async (err) => {
       if (err) {
         err.statusCode = 400;
         return next(err);
       }
+
       const any = req.files || {};
+
       req.file =
         (Array.isArray(any.banner_image) && any.banner_image[0]) ||
         (Array.isArray(any.image) && any.image[0]) ||
         null;
-      next();
+
+      try {
+        await compressFilesFromRequest(req, { targetKB: 100 });
+        return next();
+      } catch (compressionErr) {
+        compressionErr.statusCode = 400;
+        return next(compressionErr);
+      }
     });
   };
 }
 
-// Build public URL path
 function toWebPath(fileObj) {
   if (!fileObj || !fileObj.filename) return null;
   return `/uploads/${SUBFOLDER}/${fileObj.filename}`;
 }
 
-module.exports = { uploadBannerImage, toWebPath, DEST, SUBFOLDER, UPLOAD_ROOT };
+module.exports = {
+  uploadBannerImage,
+  toWebPath,
+  DEST,
+  SUBFOLDER,
+  UPLOAD_ROOT,
+};

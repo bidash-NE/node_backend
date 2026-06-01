@@ -1,18 +1,20 @@
-// middleware/uploadBusinessTypeImage.js
-const fs = require("fs");
+// middlewares/businessTypesImage.js
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-// ✅ Use env first, fall back to repo folder for local dev
+const {
+  ensureDirSync,
+  isLikelyImage,
+  compressFilesFromRequest,
+} = require("./imageCompression");
+
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+
 const SUBFOLDER = "business-types";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
-function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 ensureDirSync(DEST);
 
 const storage = multer.diskStorage({
@@ -24,10 +26,8 @@ const storage = multer.diskStorage({
       cb(e);
     }
   },
-  filename: (req, file, cb) => {
-    let ext = (path.extname(file.originalname || "") || "").toLowerCase();
-    if (!ext || ext.length > 6) ext = ".jpg";
 
+  filename: (req, file, cb) => {
     const base =
       (req.body?.name || "bt")
         .toString()
@@ -38,38 +38,53 @@ const storage = multer.diskStorage({
         .slice(0, 60) || "bt";
 
     const unique = `${Date.now()}-${crypto.randomUUID()}`;
-    cb(null, `${unique}-${base}${ext}`);
+
+    // Save compressed output as webp
+    cb(null, `${unique}-${base}.webp`);
   },
 });
 
-const allowed = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "image/gif",
-  "image/svg+xml",
-  "image/svg",
-]);
-
 const fileFilter = (_req, file, cb) => {
-  if (allowed.has(file.mimetype)) return cb(null, true);
-  cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
+  console.log("[BUSINESS TYPE IMAGE RECEIVED]", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  if (isLikelyImage(file)) return cb(null, true);
+
+  return cb(
+    new Error(
+      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`,
+    ),
+  );
 };
 
-const upload = multer({
+const rawUpload = multer({
   storage,
   fileFilter,
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-});
+}).single("image");
 
-// Public web path helper
+function uploadBusinessTypeImage(req, res, next) {
+  rawUpload(req, res, async (err) => {
+    if (err) return next(err);
+
+    try {
+      await compressFilesFromRequest(req, { targetKB: 100 });
+      return next();
+    } catch (compressionErr) {
+      return next(compressionErr);
+    }
+  });
+}
+
 function toWebPath(fileObj) {
   return fileObj?.filename ? `/uploads/${SUBFOLDER}/${fileObj.filename}` : null;
 }
 
 module.exports = {
-  uploadBusinessTypeImage: upload.single("image"), // field name "image"
+  uploadBusinessTypeImage,
   toWebPath,
   SUBFOLDER,
 };

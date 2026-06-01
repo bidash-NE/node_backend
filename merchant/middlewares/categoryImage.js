@@ -1,19 +1,17 @@
-// middlewares/uploadCategoryImage.js
-const fs = require("fs");
+// middlewares/categoryImage.js
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 
-// ✅ Root configurable via env (default: ./uploads)
+const {
+  ensureDirSync,
+  isLikelyImage,
+  compressFilesFromRequest,
+} = require("./imageCompression");
+
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 
-// 🔧 ensure directory exists
-function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-// 🗂️ decide which subfolder to use
 function subfolderFor(kind) {
   const k = String(kind || "").toLowerCase();
   if (k === "food") return "food-category";
@@ -21,22 +19,6 @@ function subfolderFor(kind) {
   return "category";
 }
 
-// 🧩 extension safety
-function safeExt(originalName = "", mimetype = "") {
-  const fromName = (path.extname(originalName || "") || "").toLowerCase();
-  if (fromName && fromName.length <= 6) return fromName;
-  const map = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/svg+xml": ".svg",
-  };
-  return map[mimetype] || ".jpg";
-}
-
-// 🧱 slugify base name
 function slugBase(v = "cat") {
   return (
     (String(v) || "cat")
@@ -48,7 +30,6 @@ function slugBase(v = "cat") {
   );
 }
 
-// 💾 create storage engine
 function storageFactory() {
   return multer.diskStorage({
     destination: function (req, _file, cb) {
@@ -57,30 +38,33 @@ function storageFactory() {
       ensureDirSync(dest);
       cb(null, dest);
     },
+
     filename: function (req, file, cb) {
-      const ext = safeExt(file.originalname, file.mimetype);
       const base = slugBase(req.body?.category_name || "cat");
       const unique = `${Date.now()}-${crypto.randomUUID()}`;
-      cb(null, `${unique}-${base}${ext}`);
+
+      // Save compressed output as webp
+      cb(null, `${unique}-${base}.webp`);
     },
   });
 }
 
-// 🛡️ filter
 const fileFilter = (_req, file, cb) => {
-  const allowed = new Set([
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/gif",
-    "image/svg+xml",
-  ]);
-  if (allowed.has(file.mimetype)) return cb(null, true);
-  cb(new Error("Only image files are allowed (png, jpg, webp, gif, svg)."));
+  console.log("[CATEGORY IMAGE RECEIVED]", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  if (isLikelyImage(file)) return cb(null, true);
+
+  return cb(
+    new Error(
+      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`,
+    ),
+  );
 };
 
-// 🖼️ main middleware
 function uploadCategoryImage() {
   const uploader = multer({
     storage: storageFactory(),
@@ -89,21 +73,30 @@ function uploadCategoryImage() {
   }).any();
 
   return (req, res, next) => {
-    uploader(req, res, (err) => {
+    uploader(req, res, async (err) => {
       if (err) return next(err);
+
       const allowedNames = new Set(["category_image", "image"]);
       const files = Array.isArray(req.files) ? req.files : [];
       const picked = files.find((f) => allowedNames.has(f.fieldname));
+
       req.file = picked || null;
-      next();
+
+      try {
+        await compressFilesFromRequest(req, { targetKB: 100 });
+        return next();
+      } catch (compressionErr) {
+        return next(compressionErr);
+      }
     });
   };
 }
 
-// 🌐 build web path
 function toWebPathFromFile(req, fileObj) {
   if (!fileObj || !fileObj.filename) return null;
+
   const sub = subfolderFor(req.params.kind || req.query.kind);
+
   return `/uploads/${sub}/${fileObj.filename}`;
 }
 
