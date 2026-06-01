@@ -2,7 +2,6 @@
 import express from "express";
 import crypto from "crypto";
 import { withConn } from "../db/mysql.js";
-import { requireAuth } from "../middleware/requireAuth.js";
 import { sendPushToTokens } from "../services/push.js";
 import { getPushTokensByUserIds } from "../services/getPushTokensByUserIds.js";
 
@@ -16,7 +15,7 @@ const CODE_PREFIX      = "TAB";
 const CODE_CHARS       = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/I/1 ambiguity
 
 const WALLET_IDS_ENDPOINT = (
-  process.env.WALLET_IDS_ENDPOINT || "https://grab.newedge.bt/wallet/ids/both"
+  process.env.WALLET_IDS_ENDPOINT || "https://backend.tabdhey.bt/wallet/ids/both"
 ).trim();
 
 /* ── Helpers ── */
@@ -193,8 +192,11 @@ export function makeReferralRouter(mysqlPool) {
      Returns (or generates) the caller's referral code + stats.
      Auth: requireAuth (userId also accepted as query fallback).
   ──────────────────────────────────────────────────────── */
-  router.get("/my-code", requireAuth, async (req, res) => {
-    const userId = req.user.user_id;
+  router.get("/my-code", async (req, res) => {
+    const userId = Number(req.query.userId);
+    if (!userId || !Number.isFinite(userId)) {
+      return res.status(400).json({ ok: false, message: "userId query param required" });
+    }
     try {
       const result = await withConn(async (conn) => {
         const code = await getOrCreateCode(conn, userId);
@@ -231,8 +233,11 @@ export function makeReferralRouter(mysqlPool) {
      joined with the referee's name and status.
      Auth: requireAuth
   ──────────────────────────────────────────────────────── */
-  router.get("/history", requireAuth, async (req, res) => {
-    const userId = req.user.user_id;
+  router.get("/history", async (req, res) => {
+    const userId = Number(req.query.userId);
+    if (!userId || !Number.isFinite(userId)) {
+      return res.status(400).json({ ok: false, message: "userId query param required" });
+    }
     try {
       const rows = await withConn(async (conn) => {
         const [data] = await conn.query(
