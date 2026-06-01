@@ -9,8 +9,7 @@ const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
 } = require("../realtime");
-const { MAX_PHOTOS } = require("../middleware/uploadDeliveryPhoto");
-
+const { MAX_PHOTOS, toWebPaths } = require("../middleware/uploadDeliveryPhoto");
 /* --------------------------- uploads support --------------------------- */
 const path = require("path");
 const fs = require("fs");
@@ -729,8 +728,34 @@ async function createOrder(req, res) {
 
   const cleanupUploadedFiles = () => {
     try {
-      const files = Array.isArray(req.files) ? req.files : [];
-      for (const f of files) safeUnlink(f?.path);
+      const files = [];
+
+      if (Array.isArray(req.files)) {
+        files.push(...req.files);
+      }
+
+      if (
+        req.files &&
+        typeof req.files === "object" &&
+        !Array.isArray(req.files)
+      ) {
+        Object.values(req.files).forEach((value) => {
+          if (Array.isArray(value)) files.push(...value);
+        });
+      }
+
+      if (Array.isArray(req.deliveryPhotos)) {
+        files.push(...req.deliveryPhotos);
+      }
+
+      const seen = new Set();
+
+      for (const f of files) {
+        const p = f?.path;
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        safeUnlink(p);
+      }
     } catch {}
   };
 
@@ -779,10 +804,14 @@ async function createOrder(req, res) {
     payload.order_id = order_id;
 
     const moved = mapUploadedFilesToPayload(req, order_id, normalizedItems);
+
     const uploadedOrderPhotos = Array.isArray(moved.order_images)
       ? moved.order_images
       : [];
 
+    // Photos uploaded through middleware/uploadDeliveryPhoto.js
+    // This is the correct source when route uses uploadDeliveryPhotos.
+    const uploadedDeliveryPhotos = toWebPaths(req.deliveryPhotos || []);
     payload.delivery_floor_unit =
       payload.delivery_floor_unit ??
       payload.floor_unit ??
@@ -817,6 +846,7 @@ async function createOrder(req, res) {
       ...bodyList,
       ...bodySingle,
       ...uploadedOrderPhotos,
+      ...uploadedDeliveryPhotos,
     ]);
 
     if (allPhotos.length > MAX_PHOTOS) {

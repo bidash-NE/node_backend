@@ -2,16 +2,28 @@ const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
+const sharp = require("sharp");
 
-// ✅ Use a path within the app's working directory
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
+/* ===================== CONFIG ===================== */
+
+// ✅ Root upload dir.
+// For K8s, prefer process.env.UPLOAD_ROOT = /uploads
+// For local, fallback to ./uploads
+const UPLOAD_ROOT =
+  process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+
 const SUBFOLDER = "order_delivery_photos";
 const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 
 const MAX_PHOTOS = Number(process.env.DELIVERY_PHOTO_MAX || 6);
+
 const MAX_BYTES = Number(
   process.env.DELIVERY_PHOTO_MAX_BYTES || 5 * 1024 * 1024
-); // 5MB
+); // 5MB upload limit before compression
+
+const TARGET_KB = Number(process.env.DELIVERY_PHOTO_TARGET_KB || 100);
+
+/* ===================== DIR HELPERS ===================== */
 
 function ensureDirSync(dir) {
   if (!fs.existsSync(dir)) {
@@ -20,27 +32,125 @@ function ensureDirSync(dir) {
   }
 }
 
-// Ensure directory exists
 try {
+  ensureDirSync(UPLOAD_ROOT);
   ensureDirSync(DEST);
 } catch (err) {
   console.error(`❌ Failed to create directory ${DEST}:`, err.message);
 }
 
-function safeExt(originalName = "", mimetype = "") {
-  const fromName = (path.extname(originalName || "") || "").toLowerCase();
-  if (fromName && fromName.length <= 6) return fromName;
+/* ===================== IMAGE HELPERS ===================== */
 
-  const map = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-  };
-  return map[mimetype] || ".jpg";
+const allowedMimeTypes = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "application/octet-stream", // fallback for some clients
+]);
+
+const allowedExtensions = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+]);
+
+function isLikelyImage(file) {
+  if (!file) return false;
+
+  const mimetype = String(file.mimetype || "").toLowerCase();
+  const ext = path.extname(file.originalname || "").toLowerCase();
+
+  return allowedMimeTypes.has(mimetype) || allowedExtensions.has(ext);
 }
 
-const allowed = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
+async function compressImageToTargetKB(inputPath, options = {}) {
+  const {
+    targetKB = TARGET_KB,
+    startQuality = 82,
+    minQuality = 35,
+    startWidth = 1000,
+    startHeight = 1000,
+    minWidth = 300,
+    minHeight = 300,
+  } = options;
+
+  if (!inputPath || !fs.existsSync(inputPath)) {
+    throw new Error("Image file not found for compression.");
+  }
+
+  const targetBytes = targetKB * 1024;
+
+  let width = startWidth;
+  let height = startHeight;
+  let quality = startQuality;
+  let finalBuffer = null;
+  let finalMeta = null;
+
+  while (width >= minWidth && height >= minHeight) {
+    quality = startQuality;
+
+    while (quality >= minQuality) {
+      const buffer = await sharp(inputPath)
+        .rotate()
+        .resize({
+          width,
+          height,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .webp({
+          quality,
+          effort: 6,
+        })
+        .toBuffer();
+
+      finalBuffer = buffer;
+
+      finalMeta = {
+        width,
+        height,
+        quality,
+        sizeKB: Number((buffer.length / 1024).toFixed(2)),
+      };
+
+      if (buffer.length <= targetBytes) {
+        fs.writeFileSync(inputPath, buffer);
+
+        console.log("[DELIVERY PHOTO COMPRESSED]", {
+          file: inputPath,
+          targetKB,
+          ...finalMeta,
+        });
+
+        return finalMeta;
+      }
+
+      quality -= 5;
+    }
+
+    width = Math.floor(width * 0.85);
+    height = Math.floor(height * 0.85);
+  }
+
+  if (!finalBuffer) {
+    throw new Error("Image compression failed.");
+  }
+
+  // Save smallest generated version even if still above target.
+  fs.writeFileSync(inputPath, finalBuffer);
+
+  console.log("[DELIVERY PHOTO COMPRESSED - ABOVE TARGET]", {
+    file: inputPath,
+    targetKB,
+    ...finalMeta,
+  });
+
+  return finalMeta;
+}
+
+/* ===================== MULTER STORAGE ===================== */
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
@@ -51,21 +161,33 @@ const storage = multer.diskStorage({
       cb(e);
     }
   },
-  filename: (_req, file, cb) => {
-    const ext = safeExt(file.originalname, file.mimetype);
-    cb(null, `delivery_${Date.now()}_${crypto.randomUUID()}${ext}`);
+
+  filename: (_req, _file, cb) => {
+    // Save compressed image as webp.
+    cb(null, `delivery_${Date.now()}_${crypto.randomUUID()}.webp`);
   },
 });
 
 const fileFilter = (_req, file, cb) => {
-  if (allowed.has(file.mimetype)) return cb(null, true);
-  cb(new Error("Only image files are allowed (png, jpg, webp)."));
+  console.log("[DELIVERY PHOTO RECEIVED]", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  if (isLikelyImage(file)) return cb(null, true);
+
+  return cb(
+    new Error(
+      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`
+    ),
+    false
+  );
 };
 
-/**
- * Accept up to MAX_PHOTOS images.
- */
-function uploadDeliveryPhotos() {
+/* ===================== UPLOAD MIDDLEWARE ===================== */
+
+function uploadDeliveryPhotosFactory() {
   const uploader = multer({
     storage,
     fileFilter,
@@ -82,9 +204,10 @@ function uploadDeliveryPhotos() {
   ]);
 
   return (req, res, next) => {
-    uploader(req, res, (err) => {
+    uploader(req, res, async (err) => {
       if (err) {
         console.error("[uploadDeliveryPhotos] multer error:", err);
+
         return res.status(400).json({
           success: false,
           message: err.message || "Upload failed",
@@ -95,7 +218,6 @@ function uploadDeliveryPhotos() {
 
       const any = req.files || {};
 
-      // flatten all accepted fields into one list
       const list = []
         .concat(any.delivery_photo || [])
         .concat(any.delivery_photos || [])
@@ -105,6 +227,7 @@ function uploadDeliveryPhotos() {
 
       if (list.length > MAX_PHOTOS) {
         console.error("[uploadDeliveryPhotos] Too many files:", list.length);
+
         return res.status(400).json({
           success: false,
           message: `You can upload up to ${MAX_PHOTOS} photos only.`,
@@ -112,18 +235,69 @@ function uploadDeliveryPhotos() {
         });
       }
 
-      // normalized array for controller
-      req.deliveryPhotos = list;
+      try {
+        req.deliveryPhotoCompression = [];
 
-      console.log(
-        "[uploadDeliveryPhotos] uploaded count:",
-        req.deliveryPhotos.length
-      );
+        for (const file of list) {
+          if (!file?.path) continue;
 
-      next();
+          const compression = await compressImageToTargetKB(file.path, {
+            targetKB: TARGET_KB,
+          });
+
+          const stat = fs.statSync(file.path);
+
+          // Keep multer file object updated after compression
+          file.size = stat.size;
+          file.mimetype = "image/webp";
+
+          req.deliveryPhotoCompression.push({
+            fieldname: file.fieldname,
+            originalname: file.originalname,
+            filename: file.filename,
+            path: file.path,
+            targetKB: TARGET_KB,
+            sizeKB: compression.sizeKB,
+            quality: compression.quality,
+            width: compression.width,
+            height: compression.height,
+          });
+        }
+
+        req.deliveryPhotos = list;
+
+        console.log("[uploadDeliveryPhotos] uploaded count:", list.length);
+        console.log(
+          "[uploadDeliveryPhotos] compression:",
+          req.deliveryPhotoCompression
+        );
+
+        return next();
+      } catch (compressionErr) {
+        console.error(
+          "[uploadDeliveryPhotos] compression error:",
+          compressionErr
+        );
+
+        // Delete uploaded files if compression fails
+        for (const file of list) {
+          try {
+            if (file?.path && fs.existsSync(file.path)) {
+              fs.unlinkSync(file.path);
+            }
+          } catch {}
+        }
+
+        return res.status(400).json({
+          success: false,
+          message: compressionErr.message || "Image compression failed",
+        });
+      }
     });
   };
 }
+
+/* ===================== WEB PATH HELPERS ===================== */
 
 function toWebPath(fileObj) {
   if (!fileObj?.filename) return null;
@@ -135,8 +309,9 @@ function toWebPaths(filesArr) {
   return arr.map(toWebPath).filter(Boolean).slice(0, MAX_PHOTOS);
 }
 
-// Export the middleware function (call it to get the middleware)
-const uploadMiddleware = uploadDeliveryPhotos();
+/* ===================== EXPORTS ===================== */
+
+const uploadMiddleware = uploadDeliveryPhotosFactory();
 
 module.exports = {
   uploadDeliveryPhotos: uploadMiddleware,
@@ -146,4 +321,5 @@ module.exports = {
   SUBFOLDER,
   DEST,
   UPLOAD_ROOT,
+  TARGET_KB,
 };

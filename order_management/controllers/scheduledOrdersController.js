@@ -1,6 +1,9 @@
 // controllers/scheduledOrdersController.js
 const db = require("../config/db");
-
+const {
+  MAX_PHOTOS: UPLOAD_MAX_PHOTOS,
+  toWebPaths,
+} = require("../middleware/uploadDeliveryPhoto");
 const {
   addScheduledOrder,
   getScheduledOrdersByUser,
@@ -17,7 +20,7 @@ const {
 } = require("../models/scheduledOrderModel");
 
 const ALLOWED_SERVICE_TYPES = new Set(["FOOD", "MART"]);
-const MAX_PHOTOS = 6;
+const MAX_PHOTOS = Number(UPLOAD_MAX_PHOTOS || 6);
 const REJECTED_VISIBLE_MS = 30 * 60 * 1000;
 
 function safeJsonParse(v) {
@@ -60,11 +63,36 @@ function normalizeBool(v) {
 }
 
 function getFilesFromRequest(req) {
-  return []
-    .concat(req.files?.delivery_photo || [])
-    .concat(req.files?.delivery_photos || [])
-    .concat(req.files?.image || [])
-    .concat(req.files?.images || []);
+  const files = [];
+
+  // Main source from uploadDeliveryPhotos middleware
+  if (Array.isArray(req.deliveryPhotos)) {
+    files.push(...req.deliveryPhotos);
+  }
+
+  // Fallback source from multer.fields()
+  if (req.files && typeof req.files === "object" && !Array.isArray(req.files)) {
+    files.push(...(req.files.delivery_photo || []));
+    files.push(...(req.files.delivery_photos || []));
+    files.push(...(req.files["delivery_photo[]"] || []));
+    files.push(...(req.files.image || []));
+    files.push(...(req.files.images || []));
+  }
+
+  // Safety if another multer setup uses array
+  if (Array.isArray(req.files)) {
+    files.push(...req.files);
+  }
+
+  // Remove duplicates by file path
+  const seen = new Set();
+
+  return files.filter((file) => {
+    const key = file?.path || file?.filename;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function enrichItemsWithImages(orderPayload) {
@@ -293,35 +321,58 @@ exports.scheduleOrder = async (req, res) => {
     await enrichItemsWithImages(orderPayload);
     await enrichItemsWithBusinessName(orderPayload);
 
-    let bodyUris = [];
+    const existingPhotos = [];
 
-    if (Array.isArray(orderPayload.special_photos)) {
-      bodyUris = orderPayload.special_photos
-        .map((u) => (u == null ? "" : String(u).trim()))
-        .filter(Boolean);
-    } else if (typeof orderPayload.special_photos === "string") {
-      bodyUris = [orderPayload.special_photos.trim()].filter(Boolean);
+    const pushPhoto = (value) => {
+      const s = value == null ? "" : String(value).trim();
+      if (s) existingPhotos.push(s);
+    };
+
+    const deliveryPhotoUrls = safeJsonParse(orderPayload.delivery_photo_urls);
+    const deliveryPhotoUrl = safeJsonParse(orderPayload.delivery_photo_url);
+    const specialPhotos = safeJsonParse(orderPayload.special_photos);
+
+    if (Array.isArray(deliveryPhotoUrls)) {
+      deliveryPhotoUrls.forEach(pushPhoto);
+    } else {
+      pushPhoto(deliveryPhotoUrls);
+    }
+
+    if (Array.isArray(deliveryPhotoUrl)) {
+      deliveryPhotoUrl.forEach(pushPhoto);
+    } else {
+      pushPhoto(deliveryPhotoUrl);
+    }
+
+    if (Array.isArray(specialPhotos)) {
+      specialPhotos.forEach(pushPhoto);
+    } else {
+      pushPhoto(specialPhotos);
     }
 
     const files = getFilesFromRequest(req);
 
-    const uploadedUris = files
-      .map((f) =>
-        f?.filename ? `/uploads/order_delivery_photos/${f.filename}` : null,
-      )
+    // This converts compressed uploaded files to:
+    // /uploads/order_delivery_photos/filename.webp
+    const uploadedUris = toWebPaths(files);
+
+    const allPhotos = [...existingPhotos, ...uploadedUris]
+      .map((u) => String(u || "").trim())
       .filter(Boolean);
 
-    if (bodyUris.length + uploadedUris.length > MAX_PHOTOS) {
+    const mergedPhotos = [...new Set(allPhotos)];
+
+    if (mergedPhotos.length > MAX_PHOTOS) {
       return res.status(400).json({
         success: false,
         message: `Max ${MAX_PHOTOS} photos allowed.`,
+        received: mergedPhotos.length,
       });
     }
 
-    const mergedPhotos = [...bodyUris, ...uploadedUris].slice(0, MAX_PHOTOS);
-
-    orderPayload.special_photos = mergedPhotos;
+    orderPayload.delivery_photo_urls = mergedPhotos;
     orderPayload.delivery_photo_url = mergedPhotos[0] || null;
+    orderPayload.special_photos = mergedPhotos;
 
     const saved = await addScheduledOrder(scheduled_at, orderPayload, userId);
 
@@ -645,7 +696,7 @@ exports.cancelScheduledOrder = async (req, res) => {
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
-const { status, reason, estimated_minutes } = req.body;
+    const { status, reason, estimated_minutes } = req.body;
     if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
@@ -698,60 +749,61 @@ const { status, reason, estimated_minutes } = req.body;
 
     const userId = data.user_id;
 
-   if (status === "ACCEPTED") {
-  const estimatedMins = Number(estimated_minutes);
+    if (status === "ACCEPTED") {
+      const estimatedMins = Number(estimated_minutes);
 
-  if (
-    estimated_minutes == null ||
-    !Number.isFinite(estimatedMins) ||
-    estimatedMins <= 0
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: "estimated_minutes is required and must be a positive number.",
-    });
-  }
+      if (
+        estimated_minutes == null ||
+        !Number.isFinite(estimatedMins) ||
+        estimatedMins <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "estimated_minutes is required and must be a positive number.",
+        });
+      }
 
-  data.order_payload.status = "ACCEPTED";
-  data.order_payload.estimated_minutes = estimatedMins;
-  data.order_payload.accepted_at = new Date().toISOString();
-  data.updated_at = new Date().toISOString();
+      data.order_payload.status = "ACCEPTED";
+      data.order_payload.estimated_minutes = estimatedMins;
+      data.order_payload.accepted_at = new Date().toISOString();
+      data.updated_at = new Date().toISOString();
 
-  const scheduledScore = Number(data.scheduled_epoch_ms);
+      const scheduledScore = Number(data.scheduled_epoch_ms);
 
-  if (!Number.isFinite(scheduledScore)) {
-    return res.status(400).json({
-      success: false,
-      message: "Invalid scheduled time for this scheduled order.",
-    });
-  }
+      if (!Number.isFinite(scheduledScore)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid scheduled time for this scheduled order.",
+        });
+      }
 
-  await redis
-    .multi()
-    .set(jobKey, JSON.stringify(data))
-    .zrem(PENDING_ZSET_KEY, jobId)
-    .zrem(REJECTED_ZSET_KEY, jobId)
-    .zrem(ZSET_KEY, jobId)
-    .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId)
-    .exec();
+      await redis
+        .multi()
+        .set(jobKey, JSON.stringify(data))
+        .zrem(PENDING_ZSET_KEY, jobId)
+        .zrem(REJECTED_ZSET_KEY, jobId)
+        .zrem(ZSET_KEY, jobId)
+        .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId)
+        .exec();
 
-  await sendUserNotification({
-    user_id: userId,
-    title: "Order Accepted",
-    body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
-  });
+      await sendUserNotification({
+        user_id: userId,
+        title: "Order Accepted",
+        body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
+      });
 
-  return res.json({
-    success: true,
-    message: "Scheduled order accepted.",
-    job_id: jobId,
-    status: "ACCEPTED",
-    queue: "ACCEPTED",
-    scheduled_at_utc: data.scheduled_at,
-    scheduled_at_local: data.scheduled_at_local,
-    estimated_minutes: estimatedMins,
-  });
-}
+      return res.json({
+        success: true,
+        message: "Scheduled order accepted.",
+        job_id: jobId,
+        status: "ACCEPTED",
+        queue: "ACCEPTED",
+        scheduled_at_utc: data.scheduled_at,
+        scheduled_at_local: data.scheduled_at_local,
+        estimated_minutes: estimatedMins,
+      });
+    }
 
     if (status === "REJECTED") {
       const cleanReason = String(reason).trim();
