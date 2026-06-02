@@ -27,9 +27,9 @@ app.use(cors());
 app.use(express.json());
 
 // Create tables at server start
-initMerchantTables()
-  .then(() => console.log("✅ Merchant tables initialized"))
-  .catch((err) => console.error("❌ Error initializing merchant tables:", err));
+// initMerchantTables()
+//   .then(() => console.log("✅ Merchant tables initialized"))
+//   .catch((err) => console.error("❌ Error initializing merchant tables:", err));
 
 // ✅ Load upload root from .env (default to ./uploads for local dev)
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, "uploads");
