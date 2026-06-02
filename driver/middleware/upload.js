@@ -3,6 +3,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const sharp = require("sharp");
+const heicConvert = require("heic-convert");
 
 /* ---------------- folders ---------------- */
 
@@ -28,6 +29,8 @@ const allowedImageMimeTypes = new Set([
   "image/png",
   "image/webp",
   "image/gif",
+  "image/heic",
+  "image/heif",
   "application/octet-stream", // fallback for some clients
 ]);
 
@@ -37,6 +40,8 @@ const allowedImageExtensions = new Set([
   ".png",
   ".webp",
   ".gif",
+  ".heic",
+  ".heif",
 ]);
 
 function isLikelyImage(file) {
@@ -46,6 +51,26 @@ function isLikelyImage(file) {
   const ext = path.extname(file.originalname || "").toLowerCase();
 
   return allowedImageMimeTypes.has(mimetype) || allowedImageExtensions.has(ext);
+}
+
+function isHeicFile(file) {
+  const mimetype = String(file?.mimetype || "").toLowerCase();
+  const ext = path.extname(file?.originalname || "").toLowerCase();
+
+  return (
+    mimetype === "image/heic" ||
+    mimetype === "image/heif" ||
+    ext === ".heic" ||
+    ext === ".heif"
+  );
+}
+
+function deleteFileIfExists(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
 }
 
 const fileFilter = (_req, file, cb) => {
@@ -65,7 +90,28 @@ const fileFilter = (_req, file, cb) => {
   );
 };
 
-async function compressImageToTargetKB(inputPath, options = {}) {
+async function getInputBufferForSharp(file) {
+  const inputBuffer = fs.readFileSync(file.path);
+
+  if (!isHeicFile(file)) {
+    return inputBuffer;
+  }
+
+  console.log("[DRIVER HEIC CONVERT] converting HEIC/HEIF to JPEG buffer", {
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  const jpegBuffer = await heicConvert({
+    buffer: inputBuffer,
+    format: "JPEG",
+    quality: 0.9,
+  });
+
+  return Buffer.from(jpegBuffer);
+}
+
+async function compressImageBufferToTargetKB(inputBuffer, outputPath, options = {}) {
   const {
     targetKB = 100,
     startQuality = 80,
@@ -75,10 +121,6 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     minWidth = 300,
     minHeight = 300,
   } = options;
-
-  if (!inputPath || !fs.existsSync(inputPath)) {
-    throw new Error("Image file not found for compression.");
-  }
 
   const targetBytes = targetKB * 1024;
 
@@ -92,7 +134,7 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     quality = startQuality;
 
     while (quality >= minQuality) {
-      const buffer = await sharp(inputPath)
+      const buffer = await sharp(inputBuffer)
         .rotate()
         .resize({
           width,
@@ -107,6 +149,7 @@ async function compressImageToTargetKB(inputPath, options = {}) {
         .toBuffer();
 
       finalBuffer = buffer;
+
       finalMeta = {
         width,
         height,
@@ -115,10 +158,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
       };
 
       if (buffer.length <= targetBytes) {
-        fs.writeFileSync(inputPath, buffer);
+        fs.writeFileSync(outputPath, buffer);
 
         console.log("[DRIVER IMAGE COMPRESSED]", {
-          file: inputPath,
+          file: outputPath,
           targetKB,
           ...finalMeta,
         });
@@ -137,10 +180,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     throw new Error("Image compression failed.");
   }
 
-  fs.writeFileSync(inputPath, finalBuffer);
+  fs.writeFileSync(outputPath, finalBuffer);
 
   console.log("[DRIVER IMAGE COMPRESSED - ABOVE TARGET]", {
-    file: inputPath,
+    file: outputPath,
     targetKB,
     ...finalMeta,
   });
@@ -176,7 +219,11 @@ function compressUploadedImages(options = {}) {
         files.push(...req.files);
       }
 
-      if (req.files && typeof req.files === "object" && !Array.isArray(req.files)) {
+      if (
+        req.files &&
+        typeof req.files === "object" &&
+        !Array.isArray(req.files)
+      ) {
         Object.values(req.files).forEach((value) => {
           if (Array.isArray(value)) files.push(...value);
         });
@@ -187,21 +234,53 @@ function compressUploadedImages(options = {}) {
       req.compressed_files = [];
 
       for (const file of files) {
-        const compression = await compressImageToTargetKB(
-          file.path,
-          compressionOptions,
-        );
+        if (!file?.path) continue;
 
-        req.compressed_files.push({
-          fieldname: file.fieldname,
-          originalname: file.originalname,
-          filename: file.filename,
-          path: file.path,
-          sizeKB: compression.sizeKB,
-          quality: compression.quality,
-          width: compression.width,
-          height: compression.height,
-        });
+        try {
+          const inputBuffer = await getInputBufferForSharp(file);
+
+          // Validate real image after possible HEIC conversion.
+          await sharp(inputBuffer).metadata();
+
+          const compression = await compressImageBufferToTargetKB(
+            inputBuffer,
+            file.path,
+            compressionOptions,
+          );
+
+          const stat = fs.statSync(file.path);
+
+          file.size = stat.size;
+          file.mimetype = "image/webp";
+          file.compression = compression;
+
+          req.compressed_files.push({
+            fieldname: file.fieldname,
+            originalname: file.originalname,
+            filename: file.filename,
+            path: file.path,
+            sizeKB: compression.sizeKB,
+            quality: compression.quality,
+            width: compression.width,
+            height: compression.height,
+          });
+        } catch (err) {
+          console.error("[DRIVER IMAGE COMPRESSION ERROR]", {
+            fieldname: file.fieldname,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            error: err.message,
+          });
+
+          deleteFileIfExists(file.path);
+
+          return res.status(400).json({
+            success: false,
+            message:
+              "Only valid image files are allowed. This image type could not be converted on the server.",
+            error: err.message,
+          });
+        }
       }
 
       return next();
@@ -218,6 +297,7 @@ const upload = multer({
     destination: (_req, _file, cb) => cb(null, profileDir),
 
     filename: (_req, _file, cb) => {
+      // Final compressed image is WebP.
       const fileName = `profile_${Date.now()}_${Math.random()
         .toString(36)
         .slice(2)}.webp`;
@@ -240,6 +320,7 @@ const documentUpload = multer({
     destination: (_req, _file, cb) => cb(null, documentDir),
 
     filename: (_req, _file, cb) => {
+      // Final compressed image is WebP.
       const fileName = `doc_${Date.now()}_${Math.random()
         .toString(36)
         .slice(2)}.webp`;
@@ -260,5 +341,5 @@ const documentUpload = multer({
 module.exports = upload;
 module.exports.documentUpload = documentUpload;
 module.exports.compressUploadedImages = compressUploadedImages;
-module.exports.compressImageToTargetKB = compressImageToTargetKB;
+module.exports.compressImageBufferToTargetKB = compressImageBufferToTargetKB;
 module.exports.UPLOAD_ROOT = UPLOAD_ROOT;
