@@ -156,7 +156,7 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
       deliverTo.delivery_photo_urls = deliveryPhotos;
 
       // First photo only for old UI compatibility
-      deliverTo.delivery_photo_url = deliveryPhotos[0] || null;
+      // deliverTo.delivery_photo_url = deliveryPhotos[0] || null;
 
       const orderObj = {
         order_id: r.order_id,
