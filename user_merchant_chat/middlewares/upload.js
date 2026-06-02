@@ -3,8 +3,9 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const sharp = require("sharp");
+const heicConvert = require("heic-convert");
 
-// ✅ Define upload root (K8s: /uploads | local: ./uploads)
+// ✅ Define upload root
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
 
@@ -17,18 +18,13 @@ const SUBFOLDERS = {
 const TARGET_KB = Number(process.env.CHAT_IMAGE_TARGET_KB || 100);
 const MAX_BYTES = Number(process.env.CHAT_IMAGE_MAX_BYTES || 10 * 1024 * 1024);
 
-/* ---------------- directory helpers ---------------- */
+/* ---------------- helpers ---------------- */
 
 function ensureDirSync(dir) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-// ✅ Ensure chat folder exists at startup
 ensureDirSync(path.join(UPLOAD_ROOT, SUBFOLDERS.chat_image));
-
-/* ---------------- helpers ---------------- */
 
 function slugBase(originalName = "chat-image") {
   const ext = path.extname(originalName || "");
@@ -52,7 +48,40 @@ function deleteFileIfExists(filePath) {
   } catch {}
 }
 
-async function compressImageToTargetKB(inputPath, options = {}) {
+function isHeicFile(file) {
+  const mime = String(file?.mimetype || "").toLowerCase();
+  const ext = path.extname(file?.originalname || "").toLowerCase();
+
+  return (
+    mime === "image/heic" ||
+    mime === "image/heif" ||
+    ext === ".heic" ||
+    ext === ".heif"
+  );
+}
+
+async function getInputBufferForSharp(file) {
+  const inputBuffer = fs.readFileSync(file.path);
+
+  if (!isHeicFile(file)) {
+    return inputBuffer;
+  }
+
+  console.log("[CHAT HEIC CONVERT] converting HEIC/HEIF to JPEG buffer", {
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  const jpegBuffer = await heicConvert({
+    buffer: inputBuffer,
+    format: "JPEG",
+    quality: 0.9,
+  });
+
+  return Buffer.from(jpegBuffer);
+}
+
+async function compressImageBufferToTargetKB(inputBuffer, outputPath, options = {}) {
   const {
     targetKB = TARGET_KB,
     startQuality = 82,
@@ -62,10 +91,6 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     minWidth = 300,
     minHeight = 300,
   } = options;
-
-  if (!inputPath || !fs.existsSync(inputPath)) {
-    throw new Error("Image file not found for compression.");
-  }
 
   const targetBytes = targetKB * 1024;
 
@@ -79,7 +104,7 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     quality = startQuality;
 
     while (quality >= minQuality) {
-      const buffer = await sharp(inputPath)
+      const buffer = await sharp(inputBuffer)
         .rotate()
         .resize({
           width,
@@ -94,6 +119,7 @@ async function compressImageToTargetKB(inputPath, options = {}) {
         .toBuffer();
 
       finalBuffer = buffer;
+
       finalMeta = {
         width,
         height,
@@ -102,10 +128,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
       };
 
       if (buffer.length <= targetBytes) {
-        fs.writeFileSync(inputPath, buffer);
+        fs.writeFileSync(outputPath, buffer);
 
         console.log("[CHAT IMAGE COMPRESSED]", {
-          file: inputPath,
+          file: outputPath,
           targetKB,
           ...finalMeta,
         });
@@ -124,10 +150,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     throw new Error("Image compression failed.");
   }
 
-  fs.writeFileSync(inputPath, finalBuffer);
+  fs.writeFileSync(outputPath, finalBuffer);
 
   console.log("[CHAT IMAGE COMPRESSED - ABOVE TARGET]", {
-    file: inputPath,
+    file: outputPath,
     targetKB,
     ...finalMeta,
   });
@@ -150,15 +176,16 @@ const storage = multer.diskStorage({
     const base = slugBase(file.originalname || "chat-image");
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // ✅ Always save compressed output as .webp
-    cb(null, `${unique}-${base}.webp`);
+    // Save original upload temporarily.
+    // Final compressed image will be renamed to .webp after processing.
+    cb(null, `${unique}-${base}.upload`);
   },
 });
 
 const rawUpload = multer({
   storage,
 
-  // Let multer accept first. Sharp validates real image after upload.
+  // Let multer accept first. We validate using sharp/heic-convert after upload.
   fileFilter: (_req, file, cb) => {
     console.log("[CHAT IMAGE RECEIVED]", {
       fieldname: file.fieldname,
@@ -201,16 +228,32 @@ function single(fieldName) {
         return next();
       }
 
+      const oldPath = req.file.path;
+      const oldFilename = req.file.filename;
+
       try {
-        // ✅ Sharp validates real image content.
-        await sharp(req.file.path).metadata();
+        const inputBuffer = await getInputBufferForSharp(req.file);
 
-        const compression = await compressImageToTargetKB(req.file.path, {
-          targetKB: TARGET_KB,
-        });
+        // Validate image content after possible HEIC conversion.
+        await sharp(inputBuffer).metadata();
 
-        const stat = fs.statSync(req.file.path);
+        const finalFilename = oldFilename.replace(/\.upload$/i, ".webp");
+        const finalPath = path.join(req.file.destination, finalFilename);
 
+        const compression = await compressImageBufferToTargetKB(
+          inputBuffer,
+          finalPath,
+          {
+            targetKB: TARGET_KB,
+          },
+        );
+
+        deleteFileIfExists(oldPath);
+
+        const stat = fs.statSync(finalPath);
+
+        req.file.filename = finalFilename;
+        req.file.path = finalPath;
         req.file.size = stat.size;
         req.file.mimetype = "image/webp";
         req.file.compression = compression;
@@ -223,12 +266,12 @@ function single(fieldName) {
           error: compressionErr.message,
         });
 
-        deleteFileIfExists(req.file?.path);
+        deleteFileIfExists(oldPath);
 
         return res.status(400).json({
           success: false,
           message:
-            "Only valid image files are allowed. If this is an iPhone HEIC image, please convert it to JPG/WebP before uploading.",
+            "Only valid image files are allowed. This image type could not be converted on the server.",
           error: compressionErr.message,
         });
       }
