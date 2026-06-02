@@ -8,6 +8,31 @@ const {
   parseDeliveryAddress,
 } = require("../helpers");
 
+/* ---------------- helpers ---------------- */
+
+function parsePhotoUrls(deliveryPhotoUrls, deliveryPhotoUrl) {
+  let photos = [];
+
+  if (deliveryPhotoUrls) {
+    if (Array.isArray(deliveryPhotoUrls)) {
+      photos = deliveryPhotoUrls;
+    } else {
+      try {
+        const parsed = JSON.parse(deliveryPhotoUrls);
+        if (Array.isArray(parsed)) photos = parsed;
+      } catch {}
+    }
+  }
+
+  if (!photos.length && deliveryPhotoUrl) {
+    photos = [deliveryPhotoUrl];
+  }
+
+  return photos
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+}
+
 module.exports = async function findByBusinessGroupedByUser(business_id) {
   const bid = Number(business_id);
   if (!Number.isFinite(bid) || bid <= 0) return [];
@@ -45,7 +70,12 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
       ${extras.hasFloor ? "o.delivery_floor_unit" : "NULL AS delivery_floor_unit"},
       ${extras.hasInstr ? "o.delivery_instruction_note" : "NULL AS delivery_instruction_note"},
       ${extras.hasMode ? "o.delivery_special_mode" : "NULL AS delivery_special_mode"},
+
+      -- First image only, kept for old UI compatibility
       ${extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"},
+
+      -- Full image list for new UI
+      ${extras.hasPhoto ? "o.delivery_photo_urls" : "NULL AS delivery_photo_urls"},
 
       o.note_for_restaurant,
       o.if_unavailable,
@@ -103,15 +133,30 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
       if (st === "COMPLETED") st = "DELIVERED";
 
       const deliverTo = parseDeliveryAddress(r.delivery_address) || {};
-      if (deliverTo.lat == null && r.delivery_lat != null)
+
+      if (deliverTo.lat == null && r.delivery_lat != null) {
         deliverTo.lat = Number(r.delivery_lat);
-      if (deliverTo.lng == null && r.delivery_lng != null)
+      }
+
+      if (deliverTo.lng == null && r.delivery_lng != null) {
         deliverTo.lng = Number(r.delivery_lng);
+      }
+
+      const deliveryPhotos = parsePhotoUrls(
+        r.delivery_photo_urls,
+        r.delivery_photo_url,
+      );
 
       deliverTo.delivery_floor_unit = r.delivery_floor_unit || null;
-      deliverTo.delivery_instruction_note = r.delivery_instruction_note || null;
+      deliverTo.delivery_instruction_note =
+        r.delivery_instruction_note || null;
       deliverTo.delivery_special_mode = r.delivery_special_mode || null;
-      deliverTo.delivery_photo_url = r.delivery_photo_url || null;
+
+      // Full delivery photo list for new UI
+      deliverTo.delivery_photo_urls = deliveryPhotos;
+
+      // First photo only for old UI compatibility
+      deliverTo.delivery_photo_url = deliveryPhotos[0] || null;
 
       const orderObj = {
         order_id: r.order_id,
@@ -119,7 +164,7 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
         status: st,
         status_reason: r.status_reason || null,
 
-        // sum of item subtotals for THIS merchant within this order
+        // Sum of item subtotals for THIS merchant within this order
         items_total: 0,
 
         payment_method: r.payment_method,
@@ -150,6 +195,7 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
           business_id: r.business_id,
           business_name: r.business_name || null,
         },
+
         items: [],
       };
 
@@ -160,6 +206,7 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
     const orderRef = group._ordersMap.get(r.order_id);
 
     const lineSubtotal = Number(r.subtotal || 0);
+
     orderRef.items_total = Number(
       (Number(orderRef.items_total || 0) + lineSubtotal).toFixed(2),
     );
@@ -181,10 +228,12 @@ module.exports = async function findByBusinessGroupedByUser(business_id) {
 
   const out = Array.from(byUser.values()).map((g) => {
     delete g._ordersMap;
+
     g.orders = (g.orders || []).map((o) => ({
       ...o,
       items_total: Number(Number(o.items_total || 0).toFixed(2)),
     }));
+
     return g;
   });
 

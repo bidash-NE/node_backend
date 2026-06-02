@@ -1,8 +1,10 @@
 // models/notificationModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 const UUID_RX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/* ---------------- helpers ---------------- */
 
 function assertPositiveInt(n, name) {
   if (!Number.isInteger(n) || n <= 0) {
@@ -11,17 +13,56 @@ function assertPositiveInt(n, name) {
 }
 
 function assertUuid(id) {
-  if (!UUID_RX.test(String(id))) throw new Error("notification_id is invalid");
+  const value = String(id || "").trim();
+
+  if (!UUID_RX.test(value)) {
+    throw new Error("notification_id is invalid");
+  }
 }
+
+function toLimit(v) {
+  return Math.min(Math.max(parseInt(v, 10) || 50, 1), 200);
+}
+
+function toOffset(v) {
+  return Math.max(parseInt(v, 10) || 0, 0);
+}
+
+function serializeValue(value) {
+  if (typeof value === "bigint") return Number(value);
+  return value;
+}
+
+function serializeNotification(row) {
+  if (!row) return null;
+
+  const out = {};
+
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = serializeValue(value);
+  }
+
+  return out;
+}
+
+const notificationSelect = {
+  notification_id: true,
+  order_id: true,
+  business_id: true,
+  user_id: true,
+  type: true,
+  title: true,
+  body_preview: true,
+  is_read: true,
+  created_at: true,
+  delivered_at: true,
+  seen_at: true,
+};
 
 const NotificationModel = {
   /**
    * List notifications for a business.
-   * @param {object} opts
-   * @param {number} opts.business_id
-   * @param {number} [opts.limit=50]
-   * @param {number} [opts.offset=0]
-   * @param {boolean} [opts.unreadOnly=false]
+   * GET /api/order_notification/business/:businessId?limit=50&offset=0&unreadOnly=true
    */
   async listByBusinessId({
     business_id,
@@ -29,109 +70,106 @@ const NotificationModel = {
     offset = 0,
     unreadOnly = false,
   }) {
+    business_id = Number(business_id);
     assertPositiveInt(business_id, "business_id");
-    limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    offset = Math.max(parseInt(offset, 10) || 0, 0);
 
-    const where = ["business_id = ?"];
-    const params = [business_id];
+    const lim = toLimit(limit);
+    const off = toOffset(offset);
 
-    if (unreadOnly) {
-      where.push("is_read = 0");
-    }
+    const where = {
+      business_id,
+      ...(unreadOnly ? { is_read: false } : {}),
+    };
 
-    const sql = `
-      SELECT
-        notification_id,
-        order_id,
-        business_id,
-        user_id,
-        type,
-        title,
-        body_preview,
-        is_read,
-        created_at,
-        delivered_at,
-        seen_at
-      FROM order_notification
-      WHERE ${where.join(" AND ")}
-      ORDER BY created_at DESC
-      LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    const rows = await prisma.order_notification.findMany({
+      where,
+      select: notificationSelect,
+      orderBy: {
+        created_at: "desc",
+      },
+      take: lim,
+      skip: off,
+    });
 
-    const [rows] = await db.query(sql, params);
-    return rows || [];
+    return rows.map(serializeNotification);
   },
 
   /**
    * Get one notification by UUID.
+   * GET /api/order_notification/:notificationId
    */
   async getById(notification_id) {
+    notification_id = String(notification_id || "").trim();
     assertUuid(notification_id);
-    const [rows] = await db.query(
-      `
-      SELECT
+
+    const row = await prisma.order_notification.findUnique({
+      where: {
         notification_id,
-        order_id,
-        business_id,
-        user_id,
-        type,
-        title,
-        body_preview,
-        is_read,
-        created_at,
-        delivered_at,
-        seen_at
-      FROM order_notification
-      WHERE notification_id = ?
-      LIMIT 1`,
-      [notification_id]
-    );
-    return rows?.[0] || null;
+      },
+      select: notificationSelect,
+    });
+
+    return serializeNotification(row);
   },
 
   /**
-   * Mark a single notification as read.
-   * Sets is_read=1 and seen_at=NOW().
+   * Mark one notification as read.
+   * PATCH /api/order_notification/:notificationId/read
    */
   async markAsRead(notification_id) {
+    notification_id = String(notification_id || "").trim();
     assertUuid(notification_id);
-    const [r] = await db.query(
-      `UPDATE order_notification
-         SET is_read = 1,
-             seen_at = NOW()
-       WHERE notification_id = ?`,
-      [notification_id]
-    );
-    return r.affectedRows;
+
+    const result = await prisma.order_notification.updateMany({
+      where: {
+        notification_id,
+      },
+      data: {
+        is_read: true,
+        seen_at: new Date(),
+      },
+    });
+
+    return result.count;
   },
 
   /**
-   * Mark all notifications for a business as read.
+   * Mark all unread notifications for a business as read.
+   * PATCH /api/order_notification/business/:businessId/read-all
    */
   async markAllAsRead(business_id) {
+    business_id = Number(business_id);
     assertPositiveInt(business_id, "business_id");
-    const [r] = await db.query(
-      `UPDATE order_notification
-         SET is_read = 1,
-             seen_at = COALESCE(seen_at, NOW())
-       WHERE business_id = ?
-         AND is_read = 0`,
-      [business_id]
-    );
-    return r.affectedRows;
+
+    const result = await prisma.order_notification.updateMany({
+      where: {
+        business_id,
+        is_read: false,
+      },
+      data: {
+        is_read: true,
+        seen_at: new Date(),
+      },
+    });
+
+    return result.count;
   },
 
   /**
    * Delete one notification by UUID.
+   * DELETE /api/order_notification/:notificationId
    */
   async deleteById(notification_id) {
+    notification_id = String(notification_id || "").trim();
     assertUuid(notification_id);
-    const [r] = await db.query(
-      `DELETE FROM order_notification WHERE notification_id = ?`,
-      [notification_id]
-    );
-    return r.affectedRows;
+
+    const result = await prisma.order_notification.deleteMany({
+      where: {
+        notification_id,
+      },
+    });
+
+    return result.count;
   },
 };
 

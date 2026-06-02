@@ -10,6 +10,7 @@ async function listByBusinessId(req, res) {
     const business_id = Number(req.params.businessId);
     const limit = req.query.limit;
     const offset = req.query.offset;
+
     const unreadOnly =
       String(req.query.unreadOnly || "false").toLowerCase() === "true";
 
@@ -20,11 +21,21 @@ async function listByBusinessId(req, res) {
       unreadOnly,
     });
 
-    res.status(200).json({ success: true, count: data.length, data });
+    return res.status(200).json({
+      success: true,
+      count: data.length,
+      data,
+    });
   } catch (err) {
+    console.error("[listByBusinessId]", err);
+
     const msg = err.message || "Failed to fetch notifications";
-    const code = /must be a positive integer|invalid/.test(msg) ? 400 : 500;
-    res.status(code).json({ success: false, error: msg });
+    const code = /must be a positive integer|invalid/i.test(msg) ? 400 : 500;
+
+    return res.status(code).json({
+      success: false,
+      error: msg,
+    });
   }
 }
 
@@ -34,14 +45,30 @@ async function listByBusinessId(req, res) {
 async function getOne(req, res) {
   try {
     const id = req.params.notificationId;
+
     const row = await NotificationModel.getById(id);
-    if (!row)
-      return res.status(404).json({ success: false, error: "Not found" });
-    res.status(200).json({ success: true, data: row });
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: "Not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: row,
+    });
   } catch (err) {
+    console.error("[getOne]", err);
+
     const msg = err.message || "Failed to fetch notification";
-    const code = /invalid/.test(msg) ? 400 : 500;
-    res.status(code).json({ success: false, error: msg });
+    const code = /invalid/i.test(msg) ? 400 : 500;
+
+    return res.status(code).json({
+      success: false,
+      error: msg,
+    });
   }
 }
 
@@ -52,14 +79,31 @@ async function getOne(req, res) {
 async function markOneRead(req, res) {
   try {
     const id = req.params.notificationId;
+
     const affected = await NotificationModel.markAsRead(id);
-    if (!affected)
-      return res.status(404).json({ success: false, error: "Not found" });
-    res.status(200).json({ success: true, message: "Marked as read" });
+
+    if (!affected) {
+      return res.status(404).json({
+        success: false,
+        error: "Not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Marked as read",
+      updated: affected,
+    });
   } catch (err) {
+    console.error("[markOneRead]", err);
+
     const msg = err.message || "Failed to mark as read";
-    const code = /invalid/.test(msg) ? 400 : 500;
-    res.status(code).json({ success: false, error: msg });
+    const code = /invalid/i.test(msg) ? 400 : 500;
+
+    return res.status(code).json({
+      success: false,
+      error: msg,
+    });
   }
 }
 
@@ -70,12 +114,23 @@ async function markOneRead(req, res) {
 async function markAllReadForBusiness(req, res) {
   try {
     const business_id = Number(req.params.businessId);
+
     const affected = await NotificationModel.markAllAsRead(business_id);
-    res.status(200).json({ success: true, updated: affected });
+
+    return res.status(200).json({
+      success: true,
+      updated: affected,
+    });
   } catch (err) {
+    console.error("[markAllReadForBusiness]", err);
+
     const msg = err.message || "Failed to mark all as read";
-    const code = /must be a positive integer/.test(msg) ? 400 : 500;
-    res.status(code).json({ success: false, error: msg });
+    const code = /must be a positive integer/i.test(msg) ? 400 : 500;
+
+    return res.status(code).json({
+      success: false,
+      error: msg,
+    });
   }
 }
 
@@ -85,14 +140,31 @@ async function markAllReadForBusiness(req, res) {
 async function deleteOne(req, res) {
   try {
     const id = req.params.notificationId;
+
     const affected = await NotificationModel.deleteById(id);
-    if (!affected)
-      return res.status(404).json({ success: false, error: "Not found" });
-    res.status(200).json({ success: true, message: "Deleted" });
+
+    if (!affected) {
+      return res.status(404).json({
+        success: false,
+        error: "Not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Deleted",
+      deleted: affected,
+    });
   } catch (err) {
+    console.error("[deleteOne]", err);
+
     const msg = err.message || "Failed to delete notification";
-    const code = /invalid/.test(msg) ? 400 : 500;
-    res.status(code).json({ success: false, error: msg });
+    const code = /invalid/i.test(msg) ? 400 : 500;
+
+    return res.status(code).json({
+      success: false,
+      error: msg,
+    });
   }
 }
 
