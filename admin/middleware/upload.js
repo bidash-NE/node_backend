@@ -2,6 +2,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const sharp = require("sharp");
+const heicConvert = require("heic-convert");
 
 /* ---------------- upload folders ---------------- */
 
@@ -20,16 +21,18 @@ const logoImageDir = path.join(UPLOAD_ROOT, "logo_and_image");
 makeDir(UPLOAD_ROOT);
 makeDir(logoImageDir);
 
-// console.log("📁 Admin upload root:", UPLOAD_ROOT);
-// console.log("📁 Logo/Image upload folder:", logoImageDir);
+/* ---------------- config ---------------- */
+
+const TARGET_KB = Number(process.env.LOGO_IMAGE_TARGET_KB || 100);
+const MAX_BYTES = Number(process.env.LOGO_IMAGE_MAX_BYTES || 5 * 1024 * 1024);
 
 /* ---------------- multer upload ---------------- */
 
 /**
  * Important:
  * We do not reject in fileFilter.
- * Some clients like Hoppscotch may send a strange mimetype.
- * We validate properly inside controller after receiving file.
+ * Some clients may send strange mimetypes.
+ * We validate properly in controller using isValidImageFile().
  */
 const logoImageUpload = multer({
   storage: multer.diskStorage({
@@ -41,8 +44,8 @@ const logoImageUpload = multer({
 
     filename: (_req, _file, cb) => {
       /**
-       * We save compressed output as webp.
-       * So the filename should also use .webp.
+       * Save temporary upload first.
+       * After compression, final output remains this .webp file path.
        */
       const fileName = `logo_${Date.now()}_${Math.random()
         .toString(36)
@@ -63,7 +66,7 @@ const logoImageUpload = multer({
   },
 
   limits: {
-    fileSize: 5 * 1024 * 1024, // max upload before compression: 5MB
+    fileSize: MAX_BYTES,
   },
 });
 
@@ -78,6 +81,8 @@ function isValidImageFile(file) {
     "image/png",
     "image/webp",
     "image/gif",
+    "image/heic",
+    "image/heif",
     "application/octet-stream", // fallback for some API clients
   ]);
 
@@ -87,6 +92,8 @@ function isValidImageFile(file) {
     ".png",
     ".webp",
     ".gif",
+    ".heic",
+    ".heif",
   ]);
 
   const mimetype = String(file.mimetype || "").toLowerCase();
@@ -95,29 +102,89 @@ function isValidImageFile(file) {
   return allowedMimeTypes.has(mimetype) || allowedExtensions.has(ext);
 }
 
+function isHeicFile(file) {
+  const mimetype = String(file?.mimetype || "").toLowerCase();
+  const ext = path.extname(file?.originalname || "").toLowerCase();
+
+  return (
+    mimetype === "image/heic" ||
+    mimetype === "image/heif" ||
+    ext === ".heic" ||
+    ext === ".heif"
+  );
+}
+
+/* ---------------- HEIC conversion helper ---------------- */
+
+async function getInputBufferForSharp(fileOrPath) {
+  let file = null;
+  let inputPath = null;
+
+  if (typeof fileOrPath === "string") {
+    inputPath = fileOrPath;
+  } else {
+    file = fileOrPath;
+    inputPath = file?.path;
+  }
+
+  if (!inputPath || !fs.existsSync(inputPath)) {
+    throw new Error("Image file not found for compression.");
+  }
+
+  const inputBuffer = fs.readFileSync(inputPath);
+
+  if (!file || !isHeicFile(file)) {
+    return inputBuffer;
+  }
+
+  console.log("[LOGO HEIC CONVERT] converting HEIC/HEIF to JPEG buffer", {
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  const jpegBuffer = await heicConvert({
+    buffer: inputBuffer,
+    format: "JPEG",
+    quality: 0.9,
+  });
+
+  return Buffer.from(jpegBuffer);
+}
+
 /* ---------------- compression helper ---------------- */
 
 /**
  * Compress image to target KB.
  *
- * This tries to get the image below targetKB.
- * If image is still above targetKB at minQuality,
- * it progressively reduces dimensions.
+ * Supports:
+ * - inputPath only: compress normal images using sharp
+ * - inputPath + { file }: supports HEIC/HEIF conversion
+ *
+ * Example:
+ * await compressImageToTargetKB(imageFile.path, { file: imageFile, targetKB: 100 });
  */
 async function compressImageToTargetKB(inputPath, options = {}) {
   const {
-    targetKB = 100,
+    targetKB = TARGET_KB,
     startQuality = 80,
     minQuality = 35,
     startWidth = 900,
     startHeight = 900,
     minWidth = 300,
     minHeight = 300,
+    file = null,
   } = options;
 
   if (!inputPath || !fs.existsSync(inputPath)) {
     throw new Error("Image file not found for compression.");
   }
+
+  const inputBuffer = file
+    ? await getInputBufferForSharp(file)
+    : await getInputBufferForSharp(inputPath);
+
+  // Validate actual image content after possible HEIC conversion.
+  await sharp(inputBuffer).metadata();
 
   const targetBytes = targetKB * 1024;
 
@@ -127,15 +194,11 @@ async function compressImageToTargetKB(inputPath, options = {}) {
   let finalBuffer = null;
   let finalMeta = null;
 
-  /**
-   * First reduce quality.
-   * If not enough, reduce dimensions and restart quality loop.
-   */
   while (width >= minWidth && height >= minHeight) {
     quality = startQuality;
 
     while (quality >= minQuality) {
-      const buffer = await sharp(inputPath)
+      const buffer = await sharp(inputBuffer)
         .rotate()
         .resize({
           width,
@@ -176,21 +239,17 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     height = Math.floor(height * 0.85);
   }
 
-  /**
-   * If it could not reach targetKB, save the smallest generated version.
-   * This avoids failing uploads for difficult images.
-   */
   if (!finalBuffer) {
     throw new Error("Image compression failed.");
   }
 
   fs.writeFileSync(inputPath, finalBuffer);
 
-//   console.log("[IMAGE COMPRESSED - ABOVE TARGET]", {
-//     file: inputPath,
-//     targetKB,
-//     ...finalMeta,
-//   });
+  // console.log("[IMAGE COMPRESSED - ABOVE TARGET]", {
+  //   file: inputPath,
+  //   targetKB,
+  //   ...finalMeta,
+  // });
 
   return finalMeta;
 }
@@ -202,4 +261,5 @@ module.exports = {
   compressImageToTargetKB,
   isValidImageFile,
   UPLOAD_ROOT,
+  TARGET_KB,
 };

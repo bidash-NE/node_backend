@@ -130,6 +130,7 @@ async function compressLogoImageOrFail(imageFile) {
   }
 
   return await compressImageToTargetKB(imageFile.path, {
+    file: imageFile, // ✅ required for HEIC/HEIF detection and conversion
     targetKB: 100,
     startQuality: 80,
     minQuality: 35,
