@@ -3,6 +3,7 @@ const path = require("path");
 const multer = require("multer");
 const crypto = require("crypto");
 const sharp = require("sharp");
+const heicConvert = require("heic-convert");
 
 /* ===================== CONFIG ===================== */
 
@@ -18,7 +19,7 @@ const DEST = path.join(UPLOAD_ROOT, SUBFOLDER);
 const MAX_PHOTOS = Number(process.env.DELIVERY_PHOTO_MAX || 6);
 
 const MAX_BYTES = Number(
-  process.env.DELIVERY_PHOTO_MAX_BYTES || 5 * 1024 * 1024
+  process.env.DELIVERY_PHOTO_MAX_BYTES || 5 * 1024 * 1024,
 ); // 5MB upload limit before compression
 
 const TARGET_KB = Number(process.env.DELIVERY_PHOTO_TARGET_KB || 100);
@@ -46,7 +47,14 @@ const allowedMimeTypes = new Set([
   "image/jpeg",
   "image/jpg",
   "image/webp",
-  "application/octet-stream", // fallback for some clients
+  "image/gif",
+
+  // ✅ iPhone camera formats
+  "image/heic",
+  "image/heif",
+
+  // fallback for some clients
+  "application/octet-stream",
 ]);
 
 const allowedExtensions = new Set([
@@ -54,6 +62,11 @@ const allowedExtensions = new Set([
   ".jpeg",
   ".png",
   ".webp",
+  ".gif",
+
+  // ✅ iPhone camera formats
+  ".heic",
+  ".heif",
 ]);
 
 function isLikelyImage(file) {
@@ -65,7 +78,53 @@ function isLikelyImage(file) {
   return allowedMimeTypes.has(mimetype) || allowedExtensions.has(ext);
 }
 
-async function compressImageToTargetKB(inputPath, options = {}) {
+function isHeicFile(file) {
+  const mimetype = String(file?.mimetype || "").toLowerCase();
+  const ext = path.extname(file?.originalname || "").toLowerCase();
+
+  return (
+    mimetype === "image/heic" ||
+    mimetype === "image/heif" ||
+    ext === ".heic" ||
+    ext === ".heif"
+  );
+}
+
+function deleteFileIfExists(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
+}
+
+async function getInputBufferForSharp(file) {
+  const inputBuffer = fs.readFileSync(file.path);
+
+  if (!isHeicFile(file)) {
+    return inputBuffer;
+  }
+
+  console.log("[DELIVERY PHOTO HEIC CONVERT] converting HEIC/HEIF to JPEG buffer", {
+    fieldname: file.fieldname,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  });
+
+  const jpegBuffer = await heicConvert({
+    buffer: inputBuffer,
+    format: "JPEG",
+    quality: 0.9,
+  });
+
+  return Buffer.from(jpegBuffer);
+}
+
+async function compressImageBufferToTargetKB(
+  inputBuffer,
+  outputPath,
+  options = {},
+) {
   const {
     targetKB = TARGET_KB,
     startQuality = 82,
@@ -76,11 +135,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     minHeight = 300,
   } = options;
 
-  if (!inputPath || !fs.existsSync(inputPath)) {
-    throw new Error("Image file not found for compression.");
-  }
-
   const targetBytes = targetKB * 1024;
+
+  // ✅ Validate actual image content after possible HEIC conversion
+  await sharp(inputBuffer).metadata();
 
   let width = startWidth;
   let height = startHeight;
@@ -92,7 +150,7 @@ async function compressImageToTargetKB(inputPath, options = {}) {
     quality = startQuality;
 
     while (quality >= minQuality) {
-      const buffer = await sharp(inputPath)
+      const buffer = await sharp(inputBuffer)
         .rotate()
         .resize({
           width,
@@ -116,10 +174,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
       };
 
       if (buffer.length <= targetBytes) {
-        fs.writeFileSync(inputPath, buffer);
+        fs.writeFileSync(outputPath, buffer);
 
         console.log("[DELIVERY PHOTO COMPRESSED]", {
-          file: inputPath,
+          file: outputPath,
           targetKB,
           ...finalMeta,
         });
@@ -139,10 +197,10 @@ async function compressImageToTargetKB(inputPath, options = {}) {
   }
 
   // Save smallest generated version even if still above target.
-  fs.writeFileSync(inputPath, finalBuffer);
+  fs.writeFileSync(outputPath, finalBuffer);
 
   console.log("[DELIVERY PHOTO COMPRESSED - ABOVE TARGET]", {
-    file: inputPath,
+    file: outputPath,
     targetKB,
     ...finalMeta,
   });
@@ -163,7 +221,7 @@ const storage = multer.diskStorage({
   },
 
   filename: (_req, _file, cb) => {
-    // Save compressed image as webp.
+    // ✅ Save final compressed image as webp.
     cb(null, `delivery_${Date.now()}_${crypto.randomUUID()}.webp`);
   },
 });
@@ -179,9 +237,9 @@ const fileFilter = (_req, file, cb) => {
 
   return cb(
     new Error(
-      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`
+      `Only image files are allowed. Received mimetype=${file.mimetype}, file=${file.originalname}`,
     ),
-    false
+    false,
   );
 };
 
@@ -241,15 +299,22 @@ function uploadDeliveryPhotosFactory() {
         for (const file of list) {
           if (!file?.path) continue;
 
-          const compression = await compressImageToTargetKB(file.path, {
-            targetKB: TARGET_KB,
-          });
+          const inputBuffer = await getInputBufferForSharp(file);
+
+          const compression = await compressImageBufferToTargetKB(
+            inputBuffer,
+            file.path,
+            {
+              targetKB: TARGET_KB,
+            },
+          );
 
           const stat = fs.statSync(file.path);
 
           // Keep multer file object updated after compression
           file.size = stat.size;
           file.mimetype = "image/webp";
+          file.compression = compression;
 
           req.deliveryPhotoCompression.push({
             fieldname: file.fieldname,
@@ -269,28 +334,26 @@ function uploadDeliveryPhotosFactory() {
         console.log("[uploadDeliveryPhotos] uploaded count:", list.length);
         console.log(
           "[uploadDeliveryPhotos] compression:",
-          req.deliveryPhotoCompression
+          req.deliveryPhotoCompression,
         );
 
         return next();
       } catch (compressionErr) {
         console.error(
           "[uploadDeliveryPhotos] compression error:",
-          compressionErr
+          compressionErr,
         );
 
         // Delete uploaded files if compression fails
         for (const file of list) {
-          try {
-            if (file?.path && fs.existsSync(file.path)) {
-              fs.unlinkSync(file.path);
-            }
-          } catch {}
+          deleteFileIfExists(file?.path);
         }
 
         return res.status(400).json({
           success: false,
-          message: compressionErr.message || "Image compression failed",
+          message:
+            "Only valid image files are allowed. This image type could not be converted on the server.",
+          error: compressionErr.message || "Image compression failed",
         });
       }
     });
