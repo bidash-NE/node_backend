@@ -1,703 +1,846 @@
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 const moment = require("moment-timezone");
 const axios = require("axios");
 
-const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID; // This should be set in env vars; using a placeholder here
-const ID_SERVICE_URL = process.env.ID_SERVICE_URL; // e.g., same service or dedicated ids service
+const ADMIN_WALLET_ID = process.env.ADMIN_WALLET_ID;
+const ID_SERVICE_URL = process.env.ID_SERVICE_URL;
 
-const nowBT = () => moment.tz("Asia/Thimphu").format("YYYY-MM-DD HH:mm:ss");
+const nowBT = () => moment.tz("Asia/Thimphu").toDate();
 
 function toStrOrNull(v) {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
   return s.length ? s : null;
 }
+
 function toBizId(v) {
   const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0)
+  if (!Number.isInteger(n) || n <= 0) {
     throw new Error("business_id must be a positive integer");
+  }
   return n;
 }
+
 function norm(v) {
   return String(v || "")
     .trim()
     .toLowerCase();
 }
+
 function toOwnerType(v) {
   const s = norm(v);
   if (!s) return null;
-  if (s !== "food" && s !== "mart")
+  if (s !== "food" && s !== "mart") {
     throw new Error("owner_type must be either 'food' or 'mart'");
+  }
   return s;
 }
 
+function toDateOrNull(v) {
+  if (v === undefined || v === null || v === "") return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error("Invalid date format");
+  }
+  return d;
+}
+
+function serializeBanner(row) {
+  if (!row) return null;
+
+  return {
+    id: Number(row.id),
+    business_id: Number(row.business_id),
+    title: row.title,
+    description: row.description,
+    banner_image: row.banner_image,
+    is_active: Number(row.is_active),
+    start_date: row.start_date,
+    end_date: row.end_date,
+    owner_type: row.owner_type,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 async function assertBusinessExists(business_id) {
-  const [r] = await db.query(
-    `SELECT business_id, business_name
-       FROM merchant_business_details
-      WHERE business_id = ?
-      LIMIT 1`,
-    [business_id],
-  );
-  if (!r.length) throw new Error(`business_id ${business_id} does not exist`);
-  return r[0]; // return row so we can use business_name
+  const bid = toBizId(business_id);
+
+  const row = await prisma.merchant_business_details.findUnique({
+    where: { business_id: bid },
+    select: {
+      business_id: true,
+      business_name: true,
+    },
+  });
+
+  if (!row) {
+    throw new Error(`business_id ${bid} does not exist`);
+  }
+
+  return row;
 }
 
-async function getConn() {
-  if (typeof db.getConnection === "function") return db.getConnection();
-  throw new Error("DB pool does not expose getConnection()");
-}
+/* ---------- ID API helpers ---------- */
 
-/* ---- helpers to call ID API ---- */
 async function getJournalCodeViaApi() {
   const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});
-  if (!data?.ok || !data.code)
+
+  if (!data?.ok || !data.code) {
     throw new Error("Failed to get journal_code from ID service");
+  }
+
   return data.code;
 }
+
 async function getTwoTxnIdsViaApi() {
   const { data } = await axios.post(`${ID_SERVICE_URL}/ids/transaction`, {
     count: 2,
   });
-  if (!data?.ok || !Array.isArray(data.data) || data.data.length < 2)
+
+  if (!data?.ok || !Array.isArray(data.data) || data.data.length < 2) {
     throw new Error("Failed to get transaction_ids from ID service");
-  return { dr: data.data[0], cr: data.data[1] };
+  }
+
+  return {
+    dr: data.data[0],
+    cr: data.data[1],
+  };
+}
+
+/* ---------- helpers ---------- */
+
+function buildDateCoverageSet(startDate, endDate) {
+  const set = new Set();
+
+  if (!startDate || !endDate) return set;
+
+  let s = moment(startDate).startOf("day");
+  const e = moment(endDate).startOf("day");
+
+  if (!s.isValid() || !e.isValid() || e.isBefore(s)) return set;
+
+  while (!s.isAfter(e)) {
+    set.add(s.format("YYYY-MM-DD"));
+    s = s.add(1, "day");
+  }
+
+  return set;
+}
+
+function computeAdditionalDays(oldStart, oldEnd, newStart, newEnd) {
+  const prevDays = buildDateCoverageSet(oldStart, oldEnd);
+
+  if (!newStart || !newEnd) return 0;
+
+  let added = 0;
+  let s = moment(newStart).startOf("day");
+  const e = moment(newEnd).startOf("day");
+
+  if (!s.isValid() || !e.isValid() || e.isBefore(s)) return 0;
+
+  while (!s.isAfter(e)) {
+    const key = s.format("YYYY-MM-DD");
+    if (!prevDays.has(key)) added++;
+    s = s.add(1, "day");
+  }
+
+  return added;
 }
 
 /* ---------- AUTO-DEACTIVATION SWEEP ---------- */
+
 async function sweepExpiredBanners() {
-  const now = nowBT();
-  await db.query(
-    `UPDATE business_banners
-       SET is_active = 0, updated_at = ?
-     WHERE is_active = 1
-       AND end_date IS NOT NULL
-       AND end_date <= CURRENT_DATE()`,
-    [now],
-  );
+  const todayBT = moment.tz("Asia/Thimphu").startOf("day").toDate();
+
+  await prisma.business_banners.updateMany({
+    where: {
+      is_active: 1,
+      end_date: {
+        not: null,
+        lte: todayBT,
+      },
+    },
+    data: {
+      is_active: 0,
+      updated_at: nowBT(),
+    },
+  });
 }
 
-/* ---------- Internal insert/select ---------- */
-async function _insertBanner(
-  conn,
-  {
-    business_id,
-    title,
-    description,
-    banner_image,
-    is_active = 1,
-    start_date = null,
-    end_date = null,
-    owner_type,
-  },
-) {
-  const bid = toBizId(business_id);
-  const t = toStrOrNull(title);
-  const d = toStrOrNull(description);
-  const img = toStrOrNull(banner_image);
-  if (!img) throw new Error("banner_image is required");
-  const otype = toOwnerType(owner_type);
-  if (!otype)
-    throw new Error("owner_type is required and must be 'food' or 'mart'");
+/* ---------- base price ---------- */
 
-  const now = nowBT();
-  const [res] = await conn.query(
-    `INSERT INTO business_banners
-       (business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      bid,
-      t,
-      d,
-      img,
-      Number(is_active) ? 1 : 0,
-      start_date || null,
-      end_date || null,
-      otype,
-      now,
-      now,
-    ],
-  );
-  return res.insertId;
-}
-
-async function _selectBanner(conn, id) {
-  const [rows] = await conn.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners WHERE id = ?`,
-    [id],
-  );
-  return rows[0] || null;
-}
-
-/* ---------- Atomic payment + banner creation (ENUM remark = 'CR'/'DR') ---------- */
-async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
-  const biz = await assertBusinessExists(toBizId(banner.business_id));
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { success: false, message: "Invalid total_amount" };
-  }
-
-  const conn = await getConn();
+async function getBannerBasePrice() {
   try {
-    await conn.beginTransaction();
+    const row = await prisma.banners_base_prices.findFirst({
+      orderBy: {
+        banner_price_id: "asc",
+      },
+      select: {
+        amount_per_day: true,
+      },
+    });
 
-    // Lock payer wallet
-    const [payerRows] = await conn.query(
-      `SELECT id, wallet_id, amount, status FROM wallets WHERE user_id = ? LIMIT 1 FOR UPDATE`,
-      [payer_user_id],
-    );
-    if (!payerRows.length) {
-      await conn.rollback();
-      conn.release();
+    if (!row) {
       return {
         success: false,
-        message: `No wallet found for user_id ${payer_user_id}`,
+        message: "Banner base price not found.",
       };
     }
-    const payer = payerRows[0];
 
-    // Lock admin wallet
-    const [adminRows] = await conn.query(
-      `SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? LIMIT 1 FOR UPDATE`,
-      [ADMIN_WALLET_ID],
-    );
-    if (!adminRows.length) {
-      await conn.rollback();
-      conn.release();
+    const amount = Number(row.amount_per_day);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
       return {
         success: false,
-        message: `Admin wallet ${ADMIN_WALLET_ID} not found`,
+        message: "Invalid banner base price.",
       };
     }
-    const admin = adminRows[0];
 
-    if (payer.status !== "ACTIVE") {
-      await conn.rollback();
-      conn.release();
-      return { success: false, message: "Payer wallet is not ACTIVE" };
-    }
-    if (admin.status !== "ACTIVE") {
-      await conn.rollback();
-      conn.release();
-      return { success: false, message: "Admin wallet is not ACTIVE" };
+    return {
+      success: true,
+      amount_per_day: amount,
+    };
+  } catch (error) {
+    console.error("getBannerBasePrice error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch banner base price.",
+    };
+  }
+}
+
+/* ---------- create banner + wallet charge ---------- */
+
+async function createBannerWithWalletCharge({ banner, payer_user_id, amount }) {
+  try {
+    const bid = toBizId(banner.business_id);
+    const biz = await assertBusinessExists(bid);
+
+    const payerUserId = Number(payer_user_id);
+    if (!Number.isInteger(payerUserId) || payerUserId <= 0) {
+      return {
+        success: false,
+        message: "user_id must be a positive integer",
+      };
     }
 
     const amt = Number(amount);
-    if (Number(payer.amount) < amt) {
-      await conn.rollback();
-      conn.release();
-      return { success: false, message: "Insufficient wallet balance" };
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return {
+        success: false,
+        message: "Invalid total_amount",
+      };
     }
 
-    // Create banner first (so note can use business info + owner type)
-    const bannerId = await _insertBanner(conn, banner);
+    const img = toStrOrNull(banner.banner_image);
+    if (!img) {
+      return {
+        success: false,
+        message: "banner_image is required",
+      };
+    }
 
-    // Get IDs from the ID service
+    const ownerType = toOwnerType(banner.owner_type);
+    if (!ownerType) {
+      return {
+        success: false,
+        message: "owner_type is required and must be 'food' or 'mart'",
+      };
+    }
+
     const journal_code = await getJournalCodeViaApi();
     const { dr, cr } = await getTwoTxnIdsViaApi();
 
-    const now = nowBT();
-    const business_name = biz.business_name || `business_id=${biz.business_id}`;
-    const otypeForNote = toOwnerType(banner.owner_type);
-    const note = `Banner Fee from ${business_name} (${otypeForNote})`;
+    const out = await prisma.$transaction(async (tx) => {
+      const payer = await tx.wallets.findFirst({
+        where: { user_id: payerUserId },
+      });
 
-    // Update balances
-    await conn.query(`UPDATE wallets SET amount = amount - ? WHERE id = ?`, [
-      amt,
-      payer.id,
-    ]);
-    await conn.query(`UPDATE wallets SET amount = amount + ? WHERE id = ?`, [
-      amt,
-      admin.id,
-    ]);
+      if (!payer) {
+        throw new Error(`No wallet found for user_id ${payerUserId}`);
+      }
 
-    // DR row — out from payer to admin
-    await conn.query(
-      `INSERT INTO wallet_transactions
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'DR', ?, ?, ?)`,
-      [dr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now],
-    );
+      const admin = await tx.wallets.findFirst({
+        where: { wallet_id: ADMIN_WALLET_ID },
+      });
 
-    // CR row — into admin from payer
-    await conn.query(
-      `INSERT INTO wallet_transactions
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'CR', ?, ?, ?)`,
-      [cr, journal_code, payer.wallet_id, admin.wallet_id, amt, note, now, now],
-    );
+      if (!admin) {
+        throw new Error(`Admin wallet ${ADMIN_WALLET_ID} not found`);
+      }
 
-    await conn.commit();
-    const row = await _selectBanner(conn, bannerId);
-    conn.release();
+      if (payer.status !== "ACTIVE") {
+        throw new Error("Payer wallet is not ACTIVE");
+      }
+
+      if (admin.status !== "ACTIVE") {
+        throw new Error("Admin wallet is not ACTIVE");
+      }
+
+      if (Number(payer.amount) < amt) {
+        throw new Error("Insufficient wallet balance");
+      }
+
+      const createdBanner = await tx.business_banners.create({
+        data: {
+          business_id: bid,
+          title: toStrOrNull(banner.title),
+          description: toStrOrNull(banner.description),
+          banner_image: img,
+          is_active: Number(banner.is_active) ? 1 : 0,
+          start_date: toDateOrNull(banner.start_date),
+          end_date: toDateOrNull(banner.end_date),
+          owner_type: ownerType,
+          created_at: nowBT(),
+          updated_at: nowBT(),
+        },
+      });
+
+      await tx.wallets.update({
+        where: { id: payer.id },
+        data: {
+          amount: {
+            decrement: amt,
+          },
+        },
+      });
+
+      await tx.wallets.update({
+        where: { id: admin.id },
+        data: {
+          amount: {
+            increment: amt,
+          },
+        },
+      });
+
+      const businessName =
+        biz.business_name || `business_id=${biz.business_id}`;
+      const note = `Banner Fee from ${businessName} (${ownerType})`;
+      const now = nowBT();
+
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: dr,
+          journal_code,
+          tnx_from: payer.wallet_id,
+          tnx_to: admin.wallet_id,
+          amount: amt,
+          remark: "DR",
+          note,
+          created_at: now,
+          updated_at: now,
+        },
+      });
+
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: cr,
+          journal_code,
+          tnx_from: payer.wallet_id,
+          tnx_to: admin.wallet_id,
+          amount: amt,
+          remark: "CR",
+          note,
+          created_at: now,
+          updated_at: now,
+        },
+      });
+
+      return {
+        banner: createdBanner,
+        payment: {
+          journal_code,
+          debited_from_wallet: payer.wallet_id,
+          credited_to_wallet: admin.wallet_id,
+          amount: amt,
+          debit_txn_id: dr,
+          credit_txn_id: cr,
+        },
+      };
+    });
 
     await sweepExpiredBanners();
 
     return {
       success: true,
-      data: row,
-      payment: {
-        journal_code,
-        debited_from_wallet: payer.wallet_id,
-        credited_to_wallet: admin.wallet_id,
-        amount: amt,
-        debit_txn_id: dr,
-        credit_txn_id: cr,
-      },
+      data: serializeBanner(out.banner),
+      payment: out.payment,
     };
-  } catch (err) {
-    try {
-      await conn.rollback();
-    } catch {}
-    conn.release();
+  } catch (error) {
+    console.error("createBannerWithWalletCharge error:", error);
     return {
       success: false,
-      message: err.message || "Failed to create banner with wallet charge",
+      message: error.message || "Failed to create banner with wallet charge",
     };
   }
 }
 
-/* ---------- Other banner ops ---------- */
+/* ---------- get one ---------- */
+
 async function getBannerById(id) {
-  await sweepExpiredBanners();
-  const [rows] = await db.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners WHERE id = ?`,
-    [id],
-  );
-  if (!rows.length)
-    return { success: false, message: `Banner id ${id} not found.` };
-  return { success: true, data: rows[0] };
-}
-async function listBanners({ business_id, active_only, owner_type } = {}) {
-  await sweepExpiredBanners();
-  const where = [],
-    params = [];
-  if (business_id !== undefined) {
-    const bid = toBizId(business_id);
-    await assertBusinessExists(bid);
-    where.push("business_id = ?");
-    params.push(bid);
-  }
-  if (owner_type) {
-    const ot = toOwnerType(owner_type);
-    where.push("owner_type = ?");
-    params.push(ot);
-  }
-  if (
-    String(active_only).toLowerCase() === "true" ||
-    Number(active_only) === 1
-  ) {
-    where.push(
-      "is_active = 1",
-      "(start_date IS NULL OR CURRENT_DATE() >= start_date)",
-      "(end_date IS NULL OR CURRENT_DATE() <= end_date)",
-    );
-  }
-  const [rows] = await db.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners ${
-         where.length ? "WHERE " + where.join(" AND ") : ""
-       } ORDER BY created_at DESC`,
-    params,
-  );
-  return { success: true, data: rows };
-}
-async function listAllBannersForBusiness(business_id, owner_type) {
-  await sweepExpiredBanners();
-  const bid = toBizId(business_id);
-  const where = ["business_id = ?"];
-  const params = [bid];
-  if (owner_type) {
-    const ot = toOwnerType(owner_type);
-    where.push("owner_type = ?");
-    params.push(ot);
-  }
-  const [rows] = await db.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners WHERE ${where.join(
-         " AND ",
-       )} ORDER BY created_at DESC`,
-    params,
-  );
-  return { success: true, data: rows };
-}
-async function listActiveByKind(owner_type, business_id) {
-  await sweepExpiredBanners();
-  const where = [
-    "is_active = 1",
-    "owner_type = ?",
-    "(start_date IS NULL OR CURRENT_DATE() >= start_date)",
-    "(end_date   IS NULL OR CURRENT_DATE() <= end_date)",
-  ];
-  const params = [toOwnerType(owner_type)];
-  if (business_id !== undefined && business_id !== null) {
-    const bid = toBizId(business_id);
-    where.push("business_id = ?");
-    params.push(bid);
-  }
-  const [rows] = await db.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners WHERE ${where.join(
-         " AND ",
-       )} ORDER BY created_at DESC`,
-    params,
-  );
-  return { success: true, data: rows };
-}
-async function updateBanner(id, fields, opts = {}) {
-  await sweepExpiredBanners();
+  try {
+    await sweepExpiredBanners();
 
-  // Determine if we're in "date+wallet" mode
-  const wantsDateChange =
-    Object.prototype.hasOwnProperty.call(fields, "start_date") ||
-    Object.prototype.hasOwnProperty.call(fields, "end_date") ||
-    Object.prototype.hasOwnProperty.call(fields, "is_active");
+    const row = await prisma.business_banners.findUnique({
+      where: { id: Number(id) },
+    });
 
-  const hasWalletContext =
-    opts &&
-    opts.payer_user_id !== undefined &&
-    (opts.total_amount !== undefined || opts.auto_price === true);
-
-  // If we need wallet flow for date changes, do the atomic path
-  if (wantsDateChange && hasWalletContext) {
-    const payer_user_id = Number(opts.payer_user_id);
-    if (!Number.isInteger(payer_user_id) || payer_user_id <= 0) {
-      return { success: false, message: "user_id must be a positive integer" };
+    if (!row) {
+      return {
+        success: false,
+        message: `Banner id ${id} not found.`,
+      };
     }
 
-    const conn = await (typeof db.getConnection === "function"
-      ? db.getConnection()
-      : Promise.reject(new Error("DB pool does not expose getConnection()")));
+    return {
+      success: true,
+      data: serializeBanner(row),
+    };
+  } catch (error) {
+    console.error("getBannerById error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch banner.",
+    };
+  }
+}
 
-    try {
-      await conn.beginTransaction();
+/* ---------- list banners ---------- */
 
-      // Lock current banner
-      const [curRows] = await conn.query(
-        `SELECT id, business_id, start_date, end_date, is_active, owner_type, title, description, banner_image, created_at, updated_at
-           FROM business_banners WHERE id = ? LIMIT 1 FOR UPDATE`,
-        [id],
-      );
-      if (!curRows.length) {
-        await conn.rollback();
-        conn.release();
-        return { success: false, message: `Banner id ${id} not found.` };
-      }
-      const cur = curRows[0];
+async function listBanners({ business_id, active_only, owner_type } = {}) {
+  try {
+    await sweepExpiredBanners();
 
-      // Validate/resolve any field constraints (business_id, owner_type)
-      const sets = [];
-      const params = [];
+    const where = {};
 
-      if ("business_id" in fields) {
-        const bid = toBizId(fields.business_id);
-        await assertBusinessExists(bid);
-        sets.push("business_id = ?");
-        params.push(bid);
+    if (
+      business_id !== undefined &&
+      business_id !== null &&
+      business_id !== ""
+    ) {
+      const bid = toBizId(business_id);
+      await assertBusinessExists(bid);
+      where.business_id = bid;
+    }
+
+    if (owner_type) {
+      where.owner_type = toOwnerType(owner_type);
+    }
+
+    const activeOnly =
+      String(active_only).toLowerCase() === "true" || Number(active_only) === 1;
+
+    if (activeOnly) {
+      const todayBT = moment.tz("Asia/Thimphu").startOf("day").toDate();
+
+      where.is_active = 1;
+      where.AND = [
+        {
+          OR: [{ start_date: null }, { start_date: { lte: todayBT } }],
+        },
+        {
+          OR: [{ end_date: null }, { end_date: { gte: todayBT } }],
+        },
+      ];
+    }
+
+    const rows = await prisma.business_banners.findMany({
+      where,
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return {
+      success: true,
+      data: rows.map(serializeBanner),
+    };
+  } catch (error) {
+    console.error("listBanners error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch banners.",
+      data: [],
+    };
+  }
+}
+
+/* ---------- list business banners ---------- */
+
+async function listAllBannersForBusiness(business_id, owner_type) {
+  try {
+    await sweepExpiredBanners();
+
+    const bid = toBizId(business_id);
+
+    const where = {
+      business_id: bid,
+    };
+
+    if (owner_type) {
+      where.owner_type = toOwnerType(owner_type);
+    }
+
+    const rows = await prisma.business_banners.findMany({
+      where,
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return {
+      success: true,
+      data: rows.map(serializeBanner),
+    };
+  } catch (error) {
+    console.error("listAllBannersForBusiness error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch business banners.",
+      data: [],
+    };
+  }
+}
+
+/* ---------- list active food/mart ---------- */
+
+async function listActiveByKind(owner_type, business_id) {
+  try {
+    await sweepExpiredBanners();
+
+    const todayBT = moment.tz("Asia/Thimphu").startOf("day").toDate();
+
+    const where = {
+      is_active: 1,
+      owner_type: toOwnerType(owner_type),
+      AND: [
+        {
+          OR: [{ start_date: null }, { start_date: { lte: todayBT } }],
+        },
+        {
+          OR: [{ end_date: null }, { end_date: { gte: todayBT } }],
+        },
+      ],
+    };
+
+    if (
+      business_id !== undefined &&
+      business_id !== null &&
+      business_id !== ""
+    ) {
+      where.business_id = toBizId(business_id);
+    }
+
+    const rows = await prisma.business_banners.findMany({
+      where,
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return {
+      success: true,
+      data: rows.map(serializeBanner),
+    };
+  } catch (error) {
+    console.error("listActiveByKind error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to fetch active banners.",
+      data: [],
+    };
+  }
+}
+
+/* ---------- update banner ---------- */
+
+async function updateBanner(id, fields, opts = {}) {
+  try {
+    await sweepExpiredBanners();
+
+    const bannerId = Number(id);
+    if (!Number.isInteger(bannerId) || bannerId <= 0) {
+      return {
+        success: false,
+        message: "Invalid banner id",
+      };
+    }
+
+    const current = await prisma.business_banners.findUnique({
+      where: { id: bannerId },
+    });
+
+    if (!current) {
+      return {
+        success: false,
+        message: `Banner id ${id} not found.`,
+      };
+    }
+
+    const wantsDateChange =
+      Object.prototype.hasOwnProperty.call(fields, "start_date") ||
+      Object.prototype.hasOwnProperty.call(fields, "end_date") ||
+      Object.prototype.hasOwnProperty.call(fields, "is_active");
+
+    const hasWalletContext =
+      opts &&
+      opts.payer_user_id !== undefined &&
+      (opts.total_amount !== undefined || opts.auto_price === true);
+
+    const data = {};
+
+    if ("business_id" in fields) {
+      const bid = toBizId(fields.business_id);
+      await assertBusinessExists(bid);
+      data.business_id = bid;
+    }
+
+    if ("title" in fields) {
+      data.title = toStrOrNull(fields.title);
+    }
+
+    if ("description" in fields) {
+      data.description = toStrOrNull(fields.description);
+    }
+
+    if ("banner_image" in fields) {
+      data.banner_image = toStrOrNull(fields.banner_image);
+    }
+
+    if ("is_active" in fields) {
+      data.is_active = Number(fields.is_active) ? 1 : 0;
+    }
+
+    if ("start_date" in fields) {
+      data.start_date = toDateOrNull(fields.start_date);
+    }
+
+    if ("end_date" in fields) {
+      data.end_date = toDateOrNull(fields.end_date);
+    }
+
+    if ("owner_type" in fields) {
+      data.owner_type = toOwnerType(fields.owner_type);
+    }
+
+    if (!Object.keys(data).length) {
+      return {
+        success: true,
+        message: "No changes.",
+        data: serializeBanner(current),
+      };
+    }
+
+    data.updated_at = nowBT();
+
+    if (!wantsDateChange || !hasWalletContext) {
+      const updated = await prisma.business_banners.update({
+        where: { id: bannerId },
+        data,
+      });
+
+      return {
+        success: true,
+        message: "Banner updated successfully.",
+        data: serializeBanner(updated),
+      };
+    }
+
+    const payerUserId = Number(opts.payer_user_id);
+    if (!Number.isInteger(payerUserId) || payerUserId <= 0) {
+      return {
+        success: false,
+        message: "user_id must be a positive integer",
+      };
+    }
+
+    const explicitAmount =
+      opts.total_amount !== undefined ? Number(opts.total_amount) : null;
+
+    const useAuto = opts.auto_price === true;
+
+    let chargeAmount = null;
+    let pricingInfo = null;
+
+    if (explicitAmount !== null) {
+      if (!Number.isFinite(explicitAmount) || explicitAmount <= 0) {
+        return {
+          success: false,
+          message: "total_amount must be a positive number.",
+        };
       }
-      if ("title" in fields) {
-        sets.push("title = ?");
-        params.push(toStrOrNull(fields.title));
+
+      chargeAmount = explicitAmount;
+      pricingInfo = { mode: "explicit" };
+    } else if (useAuto) {
+      const basePrice = await getBannerBasePrice();
+
+      if (!basePrice.success) {
+        return basePrice;
       }
-      if ("description" in fields) {
-        sets.push("description = ?");
-        params.push(toStrOrNull(fields.description));
-      }
-      if ("banner_image" in fields) {
-        sets.push("banner_image = ?");
-        params.push(toStrOrNull(fields.banner_image));
-      }
-      // Dates / active (these are the ones that trigger wallet logic)
+
+      const perDay = Number(basePrice.amount_per_day);
+
       const newStart = Object.prototype.hasOwnProperty.call(
         fields,
         "start_date",
       )
-        ? fields.start_date
-        : cur.start_date;
+        ? toDateOrNull(fields.start_date)
+        : current.start_date;
+
       const newEnd = Object.prototype.hasOwnProperty.call(fields, "end_date")
-        ? fields.end_date
-        : cur.end_date;
-      const newIsActive = Object.prototype.hasOwnProperty.call(
-        fields,
-        "is_active",
-      )
-        ? Number(fields.is_active)
-          ? 1
-          : 0
-        : cur.is_active;
+        ? toDateOrNull(fields.end_date)
+        : current.end_date;
 
-      if ("start_date" in fields) {
-        sets.push("start_date = ?");
-        params.push(newStart || null);
-      }
-      if ("end_date" in fields) {
-        sets.push("end_date = ?");
-        params.push(newEnd || null);
-      }
-      if ("is_active" in fields) {
-        sets.push("is_active = ?");
-        params.push(newIsActive);
-      }
+      const additionalDays = computeAdditionalDays(
+        current.start_date,
+        current.end_date,
+        newStart,
+        newEnd,
+      );
 
-      if ("owner_type" in fields) {
-        sets.push("owner_type = ?");
-        params.push(toOwnerType(fields.owner_type));
-      }
+      const computed = additionalDays * perDay;
 
-      // If NO actual changes, early return
-      if (!sets.length) {
-        await conn.rollback();
-        conn.release();
+      if (computed <= 0) {
+        const updated = await prisma.business_banners.update({
+          where: { id: bannerId },
+          data,
+        });
+
         return {
           success: true,
-          message: "No changes.",
-          data: cur,
+          message: "Banner updated (no additional charge).",
+          data: serializeBanner(updated),
+          payment: null,
+          pricing: {
+            mode: "auto",
+            additional_days: additionalDays,
+            base_amount_per_day: perDay,
+            computed_charge: 0,
+          },
         };
       }
 
-      // Compute price to charge
-      const explicitAmount =
-        opts.total_amount !== undefined ? Number(opts.total_amount) : null;
-      const useAuto = opts.auto_price === true;
+      chargeAmount = computed;
+      pricingInfo = {
+        mode: "auto",
+        additional_days: additionalDays,
+        base_amount_per_day: perDay,
+        computed_charge: computed,
+      };
+    } else {
+      return {
+        success: false,
+        message:
+          "Provide total_amount or set auto_price=true for date-change wallet charge.",
+      };
+    }
 
-      let chargeAmount = null;
-      let pricingInfo = null;
+    const journal_code = await getJournalCodeViaApi();
+    const { dr, cr } = await getTwoTxnIdsViaApi();
 
-      if (explicitAmount !== null) {
-        if (!Number.isFinite(explicitAmount) || explicitAmount <= 0) {
-          await conn.rollback();
-          conn.release();
-          return {
-            success: false,
-            message: "total_amount must be a positive number.",
-          };
-        }
-        chargeAmount = explicitAmount;
-        pricingInfo = { mode: "explicit" };
-      } else if (useAuto) {
-        // Base price
-        const [bp] = await conn.query(
-          `SELECT amount_per_day FROM banners_base_prices LIMIT 1 FOR UPDATE`,
-        );
-        if (!bp.length) {
-          await conn.rollback();
-          conn.release();
-          return {
-            success: false,
-            message: "Base price missing (banners_base_prices).",
-          };
-        }
-        const perDay = Number(bp[0].amount_per_day);
-        if (!Number.isFinite(perDay) || perDay <= 0) {
-          await conn.rollback();
-          conn.release();
-          return {
-            success: false,
-            message: "Invalid amount_per_day in base price table.",
-          };
-        }
+    const out = await prisma.$transaction(async (tx) => {
+      const payer = await tx.wallets.findFirst({
+        where: { user_id: payerUserId },
+      });
 
-        // compute additional days vs previous coverage
-        const additional_days = (() => {
-          const prevDays = new Set();
-          const addDays = (set, a, b) => {
-            if (!a || !b) return;
-            let s = moment(a).startOf("day");
-            let e = moment(b).startOf("day");
-            if (!s.isValid() || !e.isValid() || e.isBefore(s)) return;
-            while (!s.isAfter(e)) {
-              set.add(s.format("YYYY-MM-DD"));
-              s = s.add(1, "day");
-            }
-          };
-          addDays(prevDays, cur.start_date, cur.end_date);
-
-          let added = 0;
-          if (newStart && newEnd) {
-            let s = moment(newStart).startOf("day");
-            let e = moment(newEnd).startOf("day");
-            if (s.isValid() && e.isValid() && !e.isBefore(s)) {
-              while (!s.isAfter(e)) {
-                const key = s.format("YYYY-MM-DD");
-                if (!prevDays.has(key)) added++;
-                s = s.add(1, "day");
-              }
-            }
-          }
-          return added;
-        })();
-
-        const computed = additional_days * perDay;
-
-        if (computed <= 0) {
-          // No charge; just update
-          sets.push("updated_at = ?");
-          params.push(nowBT(), id);
-          await conn.query(
-            `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-            params,
-          );
-          const [afterRows] = await conn.query(
-            `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-               FROM business_banners WHERE id = ?`,
-            [id],
-          );
-          await conn.commit();
-          conn.release();
-          return {
-            success: true,
-            message: "Banner updated (no additional charge).",
-            data: afterRows[0],
-            payment: null,
-            pricing: {
-              mode: "auto",
-              additional_days,
-              base_amount_per_day: perDay,
-              computed_charge: 0,
-            },
-          };
-        }
-
-        chargeAmount = computed;
-        pricingInfo = {
-          mode: "auto",
-          additional_days,
-          base_amount_per_day: perDay,
-          computed_charge: computed,
-        };
-      } else {
-        await conn.rollback();
-        conn.release();
-        return {
-          success: false,
-          message:
-            "Provide total_amount or set auto_price=true for date-change wallet charge.",
-        };
+      if (!payer) {
+        throw new Error(`No wallet found for user_id ${payerUserId}`);
       }
 
-      // Lock wallets
-      const [payerRows] = await conn.query(
-        `SELECT id, wallet_id, amount, status FROM wallets WHERE user_id = ? LIMIT 1 FOR UPDATE`,
-        [payer_user_id],
-      );
-      if (!payerRows.length) {
-        await conn.rollback();
-        conn.release();
-        return {
-          success: false,
-          message: `No wallet found for user_id ${payer_user_id}`,
-        };
-      }
-      const payer = payerRows[0];
+      const admin = await tx.wallets.findFirst({
+        where: { wallet_id: ADMIN_WALLET_ID },
+      });
 
-      const [adminRows] = await conn.query(
-        `SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? LIMIT 1 FOR UPDATE`,
-        [ADMIN_WALLET_ID],
-      );
-      if (!adminRows.length) {
-        await conn.rollback();
-        conn.release();
-        return {
-          success: false,
-          message: `Admin wallet ${ADMIN_WALLET_ID} not found`,
-        };
+      if (!admin) {
+        throw new Error(`Admin wallet ${ADMIN_WALLET_ID} not found`);
       }
-      const admin = adminRows[0];
 
       if (payer.status !== "ACTIVE") {
-        await conn.rollback();
-        conn.release();
-        return { success: false, message: "Payer wallet is not ACTIVE" };
+        throw new Error("Payer wallet is not ACTIVE");
       }
+
       if (admin.status !== "ACTIVE") {
-        await conn.rollback();
-        conn.release();
-        return { success: false, message: "Admin wallet is not ACTIVE" };
+        throw new Error("Admin wallet is not ACTIVE");
       }
+
       if (Number(payer.amount) < chargeAmount) {
-        await conn.rollback();
-        conn.release();
-        return { success: false, message: "Insufficient wallet balance" };
+        throw new Error("Insufficient wallet balance");
       }
 
-      // IDs for journal/transactions
-      const journal_code = await getJournalCodeViaApi();
-      const { dr, cr } = await getTwoTxnIdsViaApi();
+      const updatedBanner = await tx.business_banners.update({
+        where: { id: bannerId },
+        data,
+      });
 
-      // 1) Apply the banner updates
-      sets.push("updated_at = ?");
-      params.push(nowBT(), id);
-      await conn.query(
-        `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-        params,
-      );
+      await tx.wallets.update({
+        where: { id: payer.id },
+        data: {
+          amount: {
+            decrement: chargeAmount,
+          },
+        },
+      });
 
-      // 2) Move balances
-      await conn.query(`UPDATE wallets SET amount = amount - ? WHERE id = ?`, [
-        chargeAmount,
-        payer.id,
-      ]);
-      await conn.query(`UPDATE wallets SET amount = amount + ? WHERE id = ?`, [
-        chargeAmount,
-        admin.id,
-      ]);
+      await tx.wallets.update({
+        where: { id: admin.id },
+        data: {
+          amount: {
+            increment: chargeAmount,
+          },
+        },
+      });
 
-      // 3) Insert DR/CR with nicer note
+      const biz = await tx.merchant_business_details.findUnique({
+        where: { business_id: current.business_id },
+        select: {
+          business_id: true,
+          business_name: true,
+        },
+      });
+
+      const businessName =
+        biz?.business_name || `business_id=${current.business_id}`;
+
+      const finalOwnerType =
+        fields.owner_type !== undefined
+          ? toOwnerType(fields.owner_type)
+          : current.owner_type;
+
+      const note = `Banner Fee from ${businessName} (${finalOwnerType})`;
       const now = nowBT();
-      const biz = await assertBusinessExists(cur.business_id);
-      const business_name =
-        biz.business_name || `business_id=${cur.business_id}`;
-      const otypeForNote = toOwnerType(
-        fields.owner_type !== undefined ? fields.owner_type : cur.owner_type,
-      );
-      const note = `Banner Fee from ${business_name} (${otypeForNote})`;
 
-      await conn.query(
-        `INSERT INTO wallet_transactions
-          (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'DR', ?, ?, ?)`,
-        [
-          dr,
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: dr,
           journal_code,
-          payer.wallet_id,
-          admin.wallet_id,
-          chargeAmount,
+          tnx_from: payer.wallet_id,
+          tnx_to: admin.wallet_id,
+          amount: chargeAmount,
+          remark: "DR",
           note,
-          now,
-          now,
-        ],
-      );
-      await conn.query(
-        `INSERT INTO wallet_transactions
-          (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'CR', ?, ?, ?)`,
-        [
-          cr,
+          created_at: now,
+          updated_at: now,
+        },
+      });
+
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: cr,
           journal_code,
-          payer.wallet_id,
-          admin.wallet_id,
-          chargeAmount,
+          tnx_from: payer.wallet_id,
+          tnx_to: admin.wallet_id,
+          amount: chargeAmount,
+          remark: "CR",
           note,
-          now,
-          now,
-        ],
-      );
-
-      // 4) Return the updated row
-      const [afterRows] = await conn.query(
-        `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-           FROM business_banners WHERE id = ?`,
-        [id],
-      );
-
-      await conn.commit();
-      conn.release();
+          created_at: now,
+          updated_at: now,
+        },
+      });
 
       return {
-        success: true,
-        message: "Banner updated and wallet charged successfully.",
-        data: afterRows[0],
+        banner: updatedBanner,
         payment: {
           journal_code,
           debited_from_wallet: payer.wallet_id,
@@ -706,108 +849,62 @@ async function updateBanner(id, fields, opts = {}) {
           debit_txn_id: dr,
           credit_txn_id: cr,
         },
-        pricing: pricingInfo,
       };
-    } catch (err) {
-      try {
-        await conn.rollback();
-      } catch {}
-      try {
-        conn.release();
-      } catch {}
-      return {
-        success: false,
-        message: err.message || "Failed to update banner with wallet charge",
-      };
-    }
-  }
+    });
 
-  // ---------- SIMPLE UPDATE (original behavior) ----------
-  const [prev] = await db.query(
-    `SELECT banner_image FROM business_banners WHERE id = ?`,
-    [id],
-  );
-  if (!prev.length)
-    return { success: false, message: `Banner id ${id} not found.` };
-
-  const sets = [],
-    params = [];
-  if ("business_id" in fields) {
-    const bid = toBizId(fields.business_id);
-    await assertBusinessExists(bid);
-    sets.push("business_id = ?");
-    params.push(bid);
+    return {
+      success: true,
+      message: "Banner updated and wallet charged successfully.",
+      data: serializeBanner(out.banner),
+      payment: out.payment,
+      pricing: pricingInfo,
+    };
+  } catch (error) {
+    console.error("updateBanner error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to update banner.",
+    };
   }
-  if ("title" in fields) {
-    sets.push("title = ?");
-    params.push(toStrOrNull(fields.title));
-  }
-  if ("description" in fields) {
-    sets.push("description = ?");
-    params.push(toStrOrNull(fields.description));
-  }
-  if ("banner_image" in fields) {
-    sets.push("banner_image = ?");
-    params.push(toStrOrNull(fields.banner_image));
-  }
-  if ("is_active" in fields) {
-    sets.push("is_active = ?");
-    params.push(Number(fields.is_active) ? 1 : 0);
-  }
-  if ("start_date" in fields) {
-    sets.push("start_date = ?");
-    params.push(fields.start_date || null);
-  }
-  if ("end_date" in fields) {
-    sets.push("end_date = ?");
-    params.push(fields.end_date || null);
-  }
-  if ("owner_type" in fields) {
-    sets.push("owner_type = ?");
-    params.push(toOwnerType(fields.owner_type));
-  }
-
-  if (!sets.length) {
-    const [cur] = await db.query(
-      `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-         FROM business_banners WHERE id = ?`,
-      [id],
-    );
-    return { success: true, message: "No changes.", data: cur[0] };
-  }
-
-  sets.push("updated_at = ?");
-  params.push(nowBT(), id);
-  await db.query(
-    `UPDATE business_banners SET ${sets.join(", ")} WHERE id = ?`,
-    params,
-  );
-
-  const [rows] = await db.query(
-    `SELECT id, business_id, title, description, banner_image, is_active, start_date, end_date, owner_type, created_at, updated_at
-       FROM business_banners WHERE id = ?`,
-    [id],
-  );
-  return {
-    success: true,
-    message: "Banner updated successfully.",
-    data: rows[0],
-  };
 }
 
+/* ---------- delete ---------- */
+
 async function deleteBanner(id) {
-  const [prev] = await db.query(
-    `SELECT banner_image FROM business_banners WHERE id = ?`,
-    [id],
-  );
-  if (!prev.length)
-    return { success: false, message: `Banner id ${id} not found.` };
-  await db.query(`DELETE FROM business_banners WHERE id = ?`, [id]);
-  return {
-    success: true,
-    message: "Banner deleted successfully.",
-    old_image: prev[0].banner_image || null,
-  };
+  try {
+    const bannerId = Number(id);
+
+    const current = await prisma.business_banners.findUnique({
+      where: { id: bannerId },
+      select: {
+        id: true,
+        banner_image: true,
+      },
+    });
+
+    if (!current) {
+      return {
+        success: false,
+        message: `Banner id ${id} not found.`,
+      };
+    }
+
+    await prisma.business_banners.delete({
+      where: { id: bannerId },
+    });
+
+    return {
+      success: true,
+      message: "Banner deleted successfully.",
+      old_image: current.banner_image || null,
+    };
+  } catch (error) {
+    console.error("deleteBanner error:", error);
+    return {
+      success: false,
+      message: error.message || "Failed to delete banner.",
+    };
+  }
 }
 
 module.exports = {
@@ -819,4 +916,5 @@ module.exports = {
   listActiveByKind,
   updateBanner,
   deleteBanner,
+  getBannerBasePrice,
 };
