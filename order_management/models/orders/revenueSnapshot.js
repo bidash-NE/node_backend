@@ -1,107 +1,160 @@
-// orders/revenueSnapshot.js
-const db = require("../../config/db");
+// models/orders/revenueSnapshot.js
+// ✅ Full Prisma version based on your actual schema
+// ✅ No raw db.query()
+// ✅ Keeps same function names for compatibility
+
+const { prisma } = require("../../lib/prisma");
+
+/* ======================= HELPERS ======================= */
+
+function getClient(client = null) {
+  /*
+    Supports:
+    - normal prisma
+    - Prisma transaction client
+
+    If old MySQL conn is passed, it will be ignored and normal prisma is used.
+  */
+  if (
+    client &&
+    (typeof client.merchant_earnings?.findFirst === "function" ||
+      typeof client.food_mart_revenue?.findFirst === "function")
+  ) {
+    return client;
+  }
+
+  return prisma;
+}
+
+function toBigIntOrNull(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
+}
+
+function toIntOrNull(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function toNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toStrOrNull(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s.length ? s : null;
+}
+
+function normalizeOwnerType(v) {
+  const s = String(v || "FOOD").trim().toUpperCase();
+  return s === "MART" ? "MART" : "FOOD";
+}
+
+function normalizeSource(v) {
+  const s = String(v || "delivered").trim().toLowerCase();
+
+  if (s === "orders") return "orders";
+  if (s === "cancelled") return "cancelled";
+  return "delivered";
+}
+
+/* ======================= MERCHANT EARNINGS ======================= */
 
 async function insertMerchantEarningWithConn(
   conn,
   { business_id, order_id, total_amount, dateObj },
 ) {
-  const [t] = await conn.query(
-    `
-    SELECT 1
-      FROM INFORMATION_SCHEMA.TABLES
-     WHERE TABLE_SCHEMA = DATABASE()
-       AND TABLE_NAME = 'merchant_earnings'
-     LIMIT 1
-    `,
-  );
-  if (!t.length) return;
+  const tx = getClient(conn);
 
-  const [[exists]] = await conn.query(
-    `SELECT 1 FROM merchant_earnings WHERE order_id = ? AND business_id = ? LIMIT 1`,
-    [order_id, business_id],
-  );
-  if (exists) return;
+  const bid = toBigIntOrNull(business_id);
+  const oid = toStrOrNull(order_id);
 
-  const amt = Number(total_amount || 0);
-  const d = dateObj || new Date();
+  if (!bid || !oid) {
+    return;
+  }
 
-  await conn.query(
-    `INSERT INTO merchant_earnings (business_id, \`date\`, total_amount, order_id)
-     VALUES (?, ?, ?, ?)`,
-    [business_id, d, amt, order_id],
-  );
+  const exists = await tx.merchant_earnings.findFirst({
+    where: {
+      order_id: oid,
+      business_id: bid,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (exists) {
+    return;
+  }
+
+  await tx.merchant_earnings.create({
+    data: {
+      business_id: bid,
+      date: dateObj ? new Date(dateObj) : new Date(),
+      total_amount: toNumber(total_amount, 0),
+      order_id: oid,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+  });
 }
 
-async function insertFoodMartRevenueWithConn(conn, row) {
-  const [t] = await conn.query(
-    `
-    SELECT 1
-      FROM INFORMATION_SCHEMA.TABLES
-     WHERE TABLE_SCHEMA = DATABASE()
-       AND TABLE_NAME = 'food_mart_revenue'
-     LIMIT 1
-    `,
-  );
-  if (!t.length) return;
+/* ======================= FOOD / MART REVENUE ======================= */
 
-  const ownerType = String(row.owner_type || "FOOD")
-    .trim()
-    .toUpperCase();
-  const source = String(row.source || "delivered")
-    .trim()
-    .toLowerCase();
+async function insertFoodMartRevenueWithConn(conn, row = {}) {
+  const tx = getClient(conn);
 
-  const sql = `
-    INSERT INTO food_mart_revenue
-    (
-      order_id, user_id, business_id, owner_type, source,
-      status, placed_at, payment_method,
-      total_amount, platform_fee, revenue_earned, tax,
-      customer_name, customer_phone, business_name,
-      items_summary, total_quantity, details_json, created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    ON DUPLICATE KEY UPDATE
-      user_id        = VALUES(user_id),
-      business_id    = VALUES(business_id),
-      owner_type     = VALUES(owner_type),
-      source         = VALUES(source),
-      status         = VALUES(status),
-      placed_at      = VALUES(placed_at),
-      payment_method = VALUES(payment_method),
-      total_amount   = VALUES(total_amount),
-      platform_fee   = VALUES(platform_fee),
-      revenue_earned = VALUES(revenue_earned),
-      tax            = VALUES(tax),
-      customer_name  = VALUES(customer_name),
-      customer_phone = VALUES(customer_phone),
-      business_name  = VALUES(business_name),
-      items_summary  = VALUES(items_summary),
-      total_quantity = VALUES(total_quantity),
-      details_json   = VALUES(details_json)
-  `;
+  const orderId = toStrOrNull(row.order_id);
+  const userId = toIntOrNull(row.user_id);
+  const businessId = toIntOrNull(row.business_id);
 
-  await conn.query(sql, [
-    String(row.order_id).trim(),
-    Number(row.user_id),
-    Number(row.business_id),
-    ownerType,
+  if (!orderId || !userId || !businessId) {
+    return;
+  }
+
+  const ownerType = normalizeOwnerType(row.owner_type);
+  const source = normalizeSource(row.source);
+
+  const data = {
+    order_id: orderId,
+    user_id: userId,
+    business_id: businessId,
+    owner_type: ownerType,
     source,
-    row.status || null,
-    row.placed_at || null,
-    row.payment_method || null,
-    Number(row.total_amount || 0),
-    Number(row.platform_fee || 0),
-    Number(row.revenue_earned || 0),
-    Number(row.tax || 0),
-    row.customer_name || null,
-    row.customer_phone || null,
-    row.business_name || null,
-    row.items_summary || null,
-    Number(row.total_quantity || 0),
-    row.details_json || null,
-  ]);
+
+    status: row.status ? String(row.status) : null,
+    placed_at: row.placed_at ? new Date(row.placed_at) : null,
+    payment_method: row.payment_method ? String(row.payment_method) : null,
+
+    total_amount: toNumber(row.total_amount, 0),
+    platform_fee: toNumber(row.platform_fee, 0),
+    revenue_earned: toNumber(row.revenue_earned, 0),
+    tax: toNumber(row.tax, 0),
+
+    customer_name: row.customer_name ? String(row.customer_name) : null,
+    customer_phone: row.customer_phone ? String(row.customer_phone) : null,
+    business_name: row.business_name ? String(row.business_name) : null,
+
+    items_summary: row.items_summary ? String(row.items_summary) : null,
+    total_quantity: Number.parseInt(row.total_quantity || 0, 10) || 0,
+    details_json: row.details_json ? String(row.details_json) : null,
+  };
+
+  await tx.food_mart_revenue.upsert({
+    where: {
+      order_id: orderId,
+    },
+    create: {
+      ...data,
+      created_at: new Date(),
+    },
+    update: data,
+  });
 }
+
+/* ======================= ITEM SUMMARY ======================= */
 
 function buildItemsSummary(items = []) {
   const byName = new Map();
@@ -110,6 +163,7 @@ function buildItemsSummary(items = []) {
   for (const it of items || []) {
     const name = String(it.item_name || "").trim() || "Item";
     const q = Number(it.quantity || 0) || 0;
+
     totalQty += q;
     byName.set(name, (byName.get(name) || 0) + q);
   }
@@ -119,7 +173,10 @@ function buildItemsSummary(items = []) {
     .map(([name, qty]) => `${name} x${qty}`)
     .join(", ");
 
-  return { summary, totalQty };
+  return {
+    summary,
+    totalQty,
+  };
 }
 
 module.exports = {
