@@ -1,26 +1,345 @@
 // jobs/pickedupMigrationJob.js
-const db = require("../config/db");
+// ✅ Prisma version
+// ✅ No raw db.query()
+// ✅ Keeps same behavior:
+//    - retries failed PICKUP receipt emails
+//    - migrates PICKEDUP orders after 30 minutes
+//    - sends pickup receipt email
+//    - inserts into pickedup_orders + pickedup_order_items
+//    - deletes from active orders + order_items
+
+const { prisma } = require("../lib/prisma");
 const PickupEmailService = require("../services/pickupEmailService");
 
 let _timer = null;
 let _running = false;
 
+/* ============================================================
+   Helpers
+============================================================ */
+
+function toNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toInt(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isInteger(n) ? n : fallback;
+}
+
+function toBigIntId(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
+}
+
+function normalizeOrderId(v) {
+  return String(v || "").trim().toUpperCase();
+}
+
+function getCutoffDate(minutes = 30) {
+  return new Date(Date.now() - Number(minutes || 30) * 60 * 1000);
+}
+
+function serializeValue(value) {
+  if (typeof value === "bigint") return Number(value);
+  return value;
+}
+
+function serializeRow(row) {
+  if (!row) return row;
+
+  const out = {};
+
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = serializeValue(value);
+  }
+
+  return out;
+}
+
+function extractPickupAddress(orderDeliveryAddress, businessAddress) {
+  let pickupAddress = orderDeliveryAddress || businessAddress || "N/A";
+
+  if (pickupAddress !== "N/A" && typeof pickupAddress === "string") {
+    try {
+      const parsed = JSON.parse(pickupAddress);
+      pickupAddress = parsed?.address || pickupAddress;
+    } catch {}
+  }
+
+  return pickupAddress;
+}
+
+function buildBusinessLogoUrl(logo) {
+  if (!logo) return null;
+
+  const s = String(logo).trim();
+  if (!s) return null;
+
+  if (s.startsWith("/uploads/")) {
+    return `https://backend.tabdhey.bt/merchant${s}`;
+  }
+
+  if (s.startsWith("http")) {
+    return s;
+  }
+
+  return `https://backend.tabdhey.bt/merchant/uploads/logos/${s}`;
+}
+
+async function getUserById(userId) {
+  const uid = toBigIntId(userId);
+  if (!uid) return null;
+
+  const row = await prisma.users.findUnique({
+    where: {
+      user_id: uid,
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      email: true,
+      phone: true,
+    },
+  });
+
+  return serializeRow(row);
+}
+
+async function getBusinessById(businessId) {
+  const bid = toBigIntId(businessId);
+  if (!bid) return null;
+
+  const row = await prisma.merchant_business_details.findUnique({
+    where: {
+      business_id: bid,
+    },
+    select: {
+      business_id: true,
+      business_name: true,
+      address: true,
+      business_logo: true,
+    },
+  });
+
+  return serializeRow(row);
+}
+
+async function getFoodMenuNameMap(menuIds = []) {
+  const ids = Array.from(
+    new Set(
+      menuIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  );
+
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  const rows = await prisma.food_menu.findMany({
+    where: {
+      id: {
+        in: ids.map((id) => BigInt(id)),
+      },
+    },
+    select: {
+      id: true,
+      item_name: true,
+    },
+  });
+
+  for (const raw of rows || []) {
+    const row = serializeRow(raw);
+    map.set(Number(row.id), row.item_name || null);
+  }
+
+  return map;
+}
+
+async function getOrderItemsWithMenuNames(orderId) {
+  const oid = normalizeOrderId(orderId);
+  if (!oid) return [];
+
+  const itemsRaw = await prisma.order_items.findMany({
+    where: {
+      order_id: oid,
+    },
+    orderBy: {
+      item_id: "asc",
+    },
+  });
+
+  const items = itemsRaw.map(serializeRow);
+
+  if (!items.length) return [];
+
+  const menuNameMap = await getFoodMenuNameMap(items.map((it) => it.menu_id));
+
+  return items.map((item) => ({
+    ...item,
+    menu_name:
+      menuNameMap.get(Number(item.menu_id)) ||
+      item.item_name ||
+      `Item ${item.menu_id}`,
+  }));
+}
+
+async function getPickedupOrderItems(orderId) {
+  const oid = normalizeOrderId(orderId);
+  if (!oid) return [];
+
+  const rows = await prisma.pickedup_order_items.findMany({
+    where: {
+      order_id: oid,
+    },
+    orderBy: {
+      pickedup_item_id: "asc",
+    },
+  });
+
+  return rows.map(serializeRow);
+}
+
+async function upsertReceiptSent({
+  order_id,
+  user_id,
+  business_id,
+  user_email,
+  user_name,
+  business_name,
+}) {
+  await prisma.receipt_email.upsert({
+    where: {
+      order_id,
+    },
+    create: {
+      order_id,
+      user_id: toInt(user_id),
+      business_id: toInt(business_id),
+      user_email: user_email || "",
+      user_name: user_name || null,
+      business_name: business_name || null,
+      receipt_sent: true,
+      receipt_sent_at: new Date(),
+      email_status: "sent",
+      delivery_method: "PICKUP",
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+    update: {
+      receipt_sent: true,
+      receipt_sent_at: new Date(),
+      email_status: "sent",
+      error_message: null,
+      delivery_method: "PICKUP",
+      updated_at: new Date(),
+    },
+  });
+}
+
+async function upsertReceiptFailed({
+  order_id,
+  user_id = null,
+  business_id = null,
+  user_email = null,
+  user_name = null,
+  business_name = null,
+  error_message,
+  incrementRetry = false,
+}) {
+  const existing = await prisma.receipt_email.findUnique({
+    where: {
+      order_id,
+    },
+    select: {
+      retry_count: true,
+    },
+  });
+
+  const nextRetryCount = incrementRetry
+    ? Number(existing?.retry_count || 0) + 1
+    : Number(existing?.retry_count || 0);
+
+  await prisma.receipt_email.upsert({
+    where: {
+      order_id,
+    },
+    create: {
+      order_id,
+      user_id: toInt(user_id),
+      business_id: toInt(business_id),
+      user_email: user_email || "",
+      user_name: user_name || null,
+      business_name: business_name || null,
+      receipt_sent: false,
+      email_status: "failed",
+      error_message: String(error_message || "").slice(0, 1000),
+      delivery_method: "PICKUP",
+      retry_count: nextRetryCount,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+    update: {
+      email_status: "failed",
+      error_message: String(error_message || "").slice(0, 1000),
+      delivery_method: "PICKUP",
+      retry_count: nextRetryCount,
+      updated_at: new Date(),
+    },
+  });
+}
+
+async function incrementPickupReceiptRetry(orderId, errorMessage = null) {
+  const order_id = normalizeOrderId(orderId);
+  if (!order_id) return;
+
+  await prisma.receipt_email.updateMany({
+    where: {
+      order_id,
+      delivery_method: "PICKUP",
+    },
+    data: {
+      retry_count: {
+        increment: 1,
+      },
+      updated_at: new Date(),
+      ...(errorMessage != null
+        ? { error_message: String(errorMessage).slice(0, 1000) }
+        : {}),
+    },
+  });
+}
+
+/* ============================================================
+   Retry failed pickup emails
+============================================================ */
+
 async function retryFailedPickupEmails({
   batchSize = Number(process.env.PICKEDUP_MIGRATION_BATCH || 10),
 } = {}) {
   try {
-    const [failedEmails] = await db.query(
-      `
-      SELECT order_id, user_email, business_name, error_message
-      FROM receipt_email
-      WHERE email_status = 'failed' 
-        AND receipt_sent = 0
-        AND retry_count < 3
-        AND delivery_method = 'PICKUP'
-      LIMIT ?
-      `,
-      [batchSize],
-    );
+    const take = Math.max(1, Number(batchSize) || 10);
+
+    const failedEmails = await prisma.receipt_email.findMany({
+      where: {
+        email_status: "failed",
+        receipt_sent: false,
+        retry_count: {
+          lt: 3,
+        },
+        delivery_method: "PICKUP",
+      },
+      select: {
+        order_id: true,
+        user_email: true,
+        business_name: true,
+        error_message: true,
+      },
+      take,
+    });
 
     if (!failedEmails.length) return;
 
@@ -29,46 +348,37 @@ async function retryFailedPickupEmails({
     );
 
     for (const failed of failedEmails) {
-      console.log(`[PICKUP RETRY] Retrying order ${failed.order_id}`);
+      const order_id = normalizeOrderId(failed.order_id);
+
+      console.log(`[PICKUP RETRY] Retrying order ${order_id}`);
 
       try {
-        const [orders] = await db.query(
-          `SELECT po.*, u.user_name, u.email, u.phone, 
-                  mbd.business_logo, mbd.address as business_address
-           FROM pickedup_orders po
-           JOIN users u ON po.user_id = u.user_id
-           LEFT JOIN merchant_business_details mbd ON po.business_id = mbd.business_id
-           WHERE po.order_id = ?`,
-          [failed.order_id],
-        );
+        const pickedOrderRaw = await prisma.pickedup_orders.findUnique({
+          where: {
+            order_id,
+          },
+        });
 
-        if (!orders.length) {
-          console.log(`[PICKUP RETRY] Order ${failed.order_id} not found`);
+        if (!pickedOrderRaw) {
+          console.log(`[PICKUP RETRY] Order ${order_id} not found`);
           continue;
         }
 
-        const order = orders[0];
+        const order = serializeRow(pickedOrderRaw);
 
-        const [items] = await db.query(
-          `SELECT * FROM pickedup_order_items WHERE order_id = ?`,
-          [failed.order_id],
-        );
+        const user = (await getUserById(order.user_id)) || {};
+        const business = (await getBusinessById(order.business_id)) || {};
+
+        const items = await getPickedupOrderItems(order_id);
 
         const subtotal = items.reduce(
-          (sum, item) => sum + (parseFloat(item.subtotal) || 0),
+          (total, item) => total + toNumber(item.subtotal, 0),
           0,
         );
-        const grandTotal = parseFloat(order.total_amount) || subtotal;
 
-        let businessLogo = null;
-        if (order.business_logo) {
-          let logo = order.business_logo;
-          if (logo.startsWith("/uploads/")) {
-            businessLogo = `https://backend.tabdhey.bt/merchant${logo}`;
-          } else if (logo.startsWith("http")) {
-            businessLogo = logo;
-          }
-        }
+        const grandTotal = toNumber(order.total_amount, subtotal);
+
+        const businessLogo = buildBusinessLogoUrl(business.business_logo);
 
         const orderData = {
           order_id: order.order_id,
@@ -76,19 +386,23 @@ async function retryFailedPickupEmails({
           pickedup_at: order.pickedup_at,
           payment_method: order.payment_method,
           pickup_address: order.pickup_address,
-          customer_name: order.user_name,
-          customer_email: order.email,
-          customer_phone: order.phone,
-          business_name: order.business_name,
+
+          customer_name: user.user_name || "Customer",
+          customer_email: user.email || failed.user_email,
+          customer_phone: user.phone || "N/A",
+
+          business_name: order.business_name || business.business_name,
           business_logo: businessLogo,
-          business_address: order.business_address,
+          business_address: business.address || "Thimphu, Bhutan",
+
           items: items.map((item) => ({
             menu_name: item.item_name,
-            quantity: item.quantity,
-            price_per_unit: item.price,
-            subtotal: item.subtotal,
+            quantity: toInt(item.quantity, 0),
+            price_per_unit: toNumber(item.price, 0),
+            subtotal: toNumber(item.subtotal, 0),
           })),
-          subtotal: subtotal,
+
+          subtotal,
           grand_total: grandTotal,
         };
 
@@ -96,37 +410,34 @@ async function retryFailedPickupEmails({
           await PickupEmailService.sendPickupReceipt(orderData);
 
         if (emailResult.success) {
-          await db.query(
-            `UPDATE receipt_email 
-             SET receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent', error_message = NULL
-             WHERE order_id = ? AND delivery_method = 'PICKUP'`,
-            [failed.order_id],
-          );
+          await prisma.receipt_email.updateMany({
+            where: {
+              order_id,
+              delivery_method: "PICKUP",
+            },
+            data: {
+              receipt_sent: true,
+              receipt_sent_at: new Date(),
+              email_status: "sent",
+              error_message: null,
+              updated_at: new Date(),
+            },
+          });
+
           console.log(
-            `[PICKUP RETRY] ✅ Email resent successfully for ${failed.order_id}`,
+            `[PICKUP RETRY] ✅ Email resent successfully for ${order_id}`,
           );
         } else {
-          await db.query(
-            `UPDATE receipt_email 
-             SET retry_count = retry_count + 1, updated_at = NOW(), error_message = ?
-             WHERE order_id = ? AND delivery_method = 'PICKUP'`,
-            [emailResult.error, failed.order_id],
-          );
+          await incrementPickupReceiptRetry(order_id, emailResult.error);
+
           console.log(
-            `[PICKUP RETRY] ❌ Failed again for ${failed.order_id}: ${emailResult.error}`,
+            `[PICKUP RETRY] ❌ Failed again for ${order_id}: ${emailResult.error}`,
           );
         }
       } catch (error) {
-        console.error(
-          `[PICKUP RETRY] Error for ${failed.order_id}:`,
-          error.message,
-        );
-        await db.query(
-          `UPDATE receipt_email 
-           SET retry_count = retry_count + 1, updated_at = NOW(), error_message = ?
-           WHERE order_id = ? AND delivery_method = 'PICKUP'`,
-          [error.message, failed.order_id],
-        );
+        console.error(`[PICKUP RETRY] Error for ${order_id}:`, error.message);
+
+        await incrementPickupReceiptRetry(order_id, error.message);
       }
     }
   } catch (e) {
@@ -134,30 +445,83 @@ async function retryFailedPickupEmails({
   }
 }
 
+/* ============================================================
+   Main migration
+============================================================ */
+
 async function migratePICKEDUPOrdersOnce({
   batchSize = Number(process.env.PICKEDUP_MIGRATION_BATCH || 50),
 } = {}) {
   if (_running) return;
+
   _running = true;
 
   try {
-    // In pickedupMigrationJob.js
-    const [rows] = await db.query(
-      `
-  SELECT o.order_id, o.user_id, o.total_amount, o.created_at, 
-         o.payment_method, o.delivery_address, o.status, o.business_id,
-         o.updated_at, o.discount_amount, o.pickedup_by, o.pickedup_at
-  FROM orders o
-  LEFT JOIN pickedup_orders pu ON o.order_id = pu.order_id
-  WHERE UPPER(o.status) = 'PICKEDUP'
-    AND o.pickedup_at IS NOT NULL
-    AND o.pickedup_at <= (NOW() - INTERVAL 30 MINUTE)  -- Wait 30 minutes before migrating
-    AND pu.order_id IS NULL
-  ORDER BY o.pickedup_at ASC
-  LIMIT ?
-  `,
-      [batchSize],
-    );
+    const take = Math.max(1, Number(batchSize) || 50);
+    const cutoff = getCutoffDate(30);
+
+    /*
+      Old SQL:
+      SELECT orders where:
+      - UPPER(status) = PICKEDUP
+      - pickedup_at IS NOT NULL
+      - pickedup_at <= NOW() - 30 MINUTE
+      - pickedup_orders does not already contain order_id
+    */
+    const candidatesRaw = await prisma.orders.findMany({
+      where: {
+        status: {
+          in: ["PICKEDUP", "Pickedup", "pickedup"],
+        },
+        pickedup_at: {
+          not: null,
+          lte: cutoff,
+        },
+      },
+      select: {
+        order_id: true,
+        user_id: true,
+        total_amount: true,
+        created_at: true,
+        payment_method: true,
+        delivery_address: true,
+        status: true,
+        business_id: true,
+        updated_at: true,
+        discount_amount: true,
+        pickedup_by: true,
+        pickedup_at: true,
+      },
+      orderBy: {
+        pickedup_at: "asc",
+      },
+      take: take * 3,
+    });
+
+    if (!candidatesRaw.length) {
+      console.log("[PICKEDUP MIGRATION] No orders to process");
+      return;
+    }
+
+    const candidates = candidatesRaw.map(serializeRow);
+    const orderIds = candidates.map((o) => o.order_id);
+
+    const existingPickedRows = await prisma.pickedup_orders.findMany({
+      where: {
+        order_id: {
+          in: orderIds,
+        },
+      },
+      select: {
+        order_id: true,
+      },
+    });
+
+    const alreadyPicked = new Set(existingPickedRows.map((r) => r.order_id));
+
+    const rows = candidates
+      .filter((o) => !alreadyPicked.has(o.order_id))
+      .slice(0, take);
 
     if (!rows.length) {
       console.log("[PICKEDUP MIGRATION] No orders to process");
@@ -167,7 +531,7 @@ async function migratePICKEDUPOrdersOnce({
     console.log(`[PICKEDUP MIGRATION] Found ${rows.length} orders to process`);
 
     for (const order of rows) {
-      const order_id = order.order_id;
+      const order_id = normalizeOrderId(order.order_id);
 
       if (!order_id) {
         console.error("[PICKEDUP MIGRATION] Skipping: order_id is null");
@@ -177,29 +541,10 @@ async function migratePICKEDUPOrdersOnce({
       try {
         console.log(`[PICKEDUP MIGRATION] Processing order ${order_id}`);
 
-        const [businesses] = await db.query(
-          `SELECT business_id, business_name, address, business_logo
-           FROM merchant_business_details 
-           WHERE business_id = ?`,
-          [order.business_id],
-        );
+        const business = (await getBusinessById(order.business_id)) || {};
+        const user = (await getUserById(order.user_id)) || {};
 
-        const business = businesses[0] || {};
-
-        const [users] = await db.query(
-          `SELECT user_id, user_name, email, phone FROM users WHERE user_id = ?`,
-          [order.user_id],
-        );
-
-        const user = users[0] || {};
-
-        const [items] = await db.query(
-          `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
-           FROM order_items oi
-           LEFT JOIN food_menu fm ON oi.menu_id = fm.id
-           WHERE oi.order_id = ?`,
-          [order_id],
-        );
+        const items = await getOrderItemsWithMenuNames(order_id);
 
         if (!items.length) {
           console.error(
@@ -208,152 +553,179 @@ async function migratePICKEDUPOrdersOnce({
           continue;
         }
 
-        const subtotal = items.reduce((sum, item) => {
-          const price = parseFloat(item.price) || 0;
-          const quantity = parseInt(item.quantity) || 0;
-          return sum + price * quantity;
+        const subtotal = items.reduce((total, item) => {
+          const price = toNumber(item.price, 0);
+          const quantity = toInt(item.quantity, 0);
+          return total + price * quantity;
         }, 0);
 
-        const grandTotal = parseFloat(order.total_amount) || subtotal;
+        const grandTotal = toNumber(order.total_amount, subtotal);
 
-        let businessLogo = null;
-        if (business.business_logo) {
-          let logo = business.business_logo;
-          if (logo.startsWith("/uploads/")) {
-            businessLogo = `https://backend.tabdhey.bt/merchant${logo}`;
-          } else if (logo.startsWith("http")) {
-            businessLogo = logo;
-          } else {
-            businessLogo = `https://backend.tabdhey.bt/merchant/uploads/logos/${logo}`;
-          }
-        }
+        const businessLogo = buildBusinessLogoUrl(business.business_logo);
 
-        let pickupAddress = order.delivery_address || business.address || "N/A";
-        if (pickupAddress !== "N/A" && typeof pickupAddress === "string") {
-          try {
-            const parsed = JSON.parse(pickupAddress);
-            pickupAddress = parsed.address || pickupAddress;
-          } catch (e) {}
-        }
+        const pickupAddress = extractPickupAddress(
+          order.delivery_address,
+          business.address,
+        );
 
         const orderData = {
-          order_id: order.order_id,
+          order_id,
           created_at: order.created_at,
           pickedup_at: order.pickedup_at || new Date(),
           payment_method: order.payment_method,
           pickup_address: pickupAddress,
           status: "PICKEDUP",
+
           customer_name: user.user_name || "Customer",
           customer_email: user.email,
           customer_phone: user.phone || "N/A",
+
           business_name: business.business_name || "TabDhey",
           business_logo: businessLogo,
           business_address: business.address || "Thimphu, Bhutan",
+
           items: items.map((item) => ({
-            menu_name: item.menu_name,
-            quantity: parseInt(item.quantity) || 0,
-            price_per_unit: parseFloat(item.price) || 0,
-            subtotal:
-              (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+            menu_name: item.menu_name || `Item ${item.menu_id}`,
+            quantity: toInt(item.quantity, 0),
+            price_per_unit: toNumber(item.price, 0),
+            subtotal: toNumber(item.price, 0) * toInt(item.quantity, 0),
           })),
-          subtotal: subtotal,
+
+          subtotal,
           grand_total: grandTotal,
         };
 
         console.log(
           `[PICKEDUP MIGRATION] Sending pickup email to ${user.email}...`,
         );
+
         const emailResult =
           await PickupEmailService.sendPickupReceipt(orderData);
 
         if (emailResult.success) {
-          await db.query(
-            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
-             VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'PICKUP')
-             ON DUPLICATE KEY UPDATE 
-             receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent', delivery_method = 'PICKUP'`,
-            [
-              order_id,
-              order.user_id,
-              order.business_id,
-              user.email,
-              user.user_name,
-              business.business_name,
-            ],
-          );
+          await upsertReceiptSent({
+            order_id,
+            user_id: order.user_id,
+            business_id: order.business_id,
+            user_email: user.email,
+            user_name: user.user_name,
+            business_name: business.business_name,
+          });
+
           console.log(
             `[PICKEDUP MIGRATION] ✅ Email sent for order ${order_id}`,
           );
         } else {
-          await db.query(
-            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method, retry_count)
-             VALUES (?, ?, ?, ?, 'failed', ?, 'PICKUP', 0)
-             ON DUPLICATE KEY UPDATE 
-             email_status = 'failed', error_message = ?, delivery_method = 'PICKUP', retry_count = retry_count + 1`,
-            [
-              order_id,
-              order.user_id,
-              order.business_id,
-              user.email,
-              emailResult.error,
-              emailResult.error,
-            ],
-          );
+          await upsertReceiptFailed({
+            order_id,
+            user_id: order.user_id,
+            business_id: order.business_id,
+            user_email: user.email,
+            user_name: user.user_name,
+            business_name: business.business_name,
+            error_message: emailResult.error,
+            incrementRetry: true,
+          });
+
           console.error(
             `[PICKEDUP MIGRATION] ❌ Email failed for order ${order_id}:`,
             emailResult.error,
           );
         }
 
-        await db.query(
-          `INSERT INTO pickedup_orders (
-            order_id, user_id, business_id, business_name, status,
-            total_amount, discount_amount, payment_method, pickup_address,
-            pickedup_by, pickedup_at, original_created_at, original_updated_at
-          ) VALUES (?, ?, ?, ?, 'PICKEDUP', ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            order_id,
-            order.user_id,
-            order.business_id,
-            business.business_name || "Unknown Business",
-            order.total_amount,
-            order.discount_amount || 0,
-            order.payment_method,
-            pickupAddress,
-            order.pickedup_by || user.user_name || "CUSTOMER",
-            order.pickedup_at || new Date(),
-            order.created_at,
-            order.updated_at,
-          ],
-        );
-
-        for (const item of items) {
-          const subtotal =
-            (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
-
-          await db.query(
-            `INSERT INTO pickedup_order_items (
-              order_id, business_id, business_name, menu_id, item_name,
-              item_image, quantity, price, subtotal
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
+        /*
+          Insert archive rows and remove active order in one transaction.
+          To avoid duplicate pickedup_order_items if a partial retry happens,
+          delete existing pickedup_order_items first before createMany.
+        */
+        await prisma.$transaction(async (tx) => {
+          await tx.pickedup_order_items.deleteMany({
+            where: {
               order_id,
-              item.business_id || order.business_id,
-              business.business_name || "Unknown Business",
-              item.menu_id,
-              item.menu_name || `Item ${item.menu_id}`,
-              item.item_image || null,
-              item.quantity,
-              item.price,
-              subtotal,
-            ],
-          );
-        }
+            },
+          });
 
-        await db.query(`DELETE FROM order_items WHERE order_id = ?`, [
-          order_id,
-        ]);
-        await db.query(`DELETE FROM orders WHERE order_id = ?`, [order_id]);
+          await tx.pickedup_orders.upsert({
+            where: {
+              order_id,
+            },
+            create: {
+              order_id,
+              user_id: toInt(order.user_id),
+              business_id: toInt(order.business_id),
+              business_name: business.business_name || "Unknown Business",
+              status: "PICKEDUP",
+
+              total_amount: order.total_amount,
+              discount_amount: order.discount_amount || 0,
+              payment_method: order.payment_method,
+              pickup_address: pickupAddress,
+
+              pickedup_by:
+                order.pickedup_by || user.user_name || "CUSTOMER",
+              pickedup_at: order.pickedup_at || new Date(),
+
+              original_created_at: order.created_at || new Date(),
+              original_updated_at: order.updated_at || new Date(),
+
+              created_at: new Date(),
+              updated_at: new Date(),
+            },
+            update: {
+              user_id: toInt(order.user_id),
+              business_id: toInt(order.business_id),
+              business_name: business.business_name || "Unknown Business",
+              status: "PICKEDUP",
+
+              total_amount: order.total_amount,
+              discount_amount: order.discount_amount || 0,
+              payment_method: order.payment_method,
+              pickup_address: pickupAddress,
+
+              pickedup_by:
+                order.pickedup_by || user.user_name || "CUSTOMER",
+              pickedup_at: order.pickedup_at || new Date(),
+
+              original_created_at: order.created_at || new Date(),
+              original_updated_at: order.updated_at || new Date(),
+
+              updated_at: new Date(),
+            },
+          });
+
+          await tx.pickedup_order_items.createMany({
+            data: items.map((item) => {
+              const itemSubtotal =
+                toNumber(item.price, 0) * toInt(item.quantity, 0);
+
+              return {
+                order_id,
+                business_id: toInt(item.business_id || order.business_id),
+                business_name: business.business_name || "Unknown Business",
+                menu_id:
+                  item.menu_id != null ? toInt(item.menu_id, null) : null,
+                item_name: item.menu_name || `Item ${item.menu_id}`,
+                item_image: item.item_image || null,
+                quantity: toInt(item.quantity, 1),
+                price: item.price,
+                subtotal: itemSubtotal,
+                created_at: new Date(),
+              };
+            }),
+          });
+
+          await tx.order_items.deleteMany({
+            where: {
+              order_id,
+            },
+          });
+
+          await tx.orders.deleteMany({
+            where: {
+              order_id,
+            },
+          });
+        });
 
         console.log(
           `[PICKEDUP MIGRATION] ✅ Successfully migrated order ${order_id}`,
@@ -372,13 +744,17 @@ async function migratePICKEDUPOrdersOnce({
   }
 }
 
+/* ============================================================
+   Start / stop
+============================================================ */
+
 function startPickedupMigrationJob({
   intervalMs = Number(process.env.PICKEDUP_MIGRATION_INTERVAL_MS || 60000),
   batchSize = Number(process.env.PICKEDUP_MIGRATION_BATCH || 50),
 } = {}) {
   if (_timer) return;
 
-  console.log(`🚀 Starting Pickedup Migration Job...`);
+  console.log("🚀 Starting Pickedup Migration Job...");
   console.log(`   Interval: ${intervalMs / 1000}s`);
   console.log(`   Batch Size: ${batchSize}`);
 
@@ -389,7 +765,11 @@ function startPickedupMigrationJob({
     retryFailedPickupEmails({ batchSize: 10 }).catch(console.error);
   }, intervalMs);
 
-  console.log(`✅ Pickedup migration job started`);
+  if (typeof _timer.unref === "function") {
+    _timer.unref();
+  }
+
+  console.log("✅ Pickedup migration job started");
 
   const stop = () => {
     if (_timer) {

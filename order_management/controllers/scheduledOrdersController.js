@@ -1,9 +1,17 @@
 // controllers/scheduledOrdersController.js
-const db = require("../config/db");
+// ✅ Prisma-safe scheduled order controller
+// ✅ No raw db.query() in this controller
+// ✅ Redis scheduled order model functions are kept unchanged
+// ✅ Supports multipart payload + delivery photos
+// ✅ Supports ACCEPTED / REJECTED scheduled order status flow
+
+const { prisma } = require("../lib/prisma");
+
 const {
   MAX_PHOTOS: UPLOAD_MAX_PHOTOS,
   toWebPaths,
 } = require("../middleware/uploadDeliveryPhoto");
+
 const {
   addScheduledOrder,
   getScheduledOrdersByUser,
@@ -22,6 +30,10 @@ const {
 const ALLOWED_SERVICE_TYPES = new Set(["FOOD", "MART"]);
 const MAX_PHOTOS = Number(UPLOAD_MAX_PHOTOS || 6);
 const REJECTED_VISIBLE_MS = 30 * 60 * 1000;
+
+/* ============================================================
+   Generic helpers
+============================================================ */
 
 function safeJsonParse(v) {
   if (v == null) return v;
@@ -52,14 +64,39 @@ function asNumber(v) {
 function normalizeBool(v) {
   if (typeof v === "boolean") return v;
 
-  const s = String(v || "")
-    .trim()
-    .toLowerCase();
+  const s = String(v || "").trim().toLowerCase();
 
   if (s === "true" || s === "1" || s === "yes") return true;
   if (s === "false" || s === "0" || s === "no") return false;
 
   return v;
+}
+
+function toPositiveNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function toBigIntId(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
+}
+
+function serializeValue(value) {
+  if (typeof value === "bigint") return Number(value);
+  return value;
+}
+
+function serializeRow(row) {
+  if (!row) return row;
+
+  const out = {};
+
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = serializeValue(value);
+  }
+
+  return out;
 }
 
 function getFilesFromRequest(req) {
@@ -95,41 +132,243 @@ function getFilesFromRequest(req) {
   });
 }
 
+function normalizeStatus(v) {
+  return String(v || "").trim().toUpperCase();
+}
+
+/* ============================================================
+   Prisma lookup helpers
+============================================================ */
+
+async function fetchMenuImages(serviceType, menuIds = []) {
+  const ids = Array.from(
+    new Set(
+      (menuIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+
+  const imageMap = new Map();
+
+  if (!ids.length) return imageMap;
+
+  const type = String(serviceType || "").trim().toUpperCase();
+
+  const modelName = type === "FOOD" ? "food_menu" : "mart_menu";
+  const model = prisma[modelName];
+
+  if (!model || typeof model.findMany !== "function") {
+    console.error(`[scheduledOrders] Prisma model ${modelName} not found.`);
+    return imageMap;
+  }
+
+  try {
+    const rows = await model.findMany({
+      where: {
+        id: {
+          in: ids,
+        },
+      },
+      select: {
+        id: true,
+        item_image: true,
+      },
+    });
+
+    for (const raw of rows || []) {
+      const r = serializeRow(raw);
+      imageMap.set(Number(r.id), r.item_image || null);
+    }
+
+    return imageMap;
+  } catch (err) {
+    /*
+      Some introspected schemas use BigInt ids.
+      Retry with BigInt ids if normal Number ids fail.
+    */
+    try {
+      const rows = await model.findMany({
+        where: {
+          id: {
+            in: ids.map((id) => BigInt(id)),
+          },
+        },
+        select: {
+          id: true,
+          item_image: true,
+        },
+      });
+
+      for (const raw of rows || []) {
+        const r = serializeRow(raw);
+        imageMap.set(Number(r.id), r.item_image || null);
+      }
+    } catch (e) {
+      console.error(
+        `[scheduledOrders] Failed to fetch ${modelName} item images:`,
+        e?.message || e,
+      );
+    }
+
+    return imageMap;
+  }
+}
+
+async function fetchBusinessNameMap(businessIds = []) {
+  const ids = Array.from(
+    new Set(
+      (businessIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  try {
+    const rows = await prisma.merchant_business_details.findMany({
+      where: {
+        business_id: {
+          in: ids.map((id) => BigInt(id)),
+        },
+      },
+      select: {
+        business_id: true,
+        business_name: true,
+      },
+    });
+
+    for (const raw of rows || []) {
+      const r = serializeRow(raw);
+      map.set(Number(r.business_id), r.business_name || null);
+    }
+  } catch (err) {
+    console.error(
+      "[scheduledOrders] Failed to fetch business names:",
+      err?.message || err,
+    );
+  }
+
+  return map;
+}
+
+async function fetchBusinessDetailsMap(businessIds = []) {
+  const ids = Array.from(
+    new Set(
+      (businessIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  try {
+    const rows = await prisma.merchant_business_details.findMany({
+      where: {
+        business_id: {
+          in: ids.map((id) => BigInt(id)),
+        },
+      },
+      select: {
+        business_id: true,
+        business_name: true,
+        business_logo: true,
+        address: true,
+      },
+    });
+
+    for (const raw of rows || []) {
+      const r = serializeRow(raw);
+
+      map.set(Number(r.business_id), {
+        business_id: Number(r.business_id),
+        business_name: r.business_name || null,
+        business_logo: r.business_logo || null,
+        address: r.address || null,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[scheduledOrders] Failed to fetch business details:",
+      err?.message || err,
+    );
+  }
+
+  return map;
+}
+
+async function fetchUserNameMap(userIds = []) {
+  const ids = Array.from(
+    new Set(
+      (userIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  try {
+    const rows = await prisma.users.findMany({
+      where: {
+        user_id: {
+          in: ids,
+        },
+      },
+      select: {
+        user_id: true,
+        user_name: true,
+      },
+    });
+
+    for (const raw of rows || []) {
+      const r = serializeRow(raw);
+      map.set(Number(r.user_id), r.user_name || null);
+    }
+  } catch (err) {
+    console.error(
+      "[scheduledOrders] Failed to fetch user names:",
+      err?.message || err,
+    );
+  }
+
+  return map;
+}
+
+/* ============================================================
+   Enrichment helpers
+============================================================ */
+
 async function enrichItemsWithImages(orderPayload) {
   if (!Array.isArray(orderPayload.items) || !orderPayload.items.length) {
     return orderPayload;
   }
 
-  const serviceType = String(orderPayload.service_type || "")
-    .trim()
-    .toUpperCase();
+  const serviceType = String(orderPayload.service_type || "").trim().toUpperCase();
 
   const menuIds = orderPayload.items
     .map((item) => item.menu_id)
-    .filter((id) => id != null && !isNaN(Number(id)));
+    .filter((id) => id != null && !Number.isNaN(Number(id)));
 
   if (!menuIds.length) return orderPayload;
 
-  const tableName = serviceType === "FOOD" ? "food_menu" : "mart_menu";
-  const placeholders = menuIds.map(() => "?").join(",");
-
   try {
-    const [menuItems] = await db.query(
-      `SELECT id, item_image FROM ${tableName} WHERE id IN (${placeholders})`,
-      menuIds,
-    );
-
-    const imageMap = new Map();
-    menuItems.forEach((item) => {
-      imageMap.set(Number(item.id), item.item_image);
-    });
+    const imageMap = await fetchMenuImages(serviceType, menuIds);
 
     orderPayload.items = orderPayload.items.map((item) => ({
       ...item,
       item_image: imageMap.get(Number(item.menu_id)) || item.item_image || null,
     }));
   } catch (err) {
-    console.error("[scheduleOrder] Failed to fetch item images:", err);
+    console.error("[scheduleOrder] Failed to enrich item images:", err);
   }
 
   return orderPayload;
@@ -154,25 +393,15 @@ async function enrichItemsWithBusinessName(orderPayload) {
     ...new Set(
       orderPayload.items
         .filter((item) => !item.business_name && item.business_id)
-        .map((item) => item.business_id),
+        .map((item) => Number(item.business_id))
+        .filter((id) => Number.isFinite(id) && id > 0),
     ),
   ];
 
   if (!missingBusinessIds.length) return orderPayload;
 
   try {
-    const placeholders = missingBusinessIds.map(() => "?").join(",");
-    const [businesses] = await db.query(
-      `SELECT business_id, business_name
-         FROM merchant_business_details
-        WHERE business_id IN (${placeholders})`,
-      missingBusinessIds,
-    );
-
-    const businessNameMap = new Map();
-    businesses.forEach((b) => {
-      businessNameMap.set(Number(b.business_id), b.business_name);
-    });
+    const businessNameMap = await fetchBusinessNameMap(missingBusinessIds);
 
     orderPayload.items = orderPayload.items.map((item) => ({
       ...item,
@@ -188,16 +417,17 @@ async function enrichItemsWithBusinessName(orderPayload) {
   return orderPayload;
 }
 
+/* ============================================================
+   Controllers
+============================================================ */
+
 exports.scheduleOrder = async (req, res) => {
   try {
     const body = req.body || {};
 
     console.log("[scheduleOrder] content-type:", req.headers["content-type"]);
     console.log("[scheduleOrder] req.body keys:", Object.keys(body || {}));
-    console.log(
-      "[scheduleOrder] req.files keys:",
-      Object.keys(req.files || {}),
-    );
+    console.log("[scheduleOrder] req.files keys:", Object.keys(req.files || {}));
 
     let mergedBody = { ...body };
 
@@ -224,8 +454,7 @@ exports.scheduleOrder = async (req, res) => {
       }
     }
 
-    const user_id =
-      mergedBody.user_id ?? mergedBody.userId ?? mergedBody.userid;
+    const user_id = mergedBody.user_id ?? mergedBody.userId ?? mergedBody.userid;
 
     const scheduled_at =
       mergedBody.scheduled_at ?? mergedBody.scheduledAt ?? mergedBody.scheduled;
@@ -277,9 +506,7 @@ exports.scheduleOrder = async (req, res) => {
 
     orderPayload.items = safeJsonParse(orderPayload.items);
     orderPayload.totals = safeJsonParse(orderPayload.totals);
-    orderPayload.delivery_address = safeJsonParse(
-      orderPayload.delivery_address,
-    );
+    orderPayload.delivery_address = safeJsonParse(orderPayload.delivery_address);
     orderPayload.special_photos = safeJsonParse(orderPayload.special_photos);
 
     if (orderPayload.priority != null) {
@@ -305,9 +532,7 @@ exports.scheduleOrder = async (req, res) => {
       });
     }
 
-    const serviceType = String(orderPayload.service_type || "")
-      .trim()
-      .toUpperCase();
+    const serviceType = String(orderPayload.service_type || "").trim().toUpperCase();
 
     if (!serviceType || !ALLOWED_SERVICE_TYPES.has(serviceType)) {
       return res.status(400).json({
@@ -390,9 +615,11 @@ exports.scheduleOrder = async (req, res) => {
     });
   } catch (err) {
     console.error("scheduleOrder error:", err);
+
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+      error: err?.message || "Unknown error",
     });
   }
 };
@@ -423,19 +650,7 @@ exports.listScheduledOrders = async (req, res) => {
       ),
     ];
 
-    let businessData = new Map();
-
-    if (businessIds.length) {
-      const placeholders = businessIds.map(() => "?").join(",");
-      const [rows] = await db.query(
-        `SELECT business_id, business_logo, address
-           FROM merchant_business_details
-          WHERE business_id IN (${placeholders})`,
-        businessIds,
-      );
-
-      businessData = new Map(rows.map((r) => [Number(r.business_id), r]));
-    }
+    const businessData = await fetchBusinessDetailsMap(businessIds);
 
     const foodMenuIds = new Set();
     const martMenuIds = new Set();
@@ -457,36 +672,8 @@ exports.listScheduledOrders = async (req, res) => {
       }
     }
 
-    const foodImageById = new Map();
-    const martImageById = new Map();
-
-    if (foodMenuIds.size) {
-      const ids = [...foodMenuIds];
-      const placeholders = ids.map(() => "?").join(",");
-
-      const [rows] = await db.query(
-        `SELECT id, item_image FROM food_menu WHERE id IN (${placeholders})`,
-        ids,
-      );
-
-      rows.forEach((r) => {
-        foodImageById.set(Number(r.id), r.item_image || null);
-      });
-    }
-
-    if (martMenuIds.size) {
-      const ids = [...martMenuIds];
-      const placeholders = ids.map(() => "?").join(",");
-
-      const [rows] = await db.query(
-        `SELECT id, item_image FROM mart_menu WHERE id IN (${placeholders})`,
-        ids,
-      );
-
-      rows.forEach((r) => {
-        martImageById.set(Number(r.id), r.item_image || null);
-      });
-    }
+    const foodImageById = await fetchMenuImages("FOOD", [...foodMenuIds]);
+    const martImageById = await fetchMenuImages("MART", [...martMenuIds]);
 
     const enriched = list.map((job) => {
       const business = businessData.get(Number(job.business_id)) || {};
@@ -556,9 +743,11 @@ exports.listScheduledOrders = async (req, res) => {
     });
   } catch (err) {
     console.error("listScheduledOrders error:", err);
+
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+      error: err?.message || "Unknown error",
     });
   }
 };
@@ -589,20 +778,7 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
       ),
     ];
 
-    let userNameById = new Map();
-
-    if (userIds.length) {
-      const placeholders = userIds.map(() => "?").join(",");
-
-      const [rows] = await db.query(
-        `SELECT user_id, user_name
-           FROM users
-          WHERE user_id IN (${placeholders})`,
-        userIds,
-      );
-
-      userNameById = new Map(rows.map((r) => [Number(r.user_id), r.user_name]));
-    }
+    const userNameById = await fetchUserNameMap(userIds);
 
     const sorted = [...list].sort(
       (a, b) => (b.scheduled_epoch_ms ?? 0) - (a.scheduled_epoch_ms ?? 0),
@@ -651,9 +827,11 @@ exports.listScheduledOrdersByBusiness = async (req, res) => {
     });
   } catch (err) {
     console.error("listScheduledOrdersByBusiness error:", err);
+
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+      error: err?.message || "Unknown error",
     });
   }
 };
@@ -686,9 +864,11 @@ exports.cancelScheduledOrder = async (req, res) => {
     });
   } catch (err) {
     console.error("cancelScheduledOrder error:", err);
+
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+      error: err?.message || "Unknown error",
     });
   }
 };
@@ -696,7 +876,12 @@ exports.cancelScheduledOrder = async (req, res) => {
 exports.updateScheduledOrderStatus = async (req, res) => {
   try {
     const { jobId } = req.params;
-    const { status, reason, estimated_minutes } = req.body;
+    const body = req.body || {};
+
+    const status = normalizeStatus(body.status);
+    const reason = body.reason;
+    const estimated_minutes = body.estimated_minutes;
+
     if (!jobId || !["ACCEPTED", "REJECTED"].includes(status)) {
       return res.status(400).json({
         success: false,
@@ -790,7 +975,8 @@ exports.updateScheduledOrderStatus = async (req, res) => {
       await sendUserNotification({
         user_id: userId,
         title: "Order Accepted",
-        body: "Your scheduled order has been accepted and will be processed at the scheduled time.",
+        body:
+          "Your scheduled order has been accepted and will be processed at the scheduled time.",
       });
 
       return res.json({
@@ -840,11 +1026,18 @@ exports.updateScheduledOrderStatus = async (req, res) => {
         visible_until_minutes: 30,
       });
     }
+
+    return res.status(400).json({
+      success: false,
+      message: "Unsupported status.",
+    });
   } catch (err) {
     console.error("updateScheduledOrderStatus error:", err);
+
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
+      error: err?.message || "Unknown error",
     });
   }
 };

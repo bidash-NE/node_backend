@@ -1,7 +1,13 @@
 // services/scheduledOrderCleanup.js
+// ✅ Prisma version
+// ✅ No raw db.query()
+// ✅ Redis cleanup logic stays unchanged
+// ✅ Uses Prisma for:
+//    - merchant_business_details user_id lookup
+//    - notifications insert
 
 const redis = require("../config/redis");
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 const {
   ZSET_KEY, // legacy old mixed queue
@@ -17,41 +23,78 @@ const {
 const THIRTY_MIN_MS = 30 * 60 * 1000;
 const BATCH_SIZE = 100;
 
+/* ============================================================
+   Helpers
+============================================================ */
+
+function toPositiveNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function toPositiveBigInt(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
+}
+
+function safeString(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function normalizeStatus(v, fallback = "PENDING") {
+  return safeString(v, fallback).toUpperCase();
+}
+
+function safeJsonStringify(v) {
+  try {
+    return JSON.stringify(v || {});
+  } catch {
+    return "{}";
+  }
+}
+
 /**
  * Get merchant user_id from business_id.
  *
- * IMPORTANT:
- * This assumes merchant_business_details has user_id.
- * If your column is merchant_id, owner_id, created_by, etc.,
- * update the SELECT column below.
+ * Your Prisma schema confirms:
+ * merchant_business_details.business_id = BigInt
+ * merchant_business_details.user_id = BigInt
  */
 async function getMerchantUserIdByBusinessId(businessId) {
-  if (!businessId) return null;
+  const bid = toPositiveBigInt(businessId);
+
+  if (!bid) return null;
 
   try {
-    const [rows] = await db.query(
-      `
-        SELECT user_id
-          FROM merchant_business_details
-         WHERE business_id = ?
-         LIMIT 1
-      `,
-      [businessId],
-    );
+    const row = await prisma.merchant_business_details.findUnique({
+      where: {
+        business_id: bid,
+      },
+      select: {
+        user_id: true,
+      },
+    });
 
-    const merchantUserId = rows?.[0]?.user_id;
-    return merchantUserId ? Number(merchantUserId) : null;
+    const merchantUserId = row?.user_id != null ? Number(row.user_id) : null;
+
+    return Number.isFinite(merchantUserId) && merchantUserId > 0
+      ? merchantUserId
+      : null;
   } catch (err) {
     console.error(
       `[SCHED-CLEANUP] Failed to fetch merchant user_id for business_id ${businessId}:`,
       err.message,
     );
+
     return null;
   }
 }
 
 async function sendPushNotificationSafe({ user_id, title, body }) {
-  if (!user_id) return;
+  const uid = toPositiveNumber(user_id);
+
+  if (!uid) return;
 
   try {
     const {
@@ -59,40 +102,38 @@ async function sendPushNotificationSafe({ user_id, title, body }) {
     } = require("../services/expoNotificationService");
 
     await sendUserNotification({
-      user_id,
+      user_id: uid,
       title,
       body,
     });
   } catch (err) {
     console.error(
-      `[SCHED-CLEANUP] Push notification failed for user_id ${user_id}:`,
+      `[SCHED-CLEANUP] Push notification failed for user_id ${uid}:`,
       err.message,
     );
   }
 }
 
 async function insertDbNotificationSafe({ user_id, title, message, data }) {
-  if (!user_id) return;
+  const uid = toPositiveBigInt(user_id);
+
+  if (!uid) return;
 
   try {
-    await db.query(
-      `
-        INSERT INTO notifications
-          (user_id, type, title, message, data, status, created_at)
-        VALUES
-          (?, ?, ?, ?, ?, 'unread', NOW())
-      `,
-      [
-        user_id,
-        "order_status",
-        title,
-        message,
-        JSON.stringify(data || {}),
-      ],
-    );
+    await prisma.notifications.create({
+      data: {
+        user_id: uid,
+        type: "order_status",
+        title: safeString(title, "Order status"),
+        message: safeString(message, ""),
+        data: safeJsonStringify(data),
+        status: "unread",
+        created_at: new Date(),
+      },
+    });
   } catch (err) {
     console.error(
-      `[SCHED-CLEANUP] DB notification failed for user_id ${user_id}:`,
+      `[SCHED-CLEANUP] DB notification failed for user_id ${String(user_id)}:`,
       err.message,
     );
   }
@@ -108,11 +149,16 @@ async function notifyUserAndMerchant({
   merchantTitle,
   merchantMessage,
 }) {
-  const customerUserId = Number(data?.user_id || data?.order_payload?.user_id);
+  const customerUserId = toPositiveNumber(
+    data?.user_id || data?.order_payload?.user_id,
+  );
+
   const businessId =
     data?.business_id ||
     data?.order_payload?.business_id ||
+    data?.order_payload?.businessId ||
     data?.order_payload?.items?.[0]?.business_id ||
+    data?.order_payload?.items?.[0]?.businessId ||
     null;
 
   const merchantUserId = await getMerchantUserIdByBusinessId(businessId);
@@ -172,7 +218,7 @@ function getBusinessIdFromData(data) {
   );
 }
 
-async function deleteScheduledJob(deletePipeline, jobId) {
+function deleteScheduledJob(deletePipeline, jobId) {
   deletePipeline
     .del(buildJobKey(jobId))
     .zrem(PENDING_ZSET_KEY, jobId)
@@ -183,6 +229,10 @@ async function deleteScheduledJob(deletePipeline, jobId) {
     .del(buildAttemptsKey(jobId))
     .del(buildErrorKey(jobId));
 }
+
+/* ============================================================
+   Pending cleanup
+============================================================ */
 
 /**
  * Deletes pending scheduled orders after 30 minutes if merchant does nothing.
@@ -215,6 +265,7 @@ async function cleanupPendingScheduledOrders() {
     const results = await pipeline.exec();
 
     const deletePipeline = redis.pipeline();
+
     let deletedCount = 0;
     let movedAcceptedCount = 0;
     let movedRejectedCount = 0;
@@ -230,9 +281,10 @@ async function cleanupPendingScheduledOrders() {
 
       try {
         const data = JSON.parse(raw);
-        const status = data?.order_payload?.status || "PENDING";
+        const status = normalizeStatus(data?.order_payload?.status, "PENDING");
 
         const businessId = getBusinessIdFromData(data);
+
         if (businessId && !data.business_id) {
           data.business_id = Number(businessId);
         }
@@ -250,6 +302,7 @@ async function cleanupPendingScheduledOrders() {
               .zadd(ACCEPTED_ZSET_KEY, scheduledScore, jobId);
 
             movedAcceptedCount++;
+
             console.log(
               `↪️ Moved ${jobId} from PENDING queue to ACCEPTED queue`,
             );
@@ -263,6 +316,7 @@ async function cleanupPendingScheduledOrders() {
         // Safety: if rejected but still found in pending queue, move it.
         if (status === "REJECTED") {
           const rejectedAt = data?.order_payload?.rejected_at;
+
           const rejectedTime = rejectedAt
             ? new Date(rejectedAt).getTime()
             : now;
@@ -279,6 +333,7 @@ async function cleanupPendingScheduledOrders() {
             .zadd(REJECTED_ZSET_KEY, deleteAtMs, jobId);
 
           movedRejectedCount++;
+
           console.log(
             `↪️ Moved ${jobId} from PENDING queue to REJECTED queue`,
           );
@@ -304,9 +359,10 @@ async function cleanupPendingScheduledOrders() {
             "A scheduled order expired because it was not accepted within 30 minutes.",
         });
 
-        await deleteScheduledJob(deletePipeline, jobId);
+        deleteScheduledJob(deletePipeline, jobId);
 
         deletedCount++;
+
         console.log(`🗑 Deleted expired pending scheduled order ${jobId}`);
       } catch (err) {
         console.error(
@@ -325,6 +381,10 @@ async function cleanupPendingScheduledOrders() {
     console.error("❌ Pending cleanup service error:", err);
   }
 }
+
+/* ============================================================
+   Rejected cleanup
+============================================================ */
 
 /**
  * Deletes rejected scheduled orders after 30 minutes.
@@ -357,6 +417,7 @@ async function cleanupRejectedScheduledOrders() {
     const results = await pipeline.exec();
 
     const deletePipeline = redis.pipeline();
+
     let deletedCount = 0;
 
     for (let i = 0; i < jobIds.length; i++) {
@@ -370,8 +431,10 @@ async function cleanupRejectedScheduledOrders() {
 
       try {
         const data = JSON.parse(raw);
-        const status = data?.order_payload?.status;
+
+        const status = normalizeStatus(data?.order_payload?.status, "");
         const rejectedAt = data?.order_payload?.rejected_at;
+
         const rejectionReason =
           data?.order_payload?.rejection_reason || "Rejected by merchant";
 
@@ -400,9 +463,10 @@ async function cleanupRejectedScheduledOrders() {
             "A rejected scheduled order has been removed from your scheduled order list.",
         });
 
-        await deleteScheduledJob(deletePipeline, jobId);
+        deleteScheduledJob(deletePipeline, jobId);
 
         deletedCount++;
+
         console.log(
           `🗑 Deleted rejected scheduled order ${jobId} age ${ageMinutes.toFixed(
             1,
@@ -426,6 +490,10 @@ async function cleanupRejectedScheduledOrders() {
   }
 }
 
+/* ============================================================
+   Legacy cleanup
+============================================================ */
+
 /**
  * Optional legacy cleanup for old data still stuck in old scheduled_orders ZSET.
  * This prevents old mixed queue records from staying forever.
@@ -435,6 +503,7 @@ async function cleanupLegacyRejectedAndPendingScheduledOrders() {
     console.log("🧹 Running legacy scheduled order cleanup...");
 
     const jobIds = await redis.zrange(ZSET_KEY, 0, -1);
+
     console.log(`📊 Found ${jobIds.length} legacy orders in ZSET`);
 
     if (!jobIds.length) return;
@@ -462,7 +531,7 @@ async function cleanupLegacyRejectedAndPendingScheduledOrders() {
 
       try {
         const data = JSON.parse(raw);
-        const status = data?.order_payload?.status || "PENDING";
+        const status = normalizeStatus(data?.order_payload?.status, "PENDING");
 
         if (status === "ACCEPTED") {
           const scheduledScore = Number(data.scheduled_epoch_ms);
@@ -500,7 +569,8 @@ async function cleanupLegacyRejectedAndPendingScheduledOrders() {
                 "A rejected scheduled order has been removed from your scheduled order list.",
             });
 
-            await deleteScheduledJob(deletePipeline, jobId);
+            deleteScheduledJob(deletePipeline, jobId);
+
             deletedRejectedCount++;
           } else {
             deletePipeline
@@ -529,7 +599,8 @@ async function cleanupLegacyRejectedAndPendingScheduledOrders() {
                 "A scheduled order expired because it was not accepted within 30 minutes.",
             });
 
-            await deleteScheduledJob(deletePipeline, jobId);
+            deleteScheduledJob(deletePipeline, jobId);
+
             deletedPendingCount++;
           } else {
             deletePipeline

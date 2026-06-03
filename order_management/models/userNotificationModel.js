@@ -1,113 +1,173 @@
-const db = require("../config/db");
+// models/userNotificationModel.js
+// ✅ Full Prisma version
+// ✅ No raw db.query()
+// ✅ Matches your actual Prisma schema:
+//    - model: notifications
+//    - id: BigInt
+//    - user_id: BigInt
+//    - status enum: unread | read
 
-function assertPositiveInt(n, name) {
+const { prisma } = require("../lib/prisma");
+
+/* ---------------- helpers ---------------- */
+
+function toBigIntPositive(v, name) {
+  const n = Number(v);
+
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error(`${name} must be a positive integer`);
   }
+
+  return BigInt(n);
 }
+
+function normalizeLimit(v) {
+  return Math.min(Math.max(parseInt(v, 10) || 50, 1), 200);
+}
+
+function normalizeOffset(v) {
+  return Math.max(parseInt(v, 10) || 0, 0);
+}
+
+function serializeValue(value) {
+  if (typeof value === "bigint") return Number(value);
+  return value;
+}
+
+function serializeRow(row) {
+  if (!row) return row;
+
+  const out = {};
+
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = serializeValue(value);
+  }
+
+  return out;
+}
+
+/* ---------------- model ---------------- */
 
 const UserNotificationModel = {
   /**
    * List notifications for a user.
+   *
    * @param {object} opts
-   * @param {number} opts.user_id
-   * @param {number} [opts.limit=50]
-   * @param {number} [opts.offset=0]
+   * @param {number|string} opts.user_id
+   * @param {number|string} [opts.limit=50]
+   * @param {number|string} [opts.offset=0]
    * @param {boolean} [opts.unreadOnly=false]
    */
   async listByUserId({ user_id, limit = 50, offset = 0, unreadOnly = false }) {
-    assertPositiveInt(user_id, "user_id");
-    limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    offset = Math.max(parseInt(offset, 10) || 0, 0);
+    const uid = toBigIntPositive(user_id, "user_id");
 
-    const where = ["user_id = ?"];
-    const params = [user_id];
+    const take = normalizeLimit(limit);
+    const skip = normalizeOffset(offset);
 
-    if (unreadOnly) {
-      where.push("status = 'unread'");
-    }
+    const rows = await prisma.notifications.findMany({
+      where: {
+        user_id: uid,
+        ...(unreadOnly ? { status: "unread" } : {}),
+      },
+      select: {
+        id: true,
+        user_id: true,
+        type: true,
+        title: true,
+        message: true,
+        data: true,
+        status: true,
+        created_at: true,
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+      take,
+      skip,
+    });
 
-    const sql = `
-      SELECT
-        id,
-        user_id,
-        type,
-        title,
-        message,
-        data,
-        status,
-        created_at
-      FROM notifications
-      WHERE ${where.join(" AND ")}
-      ORDER BY created_at DESC
-      LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
-
-    const [rows] = await db.query(sql, params);
-    return rows || [];
+    return rows.map(serializeRow);
   },
 
   /**
    * Get one notification by ID.
    */
   async getById(notification_id) {
-    const [rows] = await db.query(
-      `
-      SELECT
+    const id = toBigIntPositive(notification_id, "notification_id");
+
+    const row = await prisma.notifications.findUnique({
+      where: {
         id,
-        user_id,
-        type,
-        title,
-        message,
-        data,
-        status,
-        created_at
-      FROM notifications
-      WHERE id = ? LIMIT 1`,
-      [notification_id]
-    );
-    return rows?.[0] || null;
+      },
+      select: {
+        id: true,
+        user_id: true,
+        type: true,
+        title: true,
+        message: true,
+        data: true,
+        status: true,
+        created_at: true,
+      },
+    });
+
+    return serializeRow(row) || null;
   },
 
   /**
    * Mark a single notification as read.
-   * Sets status='read' and updates the `created_at` field to the current timestamp.
+   *
+   * Old SQL also updated created_at = NOW().
+   * This keeps the same behavior.
    */
   async markAsRead(notification_id) {
-    const [r] = await db.query(
-      `UPDATE notifications
-         SET status = 'read',
-             created_at = NOW()
-       WHERE id = ?`,
-      [notification_id]
-    );
-    return r.affectedRows;
+    const id = toBigIntPositive(notification_id, "notification_id");
+
+    const result = await prisma.notifications.updateMany({
+      where: {
+        id,
+      },
+      data: {
+        status: "read",
+        created_at: new Date(),
+      },
+    });
+
+    return result.count || 0;
   },
 
   /**
-   * Mark all notifications for a user as read.
+   * Mark all unread notifications for a user as read.
    */
   async markAllAsRead(user_id) {
-    assertPositiveInt(user_id, "user_id");
-    const [r] = await db.query(
-      `UPDATE notifications
-         SET status = 'read',
-             created_at = COALESCE(created_at, NOW())
-       WHERE user_id = ?
-         AND status = 'unread'`,
-      [user_id]
-    );
-    return r.affectedRows;
+    const uid = toBigIntPositive(user_id, "user_id");
+
+    const result = await prisma.notifications.updateMany({
+      where: {
+        user_id: uid,
+        status: "unread",
+      },
+      data: {
+        status: "read",
+      },
+    });
+
+    return result.count || 0;
   },
 
   /**
    * Delete one notification by ID.
    */
   async deleteById(notification_id) {
-    const [r] = await db.query(`DELETE FROM notifications WHERE id = ?`, [
-      notification_id,
-    ]);
-    return r.affectedRows;
+    const id = toBigIntPositive(notification_id, "notification_id");
+
+    const result = await prisma.notifications.deleteMany({
+      where: {
+        id,
+      },
+    });
+
+    return result.count || 0;
   },
 };
 

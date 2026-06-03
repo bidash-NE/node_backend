@@ -1,8 +1,12 @@
 // services/scheduledOrderProcessor.js
+// ✅ Prisma version
+// ✅ No raw db.query()
+// ✅ Redis queue logic remains unchanged
+// ✅ Axios call to normal order API remains unchanged
 
 const axios = require("axios");
 const redis = require("../config/redis");
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 const {
   ACCEPTED_ZSET_KEY,
@@ -33,6 +37,8 @@ const BHUTAN_OFFSET_HOURS = 6;
 
 const buildFailedKey = (jobId) => `scheduled_order_failed:${jobId}`;
 
+/* ===================== Generic helpers ===================== */
+
 function sum(nums) {
   return nums.reduce((s, n) => s + (Number(n) || 0), 0);
 }
@@ -48,6 +54,85 @@ function safeJsonParse(s) {
   } catch {
     return null;
   }
+}
+
+function toPositiveNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function toPositiveBigInt(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? BigInt(n) : null;
+}
+
+function safeString(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function serializeValue(value) {
+  if (typeof value === "bigint") return Number(value);
+  return value;
+}
+
+function serializeRow(row) {
+  if (!row) return row;
+
+  const out = {};
+
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = serializeValue(value);
+  }
+
+  return out;
+}
+
+function safeJsonStringify(v) {
+  try {
+    return JSON.stringify(v || {});
+  } catch {
+    return "{}";
+  }
+}
+
+/* ===================== Prisma lookup helpers ===================== */
+
+async function getBusinessNameMapByIds(businessIds = []) {
+  const ids = Array.from(
+    new Set(
+      (businessIds || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ),
+  );
+
+  const map = new Map();
+
+  if (!ids.length) return map;
+
+  try {
+    const rows = await prisma.merchant_business_details.findMany({
+      where: {
+        business_id: {
+          in: ids.map((id) => BigInt(id)),
+        },
+      },
+      select: {
+        business_id: true,
+        business_name: true,
+      },
+    });
+
+    for (const raw of rows || []) {
+      const row = serializeRow(raw);
+      map.set(Number(row.business_id), row.business_name || null);
+    }
+  } catch (err) {
+    console.error("[SCHED] Failed to fetch business names:", err.message);
+  }
+
+  return map;
 }
 
 /* ===================== ETA helpers ===================== */
@@ -125,7 +210,9 @@ async function updateEstimatedArrivalTimeForScheduledOrder({
   scheduledAtLocal,
   estimatedMinutes,
 }) {
-  if (!orderId) return null;
+  const oid = String(orderId || "").trim().toUpperCase();
+
+  if (!oid) return null;
 
   const etaRange = formatScheduledEtaRange({
     scheduledEpochMs,
@@ -136,14 +223,15 @@ async function updateEstimatedArrivalTimeForScheduledOrder({
 
   if (!etaRange) return null;
 
-  await db.query(
-    `
-      UPDATE orders
-         SET estimated_arrivial_time = ?
-       WHERE order_id = ?
-    `,
-    [etaRange, orderId],
-  );
+  await prisma.orders.updateMany({
+    where: {
+      order_id: oid,
+    },
+    data: {
+      estimated_arrivial_time: etaRange,
+      updated_at: new Date(),
+    },
+  });
 
   return etaRange;
 }
@@ -206,7 +294,7 @@ async function normalizeCreateOrderPayload(raw = {}) {
       tax_amount: Number(item.tax_amount || 0),
     }));
 
-    // Fetch missing business names from DB
+    // Fetch missing business names from DB using Prisma.
     const missingBusinessIds = [
       ...new Set(
         p.items
@@ -217,34 +305,15 @@ async function normalizeCreateOrderPayload(raw = {}) {
     ];
 
     if (missingBusinessIds.length) {
-      try {
-        const placeholders = missingBusinessIds.map(() => "?").join(",");
+      const businessNameMap = await getBusinessNameMapByIds(missingBusinessIds);
 
-        const [businesses] = await db.query(
-          `
-            SELECT business_id, business_name
-              FROM merchant_business_details
-             WHERE business_id IN (${placeholders})
-          `,
-          missingBusinessIds,
-        );
-
-        const businessNameMap = new Map();
-
-        businesses.forEach((b) => {
-          businessNameMap.set(Number(b.business_id), b.business_name);
-        });
-
-        p.items = p.items.map((item) => ({
-          ...item,
-          business_name:
-            item.business_name ||
-            businessNameMap.get(Number(item.business_id)) ||
-            "Unknown Business",
-        }));
-      } catch (err) {
-        console.error("[SCHED] Failed to fetch business names:", err.message);
-      }
+      p.items = p.items.map((item) => ({
+        ...item,
+        business_name:
+          item.business_name ||
+          businessNameMap.get(Number(item.business_id)) ||
+          "Unknown Business",
+      }));
     }
   }
 
@@ -408,22 +477,7 @@ async function createOrderFromScheduledPayload(orderPayload) {
     ];
 
     if (businessIds.length) {
-      const placeholders = businessIds.map(() => "?").join(",");
-
-      const [businesses] = await db.query(
-        `
-          SELECT business_id, business_name
-            FROM merchant_business_details
-           WHERE business_id IN (${placeholders})
-        `,
-        businessIds,
-      );
-
-      const businessMap = new Map();
-
-      businesses.forEach((b) => {
-        businessMap.set(Number(b.business_id), b.business_name);
-      });
+      const businessMap = await getBusinessNameMapByIds(businessIds);
 
       payloadToSend.items = payloadToSend.items.map((item) => ({
         ...item,
@@ -491,32 +545,39 @@ async function createOrderFromScheduledPayload(orderPayload) {
 /* ===================== Notifications ===================== */
 
 async function getMerchantUserIdByBusinessId(businessId) {
-  if (!businessId) return null;
+  const bid = toPositiveBigInt(businessId);
+
+  if (!bid) return null;
 
   try {
-    const [rows] = await db.query(
-      `
-        SELECT user_id
-          FROM merchant_business_details
-         WHERE business_id = ?
-         LIMIT 1
-      `,
-      [businessId],
-    );
+    const row = await prisma.merchant_business_details.findUnique({
+      where: {
+        business_id: bid,
+      },
+      select: {
+        user_id: true,
+      },
+    });
 
-    const merchantUserId = rows?.[0]?.user_id;
-    return merchantUserId ? Number(merchantUserId) : null;
+    const merchantUserId = row?.user_id != null ? Number(row.user_id) : null;
+
+    return Number.isFinite(merchantUserId) && merchantUserId > 0
+      ? merchantUserId
+      : null;
   } catch (err) {
     console.error(
       `[SCHED] Failed to fetch merchant user_id for business_id ${businessId}:`,
       err.message,
     );
+
     return null;
   }
 }
 
 async function sendPushNotificationSafe({ user_id, title, body }) {
-  if (!user_id) return;
+  const uid = toPositiveNumber(user_id);
+
+  if (!uid) return;
 
   try {
     const {
@@ -524,40 +585,38 @@ async function sendPushNotificationSafe({ user_id, title, body }) {
     } = require("../services/expoNotificationService");
 
     await sendUserNotification({
-      user_id,
+      user_id: uid,
       title,
       body,
     });
   } catch (err) {
     console.error(
-      `[SCHED] Push notification failed for user_id ${user_id}:`,
+      `[SCHED] Push notification failed for user_id ${uid}:`,
       err.message,
     );
   }
 }
 
 async function insertDbNotificationSafe({ user_id, title, message, data }) {
-  if (!user_id) return;
+  const uid = toPositiveBigInt(user_id);
+
+  if (!uid) return;
 
   try {
-    await db.query(
-      `
-        INSERT INTO notifications
-          (user_id, type, title, message, data, status, created_at)
-        VALUES
-          (?, ?, ?, ?, ?, 'unread', NOW())
-      `,
-      [
-        user_id,
-        "order_status",
-        title,
-        message,
-        JSON.stringify(data || {}),
-      ],
-    );
+    await prisma.notifications.create({
+      data: {
+        user_id: uid,
+        type: "order_status",
+        title: safeString(title, "Order status"),
+        message: safeString(message, ""),
+        data: safeJsonStringify(data),
+        status: "unread",
+        created_at: new Date(),
+      },
+    });
   } catch (err) {
     console.error(
-      `[SCHED] DB notification failed for user_id ${user_id}:`,
+      `[SCHED] DB notification failed for user_id ${String(user_id)}:`,
       err.message,
     );
   }
@@ -569,12 +628,16 @@ async function notifyScheduledOrderProcessed({
   jobId,
   estimatedArrivalTime,
 }) {
-  const customerUserId = Number(data?.user_id || data?.order_payload?.user_id);
+  const customerUserId = toPositiveNumber(
+    data?.user_id || data?.order_payload?.user_id,
+  );
 
   const businessId =
     data?.business_id ||
     data?.order_payload?.business_id ||
+    data?.order_payload?.businessId ||
     data?.order_payload?.items?.[0]?.business_id ||
+    data?.order_payload?.items?.[0]?.businessId ||
     null;
 
   const merchantUserId = await getMerchantUserIdByBusinessId(businessId);
@@ -764,6 +827,7 @@ async function failAndMaybeStopRetry(jobId, err) {
       .exec();
 
     console.log(`[SCHED] Permanent failure for ${jobId} due to ${status}`);
+
     return;
   }
 
@@ -782,6 +846,7 @@ async function failAndMaybeStopRetry(jobId, err) {
     console.log(
       `[SCHED] Permanent failure for ${jobId} after ${MAX_ATTEMPTS} attempts`,
     );
+
     return;
   }
 
@@ -848,6 +913,7 @@ async function processJob(jobId) {
         .exec();
 
       console.log(`[SCHED] Job ${jobId} not found, removing from queues`);
+
       return;
     }
 
@@ -864,6 +930,7 @@ async function processJob(jobId) {
       );
 
       await redis.del(buildLockKey(jobId));
+
       return;
     }
 
@@ -875,6 +942,7 @@ async function processJob(jobId) {
       );
 
       await removeFromAcceptedAndUnlock(jobId);
+
       return;
     }
 
@@ -944,6 +1012,7 @@ async function processJob(jobId) {
     );
   } catch (err) {
     console.error(`[SCHED] ❌ Failed to process ${jobId}:`, err.message);
+
     await failAndMaybeStopRetry(jobId, err);
   }
 }
@@ -980,16 +1049,30 @@ async function processSingleJob(jobId) {
   }
 
   await processJob(jobId);
+
   return true;
 }
 
 function startScheduledOrderProcessor() {
   console.log("[SCHED] Starting accepted scheduled order processor...");
-  setInterval(tick, POLL_INTERVAL_MS);
+
+  const timer = setInterval(tick, POLL_INTERVAL_MS);
+
+  if (typeof timer.unref === "function") {
+    timer.unref();
+  }
+
   console.log(`[SCHED] Accepted processor running every ${POLL_INTERVAL_MS}ms`);
+
+  return {
+    stop: () => clearInterval(timer),
+  };
 }
 
 module.exports = {
   startScheduledOrderProcessor,
   processSingleJob,
+
+  // exported for testing/debugging
+  formatScheduledEtaRange,
 };
