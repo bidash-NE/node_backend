@@ -1,10 +1,7 @@
 // models/orders/orderArchivePipeline.js
 // ✅ Prisma-transition version
-// ✅ Archive/cancel/delete/trim logic converted to Prisma
-// ⚠️ Keeps db only for still-unconverted engines:
-//    - walletCaptureEngine
-//    - pointsEngine
-//    - revenueSnapshot
+// ✅ Fixes payment_method enum mismatch for cancelled_orders / delivered_orders
+// ✅ Keeps db/conn only for wallet capture, points, and revenue engines that still need MySQL transaction connection
 
 const db = require("../../config/db");
 const { prisma } = require("../../lib/prisma");
@@ -31,10 +28,6 @@ const {
 } = require("./walletCaptureEngine");
 
 /* ================= PRISMA HELPERS ================= */
-
-function getTx(tx = null) {
-  return tx || prisma;
-}
 
 function prismaModelExists(modelName) {
   try {
@@ -107,6 +100,21 @@ function firstPhotoFromList(v) {
   }
 }
 
+/**
+ * Important:
+ * orders.payment_method enum uses values like: Wallet, COD, Card
+ * cancelled_orders / delivered_orders payment_method enums expect uppercase: WALLET, COD, CARD
+ */
+function normalizeArchivePaymentMethod(v) {
+  const s = String(v || "").trim().toUpperCase();
+
+  if (s === "WALLET") return "WALLET";
+  if (s === "COD") return "COD";
+  if (s === "CARD") return "CARD";
+
+  return "WALLET";
+}
+
 /* ================= ARCHIVE HELPERS ================= */
 
 async function archiveCancelledOrderInternal(
@@ -159,15 +167,19 @@ async function archiveCancelledOrderInternal(
       order_id: order.order_id,
       user_id: order.user_id,
       service_type: resolvedServiceType || null,
-      payment_method: order.payment_method,
+
+      payment_method: normalizeArchivePaymentMethod(order.payment_method),
+
       total_amount: order.total_amount,
       discount_amount: order.discount_amount,
       delivery_fee: order.delivery_fee,
       merchant_delivery_fee: order.merchant_delivery_fee,
       platform_fee: order.platform_fee,
+
       delivery_address: order.delivery_address,
       note_for_restaurant: order.note_for_restaurant,
       if_unavailable: order.if_unavailable,
+
       status: "CANCELLED",
 
       status_reason: finalReason,
@@ -324,7 +336,7 @@ async function archiveDeliveredOrderInternal(
           : null,
       total_amount,
 
-      payment_method: String(order.payment_method || "").trim().toUpperCase(),
+      payment_method: normalizeArchivePaymentMethod(order.payment_method),
       delivery_address:
         order.delivery_address != null ? String(order.delivery_address) : "",
 
@@ -596,14 +608,6 @@ async function cancelIfStillPending(order_id, reason) {
 
 /* ================= DELIVERED: COMPLETE + CAPTURE + ARCHIVE + DELETE ================= */
 
-/**
- * This remains connection-based until these files are converted:
- * - walletCaptureEngine.js
- * - pointsEngine.js
- * - revenueSnapshot.js
- *
- * After those three are converted, this function can become pure Prisma transaction.
- */
 async function completeAndArchiveDeliveredOrder(
   order_id,
   { delivered_by = "SYSTEM", reason = "", capture_at = "DELIVERED" } = {},
@@ -711,11 +715,7 @@ async function completeAndArchiveDeliveredOrder(
         if (payMethod === "WALLET") {
           capture = await captureOrderFundsWithConn(conn, oid, prefetchedIds);
         } else if (payMethod === "COD") {
-          capture = await captureOrderCODFeeWithConn(
-            conn,
-            oid,
-            prefetchedIds,
-          );
+          capture = await captureOrderCODFeeWithConn(conn, oid, prefetchedIds);
         }
       } catch (e) {
         await conn.rollback();
@@ -823,7 +823,7 @@ async function completeAndArchiveDeliveredOrder(
       let ownerType = null;
 
       try {
-        ownerType = await resolveOrderServiceType(oid, conn);
+        ownerType = await resolveOrderServiceType(oid);
       } catch {}
 
       ownerType = String(ownerType || "FOOD").toUpperCase();
@@ -916,7 +916,7 @@ async function completeAndArchiveDeliveredOrder(
           source: "delivered",
           status: "DELIVERED",
           placed_at: deliveredAt,
-          payment_method: payMethod,
+          payment_method: normalizeArchivePaymentMethod(payMethod),
           total_amount: totalAmount,
           platform_fee: platformFee,
           revenue_earned: platformFee,
@@ -962,7 +962,7 @@ async function completeAndArchiveDeliveredOrder(
         ...(capture || {}),
         order_id: oid,
         user_id,
-        payment_method: payMethod,
+        payment_method: normalizeArchivePaymentMethod(payMethod),
 
         business_id:
           capture?.business_id != null ? capture.business_id : primaryBizId,
@@ -989,16 +989,9 @@ async function completeAndArchiveDeliveredOrder(
         ...(capture || {}),
         order_id: oid,
         user_id,
-        payment_method: payMethod,
+        payment_method: normalizeArchivePaymentMethod(payMethod),
       };
     }
-
-    /*
-      Because the capture/points/revenue functions above still need the same
-      MySQL transaction connection, the archive/delete stage below remains
-      on the same connection for now. After those engines are converted, this
-      block should be replaced with the Prisma archiveDeliveredOrderInternal().
-    */
 
     await archiveDeliveredOrderInternalWithConn(conn, oid, {
       delivered_by,
@@ -1033,8 +1026,6 @@ async function completeAndArchiveDeliveredOrder(
 
 /* ======================================================================
    TEMPORARY CONNECTION-BASED DELIVERED ARCHIVE HELPERS
-   Needed only until walletCaptureEngine / pointsEngine / revenueSnapshot
-   are converted to Prisma.
 ====================================================================== */
 
 async function archiveDeliveredOrderInternalWithConn(
@@ -1063,7 +1054,7 @@ async function archiveDeliveredOrderInternalWithConn(
   let resolvedServiceType = null;
 
   try {
-    resolvedServiceType = await resolveOrderServiceType(oid, conn);
+    resolvedServiceType = await resolveOrderServiceType(oid);
   } catch {
     resolvedServiceType = order.service_type
       ? String(order.service_type).trim().toUpperCase()
@@ -1120,7 +1111,7 @@ async function archiveDeliveredOrderInternalWithConn(
         : null,
     total_amount,
 
-    payment_method: String(order.payment_method || "").trim().toUpperCase(),
+    payment_method: normalizeArchivePaymentMethod(order.payment_method),
     delivery_address:
       order.delivery_address != null ? String(order.delivery_address) : "",
 
