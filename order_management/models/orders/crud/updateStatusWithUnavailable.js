@@ -1,15 +1,7 @@
 // models/orders/crud/updateStatusWithUnavailable.js
-// ✅ Full Prisma version
-// ✅ No raw db.query()
-// ✅ Preserves same logic:
-//    - only supports CONFIRMED
-//    - applies unavailable removals/replacements
-//    - recalculates items_total from order_items
-//    - updates order status/totals/ETA in one transaction
+const db = require("../../../config/db");
 
-const { prisma } = require("../helpers");
-
-// ---- ETA formatting, same output pattern as your controller function ----
+// ---- ETA formatting (same output pattern as your controller function) ----
 function formatEtaRangeBhutan(estimated_minutes) {
   const mins = Number(estimated_minutes);
   if (!Number.isFinite(mins) || mins <= 0) return null;
@@ -25,12 +17,7 @@ function formatEtaRangeBhutan(estimated_minutes) {
     const minute = d.getUTCMinutes();
     const meridiem = hour24 >= 12 ? "PM" : "AM";
     const hour12 = hour24 % 12 || 12;
-
-    return {
-      hour12,
-      minute,
-      meridiem,
-    };
+    return { hour12, minute, meridiem };
   };
 
   const s = toBhutanParts(startDate);
@@ -50,26 +37,6 @@ const n2 = (x) => {
   return Number.isFinite(v) ? Number(v.toFixed(2)) : null;
 };
 
-function normalizeOrderId(order_id) {
-  return String(order_id || "").trim().toUpperCase();
-}
-
-function toIntOrNull(v) {
-  const n = Number(v);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function toNumberOrDefault(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function toStrOrNull(v) {
-  if (v === undefined || v === null) return null;
-  const s = String(v).trim();
-  return s.length ? s : null;
-}
-
 function normChanges(changes) {
   const uc = changes && typeof changes === "object" ? changes : {};
 
@@ -78,40 +45,44 @@ function normChanges(changes) {
 
   const removed_norm = removed
     .map((x) => ({
-      business_id: toIntOrNull(x?.business_id),
-      menu_id: toIntOrNull(x?.menu_id),
+      business_id: Number(x?.business_id),
+      menu_id: Number(x?.menu_id),
       item_name: x?.item_name ? String(x.item_name) : null,
     }))
-    .filter((x) => x.business_id && x.menu_id);
+    .filter(
+      (x) =>
+        Number.isFinite(x.business_id) &&
+        x.business_id > 0 &&
+        Number.isFinite(x.menu_id) &&
+        x.menu_id > 0,
+    );
 
   const replaced_norm = replaced
     .map((r) => {
-      const oldB = toIntOrNull(r?.old?.business_id);
-      const oldM = toIntOrNull(r?.old?.menu_id);
-
-      if (!oldB || !oldM) return null;
+      const oldB = Number(r?.old?.business_id);
+      const oldM = Number(r?.old?.menu_id);
+      if (
+        !Number.isFinite(oldB) ||
+        oldB <= 0 ||
+        !Number.isFinite(oldM) ||
+        oldM <= 0
+      )
+        return null;
 
       const n = r?.new || {};
+      const newB = Number(n?.business_id);
+      const newM = Number(n?.menu_id);
+      if (
+        !Number.isFinite(newB) ||
+        newB <= 0 ||
+        !Number.isFinite(newM) ||
+        newM <= 0
+      )
+        return null;
 
-      const newB = toIntOrNull(n?.business_id);
-      const newM = toIntOrNull(n?.menu_id);
-
-      if (!newB || !newM) return null;
-
-      const quantityRaw = Number(n?.quantity);
-      const priceRaw = Number(n?.price);
-      const subtotalRaw = Number(n?.subtotal);
-
-      const quantity =
-        Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
-
-      const price =
-        Number.isFinite(priceRaw) && priceRaw >= 0 ? priceRaw : 0;
-
-      const subtotal =
-        Number.isFinite(subtotalRaw) && subtotalRaw >= 0
-          ? subtotalRaw
-          : quantity * price;
+      const quantity = Number(n?.quantity);
+      const price = Number(n?.price);
+      const subtotal = Number(n?.subtotal);
 
       return {
         old: {
@@ -121,53 +92,27 @@ function normChanges(changes) {
         },
         new: {
           business_id: newB,
-          business_name: toStrOrNull(n?.business_name),
+          business_name: n?.business_name ? String(n.business_name) : null,
           menu_id: newM,
-          item_name: toStrOrNull(n?.item_name),
-          item_image: toStrOrNull(n?.item_image),
-          quantity,
-          price,
-          subtotal,
+          item_name: n?.item_name ? String(n.item_name) : null,
+          item_image: n?.item_image ? String(n.item_image) : null,
+          quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+          price: Number.isFinite(price) && price >= 0 ? price : 0,
+          subtotal:
+            Number.isFinite(subtotal) && subtotal >= 0
+              ? subtotal
+              : (Number.isFinite(quantity) && quantity > 0 ? quantity : 1) *
+                (Number.isFinite(price) && price >= 0 ? price : 0),
         },
       };
     })
     .filter(Boolean);
 
-  return {
-    removed_norm,
-    replaced_norm,
-  };
+  return { removed_norm, replaced_norm };
 }
 
 /**
- * Delete exactly one matching order_item.
- *
- * Old SQL for replace used:
- * UPDATE ... WHERE order_id=? AND business_id=? AND menu_id=? LIMIT 1
- *
- * Prisma does not support LIMIT 1 on updateMany/deleteMany.
- * So we first find one row by item_id, then update/delete by item_id.
- */
-async function findOneOrderItemId(tx, { order_id, business_id, menu_id }) {
-  const row = await tx.order_items.findFirst({
-    where: {
-      order_id,
-      business_id,
-      menu_id,
-    },
-    select: {
-      item_id: true,
-    },
-    orderBy: {
-      item_id: "asc",
-    },
-  });
-
-  return row?.item_id || null;
-}
-
-/**
- * Update CONFIRMED + apply unavailable changes.
+ * Update CONFIRMED + apply unavailable changes (remove/replace) in order_items
  *
  * Expects payload like:
  * {
@@ -186,23 +131,16 @@ module.exports = async function updateStatusWithUnavailable(
   order_id,
   payload = {},
 ) {
-  const oid = normalizeOrderId(order_id);
+  const oid = String(order_id || "")
+    .trim()
+    .toUpperCase();
+  if (!oid) return { ok: false, code: "BAD_ORDER_ID" };
 
-  if (!oid) {
-    return {
-      ok: false,
-      code: "BAD_ORDER_ID",
-    };
-  }
-
-  const status = String(payload.status || "").trim().toUpperCase();
-
-  if (status !== "CONFIRMED") {
-    return {
-      ok: false,
-      code: "ONLY_CONFIRMED_SUPPORTED",
-    };
-  }
+  const status = String(payload.status || "")
+    .trim()
+    .toUpperCase();
+  if (status !== "CONFIRMED")
+    return { ok: false, code: "ONLY_CONFIRMED_SUPPORTED" };
 
   const reason = String(payload.reason || "").trim();
 
@@ -221,152 +159,163 @@ module.exports = async function updateStatusWithUnavailable(
     payload.unavailable_changes,
   );
 
+  const conn = await db.getConnection();
   try {
-    return await prisma.$transaction(async (tx) => {
-      // Ensure order exists.
-      // Note: Prisma does not expose SELECT ... FOR UPDATE directly without raw SQL.
-      // The transaction still ensures all following modifications commit/rollback together.
-      const orderRow = await tx.orders.findUnique({
-        where: {
-          order_id: oid,
-        },
-        select: {
-          order_id: true,
-          status: true,
-        },
-      });
+    await conn.beginTransaction();
 
-      if (!orderRow) {
-        return {
-          ok: false,
-          code: "NOT_FOUND",
-        };
+    // Ensure order exists (and lock it)
+    const [[orderRow]] = await conn.query(
+      `SELECT order_id, status
+         FROM orders
+        WHERE order_id = ?
+        FOR UPDATE`,
+      [oid],
+    );
+    if (!orderRow) {
+      await conn.rollback();
+      return { ok: false, code: "NOT_FOUND" };
+    }
+
+    // 1) REMOVE from order_items
+    //    (delete by order_id + business_id + menu_id)
+    for (const rm of removed_norm) {
+      await conn.query(
+        `DELETE FROM order_items
+          WHERE order_id = ?
+            AND business_id = ?
+            AND menu_id = ?`,
+        [oid, rm.business_id, rm.menu_id],
+      );
+    }
+
+    // 2) REPLACE in order_items
+    //    Update the existing row that matches old business_id/menu_id
+    //    into the new item fields.
+    for (const rep of replaced_norm) {
+      const n = rep.new;
+
+      const [upd] = await conn.query(
+        `UPDATE order_items
+            SET
+              business_id   = ?,
+              business_name = ?,
+              menu_id       = ?,
+              item_name     = ?,
+              item_image    = ?,
+              quantity      = ?,
+              price         = ?,
+              subtotal      = ?
+          WHERE order_id = ?
+            AND business_id = ?
+            AND menu_id = ?
+          LIMIT 1`,
+        [
+          n.business_id,
+          n.business_name,
+          n.menu_id,
+          n.item_name,
+          n.item_image,
+          n.quantity,
+          n.price,
+          n.subtotal,
+          oid,
+          rep.old.business_id,
+          rep.old.menu_id,
+        ],
+      );
+
+      // If no row updated (old item not found), you can choose:
+      // - insert a new row instead
+      // - or fail
+      // Here: we insert a new row as a safe fallback.
+      if (!upd?.affectedRows) {
+        await conn.query(
+          `INSERT INTO order_items
+            (order_id, business_id, business_name, menu_id, item_name, item_image, quantity, price, subtotal)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            oid,
+            n.business_id,
+            n.business_name,
+            n.menu_id,
+            n.item_name,
+            n.item_image,
+            n.quantity,
+            n.price,
+            n.subtotal,
+          ],
+        );
       }
+    }
 
-      // 1) REMOVE from order_items
-      // Old raw SQL removed all matching rows because it had no LIMIT here.
-      for (const rm of removed_norm) {
-        await tx.order_items.deleteMany({
-          where: {
-            order_id: oid,
-            business_id: rm.business_id,
-            menu_id: rm.menu_id,
-          },
-        });
-      }
+    // 3) Recalculate items total from DB (after modifications)
+    const [[sumRow]] = await conn.query(
+      `SELECT COALESCE(SUM(subtotal), 0) AS items_total
+         FROM order_items
+        WHERE order_id = ?`,
+      [oid],
+    );
+    const items_total = Number(sumRow?.items_total || 0);
 
-      // 2) REPLACE in order_items
-      // Old logic:
-      // - update one matching old row into new fields
-      // - if no row updated, insert new row
-      for (const rep of replaced_norm) {
-        const n = rep.new;
+    // Optional sanity: you can recompute expected total and compare with final_total_amount
+    // expected = items_total + delivery_fee - discount + platform_fee
+    const expected_total =
+      items_total +
+      Number(final_delivery_fee || 0) -
+      Number(final_discount_amount || 0) +
+      Number(final_platform_fee || 0);
 
-        const itemId = await findOneOrderItemId(tx, {
-          order_id: oid,
-          business_id: rep.old.business_id,
-          menu_id: rep.old.menu_id,
-        });
+    // 4) Update orders (all latest fields)
+    // NOTE: If your schema uses different column names, adjust here.
+    // - estimated_arrivial_time is from your existing code.
+    // - status_reason may or may not exist; if it doesn't, remove it from query.
+    await conn.query(
+      `
+      UPDATE orders
+         SET
+           status = 'CONFIRMED',
+           status_reason = ?,
+           total_amount = ?,
+           platform_fee = ?,
+           discount_amount = ?,
+           delivery_fee = ?,
+           merchant_delivery_fee = ?,
+           estimated_arrivial_time = COALESCE(?, estimated_arrivial_time),
+           updated_at = NOW()
+       WHERE order_id = ?
+      `,
+      [
+        reason || null,
+        final_total_amount != null ? final_total_amount : n2(expected_total),
+        final_platform_fee != null ? final_platform_fee : 0,
+        final_discount_amount != null ? final_discount_amount : 0,
+        final_delivery_fee != null ? final_delivery_fee : 0,
+        final_merchant_delivery_fee != null ? final_merchant_delivery_fee : 0,
+        etaStr,
+        oid,
+      ],
+    );
 
-        if (itemId) {
-          await tx.order_items.update({
-            where: {
-              item_id: itemId,
-            },
-            data: {
-              business_id: n.business_id,
-              business_name: n.business_name,
-              menu_id: n.menu_id,
-              item_name: n.item_name,
-              item_image: n.item_image,
-              quantity: n.quantity,
-              price: n.price,
-              subtotal: n.subtotal,
-            },
-          });
-        } else {
-          await tx.order_items.create({
-            data: {
-              order_id: oid,
-              business_id: n.business_id,
-              business_name: n.business_name,
-              menu_id: n.menu_id,
-              item_name: n.item_name,
-              item_image: n.item_image,
-              quantity: n.quantity,
-              price: n.price,
-              subtotal: n.subtotal,
-              platform_fee: 0,
-              delivery_fee: 0,
-            },
-          });
-        }
-      }
+    await conn.commit();
 
-      // 3) Recalculate items total from DB after modifications
-      const sum = await tx.order_items.aggregate({
-        where: {
-          order_id: oid,
-        },
-        _sum: {
-          subtotal: true,
-        },
-      });
-
-      const items_total = Number(sum._sum.subtotal || 0);
-
-      const expected_total =
-        items_total +
-        Number(final_delivery_fee || 0) -
-        Number(final_discount_amount || 0) +
-        Number(final_platform_fee || 0);
-
-      // 4) Update order
-      const updateData = {
-        status: "CONFIRMED",
-        status_reason: reason || null,
-        total_amount:
-          final_total_amount != null ? final_total_amount : n2(expected_total),
-        platform_fee: final_platform_fee != null ? final_platform_fee : 0,
-        discount_amount:
-          final_discount_amount != null ? final_discount_amount : 0,
-        delivery_fee: final_delivery_fee != null ? final_delivery_fee : 0,
-        merchant_delivery_fee:
-          final_merchant_delivery_fee != null
-            ? final_merchant_delivery_fee
-            : 0,
-        updated_at: new Date(),
-      };
-
-      if (etaStr) {
-        updateData.estimated_arrivial_time = etaStr;
-      }
-
-      await tx.orders.update({
-        where: {
-          order_id: oid,
-        },
-        data: updateData,
-      });
-
-      return {
-        ok: true,
-        order_id: oid,
-        status: "CONFIRMED",
-        estimated_arrivial_time: etaStr,
-        items_total: n2(items_total),
-        expected_total: n2(expected_total),
-        applied: {
-          removed_count: removed_norm.length,
-          replaced_count: replaced_norm.length,
-        },
-      };
-    });
-  } catch (e) {
     return {
-      ok: false,
-      code: "DB_ERROR",
-      error: e?.message || String(e),
+      ok: true,
+      order_id: oid,
+      status: "CONFIRMED",
+      estimated_arrivial_time: etaStr,
+      items_total: n2(items_total),
+      expected_total: n2(expected_total),
+      applied: {
+        removed_count: removed_norm.length,
+        replaced_count: replaced_norm.length,
+      },
     };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {}
+    return { ok: false, code: "DB_ERROR", error: e?.message || String(e) };
+  } finally {
+    conn.release();
   }
 };

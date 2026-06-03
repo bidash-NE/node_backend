@@ -1,11 +1,7 @@
 // models/orders/unavailableItemsProcessor.js
-// ✅ Keep raw SQL intentionally for this file
-// ✅ Reason: Prisma does not support DELETE ... LIMIT 1 directly
-// ✅ This preserves the original behavior exactly
-
 // Applies unavailable changes to order_items:
-// - removed: delete ONE matching row for (order_id, business_id, menu_id)
-// - replaced: delete ONE old matching row, then insert new row
+// - removed: delete rows for (business_id, menu_id)
+// - replaced: delete old row, insert new row
 
 function toNum(v) {
   const n = Number(v);
@@ -27,14 +23,11 @@ function normalizeReplaced(arr) {
     .map((r) => {
       const oldB = toNum(r?.old?.business_id);
       const oldM = toNum(r?.old?.menu_id);
-
       if (!oldB || !oldM) return null;
 
       const n = r?.new || {};
-
       const newB = toNum(n?.business_id);
       const newM = toNum(n?.menu_id);
-
       if (!newB || !newM) return null;
 
       const qty = toNum(n?.quantity) || 1;
@@ -42,10 +35,7 @@ function normalizeReplaced(arr) {
       const subtotal = toNum(n?.subtotal) ?? qty * price;
 
       return {
-        old: {
-          business_id: oldB,
-          menu_id: oldM,
-        },
+        old: { business_id: oldB, menu_id: oldM },
         new: {
           business_id: newB,
           business_name: n?.business_name ? String(n.business_name) : null,
@@ -63,31 +53,14 @@ function normalizeReplaced(arr) {
 }
 
 async function applyUnavailableChanges(conn, order_id, unavailable_changes) {
-  if (!conn || typeof conn.query !== "function") {
-    throw new Error(
-      "applyUnavailableChanges requires a MySQL connection with conn.query().",
-    );
-  }
-
-  const oid = String(order_id || "").trim().toUpperCase();
-
-  if (!oid) {
-    return {
-      removed_count: 0,
-      replaced_count: 0,
-      hasAnyChanges: false,
-    };
-  }
-
   const uc =
     unavailable_changes && typeof unavailable_changes === "object"
       ? unavailable_changes
       : {};
-
   const removed = normalizeRemoved(uc.removed);
   const replaced = normalizeReplaced(uc.replaced);
 
-  // REMOVE: delete ONE matching item, same as old SQL behavior
+  // REMOVE: delete matching items
   for (const x of removed) {
     await conn.query(
       `DELETE FROM order_items
@@ -95,11 +68,11 @@ async function applyUnavailableChanges(conn, order_id, unavailable_changes) {
           AND business_id = ?
           AND menu_id = ?
         LIMIT 1`,
-      [oid, x.business_id, x.menu_id],
+      [order_id, x.business_id, x.menu_id],
     );
   }
 
-  // REPLACE: delete ONE old matching item, then insert new item
+  // REPLACE: remove old then insert new
   for (const r of replaced) {
     await conn.query(
       `DELETE FROM order_items
@@ -107,26 +80,15 @@ async function applyUnavailableChanges(conn, order_id, unavailable_changes) {
           AND business_id = ?
           AND menu_id = ?
         LIMIT 1`,
-      [oid, r.old.business_id, r.old.menu_id],
+      [order_id, r.old.business_id, r.old.menu_id],
     );
 
     await conn.query(
       `INSERT INTO order_items
-        (
-          order_id,
-          business_id,
-          business_name,
-          menu_id,
-          item_name,
-          item_image,
-          quantity,
-          price,
-          subtotal,
-          delivery_fee
-        )
+        (order_id, business_id, business_name, menu_id, item_name, item_image, quantity, price, subtotal, delivery_fee)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        oid,
+        order_id,
         r.new.business_id,
         r.new.business_name,
         r.new.menu_id,
@@ -147,6 +109,4 @@ async function applyUnavailableChanges(conn, order_id, unavailable_changes) {
   };
 }
 
-module.exports = {
-  applyUnavailableChanges,
-};
+module.exports = { applyUnavailableChanges };
