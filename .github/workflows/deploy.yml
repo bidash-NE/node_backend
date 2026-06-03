@@ -256,7 +256,8 @@ jobs:
         if: needs.changes.outputs.user_merchant_chat == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./user_merchant_chat
+          context: .
+          file: ./user_merchant_chat/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-user-merchant-chat:latest
