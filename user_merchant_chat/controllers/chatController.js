@@ -1,25 +1,27 @@
 // File: controllers/chatController.js
-// ✅ Prisma version
-// ✅ No raw db.query()
-// ✅ Redis chat store remains unchanged
-// ✅ CUSTOMER lists by x-user-id
-// ✅ MERCHANT lists by x-business-id only
+// ✅ Full Prisma + Redis chat controller
+// ✅ Redis remains the chat/message store
+// ✅ Prisma used for users, merchant_business_details, notifications
+// ✅ Adds in-app DB notification + Expo push notification
+// ✅ Notification title format: "New message from {ORDER_ID}"
 
 const { prisma } = require("../lib/prisma");
 
 const store = require("../models/chatStoreRedis");
 const upload = require("../middlewares/upload");
 
+/* ==================== BASIC HELPERS ==================== */
+
 function ts() {
   return new Date().toISOString();
 }
 
-function log(...a) {
-  console.log(`[${ts()}]`, ...a);
+function log(...args) {
+  console.log(`[${ts()}]`, ...args);
 }
 
 function cleanStr(v) {
-  return (v ?? "").toString().trim();
+  return String(v ?? "").trim();
 }
 
 function toPositiveNumber(v) {
@@ -49,7 +51,15 @@ function serializeRow(row) {
   return out;
 }
 
-/* ==================== ACTOR PARSERS ==================== */
+function safeJsonStringify(v) {
+  try {
+    return JSON.stringify(v || {});
+  } catch {
+    return "{}";
+  }
+}
+
+/* ==================== ACTOR HELPERS ==================== */
 
 // CUSTOMER must have x-user-id
 function getCustomerActor(req) {
@@ -67,7 +77,7 @@ function getCustomerActor(req) {
   };
 }
 
-// MERCHANT listing uses business_id only, no x-user-id required for list
+// MERCHANT conversation listing can use business_id only
 function getMerchantBusinessId(req) {
   const role = String(req.headers["x-user-type"] || "").toUpperCase();
 
@@ -81,7 +91,7 @@ function getMerchantBusinessId(req) {
   return bid ? String(bid) : null;
 }
 
-// For messages/read/create, keep strict actor check
+// Messages/read/create require actual user actor
 function getActorStrict(req) {
   const role = String(req.headers["x-user-type"] || "").toUpperCase();
   const id = toPositiveNumber(req.headers["x-user-id"]);
@@ -96,19 +106,19 @@ function getActorStrict(req) {
   };
 }
 
-/* ==================== MEDIA URL BUILDER ==================== */
+/* ==================== MEDIA HELPERS ==================== */
 
 function buildStoredMediaUrl(req, fieldname, filename) {
   const rel = upload.toWebPath(fieldname, filename);
 
-  // Force chat images served under "/chat/uploads/..."
+  // Force chat images to be served under /chat/uploads/...
   let out = rel;
 
   if (fieldname === "chat_image") {
     out = `/chat${rel.startsWith("/") ? rel : `/${rel}`}`;
   }
 
-  const base = (process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
+  const base = String(process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
 
   return base ? `${base}${out}` : out;
 }
@@ -182,6 +192,7 @@ async function fetchBusinessesByIds(businessIds) {
         business_id: true,
         business_name: true,
         business_logo: true,
+        user_id: true,
       },
     });
 
@@ -192,6 +203,7 @@ async function fetchBusinessesByIds(businessIds) {
       map.set(bid, {
         business_name: cleanStr(r.business_name),
         business_logo: cleanStr(r.business_logo),
+        user_id: r.user_id != null ? Number(r.user_id) : null,
       });
     }
   } catch (e) {
@@ -202,10 +214,8 @@ async function fetchBusinessesByIds(businessIds) {
 }
 
 /**
- * Derive merchant user_id from business_id.
- *
- * Your schema uses merchant_business_details.user_id.
- * This replaces the old SQL variants.
+ * Derive merchant app user_id from business_id.
+ * This is needed because chat receiver for merchant is stored by user_id.
  */
 async function fetchMerchantIdByBusinessId(businessId) {
   const bid = toPositiveBigInt(businessId);
@@ -231,10 +241,242 @@ async function fetchMerchantIdByBusinessId(businessId) {
   }
 }
 
+/* ==================== NOTIFICATION HELPERS ==================== */
+
+function makeNotificationTitle(orderId) {
+  const oid = cleanStr(orderId);
+
+  if (oid) {
+    return `New message from ${oid}`;
+  }
+
+  return "New message";
+}
+
+function makeNotificationBody({ senderRole, text, hasImage }) {
+  const cleanText = cleanStr(text);
+
+  if (cleanText) {
+    return cleanText.slice(0, 120);
+  }
+
+  if (hasImage) {
+    return senderRole === "CUSTOMER"
+      ? "Customer sent an image."
+      : "Merchant sent an image.";
+  }
+
+  return "You have a new chat message.";
+}
+
+async function insertUserNotificationSafe({ user_id, title, message, data }) {
+  const uid = toPositiveBigInt(user_id);
+
+  if (!uid) return false;
+
+  try {
+    await prisma.notifications.create({
+      data: {
+        user_id: uid,
+        type: "chat_message",
+        title: String(title || "New message").slice(0, 100),
+        message: String(message || "").slice(0, 1000),
+        data: safeJsonStringify(data),
+        status: "unread",
+        created_at: new Date(),
+      },
+    });
+
+    return true;
+  } catch (e) {
+    console.error("[chat] insertUserNotificationSafe ERROR:", e?.message || e);
+    return false;
+  }
+}
+
+/**
+ * Expo push sender.
+ *
+ * Set this in user-merchant-chat.yaml:
+ *
+ * EXPO_NOTIFY_URL=http://expo-push-notification.prod.svc.cluster.local:80/send-user-notification
+ *
+ * If your actual Expo route is different, change only the env URL.
+ */
+async function sendExpoPushSafe({ user_id, title, body, data }) {
+  const uid = toPositiveNumber(user_id);
+
+  if (!uid) return false;
+
+  const url =
+    process.env.EXPO_NOTIFY_URL ||
+    process.env.EXPO_PUSH_NOTIFY_URL ||
+    process.env.EXPO_NOTIFICATION_URL ||
+    "";
+
+  if (!url) {
+    console.warn("[chat] Expo push skipped: EXPO_NOTIFY_URL missing");
+    return false;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        user_id: uid,
+        title,
+        body,
+        data,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+
+      console.error("[chat] Expo push failed:", {
+        url,
+        status: response.status,
+        body: text.slice(0, 500),
+      });
+
+      return false;
+    }
+
+    return true;
+  } catch (e) {
+    console.error("[chat] sendExpoPushSafe ERROR:", e?.message || e);
+    return false;
+  }
+}
+
+function emitSocketNotification(req, { recipientUserId, payload }) {
+  try {
+    const io = req.app.get("io");
+
+    if (!io || !recipientUserId) return;
+
+    // These rooms are optional. Your frontend can join one of these later.
+    io.to(`user:${recipientUserId}`).emit("notification:new", payload);
+    io.to(`notifications:user:${recipientUserId}`).emit(
+      "notification:new",
+      payload,
+    );
+  } catch (e) {
+    console.error("[chat] emitSocketNotification ERROR:", e?.message || e);
+  }
+}
+
+/**
+ * Finds the receiver and sends:
+ * 1. DB notification
+ * 2. Expo push
+ * 3. Optional socket notification
+ */
+async function notifyChatRecipient({
+  req,
+  conversationId,
+  actor,
+  message,
+  text,
+  hasImage,
+}) {
+  try {
+    const meta = await store.getConversationMeta(conversationId);
+
+    const orderId = meta?.orderId || "";
+    const customerId = meta?.customerId ? Number(meta.customerId) : null;
+    const businessId = meta?.businessId ? Number(meta.businessId) : null;
+
+    let recipientUserId = null;
+    let recipientType = null;
+
+    if (actor.role === "CUSTOMER") {
+      recipientType = "MERCHANT";
+
+      if (businessId) {
+        recipientUserId = await fetchMerchantIdByBusinessId(businessId);
+      }
+    } else if (actor.role === "MERCHANT") {
+      recipientType = "CUSTOMER";
+      recipientUserId = customerId;
+    }
+
+    if (!recipientUserId) {
+      console.warn("[chat] notification skipped: recipient not found", {
+        conversationId,
+        senderRole: actor.role,
+        senderId: actor.id,
+        customerId,
+        businessId,
+        orderId,
+      });
+      return;
+    }
+
+    // Prevent notifying sender accidentally
+    if (Number(recipientUserId) === Number(actor.id)) {
+      return;
+    }
+
+    const title = makeNotificationTitle(orderId);
+
+    const body = makeNotificationBody({
+      senderRole: actor.role,
+      text,
+      hasImage,
+    });
+
+    const payloadData = {
+      type: "chat_message",
+      conversation_id: String(conversationId),
+      order_id: orderId || null,
+      sender_type: actor.role,
+      sender_id: Number(actor.id),
+      recipient_type: recipientType,
+      recipient_user_id: Number(recipientUserId),
+      message_id: message.id,
+      message_type: message.message_type,
+      business_id: businessId || null,
+      customer_id: customerId || null,
+      media_url: message.media_url || null,
+      created_at: new Date().toISOString(),
+    };
+
+    await insertUserNotificationSafe({
+      user_id: recipientUserId,
+      title,
+      message: body,
+      data: payloadData,
+    });
+
+    await sendExpoPushSafe({
+      user_id: recipientUserId,
+      title,
+      body,
+      data: payloadData,
+    });
+
+    emitSocketNotification(req, {
+      recipientUserId,
+      payload: {
+        title,
+        message: body,
+        data: payloadData,
+      },
+    });
+  } catch (e) {
+    console.error("[chat] notifyChatRecipient ERROR:", e?.message || e);
+  }
+}
+
 /* ==================== CONTROLLERS ==================== */
 
 // POST /chat/conversations/order/:orderId
-// Body preferred: { customer_id, business_id }  merchant_id optional
+// Body preferred: { customer_id, business_id }
+// merchant_id optional
 exports.getOrCreateConversationForOrder = async (req, res) => {
   try {
     const actor = getActorStrict(req);
@@ -288,13 +530,11 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
       extraMembers,
     );
 
-    // Store base meta
     await store.setConversationMeta(cid, {
       customerId,
       businessId,
     });
 
-    // Ensure business inbox gets this conversation immediately
     if (businessId) {
       await store.linkConversationToBusiness(
         cid,
@@ -303,29 +543,28 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
       );
     }
 
-    // Enrich
     const [usersMap, bizMap] = await Promise.all([
       fetchUsersByIds(customerId ? [customerId] : []),
       fetchBusinessesByIds(businessId ? [businessId] : []),
     ]);
 
-    const u = customerId ? usersMap.get(customerId) : null;
-    const b = businessId ? bizMap.get(businessId) : null;
+    const user = customerId ? usersMap.get(customerId) : null;
+    const business = businessId ? bizMap.get(businessId) : null;
 
     const meta = {
       customerId,
       businessId,
-      customerName: u?.name || "",
-      merchantBusinessName: b?.business_name || "",
-      customer_profile_image: u?.profile_image || "",
-      merchant_business_logo: b?.business_logo || "",
+      customerName: user?.name || "",
+      merchantBusinessName: business?.business_name || "",
+      customer_profile_image: user?.profile_image || "",
+      merchant_business_logo: business?.business_logo || "",
     };
 
     await store.setConversationMeta(cid, {
-      customerName: meta.customerName,
-      merchantBusinessName: meta.merchantBusinessName,
       customerId,
       businessId,
+      customerName: meta.customerName,
+      merchantBusinessName: meta.merchantBusinessName,
     });
 
     return res.json({
@@ -335,7 +574,7 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
       meta,
     });
   } catch (e) {
-    log("[chat] startChat ERROR:", e.message);
+    log("[chat] getOrCreateConversationForOrder ERROR:", e.message);
 
     return res.status(500).json({
       success: false,
@@ -345,13 +584,12 @@ exports.getOrCreateConversationForOrder = async (req, res) => {
 };
 
 // GET /chat/conversations
-// CUSTOMER -> uses x-user-id
-// MERCHANT -> uses x-business-id only
+// CUSTOMER -> x-user-type=CUSTOMER + x-user-id
+// MERCHANT -> x-user-type=MERCHANT + x-business-id
 exports.listConversations = async (req, res) => {
   try {
     const role = String(req.headers["x-user-type"] || "").toUpperCase();
 
-    // CUSTOMER: list by user inbox
     if (role === "CUSTOMER") {
       const actor = getCustomerActor(req);
 
@@ -389,7 +627,6 @@ exports.listConversations = async (req, res) => {
       });
     }
 
-    // MERCHANT: list by business inbox, no x-user-id required
     if (role === "MERCHANT") {
       const businessId = getMerchantBusinessId(req);
 
@@ -483,10 +720,9 @@ exports.getMessages = async (req, res) => {
 
     const metaR = await store.getConversationMeta(conversationId);
 
-    let customerId = metaR.customerId ? Number(metaR.customerId) : null;
+    const customerId = metaR.customerId ? Number(metaR.customerId) : null;
     let businessId = metaR.businessId ? Number(metaR.businessId) : null;
 
-    // Backfill businessId if merchant provided it
     if (!businessId && actor.role === "MERCHANT" && businessIdHint) {
       businessId = businessIdHint;
 
@@ -607,6 +843,18 @@ exports.sendMessage = async (req, res) => {
         message,
       });
     }
+
+    // Do not block message response if notification fails
+    notifyChatRecipient({
+      req,
+      conversationId,
+      actor,
+      message,
+      text,
+      hasImage,
+    }).catch((e) => {
+      console.error("[chat] notifyChatRecipient async ERROR:", e?.message || e);
+    });
 
     return res.json({
       success: true,
