@@ -559,7 +559,7 @@ async function startServer() {
   }
 
   server.listen(PORT, () => {
-    console.log(`chat running on port :${PORT}`);
+    console.log(`chat running on port number:${PORT}`);
     startCleanupLoop();
   });
 }
