@@ -1,25 +1,22 @@
 // controllers/orderControllers.js
-// ✅ Controller migrated partially to Prisma safely
-// ✅ Keeps db temporarily because /models/orders/* files still use db/raw SQL
-// ✅ Keeps upload + notifications + push + wallet capture delivered pipeline
+// ✅ Controller that DOES NOT use `Order.`
+// ✅ Imports functions directly from your /models/orders/* files
+// ✅ Uses: const db = require("../config/db");
+// ✅ Keeps: upload + notifications + push + wallet capture delivered pipeline
 
-const db = require("../config/db"); // keep until all /models/orders files are converted
-const { prisma } = require("../lib/prisma");
-
+const db = require("../config/db");
 const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
 } = require("../realtime");
-
 const { MAX_PHOTOS, toWebPaths } = require("../middleware/uploadDeliveryPhoto");
-
 /* --------------------------- uploads support --------------------------- */
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const multer = require("multer");
 
-/* --------------------------- Expo push --------------------------- */
+/* --------------------------- Expo push (YOUR API SHAPE) --------------------------- */
 const axios = require("axios");
 
 const EXPO_NOTIFICATION_URL =
@@ -28,16 +25,16 @@ const EXPO_NOTIFICATION_URL =
 
 /* ============================================================
    Import model functions directly
+   (Works whether modules export function directly or { fn } named)
 ============================================================ */
 
 function pickFn(mod, name) {
   if (!mod) return null;
-  if (typeof mod === "function") return mod;
-  if (name && typeof mod[name] === "function") return mod[name];
+  if (typeof mod === "function") return mod; // module.exports = function
+  if (name && typeof mod[name] === "function") return mod[name]; // module.exports = { name(){} }
   const first = Object.values(mod).find((v) => typeof v === "function");
   return first || null;
 }
-
 const PickupEmailService = require("../services/pickupEmailService");
 
 /* ---------------- CRUD ---------------- */
@@ -56,30 +53,24 @@ const _findByBusinessGroupedByUserMod = require("../models/orders/crud/findByBus
 const createDb = pickFn(_createMod, "create");
 const findAllDb = pickFn(_findAllMod, "findAll");
 const findByBusinessIdDb = pickFn(_findByBusinessIdMod, "findByBusinessId");
-
 const findByOrderIdGroupedDb = pickFn(
   _findByOrderIdGroupedMod,
   "findByOrderIdGrouped",
 );
-
 const findByUserIdForAppDb = pickFn(
   _findByUserIdForAppMod,
   "findByUserIdForApp",
 );
-
 const updateDb = pickFn(_updateMod, "update");
 const updateStatusDb = pickFn(_updateStatusMod, "updateStatus");
-
 const deleteDb =
   pickFn(_deleteMod, "delete") ||
   pickFn(_deleteMod, "del") ||
   pickFn(_deleteMod, "remove");
-
 const getOrderStatusCountsByBusinessDb = pickFn(
   _getOrderStatusCountsByBusinessMod,
   "getOrderStatusCountsByBusiness",
 );
-
 const findByBusinessGroupedByUserDb = pickFn(
   _findByBusinessGroupedByUserMod,
   "findByBusinessGroupedByUser",
@@ -87,28 +78,23 @@ const findByBusinessGroupedByUserDb = pickFn(
 
 /* ---------------- pipelines / notifications / helpers ---------------- */
 const _helpersMod = require("../models/orders/helpers");
-
 const generateOrderId =
   (typeof _helpersMod?.generateOrderId === "function" &&
     _helpersMod.generateOrderId) ||
   (typeof _helpersMod === "function" ? _helpersMod : null);
 
 const _archiveMod = require("../models/orders/orderArchivePipeline");
-
 const completeAndArchiveDeliveredOrder =
   _archiveMod?.completeAndArchiveDeliveredOrder ||
   pickFn(_archiveMod, "completeAndArchiveDeliveredOrder");
-
 const cancelAndArchiveOrder =
   _archiveMod?.cancelAndArchiveOrder ||
   pickFn(_archiveMod, "cancelAndArchiveOrder");
 
 const _notifMod = require("../models/orders/orderNotifications");
-
 const addUserOrderStatusNotification =
   _notifMod?.addUserOrderStatusNotification ||
   pickFn(_notifMod, "addUserOrderStatusNotification");
-
 const addUserWalletDebitNotification =
   _notifMod?.addUserWalletDebitNotification ||
   pickFn(_notifMod, "addUserWalletDebitNotification");
@@ -118,36 +104,26 @@ const addUserWalletDebitNotification =
 ============================================================ */
 
 /**
- * If it's business_id -> get merchant user_id from merchant_business_details.
- * _conn is kept only for compatibility with existing calls.
+ * If it's business_id -> get merchant user_id from merchant_business_details
  */
-async function resolveMerchantUserIdFromBusinessId(_conn, business_id) {
+async function resolveMerchantUserIdFromBusinessId(conn, business_id) {
   const bid = Number(business_id);
   if (!Number.isFinite(bid) || bid <= 0) return null;
 
-  try {
-    const row = await prisma.merchant_business_details.findUnique({
-      where: {
-        business_id: bid,
-      },
-      select: {
-        user_id: true,
-      },
-    });
+  const [[row]] = await conn.query(
+    `SELECT user_id
+       FROM merchant_business_details
+      WHERE business_id = ?
+      LIMIT 1`,
+    [bid],
+  );
 
-    const uid = row?.user_id != null ? Number(row.user_id) : null;
-    return Number.isFinite(uid) && uid > 0 ? uid : null;
-  } catch (e) {
-    console.error(
-      "[resolveMerchantUserIdFromBusinessId ERROR]",
-      e?.message || e,
-    );
-    return null;
-  }
+  const uid = row?.user_id != null ? Number(row.user_id) : null;
+  return Number.isFinite(uid) && uid > 0 ? uid : null;
 }
 
 /**
- * Supports multiple merchants across multiple business_ids.
+ * Supports multiple merchants across multiple business_ids
  */
 async function getMerchantUserIdsByBusinessIds(businessIds = []) {
   const ids = Array.from(
@@ -157,20 +133,15 @@ async function getMerchantUserIdsByBusinessIds(businessIds = []) {
         .filter((n) => Number.isFinite(n) && n > 0),
     ),
   );
-
   if (!ids.length) return [];
 
   try {
-    const rows = await prisma.merchant_business_details.findMany({
-      where: {
-        business_id: {
-          in: ids,
-        },
-      },
-      select: {
-        user_id: true,
-      },
-    });
+    const [rows] = await db.query(
+      `SELECT DISTINCT user_id
+         FROM merchant_business_details
+        WHERE business_id IN (?)`,
+      [ids],
+    );
 
     return Array.from(
       new Set(
@@ -186,14 +157,13 @@ async function getMerchantUserIdsByBusinessIds(businessIds = []) {
 }
 
 /**
- * Your push API expects: { user_id, title, body }
+ * ✅ IMPORTANT:
+ * Your push API expects: { user_id: <number>, title: <string>, body: <string> }
  */
 async function sendPushToUserId(user_id, { title, body }) {
   try {
     const uid = Number(user_id);
-    if (!Number.isFinite(uid) || uid <= 0) {
-      return { ok: false, skipped: true };
-    }
+    if (!Number.isFinite(uid) || uid <= 0) return { ok: false, skipped: true };
 
     const payload = {
       user_id: uid,
@@ -218,8 +188,10 @@ async function sendPushToUserId(user_id, { title, body }) {
 ============================================================ */
 
 /**
- * Fallback: if capture doesn't include amounts, compute from DB.
- * This still uses db because archive/order model pipeline is not yet converted.
+ * Fallback: if capture doesn't include amounts (or is 0),
+ * compute from DB like before:
+ * - platform_fee_user = platform_fee * 0.5 (default)
+ * - order_amount = total_amount - platform_fee
  */
 async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
   const out = {
@@ -241,6 +213,7 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
     ),
   };
 
+  // If amounts already look valid, keep them
   const looksValid =
     Number.isFinite(out.order_amount) &&
     out.order_amount > 0 &&
@@ -250,6 +223,7 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
   if (looksValid) return out;
 
   try {
+    // Prefer archive table first (because delivered pipeline often deletes from orders)
     let row = null;
 
     try {
@@ -260,7 +234,6 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
           LIMIT 1`,
         [order_id],
       );
-
       if (r1) row = r1;
     } catch {}
 
@@ -272,7 +245,6 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
           LIMIT 1`,
         [order_id],
       );
-
       if (r2) row = r2;
     }
 
@@ -285,25 +257,22 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
       ? Number((platform_fee_total * 0.5).toFixed(2))
       : 0;
 
+    // Order amount excludes the FULL platform fee (because platform fee is charged separately)
     const order_amount = Number.isFinite(total_amount)
       ? Number((total_amount - platform_fee_total).toFixed(2))
       : 0;
 
-    if (!Number.isFinite(out.total_amount) || out.total_amount <= 0) {
+    // Only override missing/zero values
+    if (!Number.isFinite(out.total_amount) || out.total_amount <= 0)
       out.total_amount = total_amount;
-    }
-
-    if (!Number.isFinite(out.platform_fee_total) || out.platform_fee_total <= 0) {
+    if (!Number.isFinite(out.platform_fee_total) || out.platform_fee_total <= 0)
       out.platform_fee_total = platform_fee_total;
-    }
 
-    if (!Number.isFinite(out.platform_fee_user) || out.platform_fee_user === 0) {
+    if (!Number.isFinite(out.platform_fee_user) || out.platform_fee_user === 0)
       out.platform_fee_user = platform_fee_user;
-    }
 
-    if (!Number.isFinite(out.order_amount) || out.order_amount === 0) {
+    if (!Number.isFinite(out.order_amount) || out.order_amount === 0)
       out.order_amount = order_amount;
-    }
 
     return out;
   } catch (e) {
@@ -313,13 +282,15 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
 }
 
 /**
- * After DELIVERED capture, write DB notifications + send PUSH.
- * Merchant notification insert is kept raw for now because notifications model is separate.
+ * After DELIVERED capture, write DB notifications + send PUSH
+ * - Customer: wallet debit (order amount + platform fee share)
+ * - Merchant: wallet credit (order credited) + merchant platform fee debit
  */
 async function safeNotifyWalletAndDelivery(
   conn,
   { order_id, user_id, capture },
 ) {
+  // customer wallet debit (DB + push)
   if (capture?.captured && user_id) {
     try {
       const method = String(capture.payment_method || "WALLET").toUpperCase();
@@ -335,6 +306,7 @@ async function safeNotifyWalletAndDelivery(
         const orderAmt = Number(computed.order_amount || 0);
         const feeAmt = Number(computed.platform_fee_user || 0);
 
+        // DB notification (if function exists)
         if (typeof addUserWalletDebitNotification === "function") {
           await addUserWalletDebitNotification({
             user_id: Number(user_id),
@@ -368,6 +340,7 @@ async function safeNotifyWalletAndDelivery(
     }
   }
 
+  // merchant notification -> show wallet movements + DB + PUSH
   if (capture?.captured && capture?.business_id) {
     try {
       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
@@ -381,16 +354,12 @@ async function safeNotifyWalletAndDelivery(
 
         const parts = [];
         parts.push(`Order ${order_id} delivered.`);
-
-        if (credited > 0) {
+        if (credited > 0)
           parts.push(`Nu. ${credited.toFixed(2)} credited to your wallet.`);
-        }
-
-        if (debited > 0) {
+        if (debited > 0)
           parts.push(
             `Nu. ${debited.toFixed(2)} debited as platform fee (merchant share).`,
           );
-        }
 
         const msg = parts.join(" ");
 
@@ -429,7 +398,6 @@ async function safeNotifyWalletAndDelivery(
 
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
-
 const ORDERS_UPLOAD_DIR = path.join(UPLOAD_ROOT, "orders");
 
 function ensureDir(dir) {
@@ -437,7 +405,6 @@ function ensureDir(dir) {
     fs.mkdirSync(dir, { recursive: true });
   } catch {}
 }
-
 ensureDir(ORDERS_UPLOAD_DIR);
 
 const ALLOWED_IMAGE_MIME = new Set([
@@ -474,18 +441,14 @@ const storage = multer.diskStorage({
     const orderId = String(req.body?.order_id || req.generated_order_id || "")
       .trim()
       .toUpperCase();
-
     const safeId = orderId && /^ORD-\d{8}$/.test(orderId) ? orderId : "TMP";
     const dir = path.join(ORDERS_UPLOAD_DIR, safeId);
-
     ensureDir(dir);
     cb(null, dir);
   },
-
   filename: (_req, file, cb) => {
     const ext =
       path.extname(file.originalname) || guessExtFromMime(file.mimetype);
-
     const name = `${Date.now()}_${crypto.randomBytes(6).toString("hex")}${ext}`;
     cb(null, name);
   },
@@ -495,7 +458,6 @@ function fileFilter(_req, file, cb) {
   if (!ALLOWED_IMAGE_MIME.has(file.mimetype)) {
     return cb(new Error("Only image files are allowed (jpg, png, webp)."));
   }
-
   cb(null, true);
 }
 
@@ -528,27 +490,28 @@ const ALLOWED_STATUSES = new Set([
 ]);
 
 function normalizeServiceType(v) {
-  const s = String(v || "").trim().toUpperCase();
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
   return s || null;
 }
-
 function normalizePaymentMethod(v) {
-  const s = String(v || "").trim().toUpperCase();
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
   return s || null;
 }
-
 function normalizeFulfillment(v) {
   const s = String(v || "Delivery").trim();
   return s || "Delivery";
 }
-
 function normalizeSpecialMode(v) {
-  const s = String(v || "").trim().toUpperCase();
-
+  const s = String(v || "")
+    .trim()
+    .toUpperCase();
   if (!s) return null;
   if (s === "DROP_OFF" || s === "DROPOFF" || s === "DROP") return "DROP_OFF";
   if (s === "MEET_UP" || s === "MEETUP" || s === "MEET") return "MEET_UP";
-
   return null;
 }
 
@@ -556,10 +519,8 @@ function buildPreview(items = [], total_amount) {
   const parts = items
     .slice(0, 2)
     .map((it) => `${it.quantity}× ${it.item_name}`);
-
   const more = items.length > 2 ? `, +${items.length - 2} more` : "";
   const totalStr = Number(total_amount ?? 0).toFixed(2);
-
   return `${parts.join(", ")}${more} · Total Nu ${totalStr}`;
 }
 
@@ -603,7 +564,6 @@ function normalizeItemShape(raw = {}, idx = 0) {
 
   const quantity =
     it.quantity ?? it.qty ?? it.count ?? it.units ?? it.unit_count ?? null;
-
   const price =
     it.price ?? it.unit_price ?? it.unitPrice ?? it.rate ?? it.cost ?? null;
 
@@ -643,14 +603,10 @@ function normalizeItemShape(raw = {}, idx = 0) {
 
 function mapUploadedFilesToPayload(req, order_id, items) {
   const files = Array.isArray(req.files) ? req.files : [];
-
-  if (!files.length) {
-    return { order_images: [], item_images: new Map() };
-  }
+  if (!files.length) return { order_images: [], item_images: new Map() };
 
   const tmpDir = path.join(ORDERS_UPLOAD_DIR, "TMP");
   const finalDir = path.join(ORDERS_UPLOAD_DIR, order_id);
-
   ensureDir(finalDir);
 
   const orderImages = [];
@@ -681,14 +637,12 @@ function mapUploadedFilesToPayload(req, order_id, items) {
     }
 
     const idxMatch = field.match(/^item_image_(\d+)$/);
-
     if (idxMatch) {
       itemImages.set(Number(idxMatch[1]), url);
       continue;
     }
 
     const midMatch = field.match(/^item_image_(\d{1,10})$/);
-
     if (midMatch) {
       itemImages.set(String(midMatch[1]), url);
       continue;
@@ -699,11 +653,9 @@ function mapUploadedFilesToPayload(req, order_id, items) {
     const idx = Number(it._index);
     const menuId = it.menu_id != null ? String(it.menu_id) : null;
 
-    if (itemImages.has(idx)) {
-      it.item_image = itemImages.get(idx);
-    } else if (menuId && itemImages.has(menuId)) {
+    if (itemImages.has(idx)) it.item_image = itemImages.get(idx);
+    else if (menuId && itemImages.has(menuId))
       it.item_image = itemImages.get(menuId);
-    }
   }
 
   return { order_images: orderImages, item_images: itemImages };
@@ -714,7 +666,6 @@ function parseMaybeJSON(v) {
   if (typeof v !== "string") return v;
 
   const s = v.trim();
-
   if (!s) return v;
   if (!(s.startsWith("{") || s.startsWith("["))) return v;
 
@@ -744,11 +695,8 @@ function getOrderInput(req) {
     "delivery_fee",
     "merchant_delivery_fee",
   ];
-
   for (const k of numFields) {
-    if (body[k] != null && body[k] !== "") {
-      body[k] = Number(body[k]);
-    }
+    if (body[k] != null && body[k] !== "") body[k] = Number(body[k]);
   }
 
   return body;
@@ -757,17 +705,13 @@ function getOrderInput(req) {
 function dedupeStrings(arr) {
   const out = [];
   const seen = new Set();
-
   for (const x of arr) {
     const s = (x == null ? "" : String(x)).trim();
-
     if (!s) continue;
     if (seen.has(s)) continue;
-
     seen.add(s);
     out.push(s);
   }
-
   return out;
 }
 
@@ -808,9 +752,7 @@ async function createOrder(req, res) {
 
       for (const f of files) {
         const p = f?.path;
-
         if (!p || seen.has(p)) continue;
-
         seen.add(p);
         safeUnlink(p);
       }
@@ -821,7 +763,6 @@ async function createOrder(req, res) {
     const payload = getOrderInput(req);
 
     const itemsRaw = Array.isArray(payload.items) ? payload.items : [];
-
     if (!itemsRaw.length) {
       cleanupUploadedFiles();
       return res.status(400).json({ ok: false, message: "Missing items" });
@@ -833,7 +774,6 @@ async function createOrder(req, res) {
     }
 
     const serviceType = normalizeServiceType(payload.service_type);
-
     if (!serviceType || !["FOOD", "MART"].includes(serviceType)) {
       cleanupUploadedFiles();
       return res.status(400).json({
@@ -843,7 +783,6 @@ async function createOrder(req, res) {
     }
 
     const payMethod = normalizePaymentMethod(payload.payment_method);
-
     if (!payMethod || payMethod !== "WALLET") {
       cleanupUploadedFiles();
       return res.status(400).json({
@@ -862,7 +801,6 @@ async function createOrder(req, res) {
     )
       .trim()
       .toUpperCase();
-
     payload.order_id = order_id;
 
     const moved = mapUploadedFilesToPayload(req, order_id, normalizedItems);
@@ -871,20 +809,19 @@ async function createOrder(req, res) {
       ? moved.order_images
       : [];
 
+    // Photos uploaded through middleware/uploadDeliveryPhoto.js
+    // This is the correct source when route uses uploadDeliveryPhotos.
     const uploadedDeliveryPhotos = toWebPaths(req.deliveryPhotos || []);
-
     payload.delivery_floor_unit =
       payload.delivery_floor_unit ??
       payload.floor_unit ??
       payload.floorUnit ??
       null;
-
     payload.delivery_instruction_note =
       payload.delivery_instruction_note ??
       payload.special_instructions ??
       payload.delivery_note ??
       null;
-
     payload.delivery_special_mode = normalizeSpecialMode(
       payload.delivery_special_mode ?? payload.special_mode,
     );
@@ -901,7 +838,6 @@ async function createOrder(req, res) {
     const bodyList = Array.isArray(payload.delivery_photo_urls)
       ? payload.delivery_photo_urls
       : [];
-
     const bodySingle = payload.delivery_photo_url
       ? [payload.delivery_photo_url]
       : [];
@@ -925,7 +861,7 @@ async function createOrder(req, res) {
     payload.delivery_photo_urls = allPhotos;
     payload.delivery_photo_url = allPhotos.length ? allPhotos[0] : null;
 
-    // wallet balance check using Prisma
+    // wallet balance check
     {
       const itemsSubtotal = normalizedItems.reduce(
         (s, it) =>
@@ -937,11 +873,9 @@ async function createOrder(req, res) {
           ),
         0,
       );
-
       const deliveryFee = Number(payload.delivery_fee || 0);
       const discount = Number(payload.discount_amount || 0);
       const platformFee = Number(payload.platform_fee || 0);
-
       const computedTotal = Number(
         (itemsSubtotal + deliveryFee - discount + platformFee).toFixed(2),
       );
@@ -951,16 +885,11 @@ async function createOrder(req, res) {
           ? Number(payload.total_amount)
           : computedTotal;
 
-      const wallet = await prisma.wallets.findFirst({
-        where: {
-          user_id: Number(payload.user_id),
-        },
-        select: {
-          amount: true,
-        },
-      });
-
-      const balance = Number(wallet?.amount || 0);
+      const [[w]] = await db.query(
+        `SELECT amount FROM wallets WHERE user_id = ? LIMIT 1`,
+        [Number(payload.user_id)],
+      );
+      const balance = Number(w?.amount || 0);
 
       if (!Number.isFinite(required) || required <= 0) {
         cleanupUploadedFiles();
@@ -984,7 +913,9 @@ async function createOrder(req, res) {
       }
     }
 
-    const status = String(payload.status || "PENDING").trim().toUpperCase();
+    const status = String(payload.status || "PENDING")
+      .trim()
+      .toUpperCase();
 
     if (typeof createDb !== "function") {
       throw new Error("create() model function not found/exported.");
@@ -1009,19 +940,17 @@ async function createOrder(req, res) {
             items: normalizedItems,
           });
 
+    // business ids
     const byBiz = new Map();
-
     for (const it of normalizedItems) {
       const bid = Number(it.business_id);
-
       if (!bid || Number.isNaN(bid)) continue;
-
       if (!byBiz.has(bid)) byBiz.set(bid, []);
       byBiz.get(bid).push(it);
     }
-
     const businessIds = Array.from(byBiz.keys());
 
+    // DB + socket notifications for merchants
     for (const business_id of businessIds) {
       const its = byBiz.get(business_id) || [];
       const title = `New order #${created_id}`;
@@ -1045,10 +974,10 @@ async function createOrder(req, res) {
       }
     }
 
+    // PUSH merchants
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(businessIds);
-
       const title = `New order ${created_id}`;
       const bodyText = buildPreview(normalizedItems, payload.total_amount);
 
@@ -1078,7 +1007,6 @@ async function createOrder(req, res) {
   } catch (err) {
     console.error("[createOrder ERROR]", err);
     cleanupUploadedFiles();
-
     return res.status(500).json({
       ok: false,
       message: "Unable to place order",
@@ -1089,94 +1017,82 @@ async function createOrder(req, res) {
 
 async function getOrders(_req, res) {
   try {
-    if (typeof findAllDb !== "function") {
+    if (typeof findAllDb !== "function")
       throw new Error("findAll() model function not found/exported.");
-    }
-
     const orders =
       findAllDb.length >= 1 ? await findAllDb(db) : await findAllDb();
-
-    return res.json(orders);
+    res.json(orders);
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 }
 
 async function getOrderById(req, res) {
   try {
-    if (typeof findByOrderIdGroupedDb !== "function") {
+    if (typeof findByOrderIdGroupedDb !== "function")
       throw new Error(
         "findByOrderIdGrouped() model function not found/exported.",
       );
-    }
 
     const grouped =
       findByOrderIdGroupedDb.length >= 2
         ? await findByOrderIdGroupedDb(db, req.params.order_id)
         : await findByOrderIdGroupedDb(req.params.order_id);
 
-    if (!grouped.length) {
+    if (!grouped.length)
       return res.status(404).json({ message: "Order not found" });
-    }
-
-    return res.json({ success: true, data: grouped });
+    res.json({ success: true, data: grouped });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 }
 
 async function getOrdersByBusinessId(req, res) {
   try {
-    if (typeof findByBusinessIdDb !== "function") {
+    if (typeof findByBusinessIdDb !== "function")
       throw new Error("findByBusinessId() model function not found/exported.");
-    }
 
     const items =
       findByBusinessIdDb.length >= 2
         ? await findByBusinessIdDb(db, req.params.business_id)
         : await findByBusinessIdDb(req.params.business_id);
 
-    return res.json(items);
+    res.json(items);
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 }
 
 async function getBusinessOrdersGroupedByUser(req, res) {
   try {
-    if (typeof findByBusinessGroupedByUserDb !== "function") {
+    if (typeof findByBusinessGroupedByUserDb !== "function")
       throw new Error(
         "findByBusinessGroupedByUser() model function not found/exported.",
       );
-    }
 
     const data =
       findByBusinessGroupedByUserDb.length >= 2
         ? await findByBusinessGroupedByUserDb(db, req.params.business_id)
         : await findByBusinessGroupedByUserDb(req.params.business_id);
 
-    return res.json({ success: true, data });
+    res.json({ success: true, data });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 }
 
 async function getOrdersForUser(req, res) {
   try {
     const userId = Number(req.params.user_id);
-
     if (!Number.isFinite(userId) || userId <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user_id",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid user_id" });
     }
 
     const qs = String(req.query?.service_type || "").trim();
-
     if (qs) {
       const st = qs.toUpperCase();
-
       if (!["FOOD", "MART"].includes(st)) {
         return res.status(400).json({
           success: false,
@@ -1185,14 +1101,12 @@ async function getOrdersForUser(req, res) {
       }
     }
 
-    if (typeof findByUserIdForAppDb !== "function") {
+    if (typeof findByUserIdForAppDb !== "function")
       throw new Error(
         "findByUserIdForApp() model function not found/exported.",
       );
-    }
 
     let data;
-
     if (findByUserIdForAppDb.length >= 3) {
       data = await findByUserIdForAppDb(
         db,
@@ -1203,10 +1117,8 @@ async function getOrdersForUser(req, res) {
       data = await findByUserIdForAppDb(userId, qs ? qs.toUpperCase() : null);
     } else {
       data = await findByUserIdForAppDb(userId);
-
       if (qs) {
         const st = qs.toUpperCase();
-
         data = Array.isArray(data)
           ? data.filter(
               (o) => String(o.service_type || "").toUpperCase() === st,
@@ -1215,77 +1127,67 @@ async function getOrdersForUser(req, res) {
       }
     }
 
+    // ✅ If business_logo is missing, fetch it from merchant_business_details
     if (data && data.length) {
       const businessIds = new Set();
-
       for (const order of data) {
         if (order.business_details?.business_id) {
-          businessIds.add(Number(order.business_details.business_id));
+          businessIds.add(order.business_details.business_id);
         }
       }
 
       if (businessIds.size) {
-        const logos = await prisma.merchant_business_details.findMany({
-          where: {
-            business_id: {
-              in: Array.from(businessIds).map(Number),
-            },
-          },
-          select: {
-            business_id: true,
-            business_logo: true,
-          },
-        });
+        const [logos] = await db.query(
+          `SELECT business_id, business_logo 
+           FROM merchant_business_details 
+           WHERE business_id IN (?)`,
+          [Array.from(businessIds)],
+        );
 
         const logoMap = new Map();
-
         for (const logo of logos) {
           logoMap.set(Number(logo.business_id), logo.business_logo);
         }
 
+        // Attach logo to each order
         for (const order of data) {
           if (order.business_details?.business_id) {
             order.business_details.business_logo =
-              logoMap.get(Number(order.business_details.business_id)) || null;
+              logoMap.get(order.business_details.business_id) || null;
           }
         }
       }
     }
 
-    return res.json({ success: true, data });
+    res.json({ success: true, data });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 }
 
 async function updateOrder(req, res) {
   try {
-    if (typeof updateDb !== "function") {
+    if (typeof updateDb !== "function")
       throw new Error("update() model function not found/exported.");
-    }
 
     const affectedRows =
       updateDb.length >= 3
         ? await updateDb(db, req.params.order_id, req.body)
         : await updateDb(req.params.order_id, req.body);
 
-    if (!affectedRows) {
+    if (!affectedRows)
       return res.status(404).json({ message: "Order not found" });
-    }
-
-    return res.json({ message: "Order updated successfully" });
+    res.json({ message: "Order updated successfully" });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 }
 
 async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
   try {
     const mins = Number(estimated_minutes);
-
-    if (!Number.isFinite(mins) || mins <= 0) {
+    if (!Number.isFinite(mins) || mins <= 0)
       throw new Error("Invalid estimated minutes");
-    }
 
     const now = new Date();
     const startDate = new Date(now.getTime() + mins * 60 * 1000);
@@ -1298,7 +1200,6 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
       const minute = d.getUTCMinutes();
       const meridiem = hour24 >= 12 ? "PM" : "AM";
       const hour12 = hour24 % 12 || 12;
-
       return { hour12, minute, meridiem };
     };
 
@@ -1313,14 +1214,10 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
         ? `${sStr} - ${eStr} ${s.meridiem}`
         : `${sStr} ${s.meridiem} - ${eStr} ${e.meridiem}`;
 
-    await prisma.orders.updateMany({
-      where: {
-        order_id: String(order_id || "").trim().toUpperCase(),
-      },
-      data: {
-        estimated_arrivial_time: formattedRange,
-      },
-    });
+    await db.query(
+      `UPDATE orders SET estimated_arrivial_time = ? WHERE order_id = ?`,
+      [formattedRange, order_id],
+    );
   } catch (err) {
     console.error("[updateEstimatedArrivalTime ERROR]", err.message);
   }
@@ -1331,9 +1228,10 @@ async function updateEstimatedArrivalTime(order_id, estimated_minutes) {
  */
 async function updateOrderStatus(req, res) {
   try {
-    const order_id = String(req.params.order_id || "").trim().toUpperCase();
+    const order_id = String(req.params.order_id || "")
+      .trim()
+      .toUpperCase();
     const body = req.body || {};
-
     const { status, reason, estimated_minutes, cancelled_by, delivered_by } =
       body;
 
@@ -1361,9 +1259,7 @@ async function updateOrderStatus(req, res) {
       [order_id],
     );
 
-    if (!row) {
-      return res.status(404).json({ message: "Order not found" });
-    }
+    if (!row) return res.status(404).json({ message: "Order not found" });
 
     const user_id = Number(row.user_id);
     const current = String(row.current_status || "PENDING").toUpperCase();
@@ -1373,11 +1269,11 @@ async function updateOrderStatus(req, res) {
       `SELECT DISTINCT business_id FROM order_items WHERE order_id = ?`,
       [order_id],
     );
-
     const business_ids = bizRows
       .map((r) => Number(r.business_id))
       .filter((n) => Number.isFinite(n) && n > 0);
 
+    // DELIVERED pipeline
     if (normalized === "DELIVERED") {
       req.body = {
         ...(req.body || {}),
@@ -1385,62 +1281,70 @@ async function updateOrderStatus(req, res) {
         delivered_by: delivered_by || "SYSTEM",
         reason: finalReason || "",
       };
-
       return markOrderDelivered(req, res);
     }
 
+    // PICKEDUP pipeline (customer pickup)
     if (normalized === "PICKEDUP") {
       const pickedup_by = body.pickedup_by || "CUSTOMER";
 
+      // Update order status only (don't migrate yet)
       await db.query(
         `UPDATE orders 
-            SET pickedup_by = ?, 
-                pickedup_at = NOW(),
-                status = 'PICKEDUP',
-                updated_at = NOW()
-          WHERE order_id = ?`,
+     SET pickedup_by = ?, 
+         pickedup_at = NOW(),
+         status = 'PICKEDUP',
+         updated_at = NOW()
+     WHERE order_id = ?`,
         [pickedup_by, order_id],
       );
 
+      // ✅ Fetch order details and SEND EMAIL IMMEDIATELY
       try {
+        // Get order details
         const [[order]] = await db.query(
           `SELECT * FROM orders WHERE order_id = ?`,
           [order_id],
         );
 
+        // Get user
         const [users] = await db.query(
           `SELECT user_id, user_name, email, phone FROM users WHERE user_id = ?`,
           [order.user_id],
         );
 
+        // Get items
         const [items] = await db.query(
           `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
-             FROM order_items oi
-             LEFT JOIN food_menu fm ON oi.menu_id = fm.id
-            WHERE oi.order_id = ?`,
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
           [order_id],
         );
 
+        // Get business
         const [businesses] = await db.query(
           `SELECT business_id, business_name, address, business_logo
-             FROM merchant_business_details 
-            WHERE business_id = ?`,
+       FROM merchant_business_details 
+       WHERE business_id = ?`,
           [order.business_id],
         );
 
         const business = businesses[0] || {};
         const user = users[0] || {};
 
+        // Calculate totals
         const subtotal = items.reduce((sum, item) => {
           const price = parseFloat(item.price) || 0;
           const quantity = parseInt(item.quantity) || 0;
           return sum + price * quantity;
         }, 0);
-
         const grandTotal = parseFloat(order.total_amount) || subtotal;
+        // Get platform_fee from order
         const platformFee = parseFloat(order.platform_fee) || 0;
         const discountAmount = parseFloat(order.discount_amount) || 0;
 
+        // Build order data
         const orderData = {
           order_id: order.order_id,
           created_at: order.created_at,
@@ -1453,8 +1357,8 @@ async function updateOrderStatus(req, res) {
           business_name: business.business_name,
           business_logo: business.business_logo,
           business_address: business.address,
-          platform_fee: platformFee,
-          discount_amount: discountAmount,
+          platform_fee: platformFee, // ✅ Add this
+          discount_amount: discountAmount, // ✅ Add this
           items: items.map((item) => ({
             menu_name: item.menu_name,
             quantity: item.quantity,
@@ -1462,20 +1366,21 @@ async function updateOrderStatus(req, res) {
             subtotal:
               (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
           })),
-          subtotal,
+          subtotal: subtotal,
           grand_total: grandTotal,
         };
 
+        // Send email immediately
         const emailResult =
           await PickupEmailService.sendPickupReceipt(orderData);
 
         if (emailResult.success) {
+          // Save to receipt_email
           await db.query(
-            `INSERT INTO receipt_email 
-              (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
-             VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'PICKUP')
-             ON DUPLICATE KEY UPDATE 
-              receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent'`,
+            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
+         VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'PICKUP')
+         ON DUPLICATE KEY UPDATE 
+         receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent'`,
             [
               order_id,
               order.user_id,
@@ -1485,7 +1390,6 @@ async function updateOrderStatus(req, res) {
               business.business_name,
             ],
           );
-
           console.log(
             `[PICKEDUP] Email sent immediately for order ${order_id}`,
           );
@@ -1494,12 +1398,10 @@ async function updateOrderStatus(req, res) {
             `[PICKEDUP] Email failed for order ${order_id}:`,
             emailResult.error,
           );
-
           await db.query(
-            `INSERT INTO receipt_email 
-              (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
-             VALUES (?, ?, ?, ?, 'failed', ?, 'PICKUP')
-             ON DUPLICATE KEY UPDATE email_status = 'failed', error_message = ?`,
+            `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
+         VALUES (?, ?, ?, ?, 'failed', ?, 'PICKUP')
+         ON DUPLICATE KEY UPDATE email_status = 'failed', error_message = ?`,
             [
               order_id,
               order.user_id,
@@ -1511,6 +1413,7 @@ async function updateOrderStatus(req, res) {
           );
         }
 
+        // Send push notification
         await sendPushToUserId(order.user_id, {
           title: "✅ Order Picked Up Successfully",
           body: `You have successfully picked up your order ${order_id}. Thank you for shopping with us!`,
@@ -1526,10 +1429,9 @@ async function updateOrderStatus(req, res) {
         status: "PICKEDUP",
       });
     }
-
+    // CONFIRMED with unavailable changes
     if (normalized === "CONFIRMED") {
       const locked = new Set(["DELIVERED", "CANCELLED"]);
-
       if (locked.has(current)) {
         return res.status(400).json({
           success: false,
@@ -1555,12 +1457,10 @@ async function updateOrderStatus(req, res) {
 
       if (!result?.ok) {
         if (result?.code === "NOT_FOUND") {
-          return res.status(404).json({
-            success: false,
-            message: "Order not found",
-          });
+          return res
+            .status(404)
+            .json({ success: false, message: "Order not found" });
         }
-
         return res.status(400).json({
           success: false,
           message: result?.code || "Unable to confirm order",
@@ -1602,7 +1502,6 @@ async function updateOrderStatus(req, res) {
         const eta = result?.estimated_arrivial_time
           ? ` ETA: ${result.estimated_arrivial_time}`
           : "";
-
         await sendPushToUserId(user_id, {
           title: "Order Update",
           body: `Your order ${order_id} has been confirmed.${eta}`,
@@ -1631,6 +1530,7 @@ async function updateOrderStatus(req, res) {
       });
     }
 
+    // CANCEL restriction
     if (normalized === "CANCELLED") {
       const locked = new Set([
         "CONFIRMED",
@@ -1639,7 +1539,6 @@ async function updateOrderStatus(req, res) {
         "OUT_FOR_DELIVERY",
         "DELIVERED",
       ]);
-
       if (locked.has(current)) {
         return res.status(400).json({
           message:
@@ -1648,22 +1547,20 @@ async function updateOrderStatus(req, res) {
       }
     }
 
+    // ETA update
     if (estimated_minutes != null) {
       await updateEstimatedArrivalTime(order_id, estimated_minutes);
     }
 
-    if (typeof updateStatusDb !== "function") {
+    if (typeof updateStatusDb !== "function")
       throw new Error("updateStatus() model function not found/exported.");
-    }
 
     const affected =
       updateStatusDb.length >= 4
         ? await updateStatusDb(db, order_id, normalized, finalReason)
         : await updateStatusDb(order_id, normalized, finalReason);
 
-    if (!affected) {
-      return res.status(404).json({ message: "Order not found" });
-    }
+    if (!affected) return res.status(404).json({ message: "Order not found" });
 
     broadcastOrderStatusToMany({
       order_id,
@@ -1703,7 +1600,6 @@ async function updateOrderStatus(req, res) {
     try {
       const merchantUserIds =
         await getMerchantUserIdsByBusinessIds(business_ids);
-
       for (const merchantUserId of merchantUserIds) {
         await sendPushToUserId(merchantUserId, {
           title: "Order Update",
@@ -1729,8 +1625,9 @@ async function updateOrderStatus(req, res) {
 
     if (normalized === "CANCELLED") {
       const by =
-        String(cancelled_by || "SYSTEM").trim().toUpperCase() || "SYSTEM";
-
+        String(cancelled_by || "SYSTEM")
+          .trim()
+          .toUpperCase() || "SYSTEM";
       return res.json({
         success: true,
         message: "Order cancelled successfully.",
@@ -1754,38 +1651,33 @@ async function updateOrderStatus(req, res) {
 
 async function deleteOrder(req, res) {
   try {
-    if (typeof deleteDb !== "function") {
+    if (typeof deleteDb !== "function")
       throw new Error("delete() model function not found/exported.");
-    }
 
     const affectedRows =
       deleteDb.length >= 2
         ? await deleteDb(db, req.params.order_id)
         : await deleteDb(req.params.order_id);
 
-    if (!affectedRows) {
+    if (!affectedRows)
       return res.status(404).json({ message: "Order not found" });
-    }
-
-    return res.json({ message: "Order deleted successfully" });
+    res.json({ message: "Order deleted successfully" });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 }
 
 async function getOrderStatusCountsByBusiness(req, res) {
   try {
     const business_id = Number(req.params.business_id);
-
     if (!Number.isFinite(business_id) || business_id <= 0) {
       return res.status(400).json({ message: "Invalid business_id" });
     }
 
-    if (typeof getOrderStatusCountsByBusinessDb !== "function") {
+    if (typeof getOrderStatusCountsByBusinessDb !== "function")
       throw new Error(
         "getOrderStatusCountsByBusiness() model function not found/exported.",
       );
-    }
 
     const counts =
       getOrderStatusCountsByBusinessDb.length >= 2
@@ -1815,9 +1707,8 @@ async function cancelOrderByUser(req, res) {
         ? `Cancelled by customer: ${userReason}`
         : "Cancelled by customer before the store accepted the order.";
 
-    if (typeof cancelAndArchiveOrder !== "function") {
+    if (typeof cancelAndArchiveOrder !== "function")
       throw new Error("cancelAndArchiveOrder() pipeline not found/exported.");
-    }
 
     const out =
       cancelAndArchiveOrder.length >= 3
@@ -1835,15 +1726,12 @@ async function cancelOrderByUser(req, res) {
           });
 
     if (!out?.ok) {
-      if (out?.code === "NOT_FOUND") {
+      if (out?.code === "NOT_FOUND")
         return res.status(404).json({ message: "Order not found" });
-      }
-
-      if (out?.code === "FORBIDDEN") {
-        return res.status(403).json({
-          message: "You are not allowed to cancel this order.",
-        });
-      }
+      if (out?.code === "FORBIDDEN")
+        return res
+          .status(403)
+          .json({ message: "You are not allowed to cancel this order." });
 
       if (out?.code === "SKIPPED") {
         return res.status(400).json({
@@ -1923,23 +1811,23 @@ async function markOrderDelivered(req, res) {
   const order_id = String(req.params.order_id || req.body?.order_id || "")
     .trim()
     .toUpperCase();
-
   const delivered_by = String(req.body?.delivered_by || "SYSTEM").trim();
+  const reason = String(req.body?.reason || "").trim();
 
   if (!order_id) {
-    return res.status(400).json({
-      success: false,
-      message: "order_id is required",
-    });
+    return res
+      .status(400)
+      .json({ success: false, message: "order_id is required" });
   }
 
   try {
+    // ✅ STEP 1: Update order status to DELIVERED
     await db.query(
       `UPDATE orders 
-          SET status = 'DELIVERED', 
-              delivered_at = NOW(),
-              updated_at = NOW()
-        WHERE order_id = ?`,
+       SET status = 'DELIVERED', 
+           delivered_at = NOW(),
+           updated_at = NOW()
+       WHERE order_id = ?`,
       [order_id],
     );
 
@@ -1947,18 +1835,19 @@ async function markOrderDelivered(req, res) {
       `[DELIVERED] Order ${order_id} marked as delivered by ${delivered_by}`,
     );
 
+    // ✅ STEP 2: Fetch order details
     const [[order]] = await db.query(
       `SELECT * FROM orders WHERE order_id = ?`,
       [order_id],
     );
 
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
+    // ✅ STEP 3: Fetch user details
     const [users] = await db.query(
       `SELECT user_id, user_name, email, phone FROM users WHERE user_id = ?`,
       [order.user_id],
@@ -1970,11 +1859,12 @@ async function markOrderDelivered(req, res) {
       console.error(`[DELIVERED] No email found for user ${order.user_id}`);
     }
 
+    // ✅ STEP 4: Fetch order items
     const [items] = await db.query(
       `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
-         FROM order_items oi
-         LEFT JOIN food_menu fm ON oi.menu_id = fm.id
-        WHERE oi.order_id = ?`,
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
       [order_id],
     );
 
@@ -1982,15 +1872,17 @@ async function markOrderDelivered(req, res) {
       console.error(`[DELIVERED] No items found for order ${order_id}`);
     }
 
+    // ✅ STEP 5: Fetch business details
     const [businesses] = await db.query(
       `SELECT business_id, business_name, address, business_logo
-         FROM merchant_business_details 
-        WHERE business_id = ?`,
+       FROM merchant_business_details 
+       WHERE business_id = ?`,
       [order.business_id],
     );
 
     const business = businesses[0] || {};
 
+    // ✅ STEP 6: Calculate totals
     const subtotal = items.reduce((sum, item) => {
       const price = parseFloat(item.price) || 0;
       const quantity = parseInt(item.quantity) || 0;
@@ -1999,15 +1891,14 @@ async function markOrderDelivered(req, res) {
 
     const deliveryFee = parseFloat(order.delivery_fee) || 0;
     const platformFee = parseFloat(order.platform_fee) || 0;
-    const discountAmount = parseFloat(order.discount_amount) || 0;
-    const merchantDeliveryFee = parseFloat(order.merchant_delivery_fee) || 0;
+    const discountAmount = parseFloat(order.discount_amount) || 0; // ✅ ADD THIS
+    const merchantDeliveryFee = parseFloat(order.merchant_delivery_fee) || 0; // ✅ ADD THIS
     const grandTotal = parseFloat(order.total_amount) || subtotal;
 
+    // ✅ STEP 7: Handle business logo URL
     let businessLogo = null;
-
     if (business.business_logo) {
       let logo = business.business_logo;
-
       if (logo.startsWith("/uploads/")) {
         businessLogo = `https://backend.tabdhey.bt/merchant${logo}`;
       } else if (logo.startsWith("http")) {
@@ -2017,15 +1908,16 @@ async function markOrderDelivered(req, res) {
       }
     }
 
+    // ✅ STEP 8: Parse delivery address
     let deliveryAddress = order.delivery_address || "N/A";
-
     if (deliveryAddress !== "N/A" && typeof deliveryAddress === "string") {
       try {
         const parsed = JSON.parse(deliveryAddress);
         deliveryAddress = parsed.address || deliveryAddress;
-      } catch {}
+      } catch (e) {}
     }
 
+    // ✅ STEP 9: Build order data for email
     const orderData = {
       order_id: order.order_id,
       delivered_at: order.delivered_at || new Date(),
@@ -2045,11 +1937,11 @@ async function markOrderDelivered(req, res) {
         subtotal:
           (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
       })),
-      subtotal,
+      subtotal: subtotal,
       delivery_fee: deliveryFee,
       platform_fee: platformFee,
-      discount_amount: discountAmount,
-      merchant_delivery_fee: merchantDeliveryFee,
+      discount_amount: discountAmount, // ✅ ADD THIS
+      merchant_delivery_fee: merchantDeliveryFee, // ✅ ADD THIS
       grand_total: grandTotal,
     };
 
@@ -2057,18 +1949,18 @@ async function markOrderDelivered(req, res) {
       `[DELIVERED] Discount: ${discountAmount}, Merchant Delivery Fee: ${merchantDeliveryFee}`,
     );
 
+    // ✅ STEP 10: Send email immediately
     console.log(`[DELIVERED] Sending delivery receipt to ${user.email}...`);
-
     const EmailService = require("../services/emailService");
     const emailResult = await EmailService.sendOrderReceipt(orderData);
 
     if (emailResult.success) {
+      // Save to receipt_email
       await db.query(
-        `INSERT INTO receipt_email 
-          (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
+        `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, user_name, business_name, receipt_sent, receipt_sent_at, email_status, delivery_method)
          VALUES (?, ?, ?, ?, ?, ?, 1, NOW(), 'sent', 'DELIVERY')
          ON DUPLICATE KEY UPDATE 
-          receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent', delivery_method = 'DELIVERY'`,
+         receipt_sent = 1, receipt_sent_at = NOW(), email_status = 'sent', delivery_method = 'DELIVERY'`,
         [
           order_id,
           order.user_id,
@@ -2078,7 +1970,6 @@ async function markOrderDelivered(req, res) {
           business.business_name,
         ],
       );
-
       console.log(
         `[DELIVERED] ✅ Email sent successfully for order ${order_id}`,
       );
@@ -2087,10 +1978,8 @@ async function markOrderDelivered(req, res) {
         `[DELIVERED] ❌ Email failed for order ${order_id}:`,
         emailResult.error,
       );
-
       await db.query(
-        `INSERT INTO receipt_email 
-          (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
+        `INSERT INTO receipt_email (order_id, user_id, business_id, user_email, email_status, error_message, delivery_method)
          VALUES (?, ?, ?, ?, 'failed', ?, 'DELIVERY')
          ON DUPLICATE KEY UPDATE email_status = 'failed', error_message = ?`,
         [
@@ -2104,6 +1993,7 @@ async function markOrderDelivered(req, res) {
       );
     }
 
+    // ✅ STEP 11: Send push notification
     try {
       await sendPushToUserId(order.user_id, {
         title: "✅ Order Delivered Successfully",
@@ -2113,6 +2003,7 @@ async function markOrderDelivered(req, res) {
       console.error("[DELIVERED] Push notification failed:", pushErr);
     }
 
+    // ✅ STEP 12: Return success (order stays in orders table for 30 minutes)
     return res.json({
       success: true,
       message: "Order marked as delivered. Receipt sent to customer.",
@@ -2121,7 +2012,6 @@ async function markOrderDelivered(req, res) {
     });
   } catch (e) {
     console.error("[markOrderDelivered]", e);
-
     return res.status(500).json({
       success: false,
       message: "Technical error while marking delivered.",
@@ -2130,25 +2020,26 @@ async function markOrderDelivered(req, res) {
   }
 }
 
+// Add this function after markOrderDelivered function (around line 900+)
+
 async function markOrderPickedUp(req, res) {
   const order_id = String(req.params.order_id || req.body?.order_id || "")
     .trim()
     .toUpperCase();
-
   const pickedup_by = String(req.body?.pickedup_by || "SYSTEM").trim();
+  const reason = String(req.body?.reason || "").trim();
 
   if (!order_id) {
-    return res.status(400).json({
-      success: false,
-      message: "order_id is required",
-    });
+    return res
+      .status(400)
+      .json({ success: false, message: "order_id is required" });
   }
 
   const conn = await db.getConnection();
-
   try {
     await conn.beginTransaction();
 
+    // Get order details
     const [[order]] = await conn.query(
       `SELECT * FROM orders WHERE order_id = ? FOR UPDATE`,
       [order_id],
@@ -2156,13 +2047,12 @@ async function markOrderPickedUp(req, res) {
 
     if (!order) {
       await conn.rollback();
-
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
+    // Check if already migrated
     const [[existing]] = await conn.query(
       `SELECT order_id FROM pickedup_orders WHERE order_id = ? LIMIT 1`,
       [order_id],
@@ -2170,7 +2060,6 @@ async function markOrderPickedUp(req, res) {
 
     if (existing) {
       await conn.commit();
-
       return res.json({
         success: true,
         message: "Order already migrated to pickedup_orders",
@@ -2179,23 +2068,24 @@ async function markOrderPickedUp(req, res) {
       });
     }
 
+    // ✅ FIXED: Removed fm.name (only use item_name)
     const [items] = await conn.query(
       `SELECT oi.*, COALESCE(fm.item_name, 'Item') as menu_name
-         FROM order_items oi
-         LEFT JOIN food_menu fm ON oi.menu_id = fm.id
-        WHERE oi.order_id = ?`,
+       FROM order_items oi
+       LEFT JOIN food_menu fm ON oi.menu_id = fm.id
+       WHERE oi.order_id = ?`,
       [order_id],
     );
 
     if (!items.length) {
       await conn.rollback();
-
       return res.status(404).json({
         success: false,
         message: "No items found for this order",
       });
     }
 
+    // Get business name
     const [[business]] = await conn.query(
       `SELECT business_name FROM merchant_business_details WHERE business_id = ?`,
       [order.business_id],
@@ -2203,15 +2093,16 @@ async function markOrderPickedUp(req, res) {
 
     const businessName = business?.business_name || "Unknown Business";
 
+    // Parse pickup address
     let pickupAddress = order.delivery_address || "N/A";
-
     if (pickupAddress !== "N/A" && typeof pickupAddress === "string") {
       try {
         const parsed = JSON.parse(pickupAddress);
         pickupAddress = parsed.address || pickupAddress;
-      } catch {}
+      } catch (e) {}
     }
 
+    // Insert into pickedup_orders
     await conn.query(
       `INSERT INTO pickedup_orders (
         order_id, user_id, business_id, business_name, status,
@@ -2233,6 +2124,7 @@ async function markOrderPickedUp(req, res) {
       ],
     );
 
+    // Insert items into pickedup_order_items
     for (const item of items) {
       const subtotal =
         (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
@@ -2256,6 +2148,7 @@ async function markOrderPickedUp(req, res) {
       );
     }
 
+    // Delete from orders
     await conn.query(`DELETE FROM order_items WHERE order_id = ?`, [order_id]);
     await conn.query(`DELETE FROM orders WHERE order_id = ?`, [order_id]);
 
@@ -2265,7 +2158,13 @@ async function markOrderPickedUp(req, res) {
       `[PICKEDUP] Order ${order_id} migrated to pickedup_orders by ${pickedup_by}`,
     );
 
+    // Send push notification (optional)
     try {
+      const [[user]] = await conn.query(
+        `SELECT user_name FROM users WHERE user_id = ?`,
+        [order.user_id],
+      );
+
       await sendPushToUserId(order.user_id, {
         title: "✅ Order Picked Up Successfully",
         body: `You have successfully picked up your order ${order_id}. Thank you for shopping with us!`,
@@ -2281,9 +2180,7 @@ async function markOrderPickedUp(req, res) {
     });
   } catch (e) {
     await conn.rollback();
-
     console.error("[markOrderPickedUp]", e);
-
     return res.status(500).json({
       success: false,
       message: "Technical error while marking picked up.",
@@ -2293,7 +2190,6 @@ async function markOrderPickedUp(req, res) {
     conn.release();
   }
 }
-
 module.exports = {
   uploadOrderImages,
   createOrder,
