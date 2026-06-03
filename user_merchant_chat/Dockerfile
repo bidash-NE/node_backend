@@ -7,28 +7,36 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Required by Prisma runtime/client generation
 RUN apk add --no-cache openssl
 
-# Copy root package + Prisma files
-COPY package*.json ./
+# Copy service package files, not root package files
+COPY user_merchant_chat/package*.json ./user_merchant_chat/
+
+# Copy root Prisma files because Prisma schema/client is shared
 COPY prisma ./prisma/
 
-# Install all dependencies including dev dependencies for prisma generate
+# Copy shared lib
+COPY lib ./lib/
+
+# Install dependencies inside service folder
+WORKDIR /app/user_merchant_chat
 RUN npm ci --include=dev
 
-# Generate Prisma client
-RUN npx prisma generate
+# Generate Prisma from root prisma schema
+WORKDIR /app
+RUN ./user_merchant_chat/node_modules/.bin/prisma generate --schema=./prisma/schema.prisma
 
-# Copy service and shared libraries
+# Copy full service source
 COPY user_merchant_chat ./user_merchant_chat
-COPY lib ./lib
 
-# Safety: support both require("../lib/prisma") and require("./lib/prisma")
+# Make shared lib available from both paths:
+# - /app/lib
+# - /app/user_merchant_chat/lib
 RUN mkdir -p /app/user_merchant_chat/lib && \
     cp -a /app/lib/. /app/user_merchant_chat/lib/
 
-# Remove dev dependencies for production
+# Prune dev dependencies from service node_modules
+WORKDIR /app/user_merchant_chat
 RUN npm prune --production
 
 
@@ -41,20 +49,23 @@ WORKDIR /app
 
 RUN apk add --no-cache openssl
 
-# Non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Create upload directory for chat images
 RUN mkdir -p /app/user_merchant_chat/uploads/chat && \
     chown -R nodejs:nodejs /app/user_merchant_chat/uploads
 
-# Copy production build
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
+# Copy service node_modules
+COPY --from=builder --chown=nodejs:nodejs /app/user_merchant_chat/node_modules ./user_merchant_chat/node_modules
+
+# Copy generated Prisma client if your prisma output is /app/generated
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
+
+# Copy Prisma schema and shared lib
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+
+# Copy full service
 COPY --from=builder --chown=nodejs:nodejs /app/user_merchant_chat ./user_merchant_chat
 
 USER nodejs
