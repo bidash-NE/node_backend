@@ -1,175 +1,95 @@
 // models/orders/crud/findByBusinessGroupedByUser.js
-// ✅ Full Prisma version
-// ✅ No raw db.query()
-// ✅ Keeps compatibility with old controller call:
-//    findByBusinessGroupedByUser(db, business_id)
-// ✅ Preserves grouping by user -> orders -> items
-
 const {
-  prisma,
+  db,
+  ensureStatusReasonSupport,
+  ensureServiceTypeSupport,
+  ensureDeliveryExtrasSupport,
   getOwnerTypeByBusinessId,
   parseDeliveryAddress,
 } = require("../helpers");
 
-/* ---------------- helpers ---------------- */
+module.exports = async function findByBusinessGroupedByUser(business_id) {
+  const bid = Number(business_id);
+  if (!Number.isFinite(bid) || bid <= 0) return [];
 
-function toInt(v) {
-  const n = Number(v);
-  return Number.isInteger(n) ? n : null;
-}
+  const hasReason = await ensureStatusReasonSupport();
+  const hasService = await ensureServiceTypeSupport();
+  const extras = await ensureDeliveryExtrasSupport();
 
-function toNumber(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
+  const derivedServiceType = (await getOwnerTypeByBusinessId(bid, db)) || null;
 
-function serializeValue(value) {
-  if (typeof value === "bigint") return Number(value);
-  return value;
-}
+  const [rows] = await db.query(
+    `
+    SELECT
+      o.order_id,
+      o.user_id,
+      u.user_name,
+      u.email,
+      u.phone,
 
-function serializeRow(row) {
-  if (!row) return row;
+      ${hasService ? "o.service_type" : "NULL AS service_type"},
+      o.status,
+      ${hasReason ? "o.status_reason" : "NULL AS status_reason"},
 
-  const out = {};
+      o.total_amount,
+      o.discount_amount,
+      o.delivery_fee,
+      o.platform_fee,
+      o.merchant_delivery_fee,
+      o.payment_method,
 
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = serializeValue(value);
-  }
+      o.delivery_address,
+      ${extras.hasLat ? "o.delivery_lat" : "NULL AS delivery_lat"},
+      ${extras.hasLng ? "o.delivery_lng" : "NULL AS delivery_lng"},
 
-  return out;
-}
+      ${extras.hasFloor ? "o.delivery_floor_unit" : "NULL AS delivery_floor_unit"},
+      ${extras.hasInstr ? "o.delivery_instruction_note" : "NULL AS delivery_instruction_note"},
+      ${extras.hasMode ? "o.delivery_special_mode" : "NULL AS delivery_special_mode"},
+      ${extras.hasPhoto ? "o.delivery_photo_url" : "NULL AS delivery_photo_url"},
 
-function parsePhotoUrls(deliveryPhotoUrls, deliveryPhotoUrl) {
-  let photos = [];
+      o.note_for_restaurant,
+      o.if_unavailable,
+      o.estimated_arrivial_time,
+      o.fulfillment_type,
+      o.priority,
+      o.created_at,
+      o.updated_at,
 
-  if (deliveryPhotoUrls) {
-    if (Array.isArray(deliveryPhotoUrls)) {
-      photos = deliveryPhotoUrls;
-    } else {
-      try {
-        const parsed = JSON.parse(deliveryPhotoUrls);
-        if (Array.isArray(parsed)) photos = parsed;
-      } catch {}
-    }
-  }
+      oi.item_id,
+      oi.business_id,
+      oi.business_name,
+      oi.menu_id,
+      oi.item_name,
+      oi.item_image,
+      oi.quantity,
+      oi.price,
+      oi.subtotal,
+      oi.platform_fee AS item_platform_fee,
+      oi.delivery_fee AS item_delivery_fee
 
-  if (!photos.length && deliveryPhotoUrl) {
-    photos = [deliveryPhotoUrl];
-  }
+    FROM order_items oi
+    INNER JOIN orders o ON o.order_id = oi.order_id
+    LEFT JOIN users u ON u.user_id = o.user_id
+    WHERE oi.business_id = ?
+    ORDER BY o.created_at DESC, o.order_id DESC, oi.menu_id ASC
+    `,
+    [bid],
+  );
 
-  return photos.map((x) => String(x || "").trim()).filter(Boolean);
-}
-
-function normalizeStatus(status) {
-  let st = String(status || "").toUpperCase();
-
-  if (st === "COMPLETED") {
-    st = "DELIVERED";
-  }
-
-  return st;
-}
-
-function normalizeServiceType(v, fallback = null) {
-  const s = String(v || "").trim().toUpperCase();
-
-  if (s === "FOOD") return "FOOD";
-  if (s === "MART") return "MART";
-
-  return fallback;
-}
-
-/**
- * Compatible call styles:
- *
- * New:
- *   findByBusinessGroupedByUser(business_id)
- *
- * Old controller style:
- *   findByBusinessGroupedByUser(db, business_id)
- */
-module.exports = async function findByBusinessGroupedByUser(
-  _maybeDbOrBusinessId,
-  maybeBusinessId,
-) {
-  const rawBusinessId =
-    maybeBusinessId !== undefined ? maybeBusinessId : _maybeDbOrBusinessId;
-
-  const bid = toInt(rawBusinessId);
-
-  if (!bid || bid <= 0) {
-    return [];
-  }
-
-  const derivedServiceType = (await getOwnerTypeByBusinessId(bid)) || null;
-
-  /*
-    Old SQL selected rows from order_items where oi.business_id = ?
-    and joined orders + users.
-
-    Prisma equivalent:
-    Get all order_items for this business, include:
-    - parent order
-    - parent order user
-  */
-  const rows = await prisma.order_items.findMany({
-    where: {
-      business_id: bid,
-    },
-    include: {
-      orders: {
-        include: {
-          users: {
-            select: {
-              user_id: true,
-              user_name: true,
-              email: true,
-              phone: true,
-            },
-          },
-        },
-      },
-    },
-    orderBy: [
-      {
-        orders: {
-          created_at: "desc",
-        },
-      },
-      {
-        order_id: "desc",
-      },
-      {
-        menu_id: "asc",
-      },
-    ],
-  });
-
-  if (!rows.length) {
-    return [];
-  }
+  if (!rows.length) return [];
 
   const byUser = new Map();
 
-  for (const itemRaw of rows) {
-    const item = serializeRow(itemRaw);
-    const order = serializeRow(itemRaw.orders || {});
-    const user = serializeRow(itemRaw.orders?.users || {});
-
-    if (!order?.order_id) {
-      continue;
-    }
-
-    const uid = Number(order.user_id);
+  for (const r of rows) {
+    const uid = Number(r.user_id);
 
     if (!byUser.has(uid)) {
       byUser.set(uid, {
         user: {
           user_id: uid,
-          name: user.user_name || null,
-          email: user.email || null,
-          phone: user.phone || null,
+          name: r.user_name || null,
+          email: r.email || null,
+          phone: r.phone || null,
         },
         orders: [],
         _ordersMap: new Map(),
@@ -178,115 +98,93 @@ module.exports = async function findByBusinessGroupedByUser(
 
     const group = byUser.get(uid);
 
-    if (!group._ordersMap.has(order.order_id)) {
-      const st = normalizeStatus(order.status);
+    if (!group._ordersMap.has(r.order_id)) {
+      let st = String(r.status || "").toUpperCase();
+      if (st === "COMPLETED") st = "DELIVERED";
 
-      const deliverTo = parseDeliveryAddress(order.delivery_address) || {};
+      const deliverTo = parseDeliveryAddress(r.delivery_address) || {};
+      if (deliverTo.lat == null && r.delivery_lat != null)
+        deliverTo.lat = Number(r.delivery_lat);
+      if (deliverTo.lng == null && r.delivery_lng != null)
+        deliverTo.lng = Number(r.delivery_lng);
 
-      if (deliverTo.lat == null && order.delivery_lat != null) {
-        deliverTo.lat = Number(order.delivery_lat);
-      }
-
-      if (deliverTo.lng == null && order.delivery_lng != null) {
-        deliverTo.lng = Number(order.delivery_lng);
-      }
-
-      const deliveryPhotos = parsePhotoUrls(
-        order.delivery_photo_urls,
-        order.delivery_photo_url,
-      );
-
-      deliverTo.delivery_floor_unit = order.delivery_floor_unit || null;
-      deliverTo.delivery_instruction_note =
-        order.delivery_instruction_note || null;
-      deliverTo.delivery_special_mode = order.delivery_special_mode || null;
-
-      // Full delivery photo list for new UI
-      deliverTo.delivery_photo_urls = deliveryPhotos;
-
-      // Old UI compatibility:
-      // Your old code intentionally commented this out, so we keep it out.
-      // deliverTo.delivery_photo_url = deliveryPhotos[0] || null;
+      deliverTo.delivery_floor_unit = r.delivery_floor_unit || null;
+      deliverTo.delivery_instruction_note = r.delivery_instruction_note || null;
+      deliverTo.delivery_special_mode = r.delivery_special_mode || null;
+      deliverTo.delivery_photo_url = r.delivery_photo_url || null;
 
       const orderObj = {
-        order_id: order.order_id,
-        service_type: normalizeServiceType(
-          order.service_type,
-          derivedServiceType,
-        ),
+        order_id: r.order_id,
+        service_type: r.service_type || derivedServiceType,
         status: st,
-        status_reason: order.status_reason || null,
+        status_reason: r.status_reason || null,
 
-        // Sum of item subtotals for THIS merchant within this order
+        // sum of item subtotals for THIS merchant within this order
         items_total: 0,
 
-        payment_method: order.payment_method,
-        fulfillment_type: order.fulfillment_type,
-        priority: order.priority,
-        estimated_arrivial_time: order.estimated_arrivial_time || null,
+        payment_method: r.payment_method,
+        fulfillment_type: r.fulfillment_type,
+        priority: r.priority,
+        estimated_arrivial_time: r.estimated_arrivial_time || null,
 
-        note_for_restaurant: order.note_for_restaurant || null,
-        if_unavailable: order.if_unavailable || null,
+        note_for_restaurant: r.note_for_restaurant || null,
+        if_unavailable: r.if_unavailable || null,
 
         deliver_to: deliverTo,
 
         totals: {
-          total_amount: toNumber(order.total_amount, 0),
-          discount_amount: toNumber(order.discount_amount, 0),
-          delivery_fee: toNumber(order.delivery_fee, 0),
-          platform_fee: toNumber(order.platform_fee, 0),
+          total_amount: Number(r.total_amount || 0),
+          discount_amount: Number(r.discount_amount || 0),
+          delivery_fee: Number(r.delivery_fee || 0),
+          platform_fee: Number(r.platform_fee || 0),
           merchant_delivery_fee:
-            order.merchant_delivery_fee != null
-              ? Number(order.merchant_delivery_fee)
+            r.merchant_delivery_fee != null
+              ? Number(r.merchant_delivery_fee)
               : null,
         },
 
-        created_at: order.created_at,
-        updated_at: order.updated_at,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
 
         business: {
-          business_id: item.business_id,
-          business_name: item.business_name || null,
+          business_id: r.business_id,
+          business_name: r.business_name || null,
         },
-
         items: [],
       };
 
-      group._ordersMap.set(order.order_id, orderObj);
+      group._ordersMap.set(r.order_id, orderObj);
       group.orders.push(orderObj);
     }
 
-    const orderRef = group._ordersMap.get(order.order_id);
+    const orderRef = group._ordersMap.get(r.order_id);
 
-    const lineSubtotal = toNumber(item.subtotal, 0);
-
+    const lineSubtotal = Number(r.subtotal || 0);
     orderRef.items_total = Number(
       (Number(orderRef.items_total || 0) + lineSubtotal).toFixed(2),
     );
 
     orderRef.items.push({
-      item_id: item.item_id,
-      business_id: item.business_id,
-      business_name: item.business_name,
-      menu_id: item.menu_id,
-      item_name: item.item_name,
-      item_image: item.item_image || null,
-      quantity: item.quantity,
-      price: item.price,
-      subtotal: item.subtotal,
-      platform_fee: toNumber(item.platform_fee, 0),
-      delivery_fee: toNumber(item.delivery_fee, 0),
+      item_id: r.item_id,
+      business_id: r.business_id,
+      business_name: r.business_name,
+      menu_id: r.menu_id,
+      item_name: r.item_name,
+      item_image: r.item_image || null,
+      quantity: r.quantity,
+      price: r.price,
+      subtotal: r.subtotal,
+      platform_fee: Number(r.item_platform_fee || 0),
+      delivery_fee: Number(r.item_delivery_fee || 0),
     });
   }
 
   const out = Array.from(byUser.values()).map((g) => {
     delete g._ordersMap;
-
     g.orders = (g.orders || []).map((o) => ({
       ...o,
       items_total: Number(Number(o.items_total || 0).toFixed(2)),
     }));
-
     return g;
   });
 
