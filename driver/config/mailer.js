@@ -16,7 +16,7 @@ const user = String(SMTP_USER).trim();
 const pass = String(SMTP_PASS).trim();
 const from =
   (SMTP_FROM && String(SMTP_FROM).trim()) ||
-  (user ? `No-Reply <${user}>` : null);
+  (user ? `TàbDey <${user}>` : null);
 
 const isConfigured = Boolean(host && user && pass);
 
