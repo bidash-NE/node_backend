@@ -46,10 +46,11 @@ function toOut(m) {
     request_id: Number(m.request_id),
     sender_type: m.sender_type,
     sender_id: m.sender_id != null ? Number(m.sender_id) : null,
-    message: m.message || "",
-    attachments: m.attachments ?? null,
+    message: m.deleted ? "" : (m.message || ""),
+    attachments: m.deleted ? null : (m.attachments ?? null),
     created_at: m.created_at,
     reply_to: m.reply_to ?? null,
+    deleted: m.deleted ?? false,
   };
 }
 
@@ -341,6 +342,44 @@ export function initRideChat(io, mysqlPool, socket) {
       ackOk(ack, { messages });
     } catch (e) {
       console.error("[chat ERROR] chat:history", e?.message);
+      ackFail(ack, "server_error");
+    }
+  });
+
+  /* ---------------------- DELETE --------------------- */
+  socket.on("chat:delete", async (payload = {}, ack) => {
+    const rideId = Number(payload.request_id);
+    const messageId = Number(payload.message_id);
+    console.log(`[chat RECV] chat:delete ride:${rideId} msgId:${messageId} socket:${socket.id}`);
+
+    try {
+      if (!rideId || !messageId) return ackFail(ack, "request_id_and_message_id_required");
+
+      const mem = await ensureRideMembership(mysqlPool, rideId, socket);
+      if (!mem.ok) return ackFail(ack, mem.reason);
+
+      const rows = await r.zrangebyscore(msgKey(rideId), messageId, messageId);
+      if (!rows.length) return ackFail(ack, "message_not_found");
+
+      const msg = safeParse(rows[0]);
+      if (!msg) return ackFail(ack, "message_not_found");
+
+      // Only the original sender can unsend
+      if (String(msg.sender_id) !== String(mem.selfId) || msg.sender_type !== mem.role) {
+        return ackFail(ack, "not_authorized");
+      }
+
+      // Replace message content with a deleted tombstone (keeps the ID in history)
+      const deleted = { ...msg, message: "", attachments: null, deleted: true, deleted_at: nowIso() };
+      await r.zremrangebyscore(msgKey(rideId), messageId, messageId);
+      await r.zadd(msgKey(rideId), messageId, JSON.stringify(deleted));
+
+      const room = ROOM.ride(rideId);
+      io.to(room).emit("chat:deleted", { request_id: rideId, message_id: messageId });
+      console.log(`[chat OK] chat:delete ride:${rideId} msgId:${messageId}`);
+      ackOk(ack, { message_id: messageId });
+    } catch (e) {
+      console.error("[chat ERROR] chat:delete", e?.message);
       ackFail(ack, "server_error");
     }
   });
