@@ -49,7 +49,20 @@ function toOut(m) {
     message: m.message || "",
     attachments: m.attachments ?? null,
     created_at: m.created_at,
+    reply_to: m.reply_to ?? null,
   };
+}
+
+async function resolveReplyTo(r, rideId, replyToId) {
+  if (!replyToId) return null;
+  try {
+    const rows = await r.zrangebyscore(msgKey(rideId), replyToId, replyToId);
+    if (!rows.length) return null;
+    const msg = safeParse(rows[0]);
+    return msg ? toOut(msg) : null;
+  } catch {
+    return null;
+  }
 }
 function roomSize(io, room) {
   try {
@@ -251,6 +264,7 @@ export function initRideChat(io, mysqlPool, socket) {
       const text = typeof payload.message === "string" ? payload.message.trim() : "";
       const attachments = payload.attachments ?? null;
       const temp_id = payload.temp_id || null;
+      const reply_to_id = payload.reply_to_id ? Number(payload.reply_to_id) : null;
 
       if (!rideId) return ackFail(ack, "request_id_required");
       if (!text && !attachments) return ackFail(ack, "empty_message");
@@ -271,12 +285,14 @@ export function initRideChat(io, mysqlPool, socket) {
         message: text || "",
         attachments: attachments || null,
         created_at: nowIso(),
+        reply_to_id: reply_to_id || null,
       };
 
       await r.zadd(msgKey(rideId), id, JSON.stringify(messageObj));
       console.log(`[chat STORE] ride:${rideId} msgId:${id} by:${mem.role} uid:${mem.selfId} textLen:${(text || "").length}`);
 
-      const out = toOut(messageObj);
+      const reply_to = await resolveReplyTo(r, rideId, reply_to_id);
+      const out = toOut({ ...messageObj, reply_to });
       logEmit(io, room, "chat:new", { message: out, temp_id });
       io.to(room).emit("chat:new", { message: out, temp_id });
 
@@ -306,7 +322,20 @@ export function initRideChat(io, mysqlPool, socket) {
 
       const maxScore = Number.isFinite(beforeId) ? beforeId - 1 : "+inf";
       const rows = await r.zrevrangebyscore(msgKey(rideId), maxScore, "-inf", "LIMIT", 0, limit);
-      const messages = rows.map(safeParse).filter(Boolean).map(toOut).reverse();
+      const parsed = rows.map(safeParse).filter(Boolean);
+
+      // Batch-resolve reply_to for any messages that reference another message
+      const replyIds = [...new Set(parsed.filter(m => m.reply_to_id).map(m => m.reply_to_id))];
+      const replyMap = {};
+      await Promise.all(replyIds.map(async (rid) => {
+        const resolved = await resolveReplyTo(r, rideId, rid);
+        if (resolved) replyMap[rid] = resolved;
+      }));
+
+      const messages = parsed.map(m => toOut({
+        ...m,
+        reply_to: m.reply_to_id ? (replyMap[m.reply_to_id] ?? null) : null,
+      })).reverse();
 
       console.log(`[chat OK] history ride:${rideId} -> ${messages.length} msgs (limit=${limit}, before=${beforeId ?? "∞"})`);
       ackOk(ack, { messages });
