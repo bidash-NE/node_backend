@@ -72,7 +72,7 @@ This OTP is valid for ${ttlMinutes} minutes and can only be used once.
 ${disclaimer}
 
 Best Regards,
-TabDhey
+TàbDey
 `.trim();
 
   const html = `
@@ -83,7 +83,7 @@ TabDhey
 <p>This OTP is valid for <b>${ttlMinutes} minutes</b> and can only be used once.</p>
 <hr />
 <p style="font-size:12px;color:#777;">${disclaimer}</p>
-<p>Best Regards,<br />TabDhey "Everything at your door step!"</p>
+<p>Best Regards,<br />TàbDey "Everything at your door step!"</p>
 `.trim();
 
   const info = await transporter.sendMail({

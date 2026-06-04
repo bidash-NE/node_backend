@@ -86,11 +86,11 @@ class EmailService {
               </div>
               
               <p>Please find attached your detailed receipt in PDF format.</p>
-              <p>Thank you for choosing TabDhey!</p>
+              <p>Thank you for choosing TàbDey!</p>
             </div>
             <div class="footer">
               <p>This is an automated message, please do not reply.</p>
-              <p>&copy; ${new Date().getFullYear()} TabDhey. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} TàbDey. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -98,7 +98,7 @@ class EmailService {
       `;
 
       const info = await this.transporter.sendMail({
-        from: process.env.SMTP_FROM || `"TabDhey" <${process.env.SMTP_USER}>`,
+        from: process.env.SMTP_FROM || `"TàbDey" <${process.env.SMTP_USER}>`,
         to: orderData.customer_email,
         subject: `Your Order Has Been Delivered - ${orderData.order_id}`,
         html: htmlContent,

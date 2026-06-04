@@ -20,7 +20,7 @@ async function sendEmailController(req, res) {
       text: message,
       html: `
         <div style="font-family: Arial, sans-serif;">
-          <h2>Tabdhey Support</h2>
+          <h2>TàbDey Support</h2>
           <p>${message}</p>
           <br/>
           <small>NOte: Please feel free to ask anything! Good Day Ahead!</small>

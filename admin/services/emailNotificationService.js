@@ -10,7 +10,7 @@ const {
   SMTP_INSECURE_TLS = "false",
   EMAIL_CONCURRENCY = "10",
 
-  BRAND_NAME = "TabDhey",
+  BRAND_NAME = "TàbDey",
   SUPPORT_EMAIL = "",
   APP_URL = "",
   BRAND_COLOR = "#0b7a3b",
@@ -23,7 +23,7 @@ const pass = String(SMTP_PASS).trim();
 
 const from =
   (SMTP_FROM && String(SMTP_FROM).trim()) ||
-  (user ? `${String(BRAND_NAME || "TabDhey").trim()} <${user}>` : "");
+  (user ? `${String(BRAND_NAME || "TàbDey").trim()} <${user}>` : "");
 
 const insecureTls = ["true", "1", "yes", "y"].includes(
   String(SMTP_INSECURE_TLS).trim().toLowerCase(),
@@ -72,7 +72,7 @@ async function sendNotificationEmails({
   roles,
   recipients,
 }) {
-  const brandName = String(BRAND_NAME || "TabDhey").trim();
+  const brandName = String(BRAND_NAME || "TàbDey").trim();
   const safeTitle = String(title || "System Notification").trim();
   const safeMessage = String(message || "").trim();
   const subject = `${brandName} Notification: ${safeTitle}`;

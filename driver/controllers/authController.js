@@ -10,7 +10,7 @@ const normalizeEmail = (email) =>
 const isValidEmail = (email) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
-// ✅ Registration (Email) - TabDhey format
+// ✅ Registration (Email) - TàbDey format
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;

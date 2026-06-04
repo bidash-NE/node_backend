@@ -239,8 +239,8 @@ exports.approveDriver = async (req, res) => {
     // Send SMS notification to driver (non-blocking)
     if (result.phone) {
       const smsText = action === "approved"
-        ? `Hi ${result.driver_name || "Driver"}, your TabDhey driver registration has been approved! You can now log in and start accepting rides.`
-        : `Hi ${result.driver_name || "Driver"}, your TabDhey driver registration was not approved. Reason: ${rejection_reason}. Please contact support for more information.`;
+        ? `Hi ${result.driver_name || "Driver"}, your TàbDey driver registration has been approved! You can now log in and start accepting rides.`
+        : `Hi ${result.driver_name || "Driver"}, your TàbDey driver registration was not approved. Reason: ${rejection_reason}. Please contact support for more information.`;
 
       sendNotificationSmsBulk({
         title: action === "approved" ? "Registration Approved" : "Registration Not Approved",

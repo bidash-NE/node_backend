@@ -96,7 +96,7 @@ class PDFReceiptService {
         doc
           .fontSize(16)
           .font("Helvetica-Bold")
-          .text(orderData.business_name || "TabDhey", 50, currentY, {
+          .text(orderData.business_name || "TàbDey", 50, currentY, {
             width: 350,
           });
 
@@ -500,7 +500,7 @@ class PDFReceiptService {
           .font("Helvetica")
           .fillColor("#666")
           .text("Thank you for your order!", 50, footerY, { align: "center" })
-          .text("For support contact: support@tabdhey.bt", 50, footerY + 12, {
+          .text("For Any Queries contact: tabdey@gmail.com", 50, footerY + 12, {
             align: "center",
           });
 

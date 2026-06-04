@@ -1926,7 +1926,7 @@ async function markOrderDelivered(req, res) {
       customer_name: user.user_name || "Customer",
       customer_email: user.email,
       customer_phone: user.phone || "N/A",
-      business_name: business.business_name || "TabDhey",
+      business_name: business.business_name || "TàbDey",
       business_logo: businessLogo,
       business_address: business.address || "Thimphu, Bhutan",
       items: items.map((item) => ({
