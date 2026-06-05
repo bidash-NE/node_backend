@@ -1695,6 +1695,23 @@ export function initDriverSocket(io, mysqlPool) {
         if (conn) conn.release();
       }
 
+      // ── Register in Redis so driverLocationUpdate forwards to passenger ──
+      try {
+        const snapshot = JSON.stringify({
+          ...(rideOut || {}),
+          request_id,
+          status: "accepted",
+          driver_id: selectedDriverId,
+          passenger_id,
+        });
+        // driver:current:rides:{driverId} → rideId: snapshot
+        await redis.hset(currentRidesKey(String(selectedDriverId)), String(request_id), snapshot);
+        // passenger:current:ride:{passengerId} → snapshot
+        await redis.set(currentPassengerRideKey(String(passenger_id)), snapshot);
+      } catch (e) {
+        console.error("[fare:select] redis current-ride key error:", e?.message);
+      }
+
       // ── Emit rideAccepted → passenger (triggers navigation to WaitingForDriver) ──
       const acceptMsg = {
         request_id,
