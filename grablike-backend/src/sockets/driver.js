@@ -1600,23 +1600,24 @@ export function initDriverSocket(io, mysqlPool) {
       const ok   = (data = {}) => safeAck(ack, { ok: true, ...data });
       const fail = (error)      => safeAck(ack, { ok: false, error });
 
-      if (!passenger_id)                        return fail("Not authenticated as passenger");
-      if (!request_id || !selectedDriverId)     return fail("Missing request_id or driver_id");
+      if (!passenger_id)                    return fail("Not authenticated as passenger");
+      if (!request_id || !selectedDriverId) return fail("Missing request_id or driver_id");
 
       const redis = getRedis();
       const rideKey = rideHash(request_id);
-      const ride = await redis.hgetall(rideKey);
+      const rideHash_ = await redis.hgetall(rideKey);
 
-      if (!ride?.state)                          return fail("Ride not found");
-      if (ride.state !== "broadcasted")          return fail("Ride no longer available");
-      if (ride.passenger_id !== String(passenger_id)) return fail("Not your ride");
+      if (!rideHash_?.state)                                  return fail("Ride not found");
+      if (rideHash_.state !== "broadcasted")                  return fail("Ride no longer available");
+      if (rideHash_.passenger_id !== String(passenger_id))    return fail("Not your ride");
 
-      // Use driver's counter if present, otherwise use the original offered fare
+      // Resolve final fare: driver's counter if present, else system fare
       const counterCents = await redis.hget(rideCountersHash(request_id), String(selectedDriverId));
       const finalFareCents = counterCents
         ? Number(counterCents)
-        : Number(ride.fare_cents || 0);
+        : Number(rideHash_.fare_cents || 0);
 
+      // Update Redis fare before locking
       if (counterCents) {
         await redis.hset(rideKey, {
           fare_cents: String(finalFareCents),
@@ -1624,15 +1625,102 @@ export function initDriverSocket(io, mysqlPool) {
         });
       }
 
+      // Lock the ride via matcher
       const result = await matcher.acceptOffer({
         io,
         rideId: request_id,
         driverId: String(selectedDriverId),
       });
-
       if (!result.ok) return fail(result.reason || "Accept failed");
 
       await redis.del(rideCountersHash(request_id));
+
+      // ── DB: mark ride accepted + fetch driver details ──────────────────
+      let conn;
+      let rideOut = null;
+      try {
+        conn = await mysqlPool.getConnection();
+
+        await conn.execute(
+          `UPDATE rides
+              SET driver_id   = ?,
+                  status      = 'accepted',
+                  accepted_at = NOW(),
+                  fare_cents  = ?
+            WHERE ride_id = ? AND status = 'requested'`,
+          [String(selectedDriverId), finalFareCents, request_id],
+        );
+
+        const [rows] = await conn.execute(
+          `SELECT r.*,
+                  u.user_name  AS driver_name,
+                  u.phone      AS driver_phone,
+                  (SELECT COUNT(*) FROM rides rr
+                    WHERE rr.driver_id = r.driver_id AND rr.status = 'completed') AS driver_trips,
+                  (SELECT ROUND(AVG(rating),2) FROM ride_ratings drt
+                    WHERE drt.driver_id = r.driver_id) AS driver_rating,
+                  NULL AS vehicle_label,
+                  NULL AS vehicle_plate
+             FROM rides r
+             LEFT JOIN drivers dr ON dr.driver_id = r.driver_id
+             LEFT JOIN users u    ON u.user_id    = dr.user_id
+            WHERE r.ride_id = ?
+            LIMIT 1`,
+          [request_id],
+        );
+
+        const dbRide = rows[0] || null;
+        if (dbRide) {
+          // Enrich with Redis metadata (payment, waypoints)
+          let payment_method = null;
+          let waypoints = [];
+          let service_code = null;
+          try {
+            const h = await redis.hgetall(rideKey);
+            if (h?.payment_method) {
+              try { payment_method = JSON.parse(h.payment_method); } catch { payment_method = h.payment_method; }
+            }
+            if (h?.waypoints_json) {
+              try { waypoints = JSON.parse(h.waypoints_json) || []; } catch {}
+            }
+            if (h?.service_code) service_code = String(h.service_code);
+          } catch {}
+
+          rideOut = { ...toClientRide(dbRide), payment_method, waypoints, service_code };
+        }
+      } catch (e) {
+        console.error("[fare:select] DB error:", e?.message);
+        // Non-fatal — Redis lock already set, emit what we have
+      } finally {
+        if (conn) conn.release();
+      }
+
+      // ── Emit rideAccepted → passenger (triggers navigation to WaitingForDriver) ──
+      const acceptMsg = {
+        request_id,
+        driver_id: selectedDriverId,
+        ride: rideOut,
+      };
+      io.to(passengerRoom(String(passenger_id))).emit("rideAccepted", acceptMsg);
+      io.to(rideRoom(request_id)).emit("rideAccepted", acceptMsg);
+
+      // ── Emit jobAssigned → driver (triggers navigation to active trip) ──
+      io.to(driverRoom(String(selectedDriverId))).emit("jobAssigned", {
+        ok: true,
+        request_id,
+        ride: rideOut,
+      });
+
+      // Push notification to passenger
+      getPushTokensByUserIds([String(passenger_id)]).then((tokens) => {
+        if (tokens.length) {
+          sendPushToTokens(tokens, {
+            title: "Driver confirmed",
+            body: `Your ride is confirmed at Nu ${(finalFareCents / 100).toFixed(2)}`,
+            data: { type: "ride_accepted", rideId: request_id },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
 
       ok({ request_id, driver_id: selectedDriverId, final_fare_cents: finalFareCents });
     });
