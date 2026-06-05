@@ -87,6 +87,9 @@ export function makeMatchingRouter(io, mysqlPool) {
       flight_number: flightNumberRaw = null,
       airport_code: airportCodeRaw = null,
       airport_name: airportNameRaw = null,
+
+      // fare negotiation — passenger's self-set offer price (optional)
+      offered_fare_cents: offeredFareCentsRaw = null,
     } = req.body || {};
 
     /* -------------------- basic validation -------------------- */
@@ -247,6 +250,14 @@ export function makeMatchingRouter(io, mysqlPool) {
     const fareUnits = fare_cents / 100;
     const baseFareUnits =
       base_fare_cents != null ? base_fare_cents / 100 : null;
+
+    // passenger's negotiated offer — must be a positive integer, below the system fare
+    const offered_fare_cents = (() => {
+      const n = Number(offeredFareCentsRaw);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      const cents = Math.round(n);
+      return cents < fare_cents ? cents : null; // only honour if genuinely lower
+    })();
 
     const platform_fee_rule_id = Number.isFinite(Number(platformFeeRuleIdRaw))
       ? Number(platformFeeRuleIdRaw)
@@ -482,6 +493,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         fare: fareUnits, // total payable in units
         fare_cents: fare_cents, // total payable in cents
         base_fare: baseFareUnits, // subtotal in units (legacy param name)
+        offered_fare_cents, // passenger's negotiated offer (null if not set)
 
         rideId,
         passenger_id: String(passenger_id),
