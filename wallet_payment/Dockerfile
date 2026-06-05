@@ -1,59 +1,71 @@
 # wallet_payment/Dockerfile
 
-# Stage 1: Builder
-FROM node:20-alpine AS builder
+# Stage 1: Prisma generator
+FROM node:20-alpine AS prisma-builder
 
 WORKDIR /app
 
-# Install OpenSSL for Prisma
 RUN apk add --no-cache openssl
 
-# Copy root package files and root Prisma schema
+# Root package is used only for Prisma generation
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install all dependencies including dev dependencies for prisma generate
 RUN npm ci --include=dev
 
-# Generate Prisma Client from root schema
+# Generate Prisma client from root prisma/schema.prisma
 RUN npx prisma generate
 
-# Copy wallet service and shared lib
+
+# Stage 2: Wallet service dependencies
+FROM node:20-alpine AS wallet-builder
+
+WORKDIR /app
+
+RUN apk add --no-cache openssl
+
+# Install wallet_payment service dependencies, not root dependencies
+COPY wallet_payment/package*.json ./wallet_payment/
+
+WORKDIR /app/wallet_payment
+
+RUN npm ci --omit=dev
+
+# Copy wallet service source
+WORKDIR /app
 COPY wallet_payment ./wallet_payment
+
+# Copy shared Prisma lib
 COPY lib ./lib
 
-# Optional safety: make root lib available inside service folder too
+# Optional safety: make lib available inside wallet_payment also
 RUN mkdir -p /app/wallet_payment/lib && \
     cp -a /app/lib/. /app/wallet_payment/lib/
 
-# Prune dev dependencies for production
-RUN npm prune --production
 
-
-# Stage 2: Production
+# Stage 3: Production
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Copy from builder
-COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
-COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
-COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
-COPY --from=builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_payment
+# Copy wallet service with its own node_modules
+COPY --from=wallet-builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_payment
 
-# Switch to non-root user
+# Copy shared lib
+COPY --from=wallet-builder --chown=nodejs:nodejs /app/lib ./lib
+
+# Copy generated Prisma client from root Prisma build
+COPY --from=prisma-builder --chown=nodejs:nodejs /app/generated ./generated
+COPY --from=prisma-builder --chown=nodejs:nodejs /app/prisma ./prisma
+
 USER nodejs
 
-# Set working directory to wallet service
 WORKDIR /app/wallet_payment
 
 ENV NODE_ENV=production
