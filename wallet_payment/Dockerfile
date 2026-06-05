@@ -1,13 +1,13 @@
 # wallet_payment/Dockerfile
 
-# Stage 1: Prisma generator
+# Stage 1: Prisma generator/root deps
 FROM node:20-alpine AS prisma-builder
 
 WORKDIR /app
 
 RUN apk add --no-cache openssl
 
-# Root package is used only for Prisma generation
+# Root package is used for Prisma packages + Prisma generate
 COPY package*.json ./
 COPY prisma ./prisma/
 
@@ -15,6 +15,9 @@ RUN npm ci --include=dev
 
 # Generate Prisma client from root prisma/schema.prisma
 RUN npx prisma generate
+
+# Keep only production deps after generate
+RUN npm prune --omit=dev
 
 
 # Stage 2: Wallet service dependencies
@@ -24,7 +27,7 @@ WORKDIR /app
 
 RUN apk add --no-cache openssl
 
-# Install wallet_payment service dependencies, not root dependencies
+# Install wallet_payment service dependencies
 COPY wallet_payment/package*.json ./wallet_payment/
 
 WORKDIR /app/wallet_payment
@@ -35,10 +38,10 @@ RUN npm ci --omit=dev
 WORKDIR /app
 COPY wallet_payment ./wallet_payment
 
-# Copy shared Prisma lib
+# Copy shared lib
 COPY lib ./lib
 
-# Optional safety: make lib available inside wallet_payment also
+# Optional safety: make lib available inside wallet_payment too
 RUN mkdir -p /app/wallet_payment/lib && \
     cp -a /app/lib/. /app/wallet_payment/lib/
 
@@ -54,15 +57,18 @@ RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Copy wallet service with its own node_modules
-COPY --from=wallet-builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_payment
-
-# Copy shared lib
-COPY --from=wallet-builder --chown=nodejs:nodejs /app/lib ./lib
-
-# Copy generated Prisma client from root Prisma build
+# ✅ Root Prisma runtime deps
+# Needed by /app/generated/prisma/runtime/client.js
+COPY --from=prisma-builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/prisma ./prisma
+COPY --from=prisma-builder --chown=nodejs:nodejs /app/package*.json ./
+
+# ✅ Wallet service deps/source
+COPY --from=wallet-builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_payment
+
+# ✅ Shared lib
+COPY --from=wallet-builder --chown=nodejs:nodejs /app/lib ./lib
 
 USER nodejs
 
