@@ -11,9 +11,11 @@ const {
 
 const { adminTipTransfer } = require("../models/adminTransferModel");
 const { userWalletTransfer } = require("../models/userTransferModel");
+
+const { prisma } = require("../lib/prisma");
+
 const { toThimphuString } = require("../utils/time");
 const bcrypt = require("bcryptjs");
-const db = require("../config/db");
 const redis = require("../utils/redisClient");
 const { sendOtpEmail } = require("../utils/mailer");
 
@@ -31,6 +33,7 @@ const EXPO_NOTIFICATION_URL = (process.env.EXPO_NOTIFICATION_URL || "").trim();
 
 function mapLocalTimes(row) {
   if (!row) return row;
+
   return {
     ...row,
     created_at: toThimphuString(row.created_at),
@@ -41,9 +44,11 @@ function mapLocalTimes(row) {
 // TD12345678 -> TD*****78
 function maskWallet(walletId) {
   if (!walletId || walletId.length < 5) return walletId;
-  const prefix = walletId.slice(0, 2); // TD
+
+  const prefix = walletId.slice(0, 2);
   const last2 = walletId.slice(-2);
   const maskedMid = "*".repeat(walletId.length - prefix.length - 2);
+
   return prefix + maskedMid + last2;
 }
 
@@ -88,7 +93,13 @@ async function sendOtpSms({
   purposeTitle = "Verification code",
   ttlMinutes = 5,
 }) {
-  if (!SMS_API_KEY) throw new Error("SMS_API_KEY missing in env");
+  if (!SMS_API_KEY) {
+    throw new Error("SMS_API_KEY missing in env");
+  }
+
+  if (!SMS_API_URL) {
+    throw new Error("SMS_API_URL missing in env");
+  }
 
   const text =
     `${purposeTitle}\n\n` +
@@ -102,10 +113,15 @@ async function sendOtpSms({
       "Content-Type": "application/json",
       "x-api-key": SMS_API_KEY,
     },
-    body: JSON.stringify({ to, text, from: SMS_FROM }),
+    body: JSON.stringify({
+      to,
+      text,
+      from: SMS_FROM,
+    }),
   });
 
   const bodyText = await resp.text();
+
   if (!resp.ok) {
     throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
   }
@@ -113,7 +129,10 @@ async function sendOtpSms({
   try {
     return JSON.parse(bodyText);
   } catch {
-    return { ok: true, response: bodyText };
+    return {
+      ok: true,
+      response: bodyText,
+    };
   }
 }
 
@@ -122,17 +141,25 @@ async function sendOtpSms({
    Payload required:
    { user_id, title, body }
 ========================== */
+
 async function sendExpoNotification({ user_id, title, body }) {
-  if (!EXPO_NOTIFICATION_URL)
+  if (!EXPO_NOTIFICATION_URL) {
     return {
       ok: false,
       skipped: true,
       reason: "EXPO_NOTIFICATION_URL missing",
     };
+  }
 
   const uid = Number(user_id);
-  if (!Number.isFinite(uid) || uid <= 0)
-    return { ok: false, skipped: true, reason: "Invalid user_id" };
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "Invalid user_id",
+    };
+  }
 
   const payload = {
     user_id: uid,
@@ -143,22 +170,38 @@ async function sendExpoNotification({ user_id, title, body }) {
   try {
     const resp = await fetch(EXPO_NOTIFICATION_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(payload),
     });
 
     const text = await resp.text();
+
     if (!resp.ok) {
-      return { ok: false, status: resp.status, error: text };
+      return {
+        ok: false,
+        status: resp.status,
+        error: text,
+      };
     }
 
     try {
-      return { ok: true, data: JSON.parse(text) };
+      return {
+        ok: true,
+        data: JSON.parse(text),
+      };
     } catch {
-      return { ok: true, data: text };
+      return {
+        ok: true,
+        data: text,
+      };
     }
   } catch (e) {
-    return { ok: false, error: e.message };
+    return {
+      ok: false,
+      error: e.message,
+    };
   }
 }
 
@@ -166,38 +209,65 @@ function isValidWalletId(v) {
   return /^TD\d{8}$/i.test(String(v || "").trim());
 }
 
+function isValidStatus(v) {
+  return ["ACTIVE", "INACTIVE"].includes(String(v || "").trim().toUpperCase());
+}
+
+function isValidUserId(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0;
+}
+
+function normalizeBoolean(v) {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
 /* ==========================
    CONTROLLERS
 ========================== */
 
 /* ---------- CREATE ---------- */
+
 async function create(req, res) {
   try {
     const { user_id, status = "ACTIVE" } = req.body || {};
-    if (!user_id || !Number.isInteger(user_id) || user_id <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid user_id." });
+    const uid = Number(user_id);
+
+    if (!isValidUserId(uid)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user_id.",
+      });
     }
-    const st = String(status).toUpperCase();
-    if (!["ACTIVE", "INACTIVE"].includes(st)) {
+
+    const st = String(status).trim().toUpperCase();
+
+    if (!isValidStatus(st)) {
       return res.status(400).json({
         success: false,
         message: "Status must be ACTIVE or INACTIVE.",
       });
     }
 
-    const result = await createWallet({ user_id, status: st });
-    if (result?.error === "USER_NOT_FOUND")
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found." });
-    if (result?.error === "WALLET_EXISTS")
+    const result = await createWallet({
+      user_id: uid,
+      status: st,
+    });
+
+    if (result?.error === "USER_NOT_FOUND") {
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    if (result?.error === "WALLET_EXISTS") {
       return res.status(409).json({
         success: false,
         message: "Wallet already exists for this user.",
         existing: mapLocalTimes(result.wallet),
       });
+    }
 
     return res.json({
       success: true,
@@ -205,73 +275,126 @@ async function create(req, res) {
       data: mapLocalTimes(result),
     });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    console.error("Error creating wallet:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- READ ALL ---------- */
+
 async function getAll(req, res) {
   try {
     const { limit = 50, offset = 0, status = null } = req.query || {};
-    const rows = await listWallets({ limit, offset, status });
-    res.json({
+
+    const rows = await listWallets({
+      limit,
+      offset,
+      status,
+    });
+
+    return res.json({
       success: true,
       count: rows.length,
       data: rows.map(mapLocalTimes),
     });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    console.error("Error listing wallets:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
-/* ---------- READ ONE (by wallet_id) ---------- */
+/* ---------- READ ONE (by wallet_id or id) ---------- */
+
 async function getByIdParam(req, res) {
   try {
     const { wallet_id } = req.params;
-    const wallet = await getWallet({ key: wallet_id });
-    if (!wallet)
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
-    res.json({ success: true, data: mapLocalTimes(wallet) });
+
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
+    if (!wallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: mapLocalTimes(wallet),
+    });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    console.error("Error getting wallet:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- READ ONE (by user_id) ---------- */
+
 async function getByUserId(req, res) {
   try {
     const { user_id } = req.params;
-    if (!user_id || isNaN(user_id))
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid user_id." });
+    const uid = Number(user_id);
 
-    const wallet = await getWalletByUserId(user_id);
-    if (!wallet)
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found for this user." });
-    res.json({ success: true, data: mapLocalTimes(wallet) });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
-}
-
-/* ---------- HAS T-PIN (by user_id) ---------- */
-async function checkTPinByUserId(req, res) {
-  try {
-    const { user_id } = req.params;
-
-    if (!user_id || isNaN(user_id) || Number(user_id) <= 0) {
+    if (!isValidUserId(uid)) {
       return res.status(400).json({
         success: false,
         message: "Invalid user_id.",
       });
     }
 
-    const wallet = await getWalletByUserId(Number(user_id));
+    const wallet = await getWalletByUserId(uid);
+
+    if (!wallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found for this user.",
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: mapLocalTimes(wallet),
+    });
+  } catch (e) {
+    console.error("Error getting wallet by user_id:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
+  }
+}
+
+/* ---------- HAS T-PIN (by user_id) ---------- */
+
+async function checkTPinByUserId(req, res) {
+  try {
+    const { user_id } = req.params;
+    const uid = Number(user_id);
+
+    if (!isValidUserId(uid)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user_id.",
+      });
+    }
+
+    const wallet = await getWalletByUserId(uid);
+
     if (!wallet) {
       return res.status(404).json({
         success: false,
@@ -283,11 +406,13 @@ async function checkTPinByUserId(req, res) {
 
     return res.json({
       success: true,
-      user_id: Number(user_id),
+      user_id: uid,
       has_tpin: hasTPin,
     });
   } catch (e) {
-    res.status(500).json({
+    console.error("Error checking T-PIN:", e);
+
+    return res.status(500).json({
       success: false,
       message: e.message,
     });
@@ -295,54 +420,86 @@ async function checkTPinByUserId(req, res) {
 }
 
 /* ---------- UPDATE STATUS ---------- */
+
 async function updateStatusByParam(req, res) {
   try {
     const { wallet_id, status } = req.params;
-    const st = String(status).toUpperCase();
-    if (!["ACTIVE", "INACTIVE"].includes(st))
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid status." });
+    const st = String(status || "").trim().toUpperCase();
 
-    const updated = await updateWalletStatus({ key: wallet_id, status: st });
-    if (!updated)
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+    if (!isValidStatus(st)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status.",
+      });
+    }
 
-    res.json({
+    const updated = await updateWalletStatus({
+      key: wallet_id,
+      status: st,
+    });
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
+    }
+
+    return res.json({
       success: true,
       message: "Wallet status updated.",
       data: mapLocalTimes(updated),
     });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    console.error("Error updating wallet status:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- DELETE ---------- */
+
 async function removeByParam(req, res) {
   try {
     const { wallet_id } = req.params;
-    const out = await deleteWallet({ key: wallet_id });
 
-    if (!out.ok && out.code === "NOT_FOUND")
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
-    if (!out.ok && out.code === "HAS_TRANSACTIONS")
+    const out = await deleteWallet({
+      key: wallet_id,
+    });
+
+    if (!out.ok && out.code === "NOT_FOUND") {
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
+    }
+
+    if (!out.ok && out.code === "HAS_TRANSACTIONS") {
       return res.status(409).json({
         success: false,
         message: "Cannot delete wallet with transactions.",
       });
+    }
 
-    res.json({ success: true, message: "Wallet deleted." });
+    return res.json({
+      success: true,
+      message: "Wallet deleted.",
+    });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    console.error("Error deleting wallet:", e);
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- ADMIN TIP TRANSFER ---------- */
+
 async function adminTipTransferHandler(req, res) {
   try {
     const {
@@ -351,102 +508,126 @@ async function adminTipTransferHandler(req, res) {
       user_wallet_id,
       amount,
       note = "",
-      t_pin, // T-PIN sent for verification
+      t_pin,
     } = req.body || {};
 
-    // 1. Validate input fields
-    if (!admin_name || admin_name.trim().length < 2)
-      return res
-        .status(400)
-        .json({ success: false, message: "admin_name is required." });
+    if (!admin_name || String(admin_name).trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "admin_name is required.",
+      });
+    }
 
-    if (!isValidWalletId(admin_wallet_id))
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid admin_wallet_id." });
+    if (!isValidWalletId(admin_wallet_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid admin_wallet_id.",
+      });
+    }
 
-    if (!isValidWalletId(user_wallet_id))
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid user_wallet_id." });
+    if (!isValidWalletId(user_wallet_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user_wallet_id.",
+      });
+    }
 
-    if (admin_wallet_id === user_wallet_id)
-      return res
-        .status(400)
-        .json({ success: false, message: "Wallets must differ." });
+    if (String(admin_wallet_id) === String(user_wallet_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Wallets must differ.",
+      });
+    }
 
-    if (isNaN(amount) || Number(amount) <= 0)
-      return res
-        .status(400)
-        .json({ success: false, message: "amount must be positive (Nu)." });
+    if (isNaN(amount) || Number(amount) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "amount must be positive (Nu).",
+      });
+    }
 
-    // 2. Fetch admin wallet details
-    const adminWallet = await getWallet({ key: admin_wallet_id });
-    if (!adminWallet)
-      return res
-        .status(404)
-        .json({ success: false, message: "Admin wallet not found." });
+    const adminWallet = await getWallet({
+      key: admin_wallet_id,
+    });
 
-    // 3. Verify T-PIN for admin wallet
-    if (adminWallet.status === "ACTIVE" && adminWallet.t_pin) {
-      const pinStr = String(t_pin || "").trim();
-      if (!/^\d{4}$/.test(pinStr)) {
-        return res.status(400).json({
-          success: false,
-          message: "T-PIN must be a 4-digit numeric code.",
-        });
-      }
+    if (!adminWallet) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin wallet not found.",
+      });
+    }
 
-      const isValidPin = await bcrypt.compare(pinStr, adminWallet.t_pin);
-      if (!isValidPin) {
-        return res
-          .status(401)
-          .json({ success: false, message: "Invalid T-PIN." });
-      }
-    } else {
+    if (adminWallet.status !== "ACTIVE" || !adminWallet.t_pin) {
       return res.status(400).json({
         success: false,
         message: "Admin wallet is not active or does not have a T-PIN set.",
       });
     }
 
-    // 4. Proceed with the admin tip transfer logic
+    const pinStr = String(t_pin || "").trim();
+
+    if (!/^\d{4}$/.test(pinStr)) {
+      return res.status(400).json({
+        success: false,
+        message: "T-PIN must be a 4-digit numeric code.",
+      });
+    }
+
+    const isValidPin = await bcrypt.compare(pinStr, adminWallet.t_pin);
+
+    if (!isValidPin) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid T-PIN.",
+      });
+    }
+
     const result = await adminTipTransfer({
-      admin_name: admin_name.trim(),
+      admin_name: String(admin_name).trim(),
       admin_wallet_id,
       user_wallet_id,
       amount_nu: Number(amount),
       note,
     });
 
-    if (!result.ok)
-      return res
-        .status(result.status || 400)
-        .json({ success: false, message: result.message });
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+      });
+    }
 
-    res.json({
+    return res.json({
       success: true,
       message: "Tip transferred successfully.",
       data: result,
     });
   } catch (e) {
     console.error("Error in adminTipTransfer:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
+
 /* ---------- SET / CREATE T-PIN ---------- */
+
 async function setTPin(req, res) {
   try {
     const { wallet_id } = req.params;
     const { t_pin } = req.body || {};
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
     const pinStr = String(t_pin || "").trim();
+
     if (!/^\d{4}$/.test(pinStr)) {
       return res.status(400).json({
         success: false,
@@ -454,11 +635,15 @@ async function setTPin(req, res) {
       });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
     if (wallet.t_pin && wallet.t_pin !== "") {
@@ -476,9 +661,10 @@ async function setTPin(req, res) {
     });
 
     if (!updated) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to set T-PIN." });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to set T-PIN.",
+      });
     }
 
     return res.json({
@@ -488,23 +674,30 @@ async function setTPin(req, res) {
     });
   } catch (e) {
     console.error("Error setting T-PIN:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- CHANGE T-PIN ---------- */
+
 async function changeTPin(req, res) {
   try {
     const { wallet_id } = req.params;
     const { old_t_pin, new_t_pin } = req.body || {};
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
     const oldPinStr = String(old_t_pin || "").trim();
+
     if (!/^\d{4}$/.test(oldPinStr)) {
       return res.status(400).json({
         success: false,
@@ -513,6 +706,7 @@ async function changeTPin(req, res) {
     }
 
     const newPinStr = String(new_t_pin || "").trim();
+
     if (!/^\d{4}$/.test(newPinStr)) {
       return res.status(400).json({
         success: false,
@@ -527,11 +721,15 @@ async function changeTPin(req, res) {
       });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
     if (!wallet.t_pin) {
@@ -542,6 +740,7 @@ async function changeTPin(req, res) {
     }
 
     const isMatch = await bcrypt.compare(oldPinStr, wallet.t_pin);
+
     if (!isMatch) {
       return res.status(401).json({
         success: false,
@@ -557,9 +756,10 @@ async function changeTPin(req, res) {
     });
 
     if (!updated) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to update T-PIN." });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update T-PIN.",
+      });
     }
 
     return res.json({
@@ -569,47 +769,61 @@ async function changeTPin(req, res) {
     });
   } catch (e) {
     console.error("Error changing T-PIN:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- FORGOT T-PIN: REQUEST OTP (EMAIL) ---------- */
+
 async function forgotTPinRequest(req, res) {
   try {
     const { wallet_id } = req.params;
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
-    const [rows] = await db.query(
-      "SELECT user_id, email, user_name FROM users WHERE user_id = ? LIMIT 1",
-      [wallet.user_id],
-    );
+    const user = await prisma.users.findUnique({
+      where: {
+        user_id: Number(wallet.user_id),
+      },
+      select: {
+        user_id: true,
+        email: true,
+        user_name: true,
+      },
+    });
 
-    if (!rows.length || !rows[0].email) {
+    if (!user || !user.email) {
       return res.status(404).json({
         success: false,
         message: "User email not found.",
       });
     }
 
-    const user = rows[0];
-    const email = String(user.email || "")
-      .trim()
-      .toLowerCase();
+    const email = String(user.email || "").trim().toLowerCase();
     const userName = user.user_name || null;
 
     const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
     if (!isValidEmail) {
       return res.status(400).json({
         success: false,
@@ -618,6 +832,7 @@ async function forgotTPinRequest(req, res) {
     }
 
     const rlKey = `tpin_reset_email_rl:${wallet.user_id}:${wallet.wallet_id}`;
+
     if (await redis.get(rlKey)) {
       return res.status(429).json({
         success: false,
@@ -645,6 +860,7 @@ async function forgotTPinRequest(req, res) {
     });
   } catch (e) {
     console.error("Error in forgotTPinRequest:", e);
+
     return res.status(500).json({
       success: false,
       message: "Failed to send OTP.",
@@ -654,18 +870,21 @@ async function forgotTPinRequest(req, res) {
 }
 
 /* ---------- FORGOT T-PIN: VERIFY OTP (EMAIL) & SET NEW T-PIN ---------- */
+
 async function forgotTPinVerify(req, res) {
   try {
     const { wallet_id } = req.params;
     const { otp, new_t_pin } = req.body || {};
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
     const otpStr = String(otp || "").trim();
+
     if (!/^\d{6}$/.test(otpStr)) {
       return res.status(400).json({
         success: false,
@@ -674,6 +893,7 @@ async function forgotTPinVerify(req, res) {
     }
 
     const newPinStr = String(new_t_pin || "").trim();
+
     if (!/^\d{4}$/.test(newPinStr)) {
       return res.status(400).json({
         success: false,
@@ -681,11 +901,15 @@ async function forgotTPinVerify(req, res) {
       });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
     const redisKey = `tpin_reset:${wallet.user_id}:${wallet.wallet_id}`;
@@ -698,7 +922,7 @@ async function forgotTPinVerify(req, res) {
       });
     }
 
-    if (savedOtp !== otpStr) {
+    if (String(savedOtp).trim() !== otpStr) {
       return res.status(400).json({
         success: false,
         message: "Invalid OTP.",
@@ -706,6 +930,7 @@ async function forgotTPinVerify(req, res) {
     }
 
     const hashed = await bcrypt.hash(newPinStr, 10);
+
     const updated = await setWalletTPin({
       key: wallet_id,
       t_pin_hash: hashed,
@@ -714,9 +939,10 @@ async function forgotTPinVerify(req, res) {
     await redis.del(redisKey);
 
     if (!updated) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to update T-PIN." });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update T-PIN.",
+      });
     }
 
     return res.json({
@@ -726,7 +952,11 @@ async function forgotTPinVerify(req, res) {
     });
   } catch (e) {
     console.error("Error in forgotTPinVerify:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
@@ -734,36 +964,47 @@ async function forgotTPinVerify(req, res) {
    FORGOT T-PIN (SMS): REQUEST OTP
    POST /wallet/:wallet_id/forgot-tpin-sms
 ========================================================= */
+
 async function forgotTPinRequestSms(req, res) {
   try {
     const { wallet_id } = req.params;
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
-    const [rows] = await db.query(
-      "SELECT user_id, phone, user_name FROM users WHERE user_id = ? LIMIT 1",
-      [wallet.user_id],
-    );
+    const user = await prisma.users.findUnique({
+      where: {
+        user_id: Number(wallet.user_id),
+      },
+      select: {
+        user_id: true,
+        phone: true,
+        user_name: true,
+      },
+    });
 
-    if (!rows.length || !rows[0].phone) {
+    if (!user || !user.phone) {
       return res.status(404).json({
         success: false,
         message: "User phone not found.",
       });
     }
 
-    const user = rows[0];
     const phoneToSend = normalizeBhutanPhone(user.phone);
 
     if (!phoneToSend) {
@@ -792,7 +1033,11 @@ async function forgotTPinRequestSms(req, res) {
     });
   } catch (e) {
     console.error("Error in forgotTPinRequestSms:", e);
-    return res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
@@ -801,18 +1046,21 @@ async function forgotTPinRequestSms(req, res) {
    POST /wallet/:wallet_id/forgot-tpin-sms/verify
    body: { otp, new_t_pin }
 ========================================================= */
+
 async function forgotTPinVerifySms(req, res) {
   try {
     const { wallet_id } = req.params;
     const { otp, new_t_pin } = req.body || {};
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
     const otpStr = String(otp || "").trim();
+
     if (!/^\d{6}$/.test(otpStr)) {
       return res.status(400).json({
         success: false,
@@ -821,6 +1069,7 @@ async function forgotTPinVerifySms(req, res) {
     }
 
     const newPinStr = String(new_t_pin || "").trim();
+
     if (!/^\d{4}$/.test(newPinStr)) {
       return res.status(400).json({
         success: false,
@@ -828,11 +1077,15 @@ async function forgotTPinVerifySms(req, res) {
       });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
     const redisKey = `tpin_reset_sms:${wallet.user_id}:${wallet.wallet_id}`;
@@ -853,6 +1106,7 @@ async function forgotTPinVerifySms(req, res) {
     }
 
     const hashed = await bcrypt.hash(newPinStr, 10);
+
     const updated = await setWalletTPin({
       key: wallet_id,
       t_pin_hash: hashed,
@@ -861,9 +1115,10 @@ async function forgotTPinVerifySms(req, res) {
     await redis.del(redisKey);
 
     if (!updated) {
-      return res
-        .status(500)
-        .json({ success: false, message: "Failed to update T-PIN." });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update T-PIN.",
+      });
     }
 
     return res.json({
@@ -873,11 +1128,16 @@ async function forgotTPinVerifySms(req, res) {
     });
   } catch (e) {
     console.error("Error in forgotTPinVerifySms:", e);
-    return res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- USER WALLET TRANSFER ---------- */
+
 async function userTransfer(req, res) {
   try {
     const {
@@ -917,10 +1177,12 @@ async function userTransfer(req, res) {
       });
     }
 
-    const biometricOk =
-      biometric === true || biometric === "true" || biometric === 1;
+    const biometricOk = normalizeBoolean(biometric);
 
-    const senderWallet = await getWallet({ key: sender_wallet_id });
+    const senderWallet = await getWallet({
+      key: sender_wallet_id,
+    });
+
     if (!senderWallet) {
       return res.status(404).json({
         success: false,
@@ -937,6 +1199,7 @@ async function userTransfer(req, res) {
 
     if (!biometricOk) {
       const pinStr = String(t_pin || "").trim();
+
       if (!/^\d{4}$/.test(pinStr)) {
         return res.status(400).json({
           success: false,
@@ -952,6 +1215,7 @@ async function userTransfer(req, res) {
       }
 
       const okPin = await bcrypt.compare(pinStr, senderWallet.t_pin);
+
       if (!okPin) {
         return res.status(401).json({
           success: false,
@@ -960,7 +1224,10 @@ async function userTransfer(req, res) {
       }
     }
 
-    const recipientWallet = await getWallet({ key: recipient_wallet_id });
+    const recipientWallet = await getWallet({
+      key: recipient_wallet_id,
+    });
+
     if (!recipientWallet) {
       return res.status(404).json({
         success: false,
@@ -990,6 +1257,7 @@ async function userTransfer(req, res) {
     }
 
     const { journal_code, transaction_ids } = result;
+
     const primaryTxnId = Array.isArray(transaction_ids)
       ? transaction_ids[0]
       : null;
@@ -1008,7 +1276,6 @@ async function userTransfer(req, res) {
       biometric: biometricOk,
     };
 
-    // ✅ send Expo push to BOTH sender and receiver
     const amtStr = `Nu. ${Number(amount).toFixed(2)}`;
     const jrn = journal_code || "N/A";
     const tnx = primaryTxnId || "N/A";
@@ -1049,41 +1316,54 @@ async function userTransfer(req, res) {
     });
   } catch (e) {
     console.error("Error in userTransfer:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 
 /* ---------- GET USER_NAME BY WALLET_ID ---------- */
+
 async function getUserNameByWalletId(req, res) {
   try {
     const { wallet_id } = req.params;
 
     if (!isValidWalletId(wallet_id)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid wallet_id." });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid wallet_id.",
+      });
     }
 
-    const wallet = await getWallet({ key: wallet_id });
+    const wallet = await getWallet({
+      key: wallet_id,
+    });
+
     if (!wallet) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Wallet not found." });
+      return res.status(404).json({
+        success: false,
+        message: "Wallet not found.",
+      });
     }
 
-    const [rows] = await db.query(
-      "SELECT user_id, user_name FROM users WHERE user_id = ?",
-      [wallet.user_id],
-    );
+    const user = await prisma.users.findUnique({
+      where: {
+        user_id: Number(wallet.user_id),
+      },
+      select: {
+        user_id: true,
+        user_name: true,
+      },
+    });
 
-    if (!rows.length) {
+    if (!user) {
       return res.status(404).json({
         success: false,
         message: "User not found for this wallet.",
       });
     }
-
-    const user = rows[0];
 
     return res.json({
       success: true,
@@ -1094,7 +1374,11 @@ async function getUserNameByWalletId(req, res) {
     });
   } catch (e) {
     console.error("Error in getUserNameByWalletId:", e);
-    res.status(500).json({ success: false, message: e.message });
+
+    return res.status(500).json({
+      success: false,
+      message: e.message,
+    });
   }
 }
 

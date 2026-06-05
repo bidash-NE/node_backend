@@ -1,52 +1,133 @@
 // models/adminTransferModel.js
-const db = require("../config/db");
 const axios = require("axios");
+const { prisma } = require("../lib/prisma");
 
-const ADMIN_ROLES = ["admin", "super admin"]; // lowercased comparison
+const ADMIN_ROLES = ["admin", "super admin"];
+const ADMIN_ROLE_VARIANTS = [
+  "admin",
+  "Admin",
+  "ADMIN",
+  "super admin",
+  "Super Admin",
+  "SUPER ADMIN",
+];
+
 const ID_SERVICE_URL = process.env.ID_SERVICE_URL;
+const WALLET_IDS_BOTH_URL = process.env.WALLET_IDS_BOTH_URL;
+
 console.log("ID Service URL:", ID_SERVICE_URL);
-/* ---------- Helpers to call ID generator API ---------- */
-async function getJournalCodeViaApi() {
-  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/journal`, {});
-  if (!data?.ok || !data.code) {
-    throw new Error("ID service: failed to generate journal_code");
+
+/* ---------- ID SERVICE ---------- */
+
+async function fetchTxIdsAndJournalCode() {
+  const url =
+    String(WALLET_IDS_BOTH_URL || "").trim() ||
+    `${String(ID_SERVICE_URL || "").trim()}/ids/both`;
+
+  if (!url || url === "/ids/both") {
+    throw new Error("WALLET_IDS_BOTH_URL or ID_SERVICE_URL missing in env.");
   }
-  return data.code;
+
+  try {
+    const resp = await axios.post(url, {}, { timeout: 5000 });
+
+    if (!resp.data || !resp.data.ok || !resp.data.data) {
+      throw new Error("Invalid response from wallet/ids/both");
+    }
+
+    const { transaction_ids, journal_code } = resp.data.data;
+
+    if (!Array.isArray(transaction_ids) || transaction_ids.length < 2) {
+      throw new Error("wallet/ids/both did not return valid transaction_ids");
+    }
+
+    if (!journal_code) {
+      throw new Error("wallet/ids/both did not return journal_code");
+    }
+
+    return {
+      transaction_ids,
+      journal_code,
+    };
+  } catch (err) {
+    console.error("[ID SERVICE ERROR]", {
+      url,
+      message: err.message,
+      code: err.code,
+      status: err.response?.status,
+      data: err.response?.data,
+    });
+
+    throw err;
+  }
 }
 
-async function getTxnIdsViaApi(count = 2) {
-  const { data } = await axios.post(`${ID_SERVICE_URL}/ids/transaction`, {
-    count,
+/* ---------- HELPERS ---------- */
+
+function toDecimalNumber(v) {
+  if (v == null) return 0;
+
+  if (typeof v === "number") return v;
+  if (typeof v === "bigint") return Number(v);
+  if (typeof v === "string") return Number(v);
+
+  if (
+    typeof v === "object" &&
+    typeof v.toString === "function" &&
+    v.constructor?.name === "Decimal"
+  ) {
+    return Number(v.toString());
+  }
+
+  return Number(v);
+}
+
+function moneyString(v) {
+  const n = toDecimalNumber(v);
+  return Number.isFinite(n) ? n.toFixed(2) : "0.00";
+}
+
+function normalizeAmount(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+async function findAdminByUserName(tx, admin_name) {
+  const cleanName = String(admin_name || "").trim().toLowerCase();
+
+  if (!cleanName) return null;
+
+  const users = await tx.users.findMany({
+    where: {
+      role: {
+        in: ADMIN_ROLE_VARIANTS,
+      },
+    },
+    select: {
+      user_id: true,
+      user_name: true,
+      role: true,
+    },
   });
-  if (!data?.ok || !Array.isArray(data.data) || data.data.length < count) {
-    throw new Error("ID service: failed to generate transaction_id(s)");
-  }
-  return data.data; // array of ids
-}
 
-/** Find admin by users.user_name (case-insensitive) with allowed role */
-async function findAdminByUserName(conn, admin_name) {
-  const [rows] = await conn.query(
-    `SELECT user_id, user_name, role
-       FROM users
-      WHERE LOWER(user_name) = LOWER(?)
-        AND LOWER(role) IN (?, ?)
-      LIMIT 1`,
-    [admin_name, ADMIN_ROLES[0], ADMIN_ROLES[1]],
+  return (
+    users.find(
+      (u) =>
+        String(u.user_name || "").trim().toLowerCase() === cleanName &&
+        ADMIN_ROLES.includes(String(u.role || "").trim().toLowerCase()),
+    ) || null
   );
-  return rows[0] || null;
 }
 
 /**
  * Admin Tip Transfer:
- * - verifies admin (user_name + role)
- * - locks both wallets (FOR UPDATE)
- * - validates ACTIVE status and sufficient balance
- * - updates balances (DECIMAL)
- * - generates journal_code + txn ids via *API*
- * - inserts 2 wallet_transactions (DR & CR) with wallet_id in tnx_from/tnx_to
- * - inserts `note` into both records
- * - logs admin action in admin_logs
+ * - verifies admin by users.user_name + role
+ * - validates both wallets
+ * - debits admin wallet
+ * - credits user wallet
+ * - inserts 2 wallet_transactions
+ * - logs admin action
+ * - marks driver ride_ratings payment_status true
  */
 async function adminTipTransfer({
   admin_name,
@@ -55,180 +136,257 @@ async function adminTipTransfer({
   amount_nu,
   note = "",
 }) {
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
+  const amt = normalizeAmount(amount_nu);
 
-    // 1️⃣ Verify admin user
-    const adminUser = await findAdminByUserName(conn, admin_name);
-    if (!adminUser) {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 403,
-        message: "Admin not found or not permitted.",
-      };
-    }
-
-    // 2️⃣ Lock wallets
-    const [[adminW]] = await conn.query(
-      "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [admin_wallet_id],
-    );
-    const [[userW]] = await conn.query(
-      "SELECT * FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [user_wallet_id],
-    );
-
-    const user_id = userW.user_id;
-
-    const [rows] = await conn.query(
-      `SELECT driver_id FROM drivers WHERE user_id = ?`,
-      [user_id],
-    );
-
-    if (rows.length === 0) {
-      // handle case where no driver found for this user_id
-      console.error("Driver not found");
-      return;
-    }
-
-    const driver_id = rows[0].driver_id;
-
-    // 3️⃣ Validate wallets
-    if (!adminW) {
-      await conn.rollback();
-      return { ok: false, status: 404, message: "Admin wallet not found." };
-    }
-    if (!userW) {
-      await conn.rollback();
-      return { ok: false, status: 404, message: "User wallet not found." };
-    }
-    if (adminW.status !== "ACTIVE") {
-      await conn.rollback();
-      return { ok: false, status: 409, message: "Admin wallet is not ACTIVE." };
-    }
-    if (userW.status !== "ACTIVE") {
-      await conn.rollback();
-      return { ok: false, status: 409, message: "User wallet is not ACTIVE." };
-    }
-
-    // 4️⃣ Validate amount
-    const amt = Number(amount_nu);
-    if (!isFinite(amt) || amt <= 0) {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 400,
-        message: "Amount must be a positive number (Nu).",
-      };
-    }
-    if (Number(adminW.amount) < amt) {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 409,
-        message: "Insufficient admin wallet balance.",
-      };
-    }
-    const amtStr = amt.toFixed(2);
-
-    // 5️⃣ Update balances using numeric IDs
-    await conn.query("UPDATE wallets SET amount = amount - ? WHERE id = ?", [
-      amtStr,
-      adminW.id,
-    ]);
-    await conn.query("UPDATE wallets SET amount = amount + ? WHERE id = ?", [
-      amtStr,
-      userW.id,
-    ]);
-
-    // 6️⃣ Generate journal + transaction IDs via API (consistency across services)
-    const journal_code = await getJournalCodeViaApi();
-    const [txnAdmin, txnUser] = await getTxnIdsViaApi(2); // DR then CR
-
-    // 7️⃣ Insert wallet transactions (using wallet IDs + note)
-    // DR: admin -> user
-    await conn.query(
-      `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
-       VALUES (?, ?, ?, ?, ?, 'DR', ?)`,
-      [txnAdmin, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note],
-    );
-
-    // CR: admin -> user
-    await conn.query(
-      `INSERT INTO wallet_transactions 
-        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note)
-       VALUES (?, ?, ?, ?, ?, 'CR', ?)`,
-      [txnUser, journal_code, adminW.wallet_id, userW.wallet_id, amtStr, note],
-    );
-
-    // 8️⃣ Log admin action
-    const activity =
-      `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
-      `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
-      (note ? ` | ${note}` : "");
-
-    await conn.query(
-      `INSERT INTO admin_logs (user_id, admin_name, activity) VALUES (?, ?, ?)`,
-      [userW.user_id, adminUser.user_name, activity],
-    );
-
-    // 9️⃣ Get updated balances
-    const [[adminNew]] = await conn.query(
-      "SELECT * FROM wallets WHERE id = ?",
-      [adminW.id],
-    );
-    const [[userNew]] = await conn.query("SELECT * FROM wallets WHERE id = ?", [
-      userW.id,
-    ]);
-
-    // update payment_status in ride_ratings table
-    await conn.query(
-      `UPDATE ride_ratings SET payment_status = 1 WHERE driver_id = ? AND payment_status = 0;`,
-      [driver_id],
-    );
-
-    await conn.commit();
-
-    // ✅ Return response
+  if (!Number.isFinite(amt) || amt <= 0) {
     return {
-      ok: true,
-      journal_code,
-      amount: amtStr,
-      note,
-      admin_verified: {
-        user_id: adminUser.user_id,
-        user_name: adminUser.user_name,
-        role: adminUser.role,
-      },
-      from: {
-        wallet_id: adminNew.wallet_id,
-        user_id: adminNew.user_id,
-        balance:
-          typeof adminNew.amount === "string"
-            ? adminNew.amount
-            : Number(adminNew.amount).toFixed(2),
-      },
-      to: {
-        wallet_id: userNew.wallet_id,
-        user_id: userNew.user_id,
-        balance:
-          typeof userNew.amount === "string"
-            ? userNew.amount
-            : Number(userNew.amount).toFixed(2),
-      },
-      transactions: { admin_dr: txnAdmin, user_cr: txnUser },
+      ok: false,
+      status: 400,
+      message: "Amount must be a positive number (Nu).",
     };
-  } catch (err) {
-    try {
-      await conn.rollback();
-    } catch {}
-    throw err;
-  } finally {
-    conn.release();
   }
+
+  const amtStr = amt.toFixed(2);
+
+  /*
+   * IMPORTANT:
+   * This external HTTP call must stay OUTSIDE prisma.$transaction().
+   * Otherwise the DB transaction can expire while waiting for Axios.
+   */
+  const { transaction_ids, journal_code } = await fetchTxIdsAndJournalCode();
+  const [txnAdmin, txnUser] = transaction_ids;
+
+  return await prisma.$transaction(
+    async (tx) => {
+      /* 1️⃣ Verify admin user */
+      const adminUser = await findAdminByUserName(tx, admin_name);
+
+      if (!adminUser) {
+        return {
+          ok: false,
+          status: 403,
+          message: "Admin not found or not permitted.",
+        };
+      }
+
+      /* 2️⃣ Fetch wallets */
+      const adminW = await tx.wallets.findUnique({
+        where: {
+          wallet_id: String(admin_wallet_id).trim(),
+        },
+      });
+
+      const userW = await tx.wallets.findUnique({
+        where: {
+          wallet_id: String(user_wallet_id).trim(),
+        },
+      });
+
+      /* 3️⃣ Validate wallets */
+      if (!adminW) {
+        return {
+          ok: false,
+          status: 404,
+          message: "Admin wallet not found.",
+        };
+      }
+
+      if (!userW) {
+        return {
+          ok: false,
+          status: 404,
+          message: "User wallet not found.",
+        };
+      }
+
+      if (String(adminW.status || "").toUpperCase() !== "ACTIVE") {
+        return {
+          ok: false,
+          status: 409,
+          message: "Admin wallet is not ACTIVE.",
+        };
+      }
+
+      if (String(userW.status || "").toUpperCase() !== "ACTIVE") {
+        return {
+          ok: false,
+          status: 409,
+          message: "User wallet is not ACTIVE.",
+        };
+      }
+
+      if (toDecimalNumber(adminW.amount) < amt) {
+        return {
+          ok: false,
+          status: 409,
+          message: "Insufficient admin wallet balance.",
+        };
+      }
+
+      /* 4️⃣ Find driver for receiving user */
+      const driver = await tx.drivers.findFirst({
+        where: {
+          user_id: BigInt(userW.user_id),
+        },
+        select: {
+          driver_id: true,
+        },
+      });
+
+      if (!driver) {
+        return {
+          ok: false,
+          status: 404,
+          message: "Driver not found for this user.",
+        };
+      }
+
+      /*
+       * 5️⃣ Debit admin safely.
+       * updateMany with amount >= amt prevents overdraft in concurrent transfers.
+       */
+      const debitResult = await tx.wallets.updateMany({
+        where: {
+          id: BigInt(adminW.id),
+          wallet_id: adminW.wallet_id,
+          status: "ACTIVE",
+          amount: {
+            gte: amt,
+          },
+        },
+        data: {
+          amount: {
+            decrement: amt,
+          },
+        },
+      });
+
+      if (Number(debitResult.count || 0) !== 1) {
+        return {
+          ok: false,
+          status: 409,
+          message: "Insufficient admin wallet balance.",
+        };
+      }
+
+      /* 6️⃣ Credit user */
+      const creditResult = await tx.wallets.updateMany({
+        where: {
+          id: BigInt(userW.id),
+          wallet_id: userW.wallet_id,
+          status: "ACTIVE",
+        },
+        data: {
+          amount: {
+            increment: amt,
+          },
+        },
+      });
+
+      if (Number(creditResult.count || 0) !== 1) {
+        throw new Error("Failed to credit user wallet.");
+      }
+
+      /* 7️⃣ Insert wallet transactions */
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: txnAdmin,
+          journal_code,
+          tnx_from: adminW.wallet_id,
+          tnx_to: userW.wallet_id,
+          amount: amt,
+          remark: "DR",
+          note: note || "",
+        },
+      });
+
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: txnUser,
+          journal_code,
+          tnx_from: adminW.wallet_id,
+          tnx_to: userW.wallet_id,
+          amount: amt,
+          remark: "CR",
+          note: note || "",
+        },
+      });
+
+      /* 8️⃣ Log admin action */
+      const activity =
+        `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
+        `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
+        (note ? ` | ${note}` : "");
+
+      await tx.admin_logs.create({
+        data: {
+          user_id: BigInt(userW.user_id),
+          admin_name: adminUser.user_name,
+          activity,
+        },
+      });
+
+      /*
+       * 9️⃣ Update ride_ratings payment status.
+       * Your Prisma model has payment_status Boolean.
+       * false = unpaid, true = paid.
+       */
+      await tx.ride_ratings.updateMany({
+        where: {
+          driver_id: BigInt(driver.driver_id),
+          payment_status: false,
+        },
+        data: {
+          payment_status: true,
+        },
+      });
+
+      /* 🔟 Get updated balances */
+      const adminNew = await tx.wallets.findUnique({
+        where: {
+          id: BigInt(adminW.id),
+        },
+      });
+
+      const userNew = await tx.wallets.findUnique({
+        where: {
+          id: BigInt(userW.id),
+        },
+      });
+
+      return {
+        ok: true,
+        journal_code,
+        amount: amtStr,
+        note,
+        admin_verified: {
+          user_id: Number(adminUser.user_id),
+          user_name: adminUser.user_name,
+          role: adminUser.role,
+        },
+        from: {
+          wallet_id: adminNew.wallet_id,
+          user_id: Number(adminNew.user_id),
+          balance: moneyString(adminNew.amount),
+        },
+        to: {
+          wallet_id: userNew.wallet_id,
+          user_id: Number(userNew.user_id),
+          balance: moneyString(userNew.amount),
+        },
+        transactions: {
+          admin_dr: txnAdmin,
+          user_cr: txnUser,
+        },
+      };
+    },
+    {
+      maxWait: 5000,
+      timeout: 15000,
+    },
+  );
 }
 
-module.exports = { adminTipTransfer };
+module.exports = {
+  adminTipTransfer,
+};

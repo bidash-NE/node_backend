@@ -208,7 +208,8 @@ jobs:
         if: needs.changes.outputs.wallet_payment == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./wallet_payment
+          context: .
+          file: ./wallet_payment/Dockerfile
           push: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/superapp-wallet-payment:latest

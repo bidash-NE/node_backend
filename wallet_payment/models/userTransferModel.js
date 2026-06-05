@@ -1,6 +1,6 @@
 // models/userTransferModel.js
-const db = require("../config/db");
 const axios = require("axios");
+const { prisma } = require("../lib/prisma");
 
 /**
  * POST https://grab.newedge.bt/wallet/ids/both
@@ -14,7 +14,11 @@ const axios = require("axios");
  * }
  */
 async function fetchTxIdsAndJournalCode() {
-  const url = process.env.WALLET_IDS_BOTH_URL;
+  const url = String(process.env.WALLET_IDS_BOTH_URL || "").trim();
+
+  if (!url) {
+    throw new Error("WALLET_IDS_BOTH_URL missing in env");
+  }
 
   const resp = await axios.post(url, {}, { timeout: 5000 });
 
@@ -32,7 +36,73 @@ async function fetchTxIdsAndJournalCode() {
     throw new Error("wallet/ids/both did not return journal_code");
   }
 
-  return { transaction_ids, journal_code };
+  return {
+    transaction_ids,
+    journal_code,
+  };
+}
+
+/* ---------------- helpers ---------------- */
+
+function toDecimalNumber(v) {
+  if (v == null) return 0;
+
+  if (typeof v === "number") return v;
+
+  if (typeof v === "bigint") return Number(v);
+
+  if (typeof v === "string") return Number(v);
+
+  if (
+    typeof v === "object" &&
+    typeof v.toString === "function" &&
+    v.constructor?.name === "Decimal"
+  ) {
+    return Number(v.toString());
+  }
+
+  return Number(v);
+}
+
+function normalizeAmount(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function prismaModelFields(modelName) {
+  try {
+    const model = prisma?._runtimeDataModel?.models?.[modelName];
+
+    if (!model || !Array.isArray(model.fields)) {
+      return new Set();
+    }
+
+    return new Set(model.fields.map((f) => f.name));
+  } catch {
+    return new Set();
+  }
+}
+
+function transactionCreateData(data) {
+  const fields = prismaModelFields("wallet_transactions");
+
+  const out = {
+    transaction_id: data.transaction_id,
+    journal_code: data.journal_code,
+    tnx_from: data.tnx_from,
+    tnx_to: data.tnx_to,
+    amount: data.amount,
+    remark: data.remark,
+    note: data.note,
+  };
+
+  const now = new Date();
+
+  // Only include these if your Prisma model exposes these fields.
+  if (fields.has("created_at")) out.created_at = now;
+  if (fields.has("updated_at")) out.updated_at = now;
+
+  return out;
 }
 
 /**
@@ -47,125 +117,199 @@ async function userWalletTransfer({
   amount_nu,
   note = "",
 }) {
-  // 1) Fetch transaction IDs + journal code from external service
-  const { transaction_ids, journal_code } = await fetchTxIdsAndJournalCode();
-
-  const [txIdDr, txIdCr] = transaction_ids;
-
-  const conn = await db.getConnection();
   try {
-    await conn.beginTransaction();
+    // 1) Fetch transaction IDs + journal code from external service
+    // Kept outside DB transaction, same as your old code.
+    const { transaction_ids, journal_code } = await fetchTxIdsAndJournalCode();
 
-    /* ----------------- LOCK SENDER ----------------- */
-    const [senderRows] = await conn.query(
-      "SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [sender_wallet_id],
-    );
-    if (!senderRows.length) {
-      await conn.rollback();
-      return { ok: false, status: 404, message: "Sender wallet not found." };
-    }
-    const sender = senderRows[0];
+    const [txIdDr, txIdCr] = transaction_ids;
 
-    /* ----------------- LOCK RECIPIENT ----------------- */
-    const [recipientRows] = await conn.query(
-      "SELECT id, wallet_id, amount, status FROM wallets WHERE wallet_id = ? FOR UPDATE",
-      [recipient_wallet_id],
-    );
-    if (!recipientRows.length) {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 404,
-        message: "Recipient wallet not found.",
-      };
-    }
-    const recipient = recipientRows[0];
+    const amt = normalizeAmount(amount_nu);
 
-    if (sender.status !== "ACTIVE") {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 403,
-        message: "Sender wallet is not ACTIVE.",
-      };
-    }
-
-    if (recipient.status !== "ACTIVE") {
-      await conn.rollback();
-      return {
-        ok: false,
-        status: 403,
-        message: "Recipient wallet is not ACTIVE.",
-      };
-    }
-
-    const amt = Number(amount_nu);
-    if (isNaN(amt) || amt <= 0) {
-      await conn.rollback();
-      return { ok: false, status: 400, message: "Invalid amount." };
-    }
-
-    if (Number(sender.amount) < amt) {
-      await conn.rollback();
+    if (!Number.isFinite(amt) || amt <= 0) {
       return {
         ok: false,
         status: 400,
-        message: "Insufficient balance in sender wallet.",
+        message: "Invalid amount.",
       };
     }
 
-    const newSenderBal = Number(sender.amount) - amt;
-    const newRecipientBal = Number(recipient.amount) + amt;
+    return await prisma.$transaction(async (tx) => {
+      /* ----------------- FETCH SENDER ----------------- */
+      const sender = await tx.wallets.findUnique({
+        where: {
+          wallet_id: String(sender_wallet_id).trim(),
+        },
+        select: {
+          id: true,
+          wallet_id: true,
+          amount: true,
+          status: true,
+        },
+      });
 
-    /* ----------------- UPDATE BALANCES ----------------- */
-    await conn.query("UPDATE wallets SET amount = ? WHERE id = ?", [
-      newSenderBal,
-      sender.id,
-    ]);
+      if (!sender) {
+        return {
+          ok: false,
+          status: 404,
+          message: "Sender wallet not found.",
+        };
+      }
 
-    await conn.query("UPDATE wallets SET amount = ? WHERE id = ?", [
-      newRecipientBal,
-      recipient.id,
-    ]);
+      /* ----------------- FETCH RECIPIENT ----------------- */
+      const recipient = await tx.wallets.findUnique({
+        where: {
+          wallet_id: String(recipient_wallet_id).trim(),
+        },
+        select: {
+          id: true,
+          wallet_id: true,
+          amount: true,
+          status: true,
+        },
+      });
 
-    /* ----------------- INSERT DR (Sender) ----------------- */
-    await conn.query(
-      `INSERT INTO wallet_transactions
-       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
-      [txIdDr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note],
-    );
+      if (!recipient) {
+        return {
+          ok: false,
+          status: 404,
+          message: "Recipient wallet not found.",
+        };
+      }
 
-    /* ----------------- INSERT CR (Recipient) ----------------- */
-    await conn.query(
-      `INSERT INTO wallet_transactions
-       (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
-      [txIdCr, journal_code, sender_wallet_id, recipient_wallet_id, amt, note],
-    );
+      if (String(sender.status || "").toUpperCase() !== "ACTIVE") {
+        return {
+          ok: false,
+          status: 403,
+          message: "Sender wallet is not ACTIVE.",
+        };
+      }
 
-    await conn.commit();
+      if (String(recipient.status || "").toUpperCase() !== "ACTIVE") {
+        return {
+          ok: false,
+          status: 403,
+          message: "Recipient wallet is not ACTIVE.",
+        };
+      }
 
-    return {
-      ok: true,
-      status: 200,
-      message: "Transfer completed.",
-      journal_code,
-      transaction_ids,
-      sender_balance: newSenderBal,
-      recipient_balance: newRecipientBal,
-    };
+      if (toDecimalNumber(sender.amount) < amt) {
+        return {
+          ok: false,
+          status: 400,
+          message: "Insufficient balance in sender wallet.",
+        };
+      }
+
+      /*
+       * Atomic debit protection:
+       * This prevents overdraft even if two transfers hit the same wallet together.
+       */
+      const debitResult = await tx.wallets.updateMany({
+        where: {
+          id: Number(sender.id),
+          wallet_id: String(sender_wallet_id).trim(),
+          status: "ACTIVE",
+          amount: {
+            gte: amt,
+          },
+        },
+        data: {
+          amount: {
+            decrement: amt,
+          },
+        },
+      });
+
+      if (Number(debitResult.count || 0) !== 1) {
+        return {
+          ok: false,
+          status: 400,
+          message: "Insufficient balance in sender wallet.",
+        };
+      }
+
+      /* ----------------- CREDIT RECIPIENT ----------------- */
+      const creditResult = await tx.wallets.updateMany({
+        where: {
+          id: Number(recipient.id),
+          wallet_id: String(recipient_wallet_id).trim(),
+          status: "ACTIVE",
+        },
+        data: {
+          amount: {
+            increment: amt,
+          },
+        },
+      });
+
+      if (Number(creditResult.count || 0) !== 1) {
+        throw new Error("Failed to credit recipient wallet.");
+      }
+
+      /* ----------------- INSERT DR (Sender) ----------------- */
+      await tx.wallet_transactions.create({
+        data: transactionCreateData({
+          transaction_id: txIdDr,
+          journal_code,
+          tnx_from: String(sender_wallet_id).trim(),
+          tnx_to: String(recipient_wallet_id).trim(),
+          amount: amt,
+          remark: "DR",
+          note: note || "",
+        }),
+      });
+
+      /* ----------------- INSERT CR (Recipient) ----------------- */
+      await tx.wallet_transactions.create({
+        data: transactionCreateData({
+          transaction_id: txIdCr,
+          journal_code,
+          tnx_from: String(sender_wallet_id).trim(),
+          tnx_to: String(recipient_wallet_id).trim(),
+          amount: amt,
+          remark: "CR",
+          note: note || "",
+        }),
+      });
+
+      /* ----------------- GET UPDATED BALANCES ----------------- */
+      const senderNew = await tx.wallets.findUnique({
+        where: {
+          id: Number(sender.id),
+        },
+        select: {
+          amount: true,
+        },
+      });
+
+      const recipientNew = await tx.wallets.findUnique({
+        where: {
+          id: Number(recipient.id),
+        },
+        select: {
+          amount: true,
+        },
+      });
+
+      return {
+        ok: true,
+        status: 200,
+        message: "Transfer completed.",
+        journal_code,
+        transaction_ids,
+        sender_balance: toDecimalNumber(senderNew?.amount),
+        recipient_balance: toDecimalNumber(recipientNew?.amount),
+      };
+    });
   } catch (err) {
-    await conn.rollback();
     console.error("Error in userWalletTransfer:", err);
+
     return {
       ok: false,
       status: 500,
       message: err.message,
     };
-  } finally {
-    conn.release();
   }
 }
 

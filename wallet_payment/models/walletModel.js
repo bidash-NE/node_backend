@@ -1,5 +1,5 @@
 // models/walletModel.js
-const db = require("../config/db");
+const { prisma } = require("../lib/prisma");
 
 /**
  * Wallet ID format:
@@ -18,235 +18,339 @@ function makeWalletId(prefix = "TD") {
   return `${prefix}${randDigits(8)}`;
 }
 
-async function userExists(conn, user_id) {
-  const [rows] = await conn.query(
-    "SELECT user_id FROM users WHERE user_id = ?",
-    [user_id],
-  );
-  return rows.length > 0;
-}
-
-async function walletIdExists(conn, wallet_id) {
-  const [rows] = await conn.query(
-    "SELECT 1 FROM wallets WHERE wallet_id = ? LIMIT 1",
-    [wallet_id],
-  );
-  return rows.length > 0;
-}
-
-async function generateUniqueWalletId(conn, prefix = "TD", maxTries = 50) {
-  for (let i = 0; i < maxTries; i++) {
-    const candidate = makeWalletId(prefix);
-    const exists = await walletIdExists(conn, candidate);
-    if (!exists) return candidate;
-  }
-  throw new Error("Failed to generate unique wallet_id. Please retry.");
-}
-
 function isWalletId(v) {
   return /^TD\d{8}$/i.test(String(v || "").trim());
 }
 
-async function createWallet({ user_id, status = "ACTIVE" }) {
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
+function toNumberIfDecimal(v) {
+  if (v == null) return v;
 
-    if (!(await userExists(conn, user_id))) {
-      await conn.rollback();
+  if (typeof v === "bigint") return Number(v);
+
+  if (
+    typeof v === "object" &&
+    typeof v.toString === "function" &&
+    v.constructor?.name === "Decimal"
+  ) {
+    return Number(v.toString());
+  }
+
+  return v;
+}
+
+function normalizeWallet(row) {
+  if (!row) return null;
+
+  return {
+    ...row,
+    id: toNumberIfDecimal(row.id),
+    user_id: toNumberIfDecimal(row.user_id),
+    amount: toNumberIfDecimal(row.amount),
+  };
+}
+
+async function userExists(tx, user_id) {
+  const uid = Number(user_id);
+
+  if (!Number.isInteger(uid) || uid <= 0) return false;
+
+  const user = await tx.users.findUnique({
+    where: {
+      user_id: uid,
+    },
+    select: {
+      user_id: true,
+    },
+  });
+
+  return !!user;
+}
+
+async function walletIdExists(tx, wallet_id) {
+  const wallet = await tx.wallets.findUnique({
+    where: {
+      wallet_id,
+    },
+    select: {
+      wallet_id: true,
+    },
+  });
+
+  return !!wallet;
+}
+
+async function generateUniqueWalletId(tx, prefix = "TD", maxTries = 50) {
+  for (let i = 0; i < maxTries; i++) {
+    const candidate = makeWalletId(prefix);
+    const exists = await walletIdExists(tx, candidate);
+
+    if (!exists) return candidate;
+  }
+
+  throw new Error("Failed to generate unique wallet_id. Please retry.");
+}
+
+async function createWallet({ user_id, status = "ACTIVE" }) {
+  const uid = Number(user_id);
+  const st = String(status || "ACTIVE").trim().toUpperCase();
+
+  return await prisma.$transaction(async (tx) => {
+    if (!(await userExists(tx, uid))) {
       return { error: "USER_NOT_FOUND" };
     }
 
-    const [existing] = await conn.query(
-      "SELECT * FROM wallets WHERE user_id = ? FOR UPDATE",
-      [user_id],
-    );
-    if (existing.length) {
-      await conn.rollback();
-      return { error: "WALLET_EXISTS", wallet: existing[0] };
+    const existing = await tx.wallets.findFirst({
+      where: {
+        user_id: uid,
+      },
+    });
+
+    if (existing) {
+      return {
+        error: "WALLET_EXISTS",
+        wallet: normalizeWallet(existing),
+      };
     }
 
-    let insertedId = null;
-    let wallet_id = null;
+    let created = null;
 
     for (let attempt = 0; attempt < 50; attempt++) {
-      wallet_id = await generateUniqueWalletId(conn, "TD", 10);
+      const wallet_id = await generateUniqueWalletId(tx, "TD", 10);
 
       try {
-        const [ins] = await conn.query(
-          "INSERT INTO wallets (wallet_id, user_id, amount, status) VALUES (?, ?, 0.00, ?)",
-          [wallet_id, user_id, status],
-        );
-        insertedId = ins.insertId;
+        created = await tx.wallets.create({
+          data: {
+            wallet_id,
+            user_id: uid,
+            amount: 0,
+            status: st,
+          },
+        });
+
         break;
       } catch (err) {
         if (
-          err &&
-          (err.code === "ER_DUP_ENTRY" ||
-            String(err.message || "").includes("Duplicate"))
+          err?.code === "P2002" ||
+          String(err?.message || "").toLowerCase().includes("unique")
         ) {
-          wallet_id = null;
           continue;
         }
+
         throw err;
       }
     }
 
-    if (!insertedId || !wallet_id) {
+    if (!created) {
       throw new Error(
         "Could not allocate unique wallet_id after multiple attempts.",
       );
     }
 
-    const [[row]] = await conn.query("SELECT * FROM wallets WHERE id = ?", [
-      insertedId,
-    ]);
-
-    await conn.commit();
-    return row;
-  } catch (err) {
-    try {
-      await conn.rollback();
-    } catch (_) {}
-    throw err;
-  } finally {
-    conn.release();
-  }
+    return normalizeWallet(created);
+  });
 }
 
 async function getWallet({ key }) {
-  const k = String(key).trim();
+  const k = String(key || "").trim();
+
+  if (!k) return null;
+
   const byWalletId = isWalletId(k);
 
-  const [rows] = await db.query(
-    byWalletId
-      ? "SELECT * FROM wallets WHERE wallet_id = ?"
-      : "SELECT * FROM wallets WHERE id = ?",
-    [byWalletId ? k : Number(k)],
-  );
-  return rows[0] || null;
+  const wallet = byWalletId
+    ? await prisma.wallets.findUnique({
+        where: {
+          wallet_id: k,
+        },
+      })
+    : await prisma.wallets.findUnique({
+        where: {
+          id: Number(k),
+        },
+      });
+
+  return normalizeWallet(wallet);
 }
 
 async function getWalletByUserId(user_id) {
-  const [rows] = await db.query("SELECT * FROM wallets WHERE user_id = ?", [
-    user_id,
-  ]);
-  return rows[0] || null;
+  const uid = Number(user_id);
+
+  if (!Number.isInteger(uid) || uid <= 0) return null;
+
+  const wallet = await prisma.wallets.findFirst({
+    where: {
+      user_id: uid,
+    },
+  });
+
+  return normalizeWallet(wallet);
 }
 
 async function listWallets({ limit = 50, offset = 0, status = null }) {
-  limit = Math.min(Number(limit) || 50, 200);
-  offset = Number(offset) || 0;
+  const take = Math.min(Number(limit) || 50, 200);
+  const skip = Number(offset) || 0;
+
+  const where = {};
 
   if (status) {
-    const [rows] = await db.query(
-      "SELECT * FROM wallets WHERE status = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-      [String(status).toUpperCase(), limit, offset],
-    );
-    return rows;
+    where.status = String(status).trim().toUpperCase();
   }
-  const [rows] = await db.query(
-    "SELECT * FROM wallets ORDER BY id DESC LIMIT ? OFFSET ?",
-    [limit, offset],
-  );
-  return rows;
+
+  const rows = await prisma.wallets.findMany({
+    where,
+    orderBy: {
+      id: "desc",
+    },
+    take,
+    skip,
+  });
+
+  return rows.map(normalizeWallet);
 }
 
 async function updateWalletStatus({ key, status }) {
-  const k = String(key).trim();
-  const byWalletId = isWalletId(k);
+  const k = String(key || "").trim();
+  const st = String(status || "").trim().toUpperCase();
 
-  const [existing] = await db.query(
-    byWalletId
-      ? "SELECT id FROM wallets WHERE wallet_id = ?"
-      : "SELECT id FROM wallets WHERE id = ?",
-    [byWalletId ? k : Number(k)],
-  );
-  if (!existing.length) return null;
+  if (!k) return null;
 
-  await db.query("UPDATE wallets SET status = ? WHERE id = ?", [
-    status,
-    existing[0].id,
-  ]);
+  const existing = isWalletId(k)
+    ? await prisma.wallets.findUnique({
+        where: {
+          wallet_id: k,
+        },
+        select: {
+          id: true,
+        },
+      })
+    : await prisma.wallets.findUnique({
+        where: {
+          id: Number(k),
+        },
+        select: {
+          id: true,
+        },
+      });
 
-  const [rows] = await db.query("SELECT * FROM wallets WHERE id = ?", [
-    existing[0].id,
-  ]);
-  return rows[0] || null;
+  if (!existing) return null;
+
+  const updated = await prisma.wallets.update({
+    where: {
+      id: Number(existing.id),
+    },
+    data: {
+      status: st,
+    },
+  });
+
+  return normalizeWallet(updated);
 }
 
 async function deleteWallet({ key }) {
-  const conn = await db.getConnection();
-  try {
-    await conn.beginTransaction();
+  const k = String(key || "").trim();
 
-    const k = String(key).trim();
-    const byWalletId = isWalletId(k);
-
-    const [wallet] = await conn.query(
-      byWalletId
-        ? "SELECT id, wallet_id FROM wallets WHERE wallet_id = ?"
-        : "SELECT id, wallet_id FROM wallets WHERE id = ?",
-      [byWalletId ? k : Number(k)],
-    );
-
-    if (!wallet.length) {
-      await conn.rollback();
-      return { ok: false, code: "NOT_FOUND" };
-    }
-
-    const id = wallet[0].id;
-    const wid = wallet[0].wallet_id;
-
-    const [[cnt]] = await conn.query(
-      "SELECT COUNT(1) AS c FROM wallet_transactions WHERE tnx_from = ? OR tnx_to = ?",
-      [wid, wid],
-    );
-
-    if (cnt.c > 0) {
-      await conn.rollback();
-      return { ok: false, code: "HAS_TRANSACTIONS" };
-    }
-
-    await conn.query("DELETE FROM wallets WHERE id = ?", [id]);
-    await conn.commit();
-    return { ok: true };
-  } catch (err) {
-    try {
-      await conn.rollback();
-    } catch (_) {}
-    throw err;
-  } finally {
-    conn.release();
+  if (!k) {
+    return { ok: false, code: "NOT_FOUND" };
   }
+
+  return await prisma.$transaction(async (tx) => {
+    const wallet = isWalletId(k)
+      ? await tx.wallets.findUnique({
+          where: {
+            wallet_id: k,
+          },
+          select: {
+            id: true,
+            wallet_id: true,
+          },
+        })
+      : await tx.wallets.findUnique({
+          where: {
+            id: Number(k),
+          },
+          select: {
+            id: true,
+            wallet_id: true,
+          },
+        });
+
+    if (!wallet) {
+      return {
+        ok: false,
+        code: "NOT_FOUND",
+      };
+    }
+
+    const txnCount = await tx.wallet_transactions.count({
+      where: {
+        OR: [
+          {
+            tnx_from: wallet.wallet_id,
+          },
+          {
+            tnx_to: wallet.wallet_id,
+          },
+        ],
+      },
+    });
+
+    if (txnCount > 0) {
+      return {
+        ok: false,
+        code: "HAS_TRANSACTIONS",
+      };
+    }
+
+    await tx.wallets.delete({
+      where: {
+        id: Number(wallet.id),
+      },
+    });
+
+    return {
+      ok: true,
+    };
+  });
 }
 
 /**
  * Set / update encrypted T-PIN for a wallet
  */
 async function setWalletTPin({ key, t_pin_hash }) {
-  const k = String(key).trim();
-  const byWalletId = isWalletId(k);
+  const k = String(key || "").trim();
 
-  const [existing] = await db.query(
-    byWalletId
-      ? "SELECT id FROM wallets WHERE wallet_id = ?"
-      : "SELECT id FROM wallets WHERE id = ?",
-    [byWalletId ? k : Number(k)],
-  );
-  if (!existing.length) return null;
+  if (!k) return null;
 
-  const walletDbId = existing[0].id;
+  const existing = isWalletId(k)
+    ? await prisma.wallets.findUnique({
+        where: {
+          wallet_id: k,
+        },
+        select: {
+          id: true,
+        },
+      })
+    : await prisma.wallets.findUnique({
+        where: {
+          id: Number(k),
+        },
+        select: {
+          id: true,
+        },
+      });
 
-  await db.query("UPDATE wallets SET t_pin = ? WHERE id = ?", [
-    t_pin_hash,
-    walletDbId,
-  ]);
+  if (!existing) return null;
 
-  const [rows] = await db.query("SELECT * FROM wallets WHERE id = ?", [
-    walletDbId,
-  ]);
-  return rows[0] || null;
+  const updated = await prisma.wallets.update({
+    where: {
+      id: Number(existing.id),
+    },
+    data: {
+      t_pin: t_pin_hash,
+    },
+  });
+
+  return normalizeWallet(updated);
 }
 
 module.exports = {
