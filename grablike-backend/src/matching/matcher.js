@@ -138,6 +138,7 @@ export const matcher = {
     duration_s,
     fare, // units
     fare_cents, // integer cents (preferred)
+    offered_fare_cents, // passenger's negotiation offer (optional)
     base_fare, // legacy
     rideId,
     passenger_id,
@@ -174,6 +175,7 @@ export const matcher = {
       duration_s: Number.isFinite(Number(duration_s)) ? Number(duration_s) : 0,
       fare: fare != null ? String(fare) : "",
       fare_cents: fare_cents != null ? String(fare_cents) : "",
+      offered_fare_cents: offered_fare_cents != null ? String(offered_fare_cents) : "",
       base_fare: base_fare != null ? String(base_fare) : "",
       passenger_id: passenger_id || "",
       trip_type: trip_type || "instant",
@@ -259,6 +261,8 @@ export const matcher = {
         distance_km: Math.round((Number(ride.distance_m || 0) / 1000) * 10) / 10,
         eta_min: Math.round(Number(ride.duration_s || 0) / 60),
         fare: fareOut ?? 0,
+        offered_fare_cents: ride.offered_fare_cents ? Number(ride.offered_fare_cents) : null,
+        offered_fare: ride.offered_fare_cents ? Number(ride.offered_fare_cents) / 100 : null,
         cityId: ride.cityId,
         serviceType: ride.serviceType,
         service_code: ride.service_code,

@@ -7,6 +7,7 @@ import {
   rideHash,
   currentRidesKey,
   currentPassengerRideKey,
+  rideCountersHash,
 } from "../matching/redisKeys.js";
 import { initRideChat } from "./chat.js";
 import { initCallEvents } from "./calls.js";
@@ -1546,6 +1547,117 @@ export function initDriverSocket(io, mysqlPool) {
         mysqlPool,
         payload: { request_id, driver_id, reason: "timeout" },
       });
+    });
+
+    /* ===================== Fare Negotiation ===================== */
+
+    // Driver sends a counter-offer to the passenger
+    socket.on("fare:counter", async ({ request_id, counter_fare_cents } = {}, ack) => {
+      const driver_id = socket.data.driver_id;
+      const ok   = (data = {}) => safeAck(ack, { ok: true, ...data });
+      const fail = (error)      => safeAck(ack, { ok: false, error });
+
+      if (!driver_id)    return fail("Not authenticated as driver");
+      if (!request_id)   return fail("Missing request_id");
+
+      const counterCents = Number(counter_fare_cents);
+      if (!Number.isFinite(counterCents) || counterCents <= 0)
+        return fail("Invalid counter fare");
+
+      const MIN_FARE_CENTS = 5000; // Nu 50 floor
+      if (counterCents < MIN_FARE_CENTS)
+        return fail(`Minimum fare is Nu ${MIN_FARE_CENTS / 100}`);
+
+      const redis = getRedis();
+      const rideKey = rideHash(request_id);
+      const ride = await redis.hgetall(rideKey);
+
+      if (!ride?.state)               return fail("Ride not found");
+      if (ride.state !== "broadcasted") return fail("Ride no longer available");
+
+      const offeredCents = Number(ride.offered_fare_cents || ride.fare_cents || 0);
+      if (counterCents <= offeredCents)
+        return fail("Counter must be higher than the passenger's offer");
+
+      await redis.hset(rideCountersHash(request_id), driver_id, String(counterCents));
+      await redis.expire(rideCountersHash(request_id), 300);
+
+      if (ride.passenger_id) {
+        io.to(passengerRoom(ride.passenger_id)).emit("fare:counter", {
+          request_id,
+          driver_id,
+          counter_fare_cents: counterCents,
+          counter_fare: counterCents / 100,
+        });
+      }
+
+      ok({ request_id, counter_fare_cents: counterCents });
+    });
+
+    // Passenger selects a driver (either at offered price or their counter)
+    socket.on("fare:select", async ({ request_id, driver_id: selectedDriverId } = {}, ack) => {
+      const passenger_id = socket.data.passenger_id;
+      const ok   = (data = {}) => safeAck(ack, { ok: true, ...data });
+      const fail = (error)      => safeAck(ack, { ok: false, error });
+
+      if (!passenger_id)                        return fail("Not authenticated as passenger");
+      if (!request_id || !selectedDriverId)     return fail("Missing request_id or driver_id");
+
+      const redis = getRedis();
+      const rideKey = rideHash(request_id);
+      const ride = await redis.hgetall(rideKey);
+
+      if (!ride?.state)                          return fail("Ride not found");
+      if (ride.state !== "broadcasted")          return fail("Ride no longer available");
+      if (ride.passenger_id !== String(passenger_id)) return fail("Not your ride");
+
+      // Use driver's counter if present, otherwise use the original offered fare
+      const counterCents = await redis.hget(rideCountersHash(request_id), String(selectedDriverId));
+      const finalFareCents = counterCents
+        ? Number(counterCents)
+        : Number(ride.fare_cents || 0);
+
+      if (counterCents) {
+        await redis.hset(rideKey, {
+          fare_cents: String(finalFareCents),
+          fare: String(finalFareCents / 100),
+        });
+      }
+
+      const result = await matcher.acceptOffer({
+        io,
+        rideId: request_id,
+        driverId: String(selectedDriverId),
+      });
+
+      if (!result.ok) return fail(result.reason || "Accept failed");
+
+      await redis.del(rideCountersHash(request_id));
+
+      ok({ request_id, driver_id: selectedDriverId, final_fare_cents: finalFareCents });
+    });
+
+    // Driver withdraws their counter-offer
+    socket.on("fare:counter_withdraw", async ({ request_id } = {}, ack) => {
+      const driver_id = socket.data.driver_id;
+      const ok   = (data = {}) => safeAck(ack, { ok: true, ...data });
+      const fail = (error)      => safeAck(ack, { ok: false, error });
+
+      if (!driver_id)  return fail("Not authenticated as driver");
+      if (!request_id) return fail("Missing request_id");
+
+      const redis = getRedis();
+      await redis.hdel(rideCountersHash(request_id), driver_id);
+
+      const ride = await redis.hgetall(rideHash(request_id));
+      if (ride?.passenger_id) {
+        io.to(passengerRoom(ride.passenger_id)).emit("fare:counter_withdrawn", {
+          request_id,
+          driver_id,
+        });
+      }
+
+      ok({ request_id });
     });
 
     /* -------- Disconnect -------- */

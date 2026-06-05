@@ -11,3 +11,6 @@ export const rideRejected = (rideId) => `ride:${rideId}:rejected`;
 export const currentRidesKey = (driverId) => `driver:current:rides:${driverId}`;
 export const currentPassengerRideKey = (passengerId) => `passenger:current:ride:${passengerId}`;
 
+// Hash of driverId -> counter_fare_cents for a ride under negotiation
+export const rideCountersHash = (rideId) => `ride:${rideId}:counters`;
+
