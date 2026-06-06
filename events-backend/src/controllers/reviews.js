@@ -201,15 +201,15 @@ async function toggleHelpful(req, res, next) {
     });
 
     if (existing) {
-      await prisma.event_event_review_helpful.delete({
+      await prisma.event_review_helpful.delete({
         where: { review_id_user_id: { review_id: reviewId, user_id: userId } },
       });
-      const count = await prisma.event_event_review_helpful.count({ where: { review_id: reviewId } });
+      const count = await prisma.event_review_helpful.count({ where: { review_id: reviewId } });
       return res.json({ success: true, helpful: false, helpful_count: count });
     }
 
-    await prisma.event_event_review_helpful.create({ data: { review_id: reviewId, user_id: userId } });
-    const count = await prisma.event_event_review_helpful.count({ where: { review_id: reviewId } });
+    await prisma.event_review_helpful.create({ data: { review_id: reviewId, user_id: userId } });
+    const count = await prisma.event_review_helpful.count({ where: { review_id: reviewId } });
 
     res.json({ success: true, helpful: true, helpful_count: count });
   } catch (err) {
