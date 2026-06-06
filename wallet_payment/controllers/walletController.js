@@ -210,7 +210,11 @@ function isValidWalletId(v) {
 }
 
 function isValidStatus(v) {
-  return ["ACTIVE", "INACTIVE"].includes(String(v || "").trim().toUpperCase());
+  return ["ACTIVE", "INACTIVE"].includes(
+    String(v || "")
+      .trim()
+      .toUpperCase(),
+  );
 }
 
 function isValidUserId(v) {
@@ -424,7 +428,9 @@ async function checkTPinByUserId(req, res) {
 async function updateStatusByParam(req, res) {
   try {
     const { wallet_id, status } = req.params;
-    const st = String(status || "").trim().toUpperCase();
+    const st = String(status || "")
+      .trim()
+      .toUpperCase();
 
     if (!isValidStatus(st)) {
       return res.status(400).json({
@@ -819,7 +825,9 @@ async function forgotTPinRequest(req, res) {
       });
     }
 
-    const email = String(user.email || "").trim().toLowerCase();
+    const email = String(user.email || "")
+      .trim()
+      .toLowerCase();
     const userName = user.user_name || null;
 
     const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -1350,7 +1358,7 @@ async function getUserNameByWalletId(req, res) {
 
     const user = await prisma.users.findUnique({
       where: {
-        user_id: Number(wallet.user_id),
+        user_id: BigInt(wallet.user_id),
       },
       select: {
         user_id: true,
@@ -1368,7 +1376,7 @@ async function getUserNameByWalletId(req, res) {
     return res.json({
       success: true,
       data: {
-        user_id: user.user_id,
+        user_id: Number(user.user_id),
         user_name: user.user_name,
       },
     });
