@@ -1644,14 +1644,17 @@ export function initDriverSocket(io, mysqlPool) {
       try {
         conn = await mysqlPool.getConnection();
 
+        // Set base_fare_cents = fare_cents so computePlatformFeeAndGST
+        // never sees total < subtotal for negotiated rides
         await conn.execute(
           `UPDATE rides
-              SET driver_id   = ?,
-                  status      = 'accepted',
-                  accepted_at = NOW(),
-                  fare_cents  = ?
+              SET driver_id      = ?,
+                  status         = 'accepted',
+                  accepted_at    = NOW(),
+                  fare_cents     = ?,
+                  base_fare_cents = ?
             WHERE ride_id = ? AND status = 'requested'`,
-          [String(selectedDriverId), finalFareCents, request_id],
+          [String(selectedDriverId), finalFareCents, finalFareCents, request_id],
         );
 
         const [rows] = await conn.execute(
@@ -1707,12 +1710,21 @@ export function initDriverSocket(io, mysqlPool) {
           driver_id: selectedDriverId,
           passenger_id,
         });
-        // driver:current:rides:{driverId} → rideId: snapshot
         await redis.hset(currentRidesKey(String(selectedDriverId)), String(request_id), snapshot);
-        // passenger:current:ride:{passengerId} → snapshot
         await redis.set(currentPassengerRideKey(String(passenger_id)), snapshot);
       } catch (e) {
         console.error("[fare:select] redis current-ride key error:", e?.message);
+      }
+
+      // ── Join the driver's socket(s) to the ride room so rideDriverLocation
+      //    and fareFinalized are routed correctly ──
+      try {
+        const driverSockets = await io.in(driverRoom(String(selectedDriverId))).fetchSockets();
+        for (const s of driverSockets) {
+          s.join(rideRoom(request_id));
+        }
+      } catch (e) {
+        console.error("[fare:select] ride room join error:", e?.message);
       }
 
       // ── Emit rideAccepted → passenger (triggers navigation to WaitingForDriver) ──
