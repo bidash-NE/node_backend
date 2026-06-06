@@ -1564,10 +1564,6 @@ export function initDriverSocket(io, mysqlPool) {
       if (!Number.isFinite(counterCents) || counterCents <= 0)
         return fail("Invalid counter fare");
 
-      const MIN_FARE_CENTS = 5000; // Nu 50 floor
-      if (counterCents < MIN_FARE_CENTS)
-        return fail(`Minimum fare is Nu ${MIN_FARE_CENTS / 100}`);
-
       const redis = getRedis();
       const rideKey = rideHash(request_id);
       const ride = await redis.hgetall(rideKey);
@@ -1575,9 +1571,16 @@ export function initDriverSocket(io, mysqlPool) {
       if (!ride?.state)               return fail("Ride not found");
       if (ride.state !== "broadcasted") return fail("Ride no longer available");
 
-      const offeredCents = Number(ride.offered_fare_cents || ride.fare_cents || 0);
+      const minFareCents = Number(ride.min_fare_cents || 5000);
+      if (counterCents < minFareCents)
+        return fail(`Minimum fare is Nu ${(minFareCents / 100).toFixed(0)}`);
+
+      const systemFareCents = Number(ride.fare_cents || 0);
+      const offeredCents = Number(ride.offered_fare_cents || systemFareCents || 0);
       if (counterCents <= offeredCents)
         return fail("Counter must be higher than the passenger's offer");
+      if (systemFareCents > 0 && counterCents > systemFareCents)
+        return fail(`Counter cannot exceed the system fare (Nu ${(systemFareCents / 100).toFixed(0)})`);
 
       await redis.hset(rideCountersHash(request_id), driver_id, String(counterCents));
       await redis.expire(rideCountersHash(request_id), 300);
