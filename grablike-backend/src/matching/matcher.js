@@ -384,6 +384,8 @@ export const matcher = {
     fare,
     fare_cents,
     base_fare,
+    offered_fare_cents,
+    min_fare_cents,
     rideId,
     passenger_id,
     payment_method,
@@ -430,6 +432,8 @@ export const matcher = {
       fare: fare != null ? String(fare) : "",
       fare_cents: fare_cents != null ? String(fare_cents) : "",
       base_fare: base_fare != null ? String(base_fare) : "",
+      offered_fare_cents: offered_fare_cents != null ? String(offered_fare_cents) : "",
+      min_fare_cents: min_fare_cents != null ? String(min_fare_cents) : "5000",
 
       passenger_id: passenger_id || "",
       trip_type: "instant",
@@ -556,6 +560,9 @@ export const matcher = {
         eta_min: Math.round(Number(duration_s || 0) / 60),
 
         fare: fareOut,
+        offered_fare_cents: offered_fare_cents != null ? Number(offered_fare_cents) : null,
+        offered_fare: offered_fare_cents != null ? Number(offered_fare_cents) / 100 : null,
+        min_fare_cents: Number(min_fare_cents || 5000),
 
         cityId: cityId || "thimphu",
         serviceType: serviceType || service_code,
