@@ -1645,16 +1645,18 @@ export function initDriverSocket(io, mysqlPool) {
         conn = await mysqlPool.getConnection();
 
         console.log("[fare:select] updating ride:", { request_id, selectedDriverId, finalFareCents });
-        // Set base_fare_cents = fare_cents so computePlatformFeeAndGST
-        // never sees total < subtotal for negotiated rides
+        // finalizeOnAccept (called inside matcher.acceptOffer) already sets
+        // status='accepted' without driver_id — so we match both 'requested'
+        // and 'accepted' to ensure driver_id + fare are always written.
         const [updateResult] = await conn.execute(
           `UPDATE rides
-              SET driver_id      = ?,
-                  status         = 'accepted',
-                  accepted_at    = NOW(),
-                  fare_cents     = ?,
+              SET driver_id       = ?,
+                  status          = 'accepted',
+                  accepted_at     = COALESCE(accepted_at, NOW()),
+                  fare_cents      = ?,
                   base_fare_cents = ?
-            WHERE ride_id = ? AND status = 'requested'`,
+            WHERE ride_id = ?
+              AND status IN ('requested', 'offered_to_driver', 'accepted')`,
           [String(selectedDriverId), finalFareCents, finalFareCents, request_id],
         );
         console.log("[fare:select] DB update affectedRows:", updateResult.affectedRows);
@@ -2815,6 +2817,11 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
       return socket.emit("fareFinalized", { ok: false, request_id, error: "Ride not found" });
     }
     console.log("[completeTrip] ride:", { ride_id: ride.ride_id, status: ride.status, driver_id: ride.driver_id, fare_cents: ride.fare_cents, base_fare_cents: ride.base_fare_cents, payment_method: ride.payment_method });
+
+    if (!ride.driver_id) {
+      await conn.rollback();
+      return socket.emit("fareFinalized", { ok: false, request_id, error: "Driver not assigned to this ride" });
+    }
 
     if (ride.status === "completed") {
       await conn.rollback();
