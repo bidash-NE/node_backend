@@ -90,6 +90,8 @@ export function makeMatchingRouter(io, mysqlPool) {
 
       // fare negotiation — passenger's self-set offer price (optional)
       offered_fare_cents: offeredFareCentsRaw = null,
+      // minimum fare floor for this ride type (from vehicle config)
+      min_fare_cents: minFareCentsRaw = null,
     } = req.body || {};
 
     /* -------------------- basic validation -------------------- */
@@ -251,11 +253,18 @@ export function makeMatchingRouter(io, mysqlPool) {
     const baseFareUnits =
       base_fare_cents != null ? base_fare_cents / 100 : null;
 
-    // passenger's negotiated offer — must be a positive integer, below the system fare
+    // minimum fare floor for this ride type
+    const min_fare_cents = (() => {
+      const n = Number(minFareCentsRaw);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : 5000; // default Nu 50
+    })();
+
+    // passenger's negotiated offer — must be positive, above floor, and below system fare
     const offered_fare_cents = (() => {
       const n = Number(offeredFareCentsRaw);
       if (!Number.isFinite(n) || n <= 0) return null;
       const cents = Math.round(n);
+      if (cents < min_fare_cents) return null; // below ride-type floor, ignore
       return cents < fare_cents ? cents : null; // only honour if genuinely lower
     })();
 
@@ -494,6 +503,7 @@ export function makeMatchingRouter(io, mysqlPool) {
         fare_cents: fare_cents, // total payable in cents
         base_fare: baseFareUnits, // subtotal in units (legacy param name)
         offered_fare_cents, // passenger's negotiated offer (null if not set)
+        min_fare_cents,     // ride-type minimum floor
 
         rideId,
         passenger_id: String(passenger_id),

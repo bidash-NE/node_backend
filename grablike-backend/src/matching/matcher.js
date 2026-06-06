@@ -139,6 +139,7 @@ export const matcher = {
     fare, // units
     fare_cents, // integer cents (preferred)
     offered_fare_cents, // passenger's negotiation offer (optional)
+    min_fare_cents,     // ride-type minimum floor
     base_fare, // legacy
     rideId,
     passenger_id,
@@ -176,6 +177,7 @@ export const matcher = {
       fare: fare != null ? String(fare) : "",
       fare_cents: fare_cents != null ? String(fare_cents) : "",
       offered_fare_cents: offered_fare_cents != null ? String(offered_fare_cents) : "",
+      min_fare_cents: min_fare_cents != null ? String(min_fare_cents) : "5000",
       base_fare: base_fare != null ? String(base_fare) : "",
       passenger_id: passenger_id || "",
       trip_type: trip_type || "instant",
@@ -263,6 +265,7 @@ export const matcher = {
         fare: fareOut ?? 0,
         offered_fare_cents: ride.offered_fare_cents ? Number(ride.offered_fare_cents) : null,
         offered_fare: ride.offered_fare_cents ? Number(ride.offered_fare_cents) / 100 : null,
+        min_fare_cents: Number(ride.min_fare_cents || 5000),
         cityId: ride.cityId,
         serviceType: ride.serviceType,
         service_code: ride.service_code,
