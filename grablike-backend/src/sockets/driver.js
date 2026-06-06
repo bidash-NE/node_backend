@@ -1644,9 +1644,10 @@ export function initDriverSocket(io, mysqlPool) {
       try {
         conn = await mysqlPool.getConnection();
 
+        console.log("[fare:select] updating ride:", { request_id, selectedDriverId, finalFareCents });
         // Set base_fare_cents = fare_cents so computePlatformFeeAndGST
         // never sees total < subtotal for negotiated rides
-        await conn.execute(
+        const [updateResult] = await conn.execute(
           `UPDATE rides
               SET driver_id      = ?,
                   status         = 'accepted',
@@ -1656,6 +1657,7 @@ export function initDriverSocket(io, mysqlPool) {
             WHERE ride_id = ? AND status = 'requested'`,
           [String(selectedDriverId), finalFareCents, finalFareCents, request_id],
         );
+        console.log("[fare:select] DB update affectedRows:", updateResult.affectedRows);
 
         const [rows] = await conn.execute(
           `SELECT r.*,
@@ -1676,6 +1678,7 @@ export function initDriverSocket(io, mysqlPool) {
         );
 
         const dbRide = rows[0] || null;
+        console.log("[fare:select] dbRide after SELECT:", dbRide ? { ride_id: dbRide.ride_id, driver_id: dbRide.driver_id, status: dbRide.status, fare_cents: dbRide.fare_cents, base_fare_cents: dbRide.base_fare_cents } : null);
         if (dbRide) {
           // Enrich with Redis metadata (payment, waypoints)
           let payment_method = null;
@@ -1693,10 +1696,10 @@ export function initDriverSocket(io, mysqlPool) {
           } catch {}
 
           rideOut = { ...toClientRide(dbRide), payment_method, waypoints, service_code };
+          console.log("[fare:select] rideOut driver_id:", rideOut?.driver_id, "fare_cents:", rideOut?.fare_cents);
         }
       } catch (e) {
-        console.error("[fare:select] DB error:", e?.message);
-        // Non-fatal — Redis lock already set, emit what we have
+        console.error("[fare:select] DB error:", e?.message, e?.stack);
       } finally {
         if (conn) conn.release();
       }
@@ -2811,15 +2814,16 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
       await conn.rollback();
       return socket.emit("fareFinalized", { ok: false, request_id, error: "Ride not found" });
     }
-    console.log("[DEBUG] ride loaded:", { ride_id: ride.ride_id, status: ride.status, payment_method: ride.payment_method });
+    console.log("[completeTrip] ride:", { ride_id: ride.ride_id, status: ride.status, driver_id: ride.driver_id, fare_cents: ride.fare_cents, base_fare_cents: ride.base_fare_cents, payment_method: ride.payment_method });
 
     if (ride.status === "completed") {
       await conn.rollback();
       return socket.emit("fareFinalized", { ok: true, request_id, info: "already_completed" });
     }
     if (ride.status !== "started") {
+      console.log("[completeTrip] REJECTED — status is not started:", ride.status);
       await conn.rollback();
-      return socket.emit("fareFinalized", { ok: false, request_id, error: "Invalid state" });
+      return socket.emit("fareFinalized", { ok: false, request_id, error: `Invalid state: ${ride.status}` });
     }
 
     // 2) Lock user row for points
@@ -2846,8 +2850,10 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     }
 
     const serviceType = await getVehicleTypeByServiceName(ride.service_type);
+    console.log("[completeTrip] serviceType:", serviceType);
 
     // 4) Pricing engine
+    console.log("[completeTrip] calling computePlatformFeeAndGST with:", { subtotal_cents: Number(ride.base_fare_cents), total_cents: Number(ride.fare_cents) });
     const pricing = await computePlatformFeeAndGST({
       country_code: "BT",
       city_id: ride.city_id || "THIMPHU",
@@ -3142,7 +3148,7 @@ async function handleDriverCompleteTrip({ io, socket, mysqlPool, payload }) {
     }
   } catch (err) {
     try { await conn.rollback(); } catch {}
-    console.error("[handleDriverCompleteTrip] error:", err);
+    console.error("[completeTrip] FAILED:", err?.message, "\nStack:", err?.stack);
     socket.emit("fareFinalized", { ok: false, request_id, error: err.message || "Server error" });
   } finally {
     try { conn.release(); } catch {}
