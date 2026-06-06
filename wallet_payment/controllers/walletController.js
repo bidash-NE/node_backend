@@ -18,6 +18,9 @@ const { toThimphuString } = require("../utils/time");
 const bcrypt = require("bcryptjs");
 const redis = require("../utils/redisClient");
 const { sendOtpEmail } = require("../utils/mailer");
+const {
+  createWalletTransactionLog,
+} = require("../models/walletTransactionLogModel");
 
 /* ---------------- SMS ENV ---------------- */
 const SMS_API_URL = process.env.SMS_API_URL && process.env.SMS_API_URL.trim();
@@ -225,7 +228,23 @@ function isValidUserId(v) {
 function normalizeBoolean(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
-
+async function safeWalletLogFromReq(req, payload) {
+  try {
+    await createWalletTransactionLog({
+      request_id: req.request_id,
+      ...payload,
+      ip_address: req.ip,
+      user_agent: req.headers["user-agent"],
+    });
+  } catch (err) {
+    console.error("[wallet_transaction_logs] controller log failed:", {
+      message: err.message,
+      request_id: req.request_id,
+      action: payload?.action,
+      status: payload?.status,
+    });
+  }
+}
 /* ==========================
    CONTROLLERS
 ========================== */
@@ -582,6 +601,21 @@ async function adminTipTransferHandler(req, res) {
     const isValidPin = await bcrypt.compare(pinStr, adminWallet.t_pin);
 
     if (!isValidPin) {
+      await safeWalletLogFromReq(req, {
+        wallet_id: admin_wallet_id,
+        user_id: adminWallet.user_id,
+        action: "ADMIN_TIP_TRANSFER",
+        status: "FAILED",
+        message: "Invalid admin T-PIN.",
+        request_payload: {
+          admin_name,
+          admin_wallet_id,
+          user_wallet_id,
+          amount,
+          note,
+        },
+      });
+
       return res.status(401).json({
         success: false,
         message: "Invalid T-PIN.",
@@ -597,6 +631,22 @@ async function adminTipTransferHandler(req, res) {
     });
 
     if (!result.ok) {
+      await safeWalletLogFromReq(req, {
+        wallet_id: admin_wallet_id,
+        user_id: adminWallet.user_id,
+        action: "ADMIN_TIP_TRANSFER",
+        status: "FAILED",
+        message: result.message || "Admin tip transfer failed.",
+        request_payload: {
+          admin_name,
+          admin_wallet_id,
+          user_wallet_id,
+          amount,
+          note,
+        },
+        response_payload: result,
+      });
+
       return res.status(result.status || 400).json({
         success: false,
         message: result.message,
@@ -860,7 +910,17 @@ async function forgotTPinRequest(req, res) {
       userName,
       walletId: wallet.wallet_id,
     });
-
+    await safeWalletLogFromReq(req, {
+      wallet_id: wallet.wallet_id,
+      user_id: wallet.user_id,
+      action: "TPIN_RESET_EMAIL_OTP_REQUEST",
+      status: "SUCCESS",
+      message: "T-PIN reset email OTP sent.",
+      request_payload: {
+        wallet_id: wallet.wallet_id,
+        email,
+      },
+    });
     return res.json({
       success: true,
       message:
@@ -931,6 +991,17 @@ async function forgotTPinVerify(req, res) {
     }
 
     if (String(savedOtp).trim() !== otpStr) {
+      await safeWalletLogFromReq(req, {
+        wallet_id: wallet.wallet_id,
+        user_id: wallet.user_id,
+        action: "TPIN_RESET_EMAIL_VERIFY",
+        status: "FAILED",
+        message: "Invalid email OTP.",
+        request_payload: {
+          wallet_id: wallet.wallet_id,
+        },
+      });
+
       return res.status(400).json({
         success: false,
         message: "Invalid OTP.",
@@ -945,7 +1016,16 @@ async function forgotTPinVerify(req, res) {
     });
 
     await redis.del(redisKey);
-
+    await safeWalletLogFromReq(req, {
+      wallet_id: wallet.wallet_id,
+      user_id: wallet.user_id,
+      action: "TPIN_RESET_EMAIL_VERIFY",
+      status: "SUCCESS",
+      message: "T-PIN reset successfully using email OTP.",
+      request_payload: {
+        wallet_id: wallet.wallet_id,
+      },
+    });
     if (!updated) {
       return res.status(500).json({
         success: false,
@@ -1033,7 +1113,17 @@ async function forgotTPinRequestSms(req, res) {
       purposeTitle: "T-PIN reset code",
       ttlMinutes: 5,
     });
-
+    await safeWalletLogFromReq(req, {
+      wallet_id: wallet.wallet_id,
+      user_id: wallet.user_id,
+      action: "TPIN_RESET_SMS_OTP_REQUEST",
+      status: "SUCCESS",
+      message: "T-PIN reset SMS OTP sent.",
+      request_payload: {
+        wallet_id: wallet.wallet_id,
+        phone: phoneToSend,
+      },
+    });
     return res.json({
       success: true,
       message:
@@ -1107,6 +1197,17 @@ async function forgotTPinVerifySms(req, res) {
     }
 
     if (String(savedOtp).trim() !== otpStr) {
+      await safeWalletLogFromReq(req, {
+        wallet_id: wallet.wallet_id,
+        user_id: wallet.user_id,
+        action: "TPIN_RESET_SMS_VERIFY",
+        status: "FAILED",
+        message: "Invalid SMS OTP.",
+        request_payload: {
+          wallet_id: wallet.wallet_id,
+        },
+      });
+
       return res.status(400).json({
         success: false,
         message: "Invalid OTP.",
@@ -1121,7 +1222,16 @@ async function forgotTPinVerifySms(req, res) {
     });
 
     await redis.del(redisKey);
-
+    await safeWalletLogFromReq(req, {
+      wallet_id: wallet.wallet_id,
+      user_id: wallet.user_id,
+      action: "TPIN_RESET_SMS_VERIFY",
+      status: "SUCCESS",
+      message: "T-PIN reset successfully using SMS OTP.",
+      request_payload: {
+        wallet_id: wallet.wallet_id,
+      },
+    });
     if (!updated) {
       return res.status(500).json({
         success: false,
@@ -1225,6 +1335,21 @@ async function userTransfer(req, res) {
       const okPin = await bcrypt.compare(pinStr, senderWallet.t_pin);
 
       if (!okPin) {
+        await safeWalletLogFromReq(req, {
+          wallet_id: sender_wallet_id,
+          user_id: senderWallet.user_id,
+          action: "USER_WALLET_TRANSFER",
+          status: "FAILED",
+          message: "Invalid T-PIN.",
+          request_payload: {
+            sender_wallet_id,
+            recipient_wallet_id,
+            amount,
+            note,
+            biometric,
+          },
+        });
+
         return res.status(401).json({
           success: false,
           message: "Invalid T-PIN.",
@@ -1258,6 +1383,22 @@ async function userTransfer(req, res) {
     });
 
     if (!result.ok) {
+      await safeWalletLogFromReq(req, {
+        wallet_id: sender_wallet_id,
+        user_id: senderWallet.user_id,
+        action: "USER_WALLET_TRANSFER",
+        status: "FAILED",
+        message: result.message || "Transfer failed.",
+        request_payload: {
+          sender_wallet_id,
+          recipient_wallet_id,
+          amount,
+          note,
+          biometric,
+        },
+        response_payload: result,
+      });
+
       return res.status(result.status || 400).json({
         success: false,
         message: result.message || "Transfer failed.",

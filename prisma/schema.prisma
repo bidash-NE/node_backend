@@ -1570,6 +1570,8 @@ model rides {
   capacity_seats        Int?                 @db.UnsignedTinyInt
   seats_booked          Int                  @default(0) @db.UnsignedTinyInt
   fare_cents            Int?                 @db.UnsignedInt
+  offered_fare_cents    Int?                 @db.UnsignedInt
+  final_fare_cents      Int?                 @db.UnsignedInt
   base_fare_cents       Int                  @default(0) @db.UnsignedInt
   currency              String               @default("BTN") @db.Char(3)
   created_at            DateTime             @default(now()) @db.DateTime(0)
@@ -1930,6 +1932,66 @@ model withdrawal_requests {
   @@unique([user_id, idempotency_key], map: "uq_user_idem")
   @@index([status, created_at], map: "idx_status_date")
   @@index([user_id, created_at], map: "idx_user_date")
+}
+
+model referrals {
+  id            BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
+  referral_code String           @db.VarChar(32)
+  referrer_id   BigInt           @db.UnsignedBigInt
+  referee_id    BigInt           @unique(map: "uq_referee") @db.UnsignedBigInt
+  status        referrals_status @default(pending)
+  amount        Int              @default(50) @db.UnsignedInt
+  credited_at   DateTime?        @db.DateTime(0)
+  created_at    DateTime         @default(dbgenerated("(utc_timestamp())")) @db.DateTime(0)
+
+  @@index([referral_code], map: "idx_code")
+  @@index([referrer_id], map: "idx_referrer")
+  @@index([status], map: "idx_status")
+}
+
+model ride_fare_counters {
+  id            BigInt                    @id @default(autoincrement()) @db.UnsignedBigInt
+  ride_id       BigInt                    @db.UnsignedBigInt
+  driver_id     BigInt                    @db.UnsignedBigInt
+  counter_cents Int                       @db.UnsignedInt
+  status        ride_fare_counters_status @default(pending)
+  created_at    DateTime                  @default(now()) @db.DateTime(0)
+  updated_at    DateTime                  @default(now()) @db.DateTime(0)
+
+  @@index([driver_id, ride_id], map: "idx_rfc_driver")
+  @@index([ride_id], map: "idx_rfc_ride")
+}
+
+model user_referral_codes {
+  user_id    BigInt   @id @db.UnsignedBigInt
+  code       String   @unique(map: "uq_code") @db.VarChar(32)
+  created_at DateTime @default(dbgenerated("(utc_timestamp())")) @db.DateTime(0)
+}
+
+model wallet_transaction_logs {
+  log_id           BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  request_id       String?  @db.VarChar(64)
+  transaction_id   String?  @db.VarChar(64)
+  journal_code     String?  @db.VarChar(64)
+  wallet_id        String?  @db.VarChar(32)
+  user_id          BigInt?  @db.UnsignedBigInt
+  action           String   @db.VarChar(64)
+  status           String   @db.VarChar(32)
+  message          String?  @db.VarChar(500)
+  request_payload  String?  @db.LongText
+  response_payload String?  @db.LongText
+  error_payload    String?  @db.LongText
+  ip_address       String?  @db.VarChar(64)
+  user_agent       String?  @db.VarChar(255)
+  created_at       DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([action, status], map: "idx_wtl_action_status")
+  @@index([created_at], map: "idx_wtl_created_at")
+  @@index([journal_code], map: "idx_wtl_journal_code")
+  @@index([transaction_id], map: "idx_wtl_transaction_id")
+  @@index([user_id], map: "idx_wtl_user_id")
+  @@index([wallet_id], map: "idx_wtl_wallet_id")
+  @@index([request_id], map: "idx_wtl_request_id")
 }
 
 enum settlement_accounts_party_type {
@@ -2430,4 +2492,18 @@ enum delivered_orders_delivery_special_mode {
 enum orders_delivery_special_mode {
   DROP_OFF
   MEET_UP
+}
+
+enum referrals_status {
+  pending
+  credited
+  expired
+}
+
+enum ride_fare_counters_status {
+  pending
+  accepted
+  rejected
+  withdrawn
+  expired
 }

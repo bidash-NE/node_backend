@@ -2,6 +2,10 @@
 const axios = require("axios");
 const { prisma } = require("../lib/prisma");
 
+const {
+  createWalletTransactionLog,
+} = require("./walletTransactionLogModel");
+
 /**
  * POST https://grab.newedge.bt/wallet/ids/both
  * returns:
@@ -48,9 +52,7 @@ function toDecimalNumber(v) {
   if (v == null) return 0;
 
   if (typeof v === "number") return v;
-
   if (typeof v === "bigint") return Number(v);
-
   if (typeof v === "string") return Number(v);
 
   if (
@@ -98,11 +100,23 @@ function transactionCreateData(data) {
 
   const now = new Date();
 
-  // Only include these if your Prisma model exposes these fields.
   if (fields.has("created_at")) out.created_at = now;
   if (fields.has("updated_at")) out.updated_at = now;
 
   return out;
+}
+
+async function safeWalletLog(payload) {
+  try {
+    await createWalletTransactionLog(payload);
+  } catch (err) {
+    console.error("[wallet_transaction_logs] write failed:", {
+      message: err.message,
+      action: payload?.action,
+      status: payload?.status,
+      transaction_id: payload?.transaction_id,
+    });
+  }
 }
 
 /**
@@ -117,12 +131,16 @@ async function userWalletTransfer({
   amount_nu,
   note = "",
 }) {
-  try {
-    // 1) Fetch transaction IDs + journal code from external service
-    // Kept outside DB transaction, same as your old code.
-    const { transaction_ids, journal_code } = await fetchTxIdsAndJournalCode();
+  let txIdDr = null;
+  let txIdCr = null;
+  let journal_code = null;
 
-    const [txIdDr, txIdCr] = transaction_ids;
+  try {
+    const ids = await fetchTxIdsAndJournalCode();
+
+    const transaction_ids = ids.transaction_ids;
+    journal_code = ids.journal_code;
+    [txIdDr, txIdCr] = transaction_ids;
 
     const amt = normalizeAmount(amount_nu);
 
@@ -134,14 +152,14 @@ async function userWalletTransfer({
       };
     }
 
-    return await prisma.$transaction(async (tx) => {
-      /* ----------------- FETCH SENDER ----------------- */
+    const result = await prisma.$transaction(async (tx) => {
       const sender = await tx.wallets.findUnique({
         where: {
           wallet_id: String(sender_wallet_id).trim(),
         },
         select: {
           id: true,
+          user_id: true,
           wallet_id: true,
           amount: true,
           status: true,
@@ -156,13 +174,13 @@ async function userWalletTransfer({
         };
       }
 
-      /* ----------------- FETCH RECIPIENT ----------------- */
       const recipient = await tx.wallets.findUnique({
         where: {
           wallet_id: String(recipient_wallet_id).trim(),
         },
         select: {
           id: true,
+          user_id: true,
           wallet_id: true,
           amount: true,
           status: true,
@@ -182,6 +200,10 @@ async function userWalletTransfer({
           ok: false,
           status: 403,
           message: "Sender wallet is not ACTIVE.",
+          sender_wallet: {
+            wallet_id: sender.wallet_id,
+            user_id: sender.user_id,
+          },
         };
       }
 
@@ -190,6 +212,14 @@ async function userWalletTransfer({
           ok: false,
           status: 403,
           message: "Recipient wallet is not ACTIVE.",
+          sender_wallet: {
+            wallet_id: sender.wallet_id,
+            user_id: sender.user_id,
+          },
+          recipient_wallet: {
+            wallet_id: recipient.wallet_id,
+            user_id: recipient.user_id,
+          },
         };
       }
 
@@ -198,16 +228,20 @@ async function userWalletTransfer({
           ok: false,
           status: 400,
           message: "Insufficient balance in sender wallet.",
+          sender_wallet: {
+            wallet_id: sender.wallet_id,
+            user_id: sender.user_id,
+          },
+          recipient_wallet: {
+            wallet_id: recipient.wallet_id,
+            user_id: recipient.user_id,
+          },
         };
       }
 
-      /*
-       * Atomic debit protection:
-       * This prevents overdraft even if two transfers hit the same wallet together.
-       */
       const debitResult = await tx.wallets.updateMany({
         where: {
-          id: Number(sender.id),
+          id: sender.id,
           wallet_id: String(sender_wallet_id).trim(),
           status: "ACTIVE",
           amount: {
@@ -226,13 +260,20 @@ async function userWalletTransfer({
           ok: false,
           status: 400,
           message: "Insufficient balance in sender wallet.",
+          sender_wallet: {
+            wallet_id: sender.wallet_id,
+            user_id: sender.user_id,
+          },
+          recipient_wallet: {
+            wallet_id: recipient.wallet_id,
+            user_id: recipient.user_id,
+          },
         };
       }
 
-      /* ----------------- CREDIT RECIPIENT ----------------- */
       const creditResult = await tx.wallets.updateMany({
         where: {
-          id: Number(recipient.id),
+          id: recipient.id,
           wallet_id: String(recipient_wallet_id).trim(),
           status: "ACTIVE",
         },
@@ -247,7 +288,6 @@ async function userWalletTransfer({
         throw new Error("Failed to credit recipient wallet.");
       }
 
-      /* ----------------- INSERT DR (Sender) ----------------- */
       await tx.wallet_transactions.create({
         data: transactionCreateData({
           transaction_id: txIdDr,
@@ -260,7 +300,6 @@ async function userWalletTransfer({
         }),
       });
 
-      /* ----------------- INSERT CR (Recipient) ----------------- */
       await tx.wallet_transactions.create({
         data: transactionCreateData({
           transaction_id: txIdCr,
@@ -273,10 +312,9 @@ async function userWalletTransfer({
         }),
       });
 
-      /* ----------------- GET UPDATED BALANCES ----------------- */
       const senderNew = await tx.wallets.findUnique({
         where: {
-          id: Number(sender.id),
+          id: sender.id,
         },
         select: {
           amount: true,
@@ -285,7 +323,7 @@ async function userWalletTransfer({
 
       const recipientNew = await tx.wallets.findUnique({
         where: {
-          id: Number(recipient.id),
+          id: recipient.id,
         },
         select: {
           amount: true,
@@ -300,10 +338,109 @@ async function userWalletTransfer({
         transaction_ids,
         sender_balance: toDecimalNumber(senderNew?.amount),
         recipient_balance: toDecimalNumber(recipientNew?.amount),
+        sender_wallet: {
+          wallet_id: sender.wallet_id,
+          user_id: sender.user_id,
+        },
+        recipient_wallet: {
+          wallet_id: recipient.wallet_id,
+          user_id: recipient.user_id,
+        },
       };
     });
+
+    if (!result.ok) {
+      await safeWalletLog({
+        transaction_id: null,
+        journal_code,
+        wallet_id: sender_wallet_id,
+        user_id: result.sender_wallet?.user_id || null,
+        action: "USER_WALLET_TRANSFER",
+        status: "FAILED",
+        message: result.message,
+        request_payload: {
+          sender_wallet_id,
+          recipient_wallet_id,
+          amount_nu,
+          note,
+        },
+        response_payload: result,
+      });
+
+      return result;
+    }
+
+    await safeWalletLog({
+      transaction_id: txIdDr,
+      journal_code,
+      wallet_id: result.sender_wallet.wallet_id,
+      user_id: result.sender_wallet.user_id,
+      action: "USER_WALLET_TRANSFER",
+      status: "SUCCESS",
+      message: "Sender wallet debited successfully.",
+      request_payload: {
+        sender_wallet_id,
+        recipient_wallet_id,
+        amount_nu,
+        note,
+      },
+      response_payload: {
+        transaction_id: txIdDr,
+        journal_code,
+        amount_nu,
+        direction: "DR",
+        sender_balance: result.sender_balance,
+      },
+    });
+
+    await safeWalletLog({
+      transaction_id: txIdCr,
+      journal_code,
+      wallet_id: result.recipient_wallet.wallet_id,
+      user_id: result.recipient_wallet.user_id,
+      action: "USER_WALLET_TRANSFER",
+      status: "SUCCESS",
+      message: "Recipient wallet credited successfully.",
+      request_payload: {
+        sender_wallet_id,
+        recipient_wallet_id,
+        amount_nu,
+        note,
+      },
+      response_payload: {
+        transaction_id: txIdCr,
+        journal_code,
+        amount_nu,
+        direction: "CR",
+        recipient_balance: result.recipient_balance,
+      },
+    });
+
+    delete result.sender_wallet;
+    delete result.recipient_wallet;
+
+    return result;
   } catch (err) {
     console.error("Error in userWalletTransfer:", err);
+
+    await safeWalletLog({
+      transaction_id: null,
+      journal_code,
+      wallet_id: sender_wallet_id || null,
+      action: "USER_WALLET_TRANSFER",
+      status: "ERROR",
+      message: err.message,
+      request_payload: {
+        sender_wallet_id,
+        recipient_wallet_id,
+        amount_nu,
+        note,
+      },
+      error_payload: {
+        message: err.message,
+        stack: err.stack,
+      },
+    });
 
     return {
       ok: false,

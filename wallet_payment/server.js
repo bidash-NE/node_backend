@@ -12,7 +12,8 @@ const walletRoutes = require("./routes/walletRoutes");
 const txRoutes = require("./routes/transactionHistoryRoutes");
 const idRoutes = require("./routes/idRoutes");
 const platformFeeRuleRoutes = require("./routes/platformFeeRuleRoutes");
-
+const walletTransactionLogRoutes = require("./routes/walletTransactionLogRoutes");
+const requestId = require("./middleware/requestId");
 const app = express();
 
 /* ─────────────────── Middleware ─────────────────── */
@@ -33,14 +34,14 @@ app.options(/.*/, cors());
 app.use(express.json());
 app.use(morgan("dev"));
 app.set("trust proxy", 1);
-
+app.use(requestId);
 /* ─────────────────── Routes ─────────────────── */
 
 app.use("/wallet", walletRoutes);
 app.use("/transactions", txRoutes);
 app.use("/ids", idRoutes);
 app.use("/api/platform-fee-rules", platformFeeRuleRoutes);
-
+app.use("/wallet-transaction-logs", walletTransactionLogRoutes);
 /* ─────────────────── Health endpoints ─────────────────── */
 
 app.get("/", (_req, res) => {

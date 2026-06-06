@@ -2,6 +2,10 @@
 const axios = require("axios");
 const { prisma } = require("../lib/prisma");
 
+const {
+  createWalletTransactionLog,
+} = require("./walletTransactionLogModel");
+
 const ADMIN_ROLES = ["admin", "super admin"];
 const ADMIN_ROLE_VARIANTS = [
   "admin",
@@ -92,6 +96,19 @@ function normalizeAmount(v) {
   return Number.isFinite(n) ? n : NaN;
 }
 
+async function safeWalletLog(payload) {
+  try {
+    await createWalletTransactionLog(payload);
+  } catch (err) {
+    console.error("[wallet_transaction_logs] write failed:", {
+      message: err.message,
+      action: payload?.action,
+      status: payload?.status,
+      transaction_id: payload?.transaction_id,
+    });
+  }
+}
+
 async function findAdminByUserName(tx, admin_name) {
   const cleanName = String(admin_name || "").trim().toLowerCase();
 
@@ -136,9 +153,27 @@ async function adminTipTransfer({
   amount_nu,
   note = "",
 }) {
+  let txnAdmin = null;
+  let txnUser = null;
+  let journal_code = null;
+
   const amt = normalizeAmount(amount_nu);
 
   if (!Number.isFinite(amt) || amt <= 0) {
+    await safeWalletLog({
+      wallet_id: admin_wallet_id || null,
+      action: "ADMIN_TIP_TRANSFER",
+      status: "FAILED",
+      message: "Amount must be a positive number (Nu).",
+      request_payload: {
+        admin_name,
+        admin_wallet_id,
+        user_wallet_id,
+        amount_nu,
+        note,
+      },
+    });
+
     return {
       ok: false,
       status: 400,
@@ -148,243 +183,393 @@ async function adminTipTransfer({
 
   const amtStr = amt.toFixed(2);
 
-  /*
-   * IMPORTANT:
-   * This external HTTP call must stay OUTSIDE prisma.$transaction().
-   * Otherwise the DB transaction can expire while waiting for Axios.
-   */
-  const { transaction_ids, journal_code } = await fetchTxIdsAndJournalCode();
-  const [txnAdmin, txnUser] = transaction_ids;
+  try {
+    const ids = await fetchTxIdsAndJournalCode();
 
-  return await prisma.$transaction(
-    async (tx) => {
-      /* 1️⃣ Verify admin user */
-      const adminUser = await findAdminByUserName(tx, admin_name);
+    const transaction_ids = ids.transaction_ids;
+    journal_code = ids.journal_code;
+    [txnAdmin, txnUser] = transaction_ids;
 
-      if (!adminUser) {
-        return {
-          ok: false,
-          status: 403,
-          message: "Admin not found or not permitted.",
-        };
-      }
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const adminUser = await findAdminByUserName(tx, admin_name);
 
-      /* 2️⃣ Fetch wallets */
-      const adminW = await tx.wallets.findUnique({
-        where: {
-          wallet_id: String(admin_wallet_id).trim(),
-        },
-      });
+        if (!adminUser) {
+          return {
+            ok: false,
+            status: 403,
+            message: "Admin not found or not permitted.",
+          };
+        }
 
-      const userW = await tx.wallets.findUnique({
-        where: {
-          wallet_id: String(user_wallet_id).trim(),
-        },
-      });
-
-      /* 3️⃣ Validate wallets */
-      if (!adminW) {
-        return {
-          ok: false,
-          status: 404,
-          message: "Admin wallet not found.",
-        };
-      }
-
-      if (!userW) {
-        return {
-          ok: false,
-          status: 404,
-          message: "User wallet not found.",
-        };
-      }
-
-      if (String(adminW.status || "").toUpperCase() !== "ACTIVE") {
-        return {
-          ok: false,
-          status: 409,
-          message: "Admin wallet is not ACTIVE.",
-        };
-      }
-
-      if (String(userW.status || "").toUpperCase() !== "ACTIVE") {
-        return {
-          ok: false,
-          status: 409,
-          message: "User wallet is not ACTIVE.",
-        };
-      }
-
-      if (toDecimalNumber(adminW.amount) < amt) {
-        return {
-          ok: false,
-          status: 409,
-          message: "Insufficient admin wallet balance.",
-        };
-      }
-
-      /* 4️⃣ Find driver for receiving user */
-      const driver = await tx.drivers.findFirst({
-        where: {
-          user_id: BigInt(userW.user_id),
-        },
-        select: {
-          driver_id: true,
-        },
-      });
-
-      if (!driver) {
-        return {
-          ok: false,
-          status: 404,
-          message: "Driver not found for this user.",
-        };
-      }
-
-      /*
-       * 5️⃣ Debit admin safely.
-       * updateMany with amount >= amt prevents overdraft in concurrent transfers.
-       */
-      const debitResult = await tx.wallets.updateMany({
-        where: {
-          id: BigInt(adminW.id),
-          wallet_id: adminW.wallet_id,
-          status: "ACTIVE",
-          amount: {
-            gte: amt,
+        const adminW = await tx.wallets.findUnique({
+          where: {
+            wallet_id: String(admin_wallet_id).trim(),
           },
-        },
-        data: {
-          amount: {
-            decrement: amt,
-          },
-        },
-      });
+        });
 
-      if (Number(debitResult.count || 0) !== 1) {
+        const userW = await tx.wallets.findUnique({
+          where: {
+            wallet_id: String(user_wallet_id).trim(),
+          },
+        });
+
+        if (!adminW) {
+          return {
+            ok: false,
+            status: 404,
+            message: "Admin wallet not found.",
+          };
+        }
+
+        if (!userW) {
+          return {
+            ok: false,
+            status: 404,
+            message: "User wallet not found.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+          };
+        }
+
+        if (String(adminW.status || "").toUpperCase() !== "ACTIVE") {
+          return {
+            ok: false,
+            status: 409,
+            message: "Admin wallet is not ACTIVE.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          };
+        }
+
+        if (String(userW.status || "").toUpperCase() !== "ACTIVE") {
+          return {
+            ok: false,
+            status: 409,
+            message: "User wallet is not ACTIVE.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          };
+        }
+
+        if (toDecimalNumber(adminW.amount) < amt) {
+          return {
+            ok: false,
+            status: 409,
+            message: "Insufficient admin wallet balance.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          };
+        }
+
+        const driver = await tx.drivers.findFirst({
+          where: {
+            user_id: BigInt(userW.user_id),
+          },
+          select: {
+            driver_id: true,
+          },
+        });
+
+        if (!driver) {
+          return {
+            ok: false,
+            status: 404,
+            message: "Driver not found for this user.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          };
+        }
+
+        const debitResult = await tx.wallets.updateMany({
+          where: {
+            id: BigInt(adminW.id),
+            wallet_id: adminW.wallet_id,
+            status: "ACTIVE",
+            amount: {
+              gte: amt,
+            },
+          },
+          data: {
+            amount: {
+              decrement: amt,
+            },
+          },
+        });
+
+        if (Number(debitResult.count || 0) !== 1) {
+          return {
+            ok: false,
+            status: 409,
+            message: "Insufficient admin wallet balance.",
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          };
+        }
+
+        const creditResult = await tx.wallets.updateMany({
+          where: {
+            id: BigInt(userW.id),
+            wallet_id: userW.wallet_id,
+            status: "ACTIVE",
+          },
+          data: {
+            amount: {
+              increment: amt,
+            },
+          },
+        });
+
+        if (Number(creditResult.count || 0) !== 1) {
+          throw new Error("Failed to credit user wallet.");
+        }
+
+        await tx.wallet_transactions.create({
+          data: {
+            transaction_id: txnAdmin,
+            journal_code,
+            tnx_from: adminW.wallet_id,
+            tnx_to: userW.wallet_id,
+            amount: amt,
+            remark: "DR",
+            note: note || "",
+          },
+        });
+
+        await tx.wallet_transactions.create({
+          data: {
+            transaction_id: txnUser,
+            journal_code,
+            tnx_from: adminW.wallet_id,
+            tnx_to: userW.wallet_id,
+            amount: amt,
+            remark: "CR",
+            note: note || "",
+          },
+        });
+
+        const activity =
+          `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
+          `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
+          (note ? ` | ${note}` : "");
+
+        await tx.admin_logs.create({
+          data: {
+            user_id: BigInt(userW.user_id),
+            admin_name: adminUser.user_name,
+            activity,
+          },
+        });
+
+        await tx.ride_ratings.updateMany({
+          where: {
+            driver_id: BigInt(driver.driver_id),
+            payment_status: false,
+          },
+          data: {
+            payment_status: true,
+          },
+        });
+
+        const adminNew = await tx.wallets.findUnique({
+          where: {
+            id: BigInt(adminW.id),
+          },
+        });
+
+        const userNew = await tx.wallets.findUnique({
+          where: {
+            id: BigInt(userW.id),
+          },
+        });
+
         return {
-          ok: false,
-          status: 409,
-          message: "Insufficient admin wallet balance.",
-        };
-      }
-
-      /* 6️⃣ Credit user */
-      const creditResult = await tx.wallets.updateMany({
-        where: {
-          id: BigInt(userW.id),
-          wallet_id: userW.wallet_id,
-          status: "ACTIVE",
-        },
-        data: {
-          amount: {
-            increment: amt,
-          },
-        },
-      });
-
-      if (Number(creditResult.count || 0) !== 1) {
-        throw new Error("Failed to credit user wallet.");
-      }
-
-      /* 7️⃣ Insert wallet transactions */
-      await tx.wallet_transactions.create({
-        data: {
-          transaction_id: txnAdmin,
+          ok: true,
           journal_code,
-          tnx_from: adminW.wallet_id,
-          tnx_to: userW.wallet_id,
-          amount: amt,
-          remark: "DR",
-          note: note || "",
+          amount: amtStr,
+          note,
+          admin_verified: {
+            user_id: Number(adminUser.user_id),
+            user_name: adminUser.user_name,
+            role: adminUser.role,
+          },
+          from: {
+            wallet_id: adminNew.wallet_id,
+            user_id: Number(adminNew.user_id),
+            balance: moneyString(adminNew.amount),
+          },
+          to: {
+            wallet_id: userNew.wallet_id,
+            user_id: Number(userNew.user_id),
+            balance: moneyString(userNew.amount),
+          },
+          transactions: {
+            admin_dr: txnAdmin,
+            user_cr: txnUser,
+          },
+          _log_meta: {
+            admin_wallet: {
+              wallet_id: adminW.wallet_id,
+              user_id: adminW.user_id,
+            },
+            user_wallet: {
+              wallet_id: userW.wallet_id,
+              user_id: userW.user_id,
+            },
+          },
+        };
+      },
+      {
+        maxWait: 5000,
+        timeout: 15000,
+      },
+    );
+
+    if (!result.ok) {
+      await safeWalletLog({
+        transaction_id: null,
+        journal_code,
+        wallet_id:
+          result.admin_wallet?.wallet_id ||
+          result.user_wallet?.wallet_id ||
+          admin_wallet_id ||
+          null,
+        user_id:
+          result.admin_wallet?.user_id ||
+          result.user_wallet?.user_id ||
+          null,
+        action: "ADMIN_TIP_TRANSFER",
+        status: "FAILED",
+        message: result.message,
+        request_payload: {
+          admin_name,
+          admin_wallet_id,
+          user_wallet_id,
+          amount_nu,
+          note,
         },
+        response_payload: result,
       });
 
-      await tx.wallet_transactions.create({
-        data: {
-          transaction_id: txnUser,
-          journal_code,
-          tnx_from: adminW.wallet_id,
-          tnx_to: userW.wallet_id,
-          amount: amt,
-          remark: "CR",
-          note: note || "",
-        },
-      });
+      delete result.admin_wallet;
+      delete result.user_wallet;
 
-      /* 8️⃣ Log admin action */
-      const activity =
-        `TIP_TRANSFER: ${adminUser.user_name} [${adminUser.role}] sent Nu. ${amtStr} ` +
-        `to ${userW.wallet_id} (user_id: ${userW.user_id}) from ${adminW.wallet_id}` +
-        (note ? ` | ${note}` : "");
+      return result;
+    }
 
-      await tx.admin_logs.create({
-        data: {
-          user_id: BigInt(userW.user_id),
-          admin_name: adminUser.user_name,
-          activity,
-        },
-      });
+    const logMeta = result._log_meta || {};
+    delete result._log_meta;
 
-      /*
-       * 9️⃣ Update ride_ratings payment status.
-       * Your Prisma model has payment_status Boolean.
-       * false = unpaid, true = paid.
-       */
-      await tx.ride_ratings.updateMany({
-        where: {
-          driver_id: BigInt(driver.driver_id),
-          payment_status: false,
-        },
-        data: {
-          payment_status: true,
-        },
-      });
-
-      /* 🔟 Get updated balances */
-      const adminNew = await tx.wallets.findUnique({
-        where: {
-          id: BigInt(adminW.id),
-        },
-      });
-
-      const userNew = await tx.wallets.findUnique({
-        where: {
-          id: BigInt(userW.id),
-        },
-      });
-
-      return {
-        ok: true,
+    await safeWalletLog({
+      transaction_id: txnAdmin,
+      journal_code,
+      wallet_id: logMeta.admin_wallet?.wallet_id || admin_wallet_id,
+      user_id: logMeta.admin_wallet?.user_id || null,
+      action: "ADMIN_TIP_TRANSFER",
+      status: "SUCCESS",
+      message: "Admin wallet debited successfully.",
+      request_payload: {
+        admin_name,
+        admin_wallet_id,
+        user_wallet_id,
+        amount_nu,
+        note,
+      },
+      response_payload: {
+        transaction_id: txnAdmin,
         journal_code,
         amount: amtStr,
+        direction: "DR",
+        result,
+      },
+    });
+
+    await safeWalletLog({
+      transaction_id: txnUser,
+      journal_code,
+      wallet_id: logMeta.user_wallet?.wallet_id || user_wallet_id,
+      user_id: logMeta.user_wallet?.user_id || null,
+      action: "ADMIN_TIP_TRANSFER",
+      status: "SUCCESS",
+      message: "User wallet credited successfully.",
+      request_payload: {
+        admin_name,
+        admin_wallet_id,
+        user_wallet_id,
+        amount_nu,
         note,
-        admin_verified: {
-          user_id: Number(adminUser.user_id),
-          user_name: adminUser.user_name,
-          role: adminUser.role,
-        },
-        from: {
-          wallet_id: adminNew.wallet_id,
-          user_id: Number(adminNew.user_id),
-          balance: moneyString(adminNew.amount),
-        },
-        to: {
-          wallet_id: userNew.wallet_id,
-          user_id: Number(userNew.user_id),
-          balance: moneyString(userNew.amount),
-        },
-        transactions: {
-          admin_dr: txnAdmin,
-          user_cr: txnUser,
-        },
-      };
-    },
-    {
-      maxWait: 5000,
-      timeout: 15000,
-    },
-  );
+      },
+      response_payload: {
+        transaction_id: txnUser,
+        journal_code,
+        amount: amtStr,
+        direction: "CR",
+        result,
+      },
+    });
+
+    return result;
+  } catch (err) {
+    console.error("Error in adminTipTransfer:", err);
+
+    await safeWalletLog({
+      transaction_id: null,
+      journal_code,
+      wallet_id: admin_wallet_id || null,
+      action: "ADMIN_TIP_TRANSFER",
+      status: "ERROR",
+      message: err.message,
+      request_payload: {
+        admin_name,
+        admin_wallet_id,
+        user_wallet_id,
+        amount_nu,
+        note,
+      },
+      error_payload: {
+        message: err.message,
+        stack: err.stack,
+      },
+    });
+
+    return {
+      ok: false,
+      status: 500,
+      message: err.message,
+    };
+  }
 }
 
 module.exports = {
