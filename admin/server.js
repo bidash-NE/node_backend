@@ -55,6 +55,7 @@ const pointSystemRoutes = require("./routes/pointSystemRoutes");
 const userPointConversionRoutes = require("./routes/userPointConversionRoutes");
 const contactRoutes = require("./routes/contactMessageRoutes");
 const logoImageRoutes = require("./routes/logoImageRoutes");
+const accountDeletionRoutes = require("./routes/accountDeletionRoutes");
 
 // Routes
 app.use("/api/admin", adminRoutes);
@@ -67,6 +68,8 @@ app.use("/api/points", pointSystemRoutes);
 app.use("/api/user", userPointConversionRoutes);
 app.use("/api/contact-messages", contactRoutes);
 app.use("/api/logo-images", logoImageRoutes);
+app.use("/api/user", accountDeletionRoutes);
+app.use("/api/admin", accountDeletionRoutes);
 
 // Healthcheck
 app.get("/health", (_req, res) => {

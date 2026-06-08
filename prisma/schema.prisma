@@ -1807,6 +1807,7 @@ model users {
   user_devices              user_devices[]
   user_verification         user_verification[]
   wishlists                 wishlists[]
+  account_deletion_requests account_deletion_requests[]
 
   @@index([email], map: "email_2")
   @@index([is_active], map: "is_active")
@@ -2506,4 +2507,25 @@ enum ride_fare_counters_status {
   rejected
   withdrawn
   expired
+}
+
+model account_deletion_requests {
+  request_id   BigInt                              @id @default(autoincrement()) @db.UnsignedBigInt
+  user_id      BigInt?                             @db.UnsignedBigInt
+  reason       String?                             @db.Text
+  status       account_deletion_requests_status    @default(pending)
+  requested_at DateTime                            @default(now()) @db.Timestamp(0)
+  resolved_at  DateTime?                           @db.Timestamp(0)
+  resolved_by  BigInt?                             @db.UnsignedBigInt
+  reject_note  String?                             @db.VarChar(500)
+  users        users?                              @relation(fields: [user_id], references: [user_id], onDelete: SetNull, map: "fk_adr_user")
+
+  @@index([status, requested_at], map: "idx_adr_status_date")
+  @@index([user_id], map: "idx_adr_user")
+}
+
+enum account_deletion_requests_status {
+  pending
+  approved
+  rejected
 }
