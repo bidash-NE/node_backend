@@ -1748,6 +1748,13 @@ export function initDriverSocket(io, mysqlPool) {
         ride: rideOut,
       });
 
+      // ── Notify driver that their counter was accepted (triggers toast) ──
+      io.to(driverRoom(String(selectedDriverId))).emit("fare:counter_response", {
+        request_id,
+        status: "accepted",
+        final_fare_cents: finalFareCents,
+      });
+
       // Push notification to passenger
       getPushTokensByUserIds([String(passenger_id)]).then((tokens) => {
         if (tokens.length) {
