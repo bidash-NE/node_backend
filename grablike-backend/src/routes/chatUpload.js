@@ -31,7 +31,7 @@ export function makeChatUploadRouter(publicBase = "grablike/uploads") {
   const upload = multer({
     storage,
     fileFilter,
-    limits: { fileSize: 1024 * 1024 }, // 1024 KB — ~1 min of high-quality voice
+    limits: { fileSize: 8 * 1024 * 1024 }, // 8 MB — covers full-res phone photos and voice notes
   });
 
   // POST /chat/upload  (form field: "file")
@@ -45,6 +45,18 @@ export function makeChatUploadRouter(publicBase = "grablike/uploads") {
       console.error("[chat upload] error:", e?.message);
       return res.status(500).json({ ok: false, error: "server_error" });
     }
+  });
+
+  // Multer/file-filter errors land here instead of falling through to the
+  // default Express HTML error page (which breaks the client's res.json()).
+  router.use((err, _req, res, _next) => {
+    if (err instanceof multer.MulterError) {
+      const msg = err.code === "LIMIT_FILE_SIZE" ? "file_too_large" : err.code.toLowerCase();
+      console.error("[chat upload] multer error:", err.code);
+      return res.status(400).json({ ok: false, error: msg });
+    }
+    console.error("[chat upload] error:", err?.message);
+    return res.status(400).json({ ok: false, error: "upload_failed" });
   });
 
   return router;
