@@ -10,16 +10,17 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev)
+# Install ALL dependencies including dev
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
+# Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the admin service and required files
+# Copy shared and service files
 COPY admin ./admin
 COPY lib ./lib
 COPY middlewares ./middlewares
+
 # Prune dev dependencies for production
 RUN npm prune --production
 
@@ -31,7 +32,7 @@ WORKDIR /app
 # Install OpenSSL for Prisma runtime
 RUN apk add --no-cache openssl
 
-# Create non-root user for security
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
@@ -41,6 +42,7 @@ COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/admin ./admin
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/middlewares ./middlewares
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
@@ -49,15 +51,12 @@ USER nodejs
 # Set working directory to admin service
 WORKDIR /app/admin
 
-# Environment variables
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3000/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
 
 EXPOSE 3000
 
-# Start the application
 CMD ["node", "server.js"]
