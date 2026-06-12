@@ -14,7 +14,7 @@ const {
 
 const PLATFORM_USER_SHARE = 0.5;
 const PLATFORM_MERCHANT_SHARE = 0.5;
-
+const BHUTAN_NOW_SQL = "DATE_ADD(UTC_TIMESTAMP(), INTERVAL 6 HOUR)";
 /* ============================================================
    Basic helpers
 ============================================================ */
@@ -171,15 +171,11 @@ async function recordWalletTransfer(
   conn,
   { fromId, toId, amount, note = null },
 ) {
-  const amt = round2(amount);
-
+  const amt = Number(amount || 0);
   if (!(amt > 0)) return null;
 
   const [dr] = await conn.query(
-    `UPDATE wallets
-        SET amount = amount - ?
-      WHERE wallet_id = ?
-        AND amount >= ?`,
+    `UPDATE wallets SET amount = amount - ? WHERE wallet_id = ? AND amount >= ?`,
     [amt, fromId, amt],
   );
 
@@ -188,9 +184,7 @@ async function recordWalletTransfer(
   }
 
   await conn.query(
-    `UPDATE wallets
-        SET amount = amount + ?
-      WHERE wallet_id = ?`,
+    `UPDATE wallets SET amount = amount + ? WHERE wallet_id = ?`,
     [amt, toId],
   );
 
@@ -199,14 +193,14 @@ async function recordWalletTransfer(
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
     [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
     [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
@@ -216,26 +210,15 @@ async function recordWalletTransfer(
     journal_id: journal_id || null,
   };
 }
-
 async function recordWalletTransferWithIds(
   conn,
   { fromId, toId, amount, note = null, ids },
 ) {
-  const amt = round2(amount);
-
+  const amt = Number(amount || 0);
   if (!(amt > 0)) return null;
 
-  const { dr_id, cr_id, journal_id } = ids || {};
-
-  if (!dr_id || !cr_id) {
-    throw new Error("Prefetched transaction ids missing: dr_id/cr_id");
-  }
-
   const [dr] = await conn.query(
-    `UPDATE wallets
-        SET amount = amount - ?
-      WHERE wallet_id = ?
-        AND amount >= ?`,
+    `UPDATE wallets SET amount = amount - ? WHERE wallet_id = ? AND amount >= ?`,
     [amt, fromId, amt],
   );
 
@@ -244,23 +227,27 @@ async function recordWalletTransferWithIds(
   }
 
   await conn.query(
-    `UPDATE wallets
-        SET amount = amount + ?
-      WHERE wallet_id = ?`,
+    `UPDATE wallets SET amount = amount + ? WHERE wallet_id = ?`,
     [amt, toId],
   );
+
+  const { dr_id, cr_id, journal_id } = ids || {};
+
+  if (!dr_id || !cr_id) {
+    throw new Error("Prefetched transaction ids missing (dr_id/cr_id).");
+  }
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
     [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
     [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
