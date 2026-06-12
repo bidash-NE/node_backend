@@ -12,7 +12,8 @@ const UPLOADS_BASE = `${BASE_URL}/grablike/uploads`;
 export default function makeProfileImageRouter() {
   const router = express.Router();
 
-  const UP_DIR = path.join(process.cwd(), "uploads", "profiles");
+  const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+  const UP_DIR = path.join(UPLOAD_ROOT, "profiles");
   fs.mkdirSync(UP_DIR, { recursive: true });
 
   const storage = multer.diskStorage({

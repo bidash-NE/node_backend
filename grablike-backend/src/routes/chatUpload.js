@@ -8,7 +8,8 @@ import mime from "mime-types";
 export function makeChatUploadRouter(publicBase = "grablike/uploads") {
   const router = express.Router();
 
-  const UP_DIR = path.join(process.cwd(), "uploads", "chat");
+  const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+  const UP_DIR = path.join(UPLOAD_ROOT, "chat");
   fs.mkdirSync(UP_DIR, { recursive: true });
 
   const storage = multer.diskStorage({

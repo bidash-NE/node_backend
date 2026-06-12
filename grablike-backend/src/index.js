@@ -74,7 +74,8 @@ app.use(
 app.use(express.json({ limit: "10mb" })); // ✅ allow bigger payloads (chat/meta)
 
 /** serve /uploads/* (for chat images & other assets) */
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+app.use("/uploads", express.static(UPLOAD_ROOT));
 
 /* ============================== Health ================================ */
 app.get("/", (_req, res) => res.json({ ok: true }));

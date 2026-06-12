@@ -11,7 +11,8 @@ const BASE_URL = (process.env.BASE_URL || "https://backend.tabdhey.bt").replace(
 const UPLOADS_BASE = `${BASE_URL}/grablike/uploads`;
 
 /* ===================== Multer — ride type icons ===================== */
-const ICON_DIR = path.join(process.cwd(), "uploads", "ride-type-icons");
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(process.cwd(), "uploads");
+const ICON_DIR = path.join(UPLOAD_ROOT, "ride-type-icons");
 fs.mkdirSync(ICON_DIR, { recursive: true });
 
 const iconStorage = multer.diskStorage({
