@@ -281,7 +281,78 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
     return out;
   }
 }
+async function forceRevertConfirmedToPending(order_id, reason) {
+  const oid = String(order_id || "")
+    .trim()
+    .toUpperCase();
+  if (!oid) return { ok: false, code: "BAD_ORDER_ID" };
 
+  const msg = reason || "Wallet transaction failed during order acceptance.";
+
+  try {
+    // Try with status_reason first
+    const [result] = await db.query(
+      `UPDATE orders
+          SET status = 'PENDING',
+              status_reason = ?,
+              updated_at = NOW()
+        WHERE order_id = ?
+          AND status = 'CONFIRMED'`,
+      [msg, oid],
+    );
+
+    const [[row]] = await db.query(
+      `SELECT order_id, status
+         FROM orders
+        WHERE order_id = ?
+        LIMIT 1`,
+      [oid],
+    );
+
+    return {
+      ok: String(row?.status || "").toUpperCase() === "PENDING",
+      affectedRows: result?.affectedRows || 0,
+      status: row?.status || null,
+    };
+  } catch (e) {
+    // Fallback if status_reason column does not exist
+    try {
+      const [result] = await db.query(
+        `UPDATE orders
+            SET status = 'PENDING',
+                updated_at = NOW()
+          WHERE order_id = ?
+            AND status = 'CONFIRMED'`,
+        [oid],
+      );
+
+      const [[row]] = await db.query(
+        `SELECT order_id, status
+           FROM orders
+          WHERE order_id = ?
+          LIMIT 1`,
+        [oid],
+      );
+
+      return {
+        ok: String(row?.status || "").toUpperCase() === "PENDING",
+        affectedRows: result?.affectedRows || 0,
+        status: row?.status || null,
+      };
+    } catch (e2) {
+      console.error("[FORCE REVERT TO PENDING FAILED]", {
+        order_id: oid,
+        error: e2?.message || e2,
+      });
+
+      return {
+        ok: false,
+        code: "REVERT_FAILED",
+        error: e2?.message || String(e2),
+      };
+    }
+  }
+}
 /**
  * After DELIVERED capture, write DB notifications + send PUSH
  * - Customer: wallet debit (order amount + platform fee share)
@@ -1619,77 +1690,43 @@ async function updateOrderStatus(req, res) {
           error: captureErr?.message || "Wallet capture failed",
         };
       }
-      if (!captureResult?.ok || !captureResult?.capture?.captured) {
+
+      const captureOk =
+        captureResult?.ok === true &&
+        (captureResult?.capture?.captured === true ||
+          captureResult?.capture?.alreadyCaptured === true ||
+          captureResult?.capture?.skipped === true);
+
+      if (!captureOk) {
         console.error("[CONFIRMED WALLET CAPTURE FAILED]", {
           order_id,
           captureResult,
         });
 
-        const revertReason =
-          "Wallet transaction failed during order acceptance. Order returned to pending.";
+        const revertResult = await forceRevertConfirmedToPending(
+          order_id,
+          "Wallet transaction failed during order acceptance.",
+        );
 
-        // ✅ Strong fallback: force order back to PENDING directly
-        try {
-          await db.query(
-            `UPDATE orders
-          SET status = 'PENDING',
-              status_reason = ?,
-              updated_at = NOW()
-        WHERE order_id = ?
-          AND status = 'CONFIRMED'`,
-            [revertReason, order_id],
-          );
-        } catch (directRevertErr) {
-          console.error(
-            "[CONFIRMED WALLET DIRECT REVERT FAILED]",
-            directRevertErr?.message || directRevertErr,
-          );
-
-          // Optional fallback if direct SQL failed due to missing status_reason column
-          try {
-            await db.query(
-              `UPDATE orders
-            SET status = 'PENDING',
-                updated_at = NOW()
-          WHERE order_id = ?
-            AND status = 'CONFIRMED'`,
-              [order_id],
-            );
-          } catch (fallbackErr) {
-            console.error(
-              "[CONFIRMED WALLET FALLBACK REVERT FAILED]",
-              fallbackErr?.message || fallbackErr,
-            );
-          }
-        }
-
-        // ✅ Verify final status before responding
-        let finalStatus = null;
-        try {
-          const [[checkRow]] = await db.query(
-            `SELECT status FROM orders WHERE order_id = ? LIMIT 1`,
-            [order_id],
-          );
-          finalStatus = checkRow?.status || null;
-        } catch (checkErr) {
-          console.error(
-            "[CONFIRMED WALLET REVERT CHECK FAILED]",
-            checkErr?.message,
-          );
-        }
+        console.error("[CONFIRMED WALLET REVERT RESULT]", {
+          order_id,
+          revertResult,
+        });
 
         return res.status(400).json({
           success: false,
           message:
-            finalStatus === "PENDING"
-              ? "Order could not be accepted because wallet transaction failed. Order is still pending."
-              : "Order could not be accepted because wallet transaction failed. Please check order status.",
-          order_id,
-          status: finalStatus,
+            "Order could not be accepted because wallet transaction failed. Order has been returned to pending.",
           code: captureResult?.code || "CAPTURE_FAILED",
           error: captureResult?.error || null,
+          revert: revertResult,
         });
       }
+
+      console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
+        order_id,
+        capture: captureResult.capture,
+      });
       console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
         order_id,
         capture: captureResult.capture,
