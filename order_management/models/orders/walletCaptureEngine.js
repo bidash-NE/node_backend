@@ -239,14 +239,14 @@ async function recordWalletTransferWithIds(
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'DR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
     [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'CR', ?, ${BHUTAN_NOW_SQL}, ${BHUTAN_NOW_SQL})`,
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
     [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
@@ -256,7 +256,6 @@ async function recordWalletTransferWithIds(
     journal_id: journal_id || null,
   };
 }
-
 async function lockAndGetOrder(conn, order_id) {
   const [[order]] = await conn.query(
     `SELECT user_id, total_amount, platform_fee, merchant_delivery_fee, payment_method
