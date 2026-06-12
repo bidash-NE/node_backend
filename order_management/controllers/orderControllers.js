@@ -50,6 +50,7 @@ const _updateMod = require("../models/orders/crud/update");
 const _updateStatusMod = require("../models/orders/crud/updateStatus");
 const _deleteMod = require("../models/orders/crud/delete");
 const updateStatusWithUnavailable = require("../models/orders/crud/updateStatusWithUnavailable");
+const { captureOnAccept } = require("../models/orders/walletCaptureEngine");
 const _getOrderStatusCountsByBusinessMod = require("../models/orders/crud/getOrderStatusCountsByBusiness");
 const _findByBusinessGroupedByUserMod = require("../models/orders/crud/findByBusinessGroupedByUser");
 
@@ -1466,7 +1467,90 @@ async function updateOrderStatus(req, res) {
           data: result || null,
         });
       }
+// ✅ Capture wallet transaction when merchant accepts the order
+let captureResult;
 
+try {
+  captureResult = await captureOnAccept(order_id);
+} catch (captureErr) {
+  captureResult = {
+    ok: false,
+    code: "CAPTURE_FAILED",
+    error: captureErr?.message || "Wallet capture failed",
+  };
+}
+if (!captureResult?.ok || !captureResult?.capture?.captured) {
+  console.error("[CONFIRMED WALLET CAPTURE FAILED]", {
+    order_id,
+    captureResult,
+  });
+
+  const revertReason =
+    "Wallet transaction failed during order acceptance. Order returned to pending.";
+
+  // ✅ Strong fallback: force order back to PENDING directly
+  try {
+    await db.query(
+      `UPDATE orders
+          SET status = 'PENDING',
+              status_reason = ?,
+              updated_at = NOW()
+        WHERE order_id = ?
+          AND status = 'CONFIRMED'`,
+      [revertReason, order_id],
+    );
+  } catch (directRevertErr) {
+    console.error(
+      "[CONFIRMED WALLET DIRECT REVERT FAILED]",
+      directRevertErr?.message || directRevertErr,
+    );
+
+    // Optional fallback if direct SQL failed due to missing status_reason column
+    try {
+      await db.query(
+        `UPDATE orders
+            SET status = 'PENDING',
+                updated_at = NOW()
+          WHERE order_id = ?
+            AND status = 'CONFIRMED'`,
+        [order_id],
+      );
+    } catch (fallbackErr) {
+      console.error(
+        "[CONFIRMED WALLET FALLBACK REVERT FAILED]",
+        fallbackErr?.message || fallbackErr,
+      );
+    }
+  }
+
+  // ✅ Verify final status before responding
+  let finalStatus = null;
+  try {
+    const [[checkRow]] = await db.query(
+      `SELECT status FROM orders WHERE order_id = ? LIMIT 1`,
+      [order_id],
+    );
+    finalStatus = checkRow?.status || null;
+  } catch (checkErr) {
+    console.error("[CONFIRMED WALLET REVERT CHECK FAILED]", checkErr?.message);
+  }
+
+  return res.status(400).json({
+    success: false,
+    message:
+      finalStatus === "PENDING"
+        ? "Order could not be accepted because wallet transaction failed. Order is still pending."
+        : "Order could not be accepted because wallet transaction failed. Please check order status.",
+    order_id,
+    status: finalStatus,
+    code: captureResult?.code || "CAPTURE_FAILED",
+    error: captureResult?.error || null,
+  });
+}
+console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
+  order_id,
+  capture: captureResult.capture,
+});
       try {
         broadcastOrderStatusToMany({
           order_id,
@@ -1520,13 +1604,14 @@ async function updateOrderStatus(req, res) {
         console.error("[user notify failed]", { order_id, err: e?.message });
       }
 
-      return res.json({
-        success: true,
-        message: "Order confirmed successfully",
-        order_id,
-        status: "CONFIRMED",
-        data: result,
-      });
+     return res.json({
+  success: true,
+  message: "Order confirmed successfully. Wallet transaction completed.",
+  order_id,
+  status: "CONFIRMED",
+  data: result,
+  wallet_capture: captureResult.capture,
+});
     }
 
     // CANCEL restriction
