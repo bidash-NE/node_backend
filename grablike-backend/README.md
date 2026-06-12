@@ -1,4 +1,4 @@
-# Grab-like Driver Backend (Node.js + MySQL + MongoDB)
+# TabDey Driver Backend (Node.js + MySQL + MongoDB)
 
 This is a minimal backend to power your Grab-style driver app:
 - **MySQL** stores rides & earnings
