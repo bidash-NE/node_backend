@@ -19,7 +19,7 @@ RUN npx prisma generate
 # Copy the user merchant chat service and shared files
 COPY user_merchant_chat ./user_merchant_chat
 COPY lib ./lib
-
+COPY middlewares ./middlewares
 # Optional safety: make root lib available inside service folder too
 RUN mkdir -p /app/user_merchant_chat/lib && \
     cp -a /app/lib/. /app/user_merchant_chat/lib/

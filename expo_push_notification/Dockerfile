@@ -19,7 +19,7 @@ RUN npx prisma generate
 # Copy the expo service and required files
 COPY expo_push_notification ./expo_push_notification
 COPY lib ./lib
-
+COPY middlewares ./middlewares
 # Prune dev dependencies for production
 RUN npm prune --production
 

@@ -19,7 +19,7 @@ RUN npx prisma generate
 # Copy the order_management service
 COPY order_management ./order_management
 COPY lib ./lib
-
+COPY middlewares ./middlewares
 # Prune dev dependencies for production
 RUN npm prune --production
 

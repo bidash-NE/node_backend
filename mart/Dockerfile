@@ -19,7 +19,7 @@ RUN npx prisma generate
 # Copy the mart service (includes its own lib folder)
 COPY mart ./mart
 COPY lib ./lib
-
+COPY middlewares ./middlewares
 # Prune dev dependencies for production
 RUN npm prune --production
 

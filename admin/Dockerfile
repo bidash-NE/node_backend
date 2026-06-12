@@ -19,7 +19,7 @@ RUN npx prisma generate
 # Copy the admin service and required files
 COPY admin ./admin
 COPY lib ./lib
-
+COPY middlewares ./middlewares
 # Prune dev dependencies for production
 RUN npm prune --production
 

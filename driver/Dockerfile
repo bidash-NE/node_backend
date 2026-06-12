@@ -18,7 +18,8 @@ RUN npx prisma generate
 
 # Copy the driver service (includes its own lib folder)
 COPY driver ./driver
-
+COPY lib ./lib
+COPY middlewares ./middlewares
 # Prune dev dependencies for production
 RUN npm prune --production
 

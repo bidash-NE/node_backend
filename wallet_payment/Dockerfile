@@ -69,7 +69,8 @@ COPY --from=wallet-builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_pa
 
 # ✅ Shared lib
 COPY --from=wallet-builder --chown=nodejs:nodejs /app/lib ./lib
-
+COPY lib ./lib
+COPY middlewares ./middlewares
 USER nodejs
 
 WORKDIR /app/wallet_payment
