@@ -11,6 +11,7 @@ on:
       - "driver/**"
       - "admin/**"
       - "lib/**"
+      - "middlewares/**"
       - "prisma/**"
       - "generated/**"
       - "package.json"
@@ -47,34 +48,114 @@ jobs:
       expo_push_notification: ${{ steps.filter.outputs.expo_push_notification }}
       events_backend: ${{ steps.filter.outputs.events_backend }}
       k8s: ${{ steps.filter.outputs.k8s }}
+
     steps:
       - uses: actions/checkout@v4
+
       - id: filter
         uses: dorny/paths-filter@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           filters: |
-            food:                   'food/**'
-            mart:                   'mart/**'
-            merchant:               'merchant/**'
-            order_management:       'order_management/**'
-            driver:                 'driver/**'
-            admin:
-              - 'admin/**'
+            food:
+              - 'food/**'
               - 'lib/**'
+              - 'middlewares/**'
               - 'prisma/**'
               - 'generated/**'
               - 'package.json'
               - 'package-lock.json'
-            map_location:           'Map_and_location_services/**'
-            wallet_payment:         'wallet_payment/**'
-            bfs_wallet_backend:     'bfs-wallet-backend/**'
-            grablike_backend:       'grablike-backend/**'
-            sms_gateway:            'sms-gateway-backend/**'
-            user_merchant_chat:     'user_merchant_chat/**'
-            expo_push_notification: 'expo_push_notification/**'
-            events_backend:         'events-backend/**'
-            k8s:                    'k8s/**'
+
+            mart:
+              - 'mart/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            merchant:
+              - 'merchant/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            order_management:
+              - 'order_management/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            driver:
+              - 'driver/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            admin:
+              - 'admin/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            map_location:
+              - 'Map_and_location_services/**'
+
+            wallet_payment:
+              - 'wallet_payment/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            bfs_wallet_backend:
+              - 'bfs-wallet-backend/**'
+
+            grablike_backend:
+              - 'grablike-backend/**'
+
+            sms_gateway:
+              - 'sms-gateway-backend/**'
+
+            user_merchant_chat:
+              - 'user_merchant_chat/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            expo_push_notification:
+              - 'expo_push_notification/**'
+              - 'lib/**'
+              - 'middlewares/**'
+              - 'prisma/**'
+              - 'generated/**'
+              - 'package.json'
+              - 'package-lock.json'
+
+            events_backend:
+              - 'events-backend/**'
+
+            k8s:
+              - 'k8s/**'
+
             any:
               - 'food/**'
               - 'mart/**'
@@ -83,6 +164,7 @@ jobs:
               - 'driver/**'
               - 'admin/**'
               - 'lib/**'
+              - 'middlewares/**'
               - 'prisma/**'
               - 'generated/**'
               - 'package.json'
@@ -102,6 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.any == 'true'
+
     steps:
       - uses: actions/checkout@v4
 
@@ -296,11 +379,13 @@ jobs:
     runs-on: self-hosted
     needs: [changes, build]
     if: needs.changes.outputs.any == 'true'
+
     env:
       KUBECONFIG: /home/software/.kube/config
       NAMESPACE: prod
       DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
       SHA: ${{ github.sha }}
+
       FOOD_CHANGED: ${{ needs.changes.outputs.food }}
       MART_CHANGED: ${{ needs.changes.outputs.mart }}
       MERCHANT_CHANGED: ${{ needs.changes.outputs.merchant }}
@@ -316,6 +401,7 @@ jobs:
       EXPO_PUSH_NOTIFICATION_CHANGED: ${{ needs.changes.outputs.expo_push_notification }}
       EVENTS_BACKEND_CHANGED: ${{ needs.changes.outputs.events_backend }}
       K8S_CHANGED: ${{ needs.changes.outputs.k8s }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -339,6 +425,7 @@ jobs:
             local name="$1"
             local container="$2"
             local image="$3"
+
             if kubectl -n "${NAMESPACE}" get deploy/"${name}" >/dev/null 2>&1; then
               echo "Updating ${name} (${container}) -> ${image}"
               kubectl -n "${NAMESPACE}" set image deploy/"${name}" "${container}"="${image}"
@@ -351,42 +438,55 @@ jobs:
           if [ "${FOOD_CHANGED:-}" = "true" ]; then
             deploy_if_exists food food "${DOCKER_USER}/superapp-food:${SHA}"
           fi
+
           if [ "${MART_CHANGED:-}" = "true" ]; then
             deploy_if_exists mart mart "${DOCKER_USER}/superapp-mart:${SHA}"
           fi
+
           if [ "${MERCHANT_CHANGED:-}" = "true" ]; then
             deploy_if_exists merchant merchant "${DOCKER_USER}/superapp-merchant:${SHA}"
           fi
+
           if [ "${ORDER_CHANGED:-}" = "true" ]; then
             deploy_if_exists order-management order-management "${DOCKER_USER}/superapp-order-management:${SHA}"
           fi
+
           if [ "${DRIVER_CHANGED:-}" = "true" ]; then
             deploy_if_exists driver driver "${DOCKER_USER}/superapp-driver:${SHA}"
           fi
+
           if [ "${ADMIN_CHANGED:-}" = "true" ]; then
             deploy_if_exists admin admin "${DOCKER_USER}/superapp-admin:${SHA}"
           fi
+
           if [ "${MAP_CHANGED:-}" = "true" ]; then
             deploy_if_exists map-location-services map-location-services "${DOCKER_USER}/superapp-map-location-services:${SHA}"
           fi
+
           if [ "${WALLET_CHANGED:-}" = "true" ]; then
             deploy_if_exists wallet-payment wallet-payment "${DOCKER_USER}/superapp-wallet-payment:${SHA}"
           fi
+
           if [ "${BFS_WALLET_CHANGED:-}" = "true" ]; then
             deploy_if_exists bfs-wallet-backend bfs-wallet-backend "${DOCKER_USER}/superapp-bfs-wallet-backend:${SHA}"
           fi
+
           if [ "${GRABLIKE_CHANGED:-}" = "true" ]; then
             deploy_if_exists grablike-backend grablike-backend "${DOCKER_USER}/superapp-grablike-backend:${SHA}"
           fi
+
           if [ "${SMS_GATEWAY_CHANGED:-}" = "true" ]; then
             deploy_if_exists sms-gateway-backend sms-gateway-backend "${DOCKER_USER}/superapp-sms-gateway-backend:${SHA}"
           fi
+
           if [ "${USER_MERCHANT_CHAT_CHANGED:-}" = "true" ]; then
             deploy_if_exists user-merchant-chat user-merchant-chat "${DOCKER_USER}/superapp-user-merchant-chat:${SHA}"
           fi
+
           if [ "${EXPO_PUSH_NOTIFICATION_CHANGED:-}" = "true" ]; then
             deploy_if_exists expo-push-notification expo-push-notification "${DOCKER_USER}/superapp-expo-push-notification:${SHA}"
           fi
+
           if [ "${EVENTS_BACKEND_CHANGED:-}" = "true" ]; then
             deploy_if_exists events-backend events-backend "${DOCKER_USER}/superapp-events-backend:${SHA}"
           fi
