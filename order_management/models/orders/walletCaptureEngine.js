@@ -15,6 +15,10 @@ const {
 const PLATFORM_USER_SHARE = 0.5;
 const PLATFORM_MERCHANT_SHARE = 0.5;
 
+/* ============================================================
+   Basic helpers
+============================================================ */
+
 function round2(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? Number(n.toFixed(2)) : 0;
@@ -40,17 +44,40 @@ function splitPlatformFee(platformFeeTotal) {
 }
 
 /**
+ * IMPORTANT:
+ * Keep this SHORT because order_wallet_captures.buyer_txn_id,
+ * merch_txn_id and admin_txn_id may be small VARCHAR columns.
+ *
+ * Do NOT store "txn1/txn2|txn3/txn4" here.
+ * Full details are already stored in wallet_transactions.
+ */
+function captureTxnId(txn, preferred = "dr") {
+  if (!txn) return null;
+
+  const value =
+    preferred === "cr"
+      ? txn.cr_txn_id || txn.dr_txn_id || txn.journal_id
+      : txn.dr_txn_id || txn.cr_txn_id || txn.journal_id;
+
+  if (!value) return null;
+
+  return String(value).slice(0, 64);
+}
+
+/**
  * Model:
  * orders.total_amount = gross payable
- * total_amount = order + delivery - discount + full platform fee
+ *
+ * Example:
+ * total_amount = 619
+ * platform_fee = 29
  *
  * Wallet movement:
- * Buyer    -> Merchant = total_amount - full platform_fee
- * Buyer    -> Admin    = 50% platform_fee
- * Merchant -> Admin    = 50% platform_fee
+ * Buyer    -> Merchant = 619 - 29 = 590
+ * Buyer    -> Admin    = 29 / 2 = 14.5
+ * Merchant -> Admin    = 29 / 2 = 14.5
  *
- * Optional:
- * Admin -> Merchant = merchant_delivery_fee
+ * Buyer total debit = 590 + 14.5 = 604.5
  */
 function computeWalletAmounts(order) {
   const finalTotalAmount = round2(order.total_amount);
@@ -67,12 +94,15 @@ function computeWalletAmounts(order) {
 
   const { userFee, merchFee } = splitPlatformFee(platformFeeTotal);
 
+  // Main correction:
+  // Merchant receives gross total minus full platform fee.
   const buyerToMerchant = round2(finalTotalAmount - platformFeeTotal);
 
   if (buyerToMerchant < 0) {
     throw new Error("Invalid wallet split: platform_fee exceeds total_amount");
   }
 
+  // Buyer pays order/delivery amount + user-side platform fee only.
   const needFromBuyer = round2(buyerToMerchant + userFee);
 
   return {
@@ -85,6 +115,10 @@ function computeWalletAmounts(order) {
     needFromBuyer,
   };
 }
+
+/* ============================================================
+   Capture helpers
+============================================================ */
 
 async function captureExists(order_id, capture_type, conn = null) {
   const dbh = conn || db;
@@ -122,14 +156,14 @@ async function computeBusinessSplit(order_id, conn = null) {
     throw new Error("Unable to identify merchant business for wallet capture");
   }
 
-  const subtotalTotal = items.reduce(
+  const itemsTotal = items.reduce(
     (sum, item) => round2(sum + Number(item.subtotal || 0)),
     0,
   );
 
   return {
     business_id: primaryBizId,
-    items_total: subtotalTotal,
+    items_total: itemsTotal,
   };
 }
 
@@ -251,6 +285,7 @@ async function lockAndGetOrder(conn, order_id) {
 
 /* ============================================================
    WALLET capture - standalone
+   Used by captureOnAccept(order_id)
 ============================================================ */
 
 async function captureOrderFunds(order_id) {
@@ -365,7 +400,7 @@ async function captureOrderFunds(order_id) {
       });
     }
 
-    // 4. Optional platform/admin support for merchant delivery fee
+    // 4. Optional admin/platform support for merchant delivery fee
     let tMerchantDelivery = null;
     if (merchantDeliveryFee > 0) {
       tMerchantDelivery = await recordWalletTransfer(conn, {
@@ -376,49 +411,16 @@ async function captureOrderFunds(order_id) {
       });
     }
 
-    const buyerTxnRef = [
-      tOrder ? `order:${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
-      tUserFee
-        ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-        : null,
-    ]
-      .filter(Boolean)
-      .join("|");
-
-    const merchantTxnRef = [
-      tMerchFee
-        ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-        : null,
-      tMerchantDelivery
-        ? `merchant_delivery:${tMerchantDelivery.dr_txn_id}/${tMerchantDelivery.cr_txn_id}`
-        : null,
-    ]
-      .filter(Boolean)
-      .join("|");
-
-    const adminTxnRef = [
-      tUserFee
-        ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-        : null,
-      tMerchFee
-        ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-        : null,
-      tMerchantDelivery
-        ? `merchant_delivery:${tMerchantDelivery.dr_txn_id}/${tMerchantDelivery.cr_txn_id}`
-        : null,
-    ]
-      .filter(Boolean)
-      .join("|");
-
+    // Keep these short to avoid "Data too long" errors.
     await conn.query(
       `INSERT INTO order_wallet_captures
          (order_id, capture_type, buyer_txn_id, merch_txn_id, admin_txn_id)
        VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
       [
         order_id,
-        buyerTxnRef || null,
-        merchantTxnRef || null,
-        adminTxnRef || null,
+        captureTxnId(tUserFee, "dr") || captureTxnId(tOrder, "dr"),
+        captureTxnId(tMerchFee, "dr") || captureTxnId(tOrder, "cr"),
+        captureTxnId(tUserFee, "cr") || captureTxnId(tMerchFee, "cr"),
       ],
     );
 
@@ -538,18 +540,9 @@ async function captureOrderCODFee(order_id) {
        VALUES (?, 'COD_FEE', ?, ?, ?)`,
       [
         order_id,
-        tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
-        tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
-        [
-          tUserFee
-            ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-            : null,
-          tMerchFee
-            ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join("|") || null,
+        captureTxnId(tUserFee, "dr"),
+        captureTxnId(tMerchFee, "dr"),
+        captureTxnId(tUserFee, "cr") || captureTxnId(tMerchFee, "cr"),
       ],
     );
 
@@ -700,37 +693,9 @@ async function captureOrderFundsWithConn(conn, order_id, prefetchedIds = []) {
      VALUES (?, 'WALLET_FULL', ?, ?, ?)`,
     [
       order_id,
-      [
-        tOrder ? `order:${tOrder.dr_txn_id}/${tOrder.cr_txn_id}` : null,
-        tUserFee
-          ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("|") || null,
-      [
-        tMerchFee
-          ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-          : null,
-        tMerchantDelivery
-          ? `merchant_delivery:${tMerchantDelivery.dr_txn_id}/${tMerchantDelivery.cr_txn_id}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("|") || null,
-      [
-        tUserFee
-          ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-          : null,
-        tMerchFee
-          ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-          : null,
-        tMerchantDelivery
-          ? `merchant_delivery:${tMerchantDelivery.dr_txn_id}/${tMerchantDelivery.cr_txn_id}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("|") || null,
+      captureTxnId(tUserFee, "dr") || captureTxnId(tOrder, "dr"),
+      captureTxnId(tMerchFee, "dr") || captureTxnId(tOrder, "cr"),
+      captureTxnId(tUserFee, "cr") || captureTxnId(tMerchFee, "cr"),
     ],
   );
 
@@ -833,18 +798,9 @@ async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds = []) {
      VALUES (?, 'COD_FEE', ?, ?, ?)`,
     [
       order_id,
-      tUserFee ? `${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}` : null,
-      tMerchFee ? `${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}` : null,
-      [
-        tUserFee
-          ? `buyer_platform:${tUserFee.dr_txn_id}/${tUserFee.cr_txn_id}`
-          : null,
-        tMerchFee
-          ? `merchant_platform:${tMerchFee.dr_txn_id}/${tMerchFee.cr_txn_id}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("|") || null,
+      captureTxnId(tUserFee, "dr"),
+      captureTxnId(tMerchFee, "dr"),
+      captureTxnId(tUserFee, "cr") || captureTxnId(tMerchFee, "cr"),
     ],
   );
 
