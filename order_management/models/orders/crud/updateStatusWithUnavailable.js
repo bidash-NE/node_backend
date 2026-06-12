@@ -259,11 +259,10 @@ module.exports = async function updateStatusWithUnavailable(
 
     // Optional sanity: you can recompute expected total and compare with final_total_amount
     // expected = items_total + delivery_fee - discount + platform_fee
-    const expected_total =
+    const expected_order_amount =
       items_total +
       Number(final_delivery_fee || 0) -
-      Number(final_discount_amount || 0) +
-      Number(final_platform_fee || 0);
+      Number(final_discount_amount || 0);
 
     // 4) Update orders (all latest fields)
     // NOTE: If your schema uses different column names, adjust here.
@@ -286,7 +285,9 @@ module.exports = async function updateStatusWithUnavailable(
       `,
       [
         reason || null,
-        final_total_amount != null ? final_total_amount : n2(expected_total),
+        final_total_amount != null
+          ? final_total_amount
+          : n2(expected_order_amount),
         final_platform_fee != null ? final_platform_fee : 0,
         final_discount_amount != null ? final_discount_amount : 0,
         final_delivery_fee != null ? final_delivery_fee : 0,
@@ -304,7 +305,7 @@ module.exports = async function updateStatusWithUnavailable(
       status: "CONFIRMED",
       estimated_arrivial_time: etaStr,
       items_total: n2(items_total),
-      expected_total: n2(expected_total),
+      expected_order_amount: n2(expected_order_amount),
       applied: {
         removed_count: removed_norm.length,
         replaced_count: replaced_norm.length,
