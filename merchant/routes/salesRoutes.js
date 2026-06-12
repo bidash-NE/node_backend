@@ -31,21 +31,30 @@ const makeLimiter = ({ windowMs, max, message }) =>
 /* ---------------- validators ---------------- */
 const validateBusinessIdParam = (req, res, next) => {
   const bid = Number(req.params.business_id);
-  if (Number.isFinite(bid) && bid > 0) return next();
-  return res
-    .status(400)
-    .json({ success: false, message: "Invalid business_id" });
+
+  if (Number.isFinite(bid) && bid > 0) {
+    return next();
+  }
+
+  return res.status(400).json({
+    success: false,
+    message: "Invalid business_id",
+  });
 };
 
 /* ---------------- limiters ---------------- */
-// Sales can be polled frequently in dashboards, so allow more reads
 const salesReadLimiter = makeLimiter({
-  windowMs: 60 * 1000, // 1 min
+  windowMs: 60 * 1000,
   max: 180,
   message: "Too many requests. Please slow down.",
 });
 
 // GET /api/sales/today/:business_id
-router.get("/today/:business_id", validateBusinessIdParam, getTodaySales);
+router.get(
+  "/today/:business_id",
+  salesReadLimiter,
+  validateBusinessIdParam,
+  getTodaySales,
+);
 
 module.exports = router;
