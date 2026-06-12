@@ -192,14 +192,14 @@ async function recordWalletTransfer(
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
     [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
     [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
@@ -239,14 +239,14 @@ async function recordWalletTransferWithIds(
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'DR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'DR', ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
     [dr_id, journal_id || null, fromId, toId, amt, note],
   );
 
   await conn.query(
     `INSERT INTO wallet_transactions
        (transaction_id, journal_code, tnx_from, tnx_to, amount, remark, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'CR', ?, NOW(), NOW())`,
+     VALUES (?, ?, ?, ?, ?, 'CR', ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
     [cr_id, journal_id || null, fromId, toId, amt, note],
   );
 
@@ -804,7 +804,7 @@ async function captureOrderCODFeeWithConn(conn, order_id, prefetchedIds = []) {
    Helper used by controller
 ============================================================ */
 
-async function captureOnAccept(order_id, conn = null) {
+async function captureOnAccept(order_id, conn = null, prefetchedIds = []) {
   const dbh = conn || db;
 
   const [[order]] = await dbh.query(
@@ -828,7 +828,9 @@ async function captureOnAccept(order_id, conn = null) {
     return {
       ok: true,
       payment_method: "WALLET",
-      capture: await captureOrderFunds(order_id),
+      capture: conn
+        ? await captureOrderFundsWithConn(conn, order_id, prefetchedIds)
+        : await captureOrderFunds(order_id),
     };
   }
 
@@ -836,7 +838,9 @@ async function captureOnAccept(order_id, conn = null) {
     return {
       ok: true,
       payment_method: "COD",
-      capture: await captureOrderCODFee(order_id),
+      capture: conn
+        ? await captureOrderCODFeeWithConn(conn, order_id, prefetchedIds)
+        : await captureOrderCODFee(order_id),
     };
   }
 

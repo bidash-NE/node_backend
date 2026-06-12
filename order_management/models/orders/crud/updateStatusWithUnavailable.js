@@ -132,11 +132,16 @@ function normChanges(changes) {
 module.exports = async function updateStatusWithUnavailable(
   order_id,
   payload = {},
+  externalConn = null,
 ) {
-  const oid = String(order_id || "").trim().toUpperCase();
+  const oid = String(order_id || "")
+    .trim()
+    .toUpperCase();
   if (!oid) return { ok: false, code: "BAD_ORDER_ID" };
 
-  const status = String(payload.status || "").trim().toUpperCase();
+  const status = String(payload.status || "")
+    .trim()
+    .toUpperCase();
   if (status !== "CONFIRMED") {
     return { ok: false, code: "ONLY_CONFIRMED_SUPPORTED" };
   }
@@ -157,11 +162,13 @@ module.exports = async function updateStatusWithUnavailable(
     payload.unavailable_changes,
   );
 
-  const conn = await db.getConnection();
+  const conn = externalConn || (await db.getConnection());
+  const ownTransaction = !externalConn;
 
   try {
-    await conn.beginTransaction();
-
+    if (ownTransaction) {
+      await conn.beginTransaction();
+    }
     const [[orderRow]] = await conn.query(
       `SELECT
           order_id,
@@ -178,13 +185,17 @@ module.exports = async function updateStatusWithUnavailable(
     );
 
     if (!orderRow) {
-      await conn.rollback();
+      if (ownTransaction) {
+        await conn.rollback();
+      }
       return { ok: false, code: "NOT_FOUND" };
     }
 
     const currentStatus = String(orderRow.status || "").toUpperCase();
     if (["DELIVERED", "CANCELLED"].includes(currentStatus)) {
-      await conn.rollback();
+      if (ownTransaction) {
+        await conn.rollback();
+      }
       return {
         ok: false,
         code: "LOCKED_STATUS",
@@ -268,7 +279,9 @@ module.exports = async function updateStatusWithUnavailable(
     const items_total = n2(sumRow?.items_total || 0);
 
     if (!(items_total > 0)) {
-      await conn.rollback();
+      if (ownTransaction) {
+        await conn.rollback();
+      }
       return {
         ok: false,
         code: "NO_ITEMS_AFTER_UPDATE",
@@ -289,7 +302,9 @@ module.exports = async function updateStatusWithUnavailable(
         : n2(orderRow.discount_amount || 0);
 
     const effective_delivery_fee =
-      final_delivery_fee != null ? final_delivery_fee : n2(orderRow.delivery_fee || 0);
+      final_delivery_fee != null
+        ? final_delivery_fee
+        : n2(orderRow.delivery_fee || 0);
 
     const effective_merchant_delivery_fee =
       final_merchant_delivery_fee != null
@@ -306,7 +321,9 @@ module.exports = async function updateStatusWithUnavailable(
     );
 
     if (!(effective_total_amount > 0)) {
-      await conn.rollback();
+      if (ownTransaction) {
+        await conn.rollback();
+      }
       return {
         ok: false,
         code: "INVALID_TOTAL_AMOUNT",
@@ -359,8 +376,9 @@ module.exports = async function updateStatusWithUnavailable(
       ],
     );
 
-    await conn.commit();
-
+if (ownTransaction) {
+  await conn.commit();
+}
     return {
       ok: true,
       order_id: oid,
@@ -381,7 +399,9 @@ module.exports = async function updateStatusWithUnavailable(
     };
   } catch (e) {
     try {
-      await conn.rollback();
+      if (ownTransaction) {
+        await conn.rollback();
+      }
     } catch {}
 
     return {
@@ -390,6 +410,7 @@ module.exports = async function updateStatusWithUnavailable(
       error: e?.message || String(e),
     };
   } finally {
-    conn.release();
-  }
+if (ownTransaction) {
+  conn.release();
+}  }
 };

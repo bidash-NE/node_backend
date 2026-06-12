@@ -1641,16 +1641,28 @@ async function updateOrderStatus(req, res) {
       });
     }
     // CONFIRMED with unavailable changes
-    if (normalized === "CONFIRMED") {
-      const locked = new Set(["DELIVERED", "CANCELLED"]);
-      if (locked.has(current)) {
-        return res.status(400).json({
-          success: false,
-          message: `Order cannot be confirmed because it is already ${current}.`,
-        });
-      }
+   if (normalized === "CONFIRMED") {
+  const locked = new Set(["DELIVERED", "CANCELLED"]);
 
-      const result = await updateStatusWithUnavailable(order_id, {
+  if (locked.has(current)) {
+    return res.status(400).json({
+      success: false,
+      message: `Order cannot be confirmed because it is already ${current}.`,
+    });
+  }
+
+  const conn = await db.getConnection();
+
+  let result = null;
+  let captureResult = null;
+
+  try {
+    await conn.beginTransaction();
+
+    // 1. Apply unavailable changes + status CONFIRMED inside same transaction
+    result = await updateStatusWithUnavailable(
+      order_id,
+      {
         status: "CONFIRMED",
         reason: finalReason,
         estimated_minutes: body.estimated_minutes ?? estimated_minutes,
@@ -1660,144 +1672,185 @@ async function updateOrderStatus(req, res) {
         final_delivery_fee: body.final_delivery_fee,
         final_merchant_delivery_fee: body.final_merchant_delivery_fee,
         unavailable_changes:
-          body.unavailable_changes &&
-          typeof body.unavailable_changes === "object"
+          body.unavailable_changes && typeof body.unavailable_changes === "object"
             ? body.unavailable_changes
             : { removed: [], replaced: [] },
-      });
+      },
+      conn,
+    );
 
-      if (!result?.ok) {
-        if (result?.code === "NOT_FOUND") {
-          return res
-            .status(404)
-            .json({ success: false, message: "Order not found" });
-        }
-        return res.status(400).json({
+    if (!result?.ok) {
+      await conn.rollback();
+
+      if (result?.code === "NOT_FOUND") {
+        return res.status(404).json({
           success: false,
-          message: result?.code || "Unable to confirm order",
-          data: result || null,
-        });
-      }
-      // ✅ Capture wallet transaction when merchant accepts the order
-      let captureResult;
-
-      try {
-        captureResult = await captureOnAccept(order_id);
-      } catch (captureErr) {
-        captureResult = {
-          ok: false,
-          code: "CAPTURE_FAILED",
-          error: captureErr?.message || "Wallet capture failed",
-        };
-      }
-
-      const captureOk =
-        captureResult?.ok === true &&
-        (captureResult?.capture?.captured === true ||
-          captureResult?.capture?.alreadyCaptured === true ||
-          captureResult?.capture?.skipped === true);
-
-      if (!captureOk) {
-        console.error("[CONFIRMED WALLET CAPTURE FAILED]", {
-          order_id,
-          captureResult,
-        });
-
-        const revertResult = await forceRevertConfirmedToPending(
-          order_id,
-          "Wallet transaction failed during order acceptance.",
-        );
-
-        console.error("[CONFIRMED WALLET REVERT RESULT]", {
-          order_id,
-          revertResult,
-        });
-
-        return res.status(400).json({
-          success: false,
-          message:
-            "Order could not be accepted because wallet transaction failed. Order has been returned to pending.",
-          code: captureResult?.code || "CAPTURE_FAILED",
-          error: captureResult?.error || null,
-          revert: revertResult,
+          message: "Order not found",
         });
       }
 
-      console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
-        order_id,
-        capture: captureResult.capture,
-      });
-      console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
-        order_id,
-        capture: captureResult.capture,
-      });
-      await safeNotifyWalletCaptureOnAccept({
-        order_id,
-        user_id,
-        capture: captureResult.capture,
-      });
-      try {
-        broadcastOrderStatusToMany({
-          order_id,
-          user_id,
-          business_ids,
-          status: "CONFIRMED",
-        });
-      } catch {}
-
-      for (const business_id of business_ids) {
-        try {
-          await insertAndEmitNotification({
-            business_id,
-            user_id,
-            order_id,
-            type: "order:status",
-            title: `Order #${order_id} CONFIRMED`,
-            body_preview: result?.estimated_arrivial_time
-              ? `ETA: ${result.estimated_arrivial_time}`
-              : "Order accepted by merchant.",
-          });
-        } catch (e) {
-          console.error("[merchant notify failed]", {
-            order_id,
-            business_id,
-            err: e?.message,
-          });
-        }
-      }
-
-      try {
-        const eta = result?.estimated_arrivial_time
-          ? ` ETA: ${result.estimated_arrivial_time}`
-          : "";
-        await sendPushToUserId(user_id, {
-          title: "Order Update",
-          body: `Your order ${order_id} has been confirmed.${eta}`,
-        });
-      } catch {}
-
-      try {
-        if (typeof addUserOrderStatusNotification === "function") {
-          await addUserOrderStatusNotification({
-            user_id,
-            order_id,
-            status: "CONFIRMED",
-            reason: finalReason,
-          });
-        }
-      } catch (e) {
-        console.error("[user notify failed]", { order_id, err: e?.message });
-      }
-
-      return res.json({
-        success: true,
-        message: "Order confirmed successfully. Wallet transaction completed.",
-        order_id,
-        status: "CONFIRMED",
-        data: result,
-        wallet_capture: captureResult.capture,
+      return res.status(400).json({
+        success: false,
+        message: result?.code || "Unable to confirm order",
+        data: result || null,
       });
     }
+
+    // 2. Capture wallet inside same transaction
+    captureResult = await captureOnAccept(order_id, conn);
+
+    const captureOk =
+      captureResult?.ok === true &&
+      (
+        captureResult?.capture?.captured === true ||
+        captureResult?.capture?.alreadyCaptured === true ||
+        captureResult?.capture?.skipped === true
+      );
+
+    if (!captureOk) {
+      throw new Error(
+        captureResult?.error ||
+          captureResult?.code ||
+          "Wallet capture failed during order acceptance.",
+      );
+    }
+
+    // 3. Insert merchant earning inside same transaction
+    const capture = captureResult.capture || {};
+
+    if (
+      capture?.captured === true &&
+      String(capture.payment_method || "WALLET").toUpperCase() === "WALLET"
+    ) {
+      const businessId = Number(capture.business_id);
+      const orderAmount = Number(capture.order_amount || 0);
+      const merchantPlatformFee = Number(capture.platform_fee_merchant || 0);
+      const merchantDeliveryFee = Number(capture.merchant_delivery_fee || 0);
+
+      const merchantEarningAmount = Number(
+        (orderAmount + merchantDeliveryFee - merchantPlatformFee).toFixed(2),
+      );
+
+      if (
+        Number.isFinite(businessId) &&
+        businessId > 0 &&
+        Number.isFinite(merchantEarningAmount) &&
+        merchantEarningAmount >= 0
+      ) {
+        await conn.query(
+          `INSERT INTO merchant_earnings
+             (business_id, date, total_amount, order_id)
+           VALUES (?, DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+06:00')), ?, ?)
+           ON DUPLICATE KEY UPDATE
+             business_id = VALUES(business_id),
+             date = VALUES(date),
+             total_amount = VALUES(total_amount)`,
+          [businessId, merchantEarningAmount, order_id],
+        );
+      }
+    }
+
+    // 4. Everything succeeded
+    await conn.commit();
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch {}
+
+    console.error("[CONFIRMED ACCEPT TRANSACTION ROLLED BACK]", {
+      order_id,
+      error: err?.message || err,
+    });
+
+    return res.status(400).json({
+      success: false,
+      message:
+        "Order could not be accepted because wallet transaction failed. All order changes have been reverted.",
+      code: "ACCEPT_ROLLED_BACK",
+      error: err?.message || String(err),
+    });
+  } finally {
+    conn.release();
+  }
+
+  // After commit only: notifications/socket/push
+  console.log("[CONFIRMED ACCEPT SUCCESS]", {
+    order_id,
+    capture: captureResult.capture,
+  });
+
+  await safeNotifyWalletCaptureOnAccept({
+    order_id,
+    user_id,
+    capture: captureResult.capture,
+  });
+
+  try {
+    broadcastOrderStatusToMany({
+      order_id,
+      user_id,
+      business_ids,
+      status: "CONFIRMED",
+    });
+  } catch {}
+
+  for (const business_id of business_ids) {
+    try {
+      await insertAndEmitNotification({
+        business_id,
+        user_id,
+        order_id,
+        type: "order:status",
+        title: `Order #${order_id} CONFIRMED`,
+        body_preview: result?.estimated_arrivial_time
+          ? `ETA: ${result.estimated_arrivial_time}`
+          : "Order accepted by merchant.",
+      });
+    } catch (e) {
+      console.error("[merchant notify failed]", {
+        order_id,
+        business_id,
+        err: e?.message,
+      });
+    }
+  }
+
+  try {
+    const eta = result?.estimated_arrivial_time
+      ? ` ETA: ${result.estimated_arrivial_time}`
+      : "";
+
+    await sendPushToUserId(user_id, {
+      title: "Order Update",
+      body: `Your order ${order_id} has been confirmed.${eta}`,
+    });
+  } catch {}
+
+  try {
+    if (typeof addUserOrderStatusNotification === "function") {
+      await addUserOrderStatusNotification({
+        user_id,
+        order_id,
+        status: "CONFIRMED",
+        reason: finalReason,
+      });
+    }
+  } catch (e) {
+    console.error("[user notify failed]", {
+      order_id,
+      err: e?.message,
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: "Order confirmed successfully. Wallet transaction completed.",
+    order_id,
+    status: "CONFIRMED",
+    data: result,
+    wallet_capture: captureResult.capture,
+  });
+}
 
     // CANCEL restriction
     if (normalized === "CANCELLED") {
