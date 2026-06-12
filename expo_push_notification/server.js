@@ -1,6 +1,6 @@
 // server.js - CORRECT ORDER
 const dotenv = require("dotenv");
-dotenv.config(); // ✅ MUST BE FIRST!
+dotenv.config(); // MUST be first
 
 // Handle BigInt serialization globally
 BigInt.prototype.toJSON = function () {
@@ -9,42 +9,76 @@ BigInt.prototype.toJSON = function () {
 
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
+
+const logger = require("../lib/logger");
+const requestLogger = require("../middlewares/requestLogger");
+const errorHandler = require("../middlewares/errorHandler");
 
 const { prisma } = require("./lib/prisma.js");
 const pushRoutes = require("./routes/pushRoutes");
 
 const app = express();
+const PORT = Number(process.env.PORT || 3007);
+const HOST = process.env.HOST || "0.0.0.0";
 
-// CORS setup - FIXED (removed app.options line)
+app.set("trust proxy", 1);
+
+// ───────────────────────── Middlewares ─────────────────────────
+
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  }),
+  })
 );
+
+// Access logger
+// Keep before express.json() so malformed JSON also gets requestId/logged.
+app.use(requestLogger);
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.set("trust proxy", 1);
 
-// Test Prisma connection
+// Optional development console logger
+if (process.env.NODE_ENV !== "production") {
+  app.use((req, _res, next) => {
+    console.log("➡️ HIT", req.method, req.originalUrl);
+    next();
+  });
+}
+
+// ───────────────────────── Database ─────────────────────────
+
 async function testPrismaConnection() {
   try {
     await prisma.$connect();
+
     console.log("✅ Prisma connected to database successfully!");
-    const result = await prisma.$queryRaw`SELECT 1 as connected`;
+
+    await prisma.$queryRaw`SELECT 1 as connected`;
+
     console.log("✅ Database connection verified");
+
+    logger.info("Prisma connected to database successfully", {
+      module: "push_notifications",
+    });
   } catch (error) {
     console.error("❌ Prisma connection failed:", error.message);
+
+    logger.error("Prisma connection failed", {
+      module: "push_notifications",
+      message: error.message,
+      stack: error.stack,
+    });
+
     if (error.message.includes("Access denied")) {
       console.error(
-        "   Please check your database username and password in .env file",
+        "   Please check your database username and password in .env file"
       );
     } else if (error.message.includes("Unknown database")) {
       console.error(
-        "   Please check if the database name is correct in .env file",
+        "   Please check if the database name is correct in .env file"
       );
     } else if (error.message.includes("connect ETIMEDOUT")) {
       console.error("   Please check if the database host is reachable");
@@ -53,10 +87,10 @@ async function testPrismaConnection() {
     }
   }
 }
-testPrismaConnection();
 
-// Health check endpoint
-app.get("/health", (req, res) => {
+// ───────────────────────── Routes ─────────────────────────
+
+app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "expo-push-notification",
@@ -64,8 +98,7 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Root endpoint
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     message: "📱 Expo Push Notification Service",
     status: "running",
@@ -78,83 +111,131 @@ app.get("/", (req, res) => {
   });
 });
 
-// Register routes
 app.use("/api/push", pushRoutes);
 
-// 404 handler for undefined routes
+// ───────────────────────── 404 Handler ─────────────────────────
+
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: "Endpoint not found",
     requestedUrl: req.originalUrl,
+    requestId: req.requestId,
   });
 });
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error("Global error:", err.message);
-  res.status(err.status || 500).json({
-    success: false,
-    message: err.message || "Internal server error. Please try again later.",
-  });
-});
+// ───────────────────────── Global Express Error Handler ─────────────────────────
 
-// List all registered routes
+// Must be after all routes and 404 handler
+app.use(errorHandler);
+
+// ───────────────────────── Route List Debug ─────────────────────────
+
 const listRoutes = () => {
   const stack = app?._router?.stack || [];
+
   console.log("\n📋 Registered Routes:");
   console.log("-------------------");
+
   for (const layer of stack) {
     if (layer.route?.path) {
       const methods = Object.keys(layer.route.methods)
         .map((m) => m.toUpperCase())
         .join(",");
-      console.log(`${methods.padEnd(8)} /api/push${layer.route.path}`);
+
+      console.log(`${methods.padEnd(8)} ${layer.route.path}`);
     }
   }
+
   console.log("-------------------\n");
 };
 
-setTimeout(listRoutes, 100);
+if (process.env.NODE_ENV !== "production") {
+  setTimeout(listRoutes, 100);
+}
 
-const PORT = Number(process.env.PORT || 3007);
-const HOST = process.env.HOST || "0.0.0.0";
+// ───────────────────────── Startup ─────────────────────────
 
-app.listen(PORT, HOST, () => {
-  console.log(`\n🚀 Expo Push Notification Service is running!`);
-  console.log(
-    `📍 URL: http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`,
-  );
-  console.log(`❤️  Health check : http://localhost:${PORT}/health`);
-  console.log(`📱 Push API base: http://localhost:${PORT}/api/push`);
-  console.log(`⏰ Started at: ${new Date().toISOString()}\n`);
-});
+async function startServer() {
+  await testPrismaConnection();
 
-// Graceful shutdown
+  app.listen(PORT, HOST, () => {
+    console.log(`\n🚀 Expo Push Notification Service is running!`);
+    console.log(
+      `📍 URL: http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`
+    );
+    console.log(`❤️  Health check : http://localhost:${PORT}/health`);
+    console.log(`📱 Push API base: http://localhost:${PORT}/api/push`);
+    console.log(`⏰ Started at: ${new Date().toISOString()}\n`);
+
+    logger.info("Push notification service started", {
+      module: "push_notifications",
+      port: PORT,
+      host: HOST,
+    });
+  });
+}
+
+startServer();
+
+// ───────────────────────── Graceful Shutdown ─────────────────────────
+
 process.on("SIGINT", async () => {
   console.log("\n🛑 SIGINT received, shutting down gracefully...");
+
+  logger.warn("SIGINT received, shutting down push notification service", {
+    module: "shutdown",
+  });
+
   await prisma.$disconnect();
+
   console.log("✅ Prisma disconnected");
+
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
   console.log("\n🛑 SIGTERM received, shutting down gracefully...");
+
+  logger.warn("SIGTERM received, shutting down push notification service", {
+    module: "shutdown",
+  });
+
   await prisma.$disconnect();
+
   console.log("✅ Prisma disconnected");
+
   process.exit(0);
 });
 
-// Handle uncaught exceptions
-process.on("uncaughtException", (error) => {
+// ───────────────────────── Global Node.js Error Handlers ─────────────────────────
+
+process.on("uncaughtException", async (error) => {
   console.error("❌ Uncaught Exception:", error.message);
   console.error(error.stack);
+
+  logger.error("UNCAUGHT EXCEPTION", {
+    module: "process",
+    message: error.message,
+    stack: error.stack,
+  });
+
+  await prisma.$disconnect();
+
   process.exit(1);
 });
 
-// Handle unhandled promise rejections
-process.on("unhandledRejection", (reason, promise) => {
+process.on("unhandledRejection", async (reason, promise) => {
   console.error("❌ Unhandled Rejection at:", promise);
   console.error("reason:", reason);
+
+  logger.error("UNHANDLED REJECTION", {
+    module: "process",
+    reason: reason instanceof Error ? reason.message : reason,
+    stack: reason instanceof Error ? reason.stack : null,
+  });
+
+  await prisma.$disconnect();
+
   process.exit(1);
 });
