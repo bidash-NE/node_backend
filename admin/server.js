@@ -118,7 +118,7 @@ async function start() {
     });
 
     app.listen(PORT, "0.0.0.0", () => {
-      console.log(`🚀 Server running at port ${PORT}`);
+      console.log(`🚀 Server running at port number ${PORT}`);
 
       logger.info("Server started", {
         module: "startup",
