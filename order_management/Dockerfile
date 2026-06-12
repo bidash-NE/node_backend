@@ -10,16 +10,17 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev)
+# Install ALL dependencies including dev
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
+# Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the order_management service
+# Copy shared and service files
 COPY order_management ./order_management
 COPY lib ./lib
 COPY middlewares ./middlewares
+
 # Prune dev dependencies for production
 RUN npm prune --production
 
@@ -35,7 +36,7 @@ RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# ✅ Create uploads directory within the app directory
+# Create uploads directory within the app directory
 RUN mkdir -p /app/order_management/uploads/order_delivery_photos && \
     chown -R nodejs:nodejs /app/order_management/uploads
 
@@ -45,6 +46,7 @@ COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/order_management ./order_management
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/middlewares ./middlewares
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user

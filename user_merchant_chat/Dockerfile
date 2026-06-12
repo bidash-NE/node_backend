@@ -20,6 +20,7 @@ RUN npx prisma generate
 COPY user_merchant_chat ./user_merchant_chat
 COPY lib ./lib
 COPY middlewares ./middlewares
+
 # Optional safety: make root lib available inside service folder too
 RUN mkdir -p /app/user_merchant_chat/lib && \
     cp -a /app/lib/. /app/user_merchant_chat/lib/
@@ -50,6 +51,7 @@ COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/middlewares ./middlewares
 COPY --from=builder --chown=nodejs:nodejs /app/user_merchant_chat ./user_merchant_chat
 
 # Switch to non-root user

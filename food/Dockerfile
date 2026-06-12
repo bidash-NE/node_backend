@@ -10,16 +10,17 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev)
+# Install ALL dependencies including dev
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
+# Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the food service (includes its own lib folder)
+# Copy shared and service files
 COPY food ./food
 COPY lib ./lib
 COPY middlewares ./middlewares
+
 # Prune dev dependencies for production
 RUN npm prune --production
 
@@ -41,12 +42,13 @@ COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/food ./food
 COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/middlewares ./middlewares
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
 USER nodejs
 
-# Set working directory to food service (THIS IS THE KEY FIX)
+# Set working directory to food service
 WORKDIR /app/food
 
 # Environment variables

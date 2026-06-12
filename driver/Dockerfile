@@ -10,16 +10,17 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# Install ALL dependencies (including dev)
+# Install ALL dependencies including dev
 RUN npm ci --include=dev
 
-# Generate Prisma Client (creates /app/generated folder)
+# Generate Prisma Client
 RUN npx prisma generate
 
-# Copy the driver service (includes its own lib folder)
+# Copy shared and service files
 COPY driver ./driver
 COPY lib ./lib
 COPY middlewares ./middlewares
+
 # Prune dev dependencies for production
 RUN npm prune --production
 
@@ -40,6 +41,8 @@ COPY --from=builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=builder --chown=nodejs:nodejs /app/package*.json ./
 COPY --from=builder --chown=nodejs:nodejs /app/driver ./driver
+COPY --from=builder --chown=nodejs:nodejs /app/lib ./lib
+COPY --from=builder --chown=nodejs:nodejs /app/middlewares ./middlewares
 COPY --from=builder --chown=nodejs:nodejs /app/prisma ./prisma
 
 # Switch to non-root user

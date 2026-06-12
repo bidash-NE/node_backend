@@ -34,12 +34,11 @@ WORKDIR /app/wallet_payment
 
 RUN npm ci --omit=dev
 
-# Copy wallet service source
+# Copy wallet service source and shared files
 WORKDIR /app
 COPY wallet_payment ./wallet_payment
-
-# Copy shared lib
 COPY lib ./lib
+COPY middlewares ./middlewares
 
 # Optional safety: make lib available inside wallet_payment too
 RUN mkdir -p /app/wallet_payment/lib && \
@@ -57,20 +56,20 @@ RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# ✅ Root Prisma runtime deps
+# Root Prisma runtime deps
 # Needed by /app/generated/prisma/runtime/client.js
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/node_modules ./node_modules
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/generated ./generated
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/prisma ./prisma
 COPY --from=prisma-builder --chown=nodejs:nodejs /app/package*.json ./
 
-# ✅ Wallet service deps/source
+# Wallet service deps/source
 COPY --from=wallet-builder --chown=nodejs:nodejs /app/wallet_payment ./wallet_payment
 
-# ✅ Shared lib
+# Shared logger and middleware
 COPY --from=wallet-builder --chown=nodejs:nodejs /app/lib ./lib
-COPY lib ./lib
-COPY middlewares ./middlewares
+COPY --from=wallet-builder --chown=nodejs:nodejs /app/middlewares ./middlewares
+
 USER nodejs
 
 WORKDIR /app/wallet_payment
