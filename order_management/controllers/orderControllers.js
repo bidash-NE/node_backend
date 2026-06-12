@@ -9,10 +9,7 @@ const {
   insertAndEmitNotification,
   broadcastOrderStatusToMany,
 } = require("../realtime");
-const {
-  MAX_PHOTOS,
-  toWebPaths,
-} = require("../middleware/uploadDeliveryPhoto");
+const { MAX_PHOTOS, toWebPaths } = require("../middleware/uploadDeliveryPhoto");
 /* --------------------------- uploads support --------------------------- */
 const path = require("path");
 const fs = require("fs");
@@ -290,62 +287,180 @@ async function resolveUserDebitAmounts(conn, order_id, user_id, capture = {}) {
  * - Customer: wallet debit (order amount + platform fee share)
  * - Merchant: wallet credit (order credited) + merchant platform fee debit
  */
-async function safeNotifyWalletAndDelivery(
-  conn,
-  { order_id, user_id, capture },
-) {
-  // customer wallet debit (DB + push)
-  if (capture?.captured && user_id) {
+// async function safeNotifyWalletAndDelivery(
+//   conn,
+//   { order_id, user_id, capture },
+// ) {
+//   // customer wallet debit (DB + push)
+//   if (capture?.captured && user_id) {
+//     try {
+//       const method = String(capture.payment_method || "WALLET").toUpperCase();
+
+//       if (method === "WALLET") {
+//         const computed = await resolveUserDebitAmounts(
+//           conn,
+//           order_id,
+//           Number(user_id),
+//           capture,
+//         );
+
+//         const orderAmt = Number(computed.order_amount || 0);
+//         const feeAmt = Number(computed.platform_fee_user || 0);
+
+//         // DB notification (if function exists)
+//         if (typeof addUserWalletDebitNotification === "function") {
+//           await addUserWalletDebitNotification({
+//             user_id: Number(user_id),
+//             order_id,
+//             order_amount: orderAmt,
+//             platform_fee: feeAmt,
+//             method: "WALLET",
+//             conn,
+//           });
+//         }
+
+//         const bodyText =
+//           `Order ${order_id} delivered. ` +
+//           `Nu. ${Number(orderAmt || 0).toFixed(2)} deducted for order` +
+//           (feeAmt > 0
+//             ? ` and Nu. ${Number(feeAmt || 0).toFixed(2)} as platform fee.`
+//             : ".");
+
+//         await sendPushToUserId(Number(user_id), {
+//           title: "Wallet deduction",
+//           body: bodyText,
+//         });
+//       } else {
+//         await sendPushToUserId(Number(user_id), {
+//           title: "Order update",
+//           body: `Order ${order_id} delivered.`,
+//         });
+//       }
+//     } catch (e) {
+//       console.error("[notify user wallet debit failed]", e?.message);
+//     }
+//   }
+
+//   // merchant notification -> show wallet movements + DB + PUSH
+//   if (capture?.captured && capture?.business_id) {
+//     try {
+//       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
+//         conn,
+//         capture.business_id,
+//       );
+
+//       if (merchantUserId) {
+//         const credited = Number(capture.order_amount || 0);
+//         const debited = Number(capture.platform_fee_merchant || 0);
+
+//         const parts = [];
+//         parts.push(`Order ${order_id} delivered.`);
+//         if (credited > 0)
+//           parts.push(`Nu. ${credited.toFixed(2)} credited to your wallet.`);
+//         if (debited > 0)
+//           parts.push(
+//             `Nu. ${debited.toFixed(2)} debited as platform fee (merchant share).`,
+//           );
+
+//         const msg = parts.join(" ");
+
+//         await conn.query(
+//           `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
+//            VALUES (?, 'wallet_update', 'Wallet updated', ?, ?, 'unread', NOW())`,
+//           [
+//             merchantUserId,
+//             msg,
+//             JSON.stringify({
+//               order_id,
+//               business_id: Number(capture.business_id),
+//               credited_order_amount: credited,
+//               debited_platform_fee_merchant: debited,
+//               payment_method: String(
+//                 capture.payment_method || "WALLET",
+//               ).toUpperCase(),
+//             }),
+//           ],
+//         );
+
+//         await sendPushToUserId(merchantUserId, {
+//           title: "Wallet updated",
+//           body: msg,
+//         });
+//       }
+//     } catch (e) {
+//       console.error("[notify merchant wallet movement failed]", e?.message);
+//     }
+//   }
+// }
+async function safeNotifyWalletCaptureOnAccept({ order_id, user_id, capture }) {
+  if (!capture?.captured) return;
+
+  const method = String(capture.payment_method || "WALLET").toUpperCase();
+  if (method !== "WALLET") return;
+
+  const conn = await db.getConnection();
+
+  try {
+    const orderAmount = Number(capture.order_amount || 0);
+    const userPlatformFee = Number(capture.platform_fee_user || 0);
+    const merchantPlatformFee = Number(capture.platform_fee_merchant || 0);
+    const merchantDeliveryFee = Number(capture.merchant_delivery_fee || 0);
+
+    const buyerTotalDebit = Number(
+      capture.buyer_total_debit || orderAmount + userPlatformFee,
+    );
+
+    // =========================
+    // 1. Customer wallet debit notification
+    // =========================
     try {
-      const method = String(capture.payment_method || "WALLET").toUpperCase();
-
-      if (method === "WALLET") {
-        const computed = await resolveUserDebitAmounts(
-          conn,
+      if (typeof addUserWalletDebitNotification === "function") {
+        await addUserWalletDebitNotification({
+          user_id: Number(user_id),
           order_id,
-          Number(user_id),
-          capture,
-        );
-
-        const orderAmt = Number(computed.order_amount || 0);
-        const feeAmt = Number(computed.platform_fee_user || 0);
-
-        // DB notification (if function exists)
-        if (typeof addUserWalletDebitNotification === "function") {
-          await addUserWalletDebitNotification({
-            user_id: Number(user_id),
-            order_id,
-            order_amount: orderAmt,
-            platform_fee: feeAmt,
-            method: "WALLET",
-            conn,
-          });
-        }
-
-        const bodyText =
-          `Order ${order_id} delivered. ` +
-          `Nu. ${Number(orderAmt || 0).toFixed(2)} deducted for order` +
-          (feeAmt > 0
-            ? ` and Nu. ${Number(feeAmt || 0).toFixed(2)} as platform fee.`
-            : ".");
-
-        await sendPushToUserId(Number(user_id), {
-          title: "Wallet deduction",
-          body: bodyText,
+          order_amount: orderAmount,
+          platform_fee: userPlatformFee,
+          method: "WALLET",
+          conn,
         });
       } else {
-        await sendPushToUserId(Number(user_id), {
-          title: "Order update",
-          body: `Order ${order_id} delivered.`,
-        });
+        await conn.query(
+          `INSERT INTO notifications
+             (user_id, type, title, message, data, status, created_at)
+           VALUES (?, 'wallet_debit', 'Wallet debited', ?, ?, 'unread', NOW())`,
+          [
+            Number(user_id),
+            `Nu. ${buyerTotalDebit.toFixed(2)} debited for order ${order_id}.`,
+            JSON.stringify({
+              order_id,
+              order_amount: orderAmount,
+              platform_fee_user: userPlatformFee,
+              total_debited: buyerTotalDebit,
+              payment_method: "WALLET",
+            }),
+          ],
+        );
       }
-    } catch (e) {
-      console.error("[notify user wallet debit failed]", e?.message);
-    }
-  }
 
-  // merchant notification -> show wallet movements + DB + PUSH
-  if (capture?.captured && capture?.business_id) {
+      await sendPushToUserId(Number(user_id), {
+        title: "Wallet debited",
+        body:
+          `Nu. ${buyerTotalDebit.toFixed(2)} debited for order ${order_id}. ` +
+          `Order amount: Nu. ${orderAmount.toFixed(2)}` +
+          (userPlatformFee > 0
+            ? `, platform fee: Nu. ${userPlatformFee.toFixed(2)}.`
+            : "."),
+      });
+    } catch (userNotifyErr) {
+      console.error(
+        "[ACCEPT WALLET USER NOTIFY FAILED]",
+        userNotifyErr?.message || userNotifyErr,
+      );
+    }
+
+    // =========================
+    // 2. Merchant wallet credit/debit notification
+    // =========================
     try {
       const merchantUserId = await resolveMerchantUserIdFromBusinessId(
         conn,
@@ -353,49 +468,70 @@ async function safeNotifyWalletAndDelivery(
       );
 
       if (merchantUserId) {
-        const credited = Number(capture.order_amount || 0);
-        const debited = Number(capture.platform_fee_merchant || 0);
+        const merchantNet = Number(
+          orderAmount + merchantDeliveryFee - merchantPlatformFee,
+        );
 
         const parts = [];
-        parts.push(`Order ${order_id} delivered.`);
-        if (credited > 0)
-          parts.push(`Nu. ${credited.toFixed(2)} credited to your wallet.`);
-        if (debited > 0)
-          parts.push(
-            `Nu. ${debited.toFixed(2)} debited as platform fee (merchant share).`,
-          );
 
-        const msg = parts.join(" ");
+        parts.push(`Order ${order_id} accepted.`);
+
+        if (orderAmount > 0) {
+          parts.push(`Nu. ${orderAmount.toFixed(2)} credited to your wallet.`);
+        }
+
+        if (merchantDeliveryFee > 0) {
+          parts.push(
+            `Nu. ${merchantDeliveryFee.toFixed(2)} credited as delivery support.`,
+          );
+        }
+
+        if (merchantPlatformFee > 0) {
+          parts.push(
+            `Nu. ${merchantPlatformFee.toFixed(2)} debited as platform fee.`,
+          );
+        }
+
+        parts.push(`Net wallet change: Nu. ${merchantNet.toFixed(2)}.`);
+
+        const merchantMessage = parts.join(" ");
 
         await conn.query(
-          `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
+          `INSERT INTO notifications
+             (user_id, type, title, message, data, status, created_at)
            VALUES (?, 'wallet_update', 'Wallet updated', ?, ?, 'unread', NOW())`,
           [
             merchantUserId,
-            msg,
+            merchantMessage,
             JSON.stringify({
               order_id,
               business_id: Number(capture.business_id),
-              credited_order_amount: credited,
-              debited_platform_fee_merchant: debited,
-              payment_method: String(
-                capture.payment_method || "WALLET",
-              ).toUpperCase(),
+              credited_order_amount: orderAmount,
+              credited_merchant_delivery_fee: merchantDeliveryFee,
+              debited_platform_fee_merchant: merchantPlatformFee,
+              net_wallet_change: merchantNet,
+              payment_method: "WALLET",
             }),
           ],
         );
 
         await sendPushToUserId(merchantUserId, {
           title: "Wallet updated",
-          body: msg,
+          body: merchantMessage,
         });
       }
-    } catch (e) {
-      console.error("[notify merchant wallet movement failed]", e?.message);
+    } catch (merchantNotifyErr) {
+      console.error(
+        "[ACCEPT WALLET MERCHANT NOTIFY FAILED]",
+        merchantNotifyErr?.message || merchantNotifyErr,
+      );
     }
+  } catch (e) {
+    console.error("[safeNotifyWalletCaptureOnAccept ERROR]", e?.message || e);
+  } finally {
+    conn.release();
   }
 }
-
 /* ============================================================
    upload setup
 ============================================================ */
@@ -730,34 +866,38 @@ async function createOrder(req, res) {
     } catch {}
   };
 
- const cleanupUploadedFiles = () => {
-  try {
-    const files = [];
+  const cleanupUploadedFiles = () => {
+    try {
+      const files = [];
 
-    if (Array.isArray(req.files)) {
-      files.push(...req.files);
-    }
+      if (Array.isArray(req.files)) {
+        files.push(...req.files);
+      }
 
-    if (req.files && typeof req.files === "object" && !Array.isArray(req.files)) {
-      Object.values(req.files).forEach((value) => {
-        if (Array.isArray(value)) files.push(...value);
-      });
-    }
+      if (
+        req.files &&
+        typeof req.files === "object" &&
+        !Array.isArray(req.files)
+      ) {
+        Object.values(req.files).forEach((value) => {
+          if (Array.isArray(value)) files.push(...value);
+        });
+      }
 
-    if (Array.isArray(req.deliveryPhotos)) {
-      files.push(...req.deliveryPhotos);
-    }
+      if (Array.isArray(req.deliveryPhotos)) {
+        files.push(...req.deliveryPhotos);
+      }
 
-    const seen = new Set();
+      const seen = new Set();
 
-    for (const f of files) {
-      const p = f?.path;
-      if (!p || seen.has(p)) continue;
-      seen.add(p);
-      safeUnlink(p);
-    }
-  } catch {}
-};
+      for (const f of files) {
+        const p = f?.path;
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        safeUnlink(p);
+      }
+    } catch {}
+  };
 
   try {
     const payload = getOrderInput(req);
@@ -803,15 +943,15 @@ async function createOrder(req, res) {
       .toUpperCase();
     payload.order_id = order_id;
 
-   const moved = mapUploadedFilesToPayload(req, order_id, normalizedItems);
+    const moved = mapUploadedFilesToPayload(req, order_id, normalizedItems);
 
-const uploadedOrderPhotos = Array.isArray(moved.order_images)
-  ? moved.order_images
-  : [];
+    const uploadedOrderPhotos = Array.isArray(moved.order_images)
+      ? moved.order_images
+      : [];
 
-// Photos uploaded through middleware/uploadDeliveryPhoto.js
-// This is the correct source when route uses uploadDeliveryPhotos.
-const uploadedDeliveryPhotos = toWebPaths(req.deliveryPhotos || []);
+    // Photos uploaded through middleware/uploadDeliveryPhoto.js
+    // This is the correct source when route uses uploadDeliveryPhotos.
+    const uploadedDeliveryPhotos = toWebPaths(req.deliveryPhotos || []);
     payload.delivery_floor_unit =
       payload.delivery_floor_unit ??
       payload.floor_unit ??
@@ -843,11 +983,11 @@ const uploadedDeliveryPhotos = toWebPaths(req.deliveryPhotos || []);
       : [];
 
     const allPhotos = dedupeStrings([
-  ...bodyList,
-  ...bodySingle,
-  ...uploadedOrderPhotos,
-  ...uploadedDeliveryPhotos,
-]);
+      ...bodyList,
+      ...bodySingle,
+      ...uploadedOrderPhotos,
+      ...uploadedDeliveryPhotos,
+    ]);
 
     if (allPhotos.length > MAX_PHOTOS) {
       cleanupUploadedFiles();
@@ -1467,90 +1607,98 @@ async function updateOrderStatus(req, res) {
           data: result || null,
         });
       }
-// ✅ Capture wallet transaction when merchant accepts the order
-let captureResult;
+      // ✅ Capture wallet transaction when merchant accepts the order
+      let captureResult;
 
-try {
-  captureResult = await captureOnAccept(order_id);
-} catch (captureErr) {
-  captureResult = {
-    ok: false,
-    code: "CAPTURE_FAILED",
-    error: captureErr?.message || "Wallet capture failed",
-  };
-}
-if (!captureResult?.ok || !captureResult?.capture?.captured) {
-  console.error("[CONFIRMED WALLET CAPTURE FAILED]", {
-    order_id,
-    captureResult,
-  });
+      try {
+        captureResult = await captureOnAccept(order_id);
+      } catch (captureErr) {
+        captureResult = {
+          ok: false,
+          code: "CAPTURE_FAILED",
+          error: captureErr?.message || "Wallet capture failed",
+        };
+      }
+      if (!captureResult?.ok || !captureResult?.capture?.captured) {
+        console.error("[CONFIRMED WALLET CAPTURE FAILED]", {
+          order_id,
+          captureResult,
+        });
 
-  const revertReason =
-    "Wallet transaction failed during order acceptance. Order returned to pending.";
+        const revertReason =
+          "Wallet transaction failed during order acceptance. Order returned to pending.";
 
-  // ✅ Strong fallback: force order back to PENDING directly
-  try {
-    await db.query(
-      `UPDATE orders
+        // ✅ Strong fallback: force order back to PENDING directly
+        try {
+          await db.query(
+            `UPDATE orders
           SET status = 'PENDING',
               status_reason = ?,
               updated_at = NOW()
         WHERE order_id = ?
           AND status = 'CONFIRMED'`,
-      [revertReason, order_id],
-    );
-  } catch (directRevertErr) {
-    console.error(
-      "[CONFIRMED WALLET DIRECT REVERT FAILED]",
-      directRevertErr?.message || directRevertErr,
-    );
+            [revertReason, order_id],
+          );
+        } catch (directRevertErr) {
+          console.error(
+            "[CONFIRMED WALLET DIRECT REVERT FAILED]",
+            directRevertErr?.message || directRevertErr,
+          );
 
-    // Optional fallback if direct SQL failed due to missing status_reason column
-    try {
-      await db.query(
-        `UPDATE orders
+          // Optional fallback if direct SQL failed due to missing status_reason column
+          try {
+            await db.query(
+              `UPDATE orders
             SET status = 'PENDING',
                 updated_at = NOW()
           WHERE order_id = ?
             AND status = 'CONFIRMED'`,
-        [order_id],
-      );
-    } catch (fallbackErr) {
-      console.error(
-        "[CONFIRMED WALLET FALLBACK REVERT FAILED]",
-        fallbackErr?.message || fallbackErr,
-      );
-    }
-  }
+              [order_id],
+            );
+          } catch (fallbackErr) {
+            console.error(
+              "[CONFIRMED WALLET FALLBACK REVERT FAILED]",
+              fallbackErr?.message || fallbackErr,
+            );
+          }
+        }
 
-  // ✅ Verify final status before responding
-  let finalStatus = null;
-  try {
-    const [[checkRow]] = await db.query(
-      `SELECT status FROM orders WHERE order_id = ? LIMIT 1`,
-      [order_id],
-    );
-    finalStatus = checkRow?.status || null;
-  } catch (checkErr) {
-    console.error("[CONFIRMED WALLET REVERT CHECK FAILED]", checkErr?.message);
-  }
+        // ✅ Verify final status before responding
+        let finalStatus = null;
+        try {
+          const [[checkRow]] = await db.query(
+            `SELECT status FROM orders WHERE order_id = ? LIMIT 1`,
+            [order_id],
+          );
+          finalStatus = checkRow?.status || null;
+        } catch (checkErr) {
+          console.error(
+            "[CONFIRMED WALLET REVERT CHECK FAILED]",
+            checkErr?.message,
+          );
+        }
 
-  return res.status(400).json({
-    success: false,
-    message:
-      finalStatus === "PENDING"
-        ? "Order could not be accepted because wallet transaction failed. Order is still pending."
-        : "Order could not be accepted because wallet transaction failed. Please check order status.",
-    order_id,
-    status: finalStatus,
-    code: captureResult?.code || "CAPTURE_FAILED",
-    error: captureResult?.error || null,
-  });
-}
-console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
-  order_id,
-  capture: captureResult.capture,
-});
+        return res.status(400).json({
+          success: false,
+          message:
+            finalStatus === "PENDING"
+              ? "Order could not be accepted because wallet transaction failed. Order is still pending."
+              : "Order could not be accepted because wallet transaction failed. Please check order status.",
+          order_id,
+          status: finalStatus,
+          code: captureResult?.code || "CAPTURE_FAILED",
+          error: captureResult?.error || null,
+        });
+      }
+      console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
+        order_id,
+        capture: captureResult.capture,
+      });
+      await safeNotifyWalletCaptureOnAccept({
+        order_id,
+        user_id,
+        capture: captureResult.capture,
+      });
       try {
         broadcastOrderStatusToMany({
           order_id,
@@ -1604,14 +1752,14 @@ console.log("[CONFIRMED WALLET CAPTURE SUCCESS]", {
         console.error("[user notify failed]", { order_id, err: e?.message });
       }
 
-     return res.json({
-  success: true,
-  message: "Order confirmed successfully. Wallet transaction completed.",
-  order_id,
-  status: "CONFIRMED",
-  data: result,
-  wallet_capture: captureResult.capture,
-});
+      return res.json({
+        success: true,
+        message: "Order confirmed successfully. Wallet transaction completed.",
+        order_id,
+        status: "CONFIRMED",
+        data: result,
+        wallet_capture: captureResult.capture,
+      });
     }
 
     // CANCEL restriction
