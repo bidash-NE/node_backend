@@ -25,8 +25,9 @@ const CATEGORY_TO_TIER = { regular: 'Regular', premium: 'VIP', balcony: 'Balcony
 const TABDEY_WALLET_ID = process.env.TABDEY_WALLET_ID || 'TD00000001';
 const DEFAULT_ORG_SHARE = 80;
 
-// Splits a wallet booking payment into organizer + tabdey shares.
-// Returns amounts, percentages, and journal codes for both transfers.
+// Charges the user once for the full amount (paid to the organizer), then
+// settles the platform's share out of the organizer's wallet. This keeps the
+// user's wallet history to a single debit per booking.
 async function processWalletPayment(userId, organizerId, totalAmount, eventTitle, tPin) {
   // Fetch user wallet, organizer wallet, and share config in parallel
   const organizer = await prisma.event_organizers.findUnique({
@@ -49,33 +50,34 @@ async function processWalletPayment(userId, organizerId, totalAmount, eventTitle
   const orgAmount = parseFloat((totalAmount * orgPct / 100).toFixed(2));
   const tabdeyAmount = parseFloat((totalAmount - orgAmount).toFixed(2));
 
-  let orgJournalCode = null;
+  const orgReceipt = await walletApi.transfer({
+    senderWalletId: userWalletId,
+    recipientWalletId: organizerWalletId,
+    amount: totalAmount,
+    note: `${eventTitle} — ticket payment`,
+    tPin,
+  });
+  const orgJournalCode = orgReceipt.receipt.journal_no;
+
+  // Settle the platform's share from the organizer's wallet. If this fails,
+  // the user's payment still stands — flag for manual reconciliation rather
+  // than blocking the booking.
   let tabdeyJournalCode = null;
-
-  try {
-    const orgReceipt = await walletApi.transfer({
-      senderWalletId: userWalletId,
-      recipientWalletId: organizerWalletId,
-      amount: orgAmount,
-      note: `${eventTitle} — organizer share (${orgPct}%)`,
-      tPin,
-    });
-    orgJournalCode = orgReceipt.receipt.journal_no;
-
-    if (tabdeyAmount > 0) {
+  if (tabdeyAmount > 0) {
+    try {
       const tabdeyReceipt = await walletApi.transfer({
-        senderWalletId: userWalletId,
+        senderWalletId: organizerWalletId,
         recipientWalletId: TABDEY_WALLET_ID,
         amount: tabdeyAmount,
         note: `${eventTitle} — platform share (${tabdeyPct}%)`,
-        tPin,
       });
       tabdeyJournalCode = tabdeyReceipt.receipt.journal_no;
+    } catch (settleErr) {
+      console.error(
+        `Platform settlement failed for journal ${orgJournalCode} (organizer ${organizerId}, amount ${tabdeyAmount}):`,
+        settleErr,
+      );
     }
-  } catch (payErr) {
-    const done = [orgJournalCode, tabdeyJournalCode].filter(Boolean);
-    if (done.length) payErr.message += ` Completed wallet journals: ${done.join(', ')}. Please contact support.`;
-    throw payErr;
   }
 
   return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId };
