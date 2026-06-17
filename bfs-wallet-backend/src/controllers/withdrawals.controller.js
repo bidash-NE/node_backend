@@ -8,36 +8,15 @@ const fail = (res, e) => {
   res.status(status).json({ ok: false, error: e?.message || "Server error" });
 };
 
-function getNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function pickUserId(req) {
-  // prefer body for POST, query for GET, fallback header
-  return (
-    getNum(req.body?.user_id) ??
-    getNum(req.query?.user_id) ??
-    getNum(req.headers["x-user-id"])
-  );
-}
-
-function pickAdminId(req) {
-  return (
-    getNum(req.headers["x-admin-id"]) ??
-    getNum(req.body?.admin_id) ??
-    getNum(req.query?.admin_id)
-  );
-}
-
 /* USER */
 async function createWithdrawal(req, res) {
   try {
-    const userId = pickUserId(req);
+    const userId = req.user.id;
     if (!userId) return res.status(400).json({ ok: false, error: "user_id is required" });
 
     const idempotencyKey = req.header("Idempotency-Key") || "";
-    const { amount, bank, user_note } = req.body || {};
+    const { amount, bank, user_note} = req.body || {};
+    console.log("Withdrawal request:", { userId, amount, bank, user_note });
 
     const data = await withTx((conn) =>
       S.userCreateWithdrawal(conn, {
@@ -56,7 +35,7 @@ async function createWithdrawal(req, res) {
 
 async function cancelWithdrawal(req, res) {
   try {
-    const userId = pickUserId(req);
+    const userId = req.user.id;
     if (!userId) return res.status(400).json({ ok: false, error: "user_id is required" });
 
     const requestId = req.params.id;
@@ -72,7 +51,7 @@ async function cancelWithdrawal(req, res) {
 
 async function listMyWithdrawals(req, res) {
   try {
-    const userId = pickUserId(req);
+    const userId = req.user.id;
     if (!userId) return res.status(400).json({ ok: false, error: "user_id is required" });
 
     const { status, limit = 50, offset = 0 } = req.query || {};
@@ -114,8 +93,8 @@ async function adminList(req, res) {
 
 async function adminNeedsInfoOne(req, res) {
   try {
-    const adminId = pickAdminId(req);
-    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required (x-admin-id header or body.admin_id)" });
+    const adminId = req.user.id;
+    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required" });
 
     const requestId = req.params.id;
     const { note } = req.body || {};
@@ -131,8 +110,8 @@ async function adminNeedsInfoOne(req, res) {
 
 async function adminApproveOne(req, res) {
   try {
-    const adminId = pickAdminId(req);
-    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required (x-admin-id header or body.admin_id)" });
+    const adminId = req.user.id;
+    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required" });
 
     const requestId = req.params.id;
     const { admin_note } = req.body || {};
@@ -148,8 +127,8 @@ async function adminApproveOne(req, res) {
 
 async function adminRejectOne(req, res) {
   try {
-    const adminId = pickAdminId(req);
-    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required (x-admin-id header or body.admin_id)" });
+    const adminId = req.user.id;
+    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required" });
 
     const requestId = req.params.id;
     const { reason } = req.body || {};
@@ -165,8 +144,8 @@ async function adminRejectOne(req, res) {
 
 async function adminMarkPaidOne(req, res) {
   try {
-    const adminId = pickAdminId(req);
-    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required (x-admin-id header or body.admin_id)" });
+    const adminId = req.user.id;
+    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required" });
 
     const requestId = req.params.id;
     const { bank_reference, note } = req.body || {};
@@ -187,8 +166,8 @@ async function adminMarkPaidOne(req, res) {
 
 async function adminFailOne(req, res) {
   try {
-    const adminId = pickAdminId(req);
-    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required (x-admin-id header or body.admin_id)" });
+    const adminId = req.user.id;
+    if (!adminId) return res.status(400).json({ ok: false, error: "admin_id is required" });
 
     const requestId = req.params.id;
     const { reason } = req.body || {};
