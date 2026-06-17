@@ -18,6 +18,10 @@ app.get("/", (req, res) => {
   res.json({ ok: true, message: "BFS wallet backend up" });
 });
 
+app.get("/health", (req, res) => {
+  res.json({ ok: true, status: "healthy", timestamp: new Date().toISOString() });
+});
+
 app.use("/api/wallet/topup", paymentRoutes);
 app.use("/api/payment", onlinePaymentRoutes);
 app.use("/api/rma", rmaLogRoutes);
