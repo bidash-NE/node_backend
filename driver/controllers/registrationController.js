@@ -15,6 +15,14 @@ function errorResponse(res, statusCode, message) {
   return res.status(statusCode).json({ success: false, message });
 }
 
+// Phone numbers (e.g. App Store review demo accounts) that skip the
+// single-device lock so reviewers can log in from any device without an SMS OTP.
+const DEMO_BYPASS_PHONES = ["+97517368132"];
+
+function isDemoBypassPhone(phone) {
+  return Boolean(phone) && DEMO_BYPASS_PHONES.includes(phone);
+}
+
 /* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {
   let userId = null;
@@ -447,11 +455,12 @@ const loginUser = async (req, res) => {
       );
     }
 
-    // Device conflict check - skip for finance and admin
+    // Device conflict check - skip for finance, admin, and demo/review accounts
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
       !financeNoDevice &&
+      !isDemoBypassPhone(user.phone) &&
       user.is_verified === true
     ) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
