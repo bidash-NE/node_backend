@@ -10,10 +10,10 @@ const {
 
 // List logs with filters
 // GET /api/rma/logs?orderNo=...&bfsTxnId=...&tag=AR-RC&page=1&limit=50
-router.get("/logs", listRmaLogs);
+router.get("/logs", requireAdminAuth, listRmaLogs);
 
 // Get single log by id
 // GET /api/rma/logs/123
-router.get("/logs/:id", getRmaLog);
+router.get("/logs/:id", requireAdminAuth, getRmaLog);
 
 module.exports = router;
