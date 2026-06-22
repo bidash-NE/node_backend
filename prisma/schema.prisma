@@ -938,7 +938,7 @@ model merchant_earnings {
   business_id               BigInt                    @db.UnsignedBigInt
   date                      DateTime                  @db.Date
   total_amount              Decimal                   @default(0.00) @db.Decimal(10, 2)
-  order_id                  String                    @db.VarChar(50)
+  order_id                  String                    @unique(map: "uniq_merchant_earnings_order_id") @db.VarChar(50)
   created_at                DateTime                  @default(now()) @db.DateTime(0)
   updated_at                DateTime                  @default(now()) @db.DateTime(0)
   merchant_business_details merchant_business_details @relation(fields: [business_id], references: [business_id], onDelete: Cascade, map: "fk_me_business")
@@ -1770,8 +1770,8 @@ model user_vouchers {
 model users {
   user_id                   BigInt                      @id @default(autoincrement()) @db.UnsignedBigInt
   user_name                 String                      @db.VarChar(50)
-  email                     String                      @unique(map: "email") @db.VarChar(100)
-  phone                     String                      @unique(map: "phone") @db.VarChar(20)
+  email                     String                      @db.VarChar(100)
+  phone                     String                      @db.VarChar(20)
   password_hash             String                      @db.VarChar(255)
   role                      String                      @default("user") @db.VarChar(20)
   points                    BigInt                      @default(0) @db.UnsignedBigInt
@@ -1807,11 +1807,10 @@ model users {
   user_devices              user_devices[]
   user_verification         user_verification[]
   wishlists                 wishlists[]
-  account_deletion_requests account_deletion_requests[]
 
-  @@index([email], map: "email_2")
+  @@unique([email, role], map: "users_email_role_unique")
+  @@unique([phone, role], map: "users_phone_role_unique")
   @@index([is_active], map: "is_active")
-  @@index([phone], map: "phone_2")
   @@index([role], map: "role")
 }
 
@@ -2507,25 +2506,4 @@ enum ride_fare_counters_status {
   rejected
   withdrawn
   expired
-}
-
-model account_deletion_requests {
-  request_id   BigInt                              @id @default(autoincrement()) @db.UnsignedBigInt
-  user_id      BigInt?                             @db.UnsignedBigInt
-  reason       String?                             @db.Text
-  status       account_deletion_requests_status    @default(pending)
-  requested_at DateTime                            @default(now()) @db.Timestamp(0)
-  resolved_at  DateTime?                           @db.Timestamp(0)
-  resolved_by  BigInt?                             @db.UnsignedBigInt
-  reject_note  String?                             @db.VarChar(500)
-  users        users?                              @relation(fields: [user_id], references: [user_id], onDelete: SetNull, map: "fk_adr_user")
-
-  @@index([status, requested_at], map: "idx_adr_status_date")
-  @@index([user_id], map: "idx_adr_user")
-}
-
-enum account_deletion_requests_status {
-  pending
-  approved
-  rejected
 }

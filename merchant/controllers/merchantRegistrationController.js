@@ -39,92 +39,224 @@ const fromBodyToStoredPath = (val) => {
 
 async function registerMerchant(req, res) {
   try {
-    const f = req.files || {};
-    const b = req.body || {};
+    const files = req.files || {};
+    const body = req.body || {};
 
     const normalizeBhutanPhone = (raw) => {
-      if (raw == null) return null;
-      let s = String(raw).trim().replace(/[^\d+]/g, "");
-      if (s.startsWith("00")) s = `+${s.slice(2)}`;
-      if (s.startsWith("+975")) return s;
-      if (s.startsWith("975")) return `+${s}`;
-      if (s.startsWith("+")) return s;
-      return `+975${s}`;
+      if (raw === null || raw === undefined) {
+        return null;
+      }
+
+      let phone = String(raw)
+        .trim()
+        .replace(/[^\d+]/g, "");
+
+      if (!phone) {
+        return null;
+      }
+
+      if (phone.startsWith("00")) {
+        phone = `+${phone.slice(2)}`;
+      }
+
+      if (phone.startsWith("+975")) {
+        return phone;
+      }
+
+      if (phone.startsWith("975")) {
+        return `+${phone}`;
+      }
+
+      if (phone.startsWith("+")) {
+        return phone;
+      }
+
+      return `+975${phone}`;
     };
 
-    const toNumOrNull = (val) => {
-      if (val === undefined || val === null) return null;
-      const s = String(val).trim();
-      if (!s) return null;
-      const n = Number(s);
-      return Number.isFinite(n) ? n : null;
+    const normalizeEmail = (raw) => {
+      if (raw === null || raw === undefined) {
+        return null;
+      }
+
+      const email = String(raw).trim().toLowerCase();
+
+      return email || null;
     };
 
-    const toLowerOrDefault = (val, def) => {
-      const s = val !== undefined && val !== null ? String(val).trim() : "";
-      return (s || def).toLowerCase();
+    const toNumberOrNull = (value) => {
+      if (
+        value === undefined ||
+        value === null ||
+        String(value).trim() === ""
+      ) {
+        return null;
+      }
+
+      const numberValue = Number(value);
+
+      return Number.isFinite(numberValue) ? numberValue : null;
     };
 
-    const license_image = f.license_image?.[0]
-      ? toRelPath(f.license_image[0])
-      : fromBodyToStoredPath(b.license_image);
+    const toLowerOrDefault = (value, defaultValue) => {
+      const normalized =
+        value !== undefined && value !== null ? String(value).trim() : "";
 
-    const business_logo = f.business_logo?.[0]
-      ? toRelPath(f.business_logo[0])
-      : fromBodyToStoredPath(b.business_logo);
+      return (normalized || defaultValue).toLowerCase();
+    };
 
-    const bank_qr_code_image = f.bank_qr_code_image?.[0]
-      ? toRelPath(f.bank_qr_code_image[0])
-      : fromBodyToStoredPath(b.bank_qr_code_image);
+    const licenseImage = files.license_image?.[0]
+      ? toRelPath(files.license_image[0])
+      : fromBodyToStoredPath(body.license_image);
 
-    const normalizedPhone = normalizeBhutanPhone(b.phone);
+    const businessLogo = files.business_logo?.[0]
+      ? toRelPath(files.business_logo[0])
+      : fromBodyToStoredPath(body.business_logo);
+
+    const bankQrCodeImage = files.bank_qr_code_image?.[0]
+      ? toRelPath(files.bank_qr_code_image[0])
+      : fromBodyToStoredPath(body.bank_qr_code_image);
+
+    const normalizedPhone = normalizeBhutanPhone(body.phone);
+    const normalizedEmail = normalizeEmail(body.email);
+
+    if (!normalizedPhone) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid phone number is required.",
+      });
+    }
+
+    if (!normalizedEmail) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid email address is required.",
+      });
+    }
+
+    const role = toLowerOrDefault(body.role, "merchant");
+
+    if (role !== "merchant") {
+      return res.status(400).json({
+        success: false,
+        message: "Merchant registration requires the merchant role.",
+      });
+    }
+
+    let businessTypes;
+
+    if (Array.isArray(body.business_types)) {
+      businessTypes = body.business_types;
+    } else if (
+      typeof body.business_types === "string" &&
+      body.business_types.trim()
+    ) {
+      businessTypes = body.business_types
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    const minimumFreeDeliveryAmount =
+      body.min_amount_for_fd !== undefined && body.min_amount_for_fd !== ""
+        ? Number(body.min_amount_for_fd)
+        : 0;
+
+    if (
+      !Number.isFinite(minimumFreeDeliveryAmount) ||
+      minimumFreeDeliveryAmount < 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Minimum amount for free delivery must be a valid non-negative number.",
+      });
+    }
 
     const payload = {
-      user_name: b.user_name,
-      email: b.email,
+      user_name: body.user_name,
+      email: normalizedEmail,
       phone: normalizedPhone,
-      cid: b.cid,
-      password: b.password,
-      role: toLowerOrDefault(b.role, "merchant"),
-      business_name: b.business_name,
-      business_type_ids: b.business_type_ids ?? null,
-      business_types: Array.isArray(b.business_types)
-        ? b.business_types
-        : typeof b.business_types === "string" && b.business_types.trim()
-          ? b.business_types.split(",").map((x) => x.trim()).filter(Boolean)
-          : undefined,
-      business_license_number: b.business_license_number,
-      license_image,
-      latitude: toNumOrNull(b.latitude),
-      longitude: toNumOrNull(b.longitude),
-      address: b.address || null,
-      business_logo,
-      delivery_option: b.delivery_option,
-      owner_type: toLowerOrDefault(b.owner_type, "individual"),
-      min_amount_for_fd: b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== "" ? Number(b.min_amount_for_fd) : 0,
-      bank_name: b.bank_name,
-      account_holder_name: b.account_holder_name,
-      account_number: b.account_number,
-      bank_qr_code_image,
-      special_celebration: b.special_celebration || null,
-      special_celebration_discount_percentage: b.special_celebration_discount_percentage || null,
+      cid: body.cid,
+      password: body.password,
+      role,
+
+      business_name: body.business_name,
+      business_type_ids: body.business_type_ids ?? null,
+      business_types: businessTypes,
+      business_license_number: body.business_license_number,
+      license_image: licenseImage,
+
+      latitude: toNumberOrNull(body.latitude),
+      longitude: toNumberOrNull(body.longitude),
+      address: body.address || null,
+      business_logo: businessLogo,
+      delivery_option: body.delivery_option,
+
+      owner_type: toLowerOrDefault(body.owner_type, "individual"),
+
+      min_amount_for_fd: minimumFreeDeliveryAmount,
+
+      bank_name: body.bank_name,
+      account_holder_name: body.account_holder_name,
+      account_number: body.account_number,
+      bank_qr_code_image: bankQrCodeImage,
+
+      special_celebration: body.special_celebration || null,
+
+      special_celebration_discount_percentage:
+        body.special_celebration_discount_percentage || null,
     };
 
     const result = await registerMerchantModel(payload);
 
     return res.status(201).json({
-      message: "Merchant registered successfully",
+      success: true,
+      message: "Merchant registered successfully.",
       user_id: result.user_id,
       business_id: result.business_id,
       business_type_ids: result.business_type_ids,
       phone: normalizedPhone,
+      email: normalizedEmail,
+      role: "merchant",
     });
-  } catch (err) {
-    console.error("Register error:", err.message);
-    const isClientErr = /exists|required|invalid|username|business_type_ids/i.test(err.message || "");
-    return res
-      .status(isClientErr ? 400 : 500)
-      .json({ error: err.message || "Merchant registration failed" });
+  } catch (error) {
+    console.error("Merchant registration error:", {
+      message: error?.message,
+      code: error?.code,
+      meta: error?.meta,
+      stack: error?.stack,
+    });
+
+    const message = error?.message || "Merchant registration failed.";
+
+    const isDuplicate = /already registered|already exists|exists/i.test(
+      message,
+    );
+
+    const isValidation =
+      /required|invalid|must contain|must be|exactly|at least one|business_type_ids|greater than|non-negative/i.test(
+        message,
+      );
+
+    if (isDuplicate) {
+      return res.status(409).json({
+        success: false,
+        message,
+      });
+    }
+
+    if (isValidation) {
+      return res.status(400).json({
+        success: false,
+        message,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Merchant registration failed. Please try again later.",
+    });
   }
 }
 
@@ -162,7 +294,8 @@ async function updateMerchant(req, res) {
       "special_celebration_discount_percentage",
     ].forEach((k) => {
       if (b[k] !== undefined) {
-        updatePayload[k] = k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
+        updatePayload[k] =
+          k === "owner_type" ? String(b[k]).toLowerCase() : b[k];
       }
     });
 
@@ -184,22 +317,37 @@ async function updateMerchant(req, res) {
 
     // Handle holidays field
     if (b.holidays !== undefined) {
-      const validDays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const validDays = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+      ];
       let holidays = [];
       if (Array.isArray(b.holidays)) {
         holidays = b.holidays.filter((day) => validDays.includes(day));
       } else if (typeof b.holidays === "string") {
-        holidays = b.holidays.split(",").map((s) => s.trim()).filter((day) => validDays.includes(day));
+        holidays = b.holidays
+          .split(",")
+          .map((s) => s.trim())
+          .filter((day) => validDays.includes(day));
       }
       updatePayload.holidays = JSON.stringify(holidays);
     }
 
-    if (b.business_type_ids !== undefined) updatePayload.business_type_ids = b.business_type_ids;
+    if (b.business_type_ids !== undefined)
+      updatePayload.business_type_ids = b.business_type_ids;
 
     if (b.business_types !== undefined) {
       updatePayload.business_types = Array.isArray(b.business_types)
         ? b.business_types
-        : String(b.business_types).split(",").map((x) => x.trim()).filter(Boolean);
+        : String(b.business_types)
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean);
     }
 
     if (b.min_amount_for_fd !== undefined) {
@@ -225,82 +373,253 @@ async function updateMerchant(req, res) {
 
 async function loginByEmail(req, res) {
   try {
-    const { email, password, device_id } = req.body || {};
+    const body = req.body || {};
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "email and password are required" });
+    const email =
+      body.email !== null && body.email !== undefined
+        ? String(body.email).trim().toLowerCase()
+        : "";
+
+    const password =
+      body.password !== null && body.password !== undefined
+        ? String(body.password)
+        : "";
+
+    const deviceId =
+      body.device_id !== null &&
+      body.device_id !== undefined &&
+      String(body.device_id).trim()
+        ? String(body.device_id).trim()
+        : null;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email address is required.",
+      });
     }
 
-    const deviceId = device_id && String(device_id).trim() ? String(device_id).trim() : null;
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: "Password is required.",
+      });
+    }
 
     if (!deviceId) {
-      return res.status(400).json({ error: "device_id is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Device ID is required.",
+      });
     }
 
+    /*
+     * This model function must filter by:
+     *
+     * email + role: "merchant"
+     */
     const candidates = await findCandidatesByEmail(email);
-    if (!candidates.length) {
-      return res.status(404).json({ error: "User not found" });
+
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No merchant account was found with this email address.",
+      });
     }
 
-    let picked = null;
-    for (const u of candidates) {
-      if (!u?.password_hash) continue;
-      const ok = await bcrypt.compare(password, u.password_hash);
-      if (ok) {
-        picked = u;
+    let pickedUser = null;
+
+    for (const candidate of candidates) {
+      if (!candidate?.password_hash) {
+        continue;
+      }
+
+      const passwordMatches = await bcrypt.compare(
+        password,
+        candidate.password_hash,
+      );
+
+      if (passwordMatches) {
+        pickedUser = candidate;
         break;
       }
     }
 
-    if (!picked) {
-      return res.status(401).json({ error: "Incorrect password" });
+    if (!pickedUser) {
+      return res.status(401).json({
+        success: false,
+        message: "Incorrect password. Please try again.",
+      });
     }
 
     const user = await prisma.users.findUnique({
-      where: { user_id: picked.user_id },
-      select: { user_id: true, user_name: true, phone: true, email: true, role: true, is_active: true, is_verified: true },
+      where: {
+        user_id: pickedUser.user_id,
+      },
+      select: {
+        user_id: true,
+        user_name: true,
+        phone: true,
+        email: true,
+        role: true,
+        is_active: true,
+        is_verified: true,
+      },
     });
 
-    if (!user) return res.status(404).json({ error: "User not found" });
-    if (user.is_active === false) return res.status(403).json({ error: "Account is deactivated. Please contact support." });
+    /*
+     * Check user existence before accessing user.role.
+     */
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Merchant account not found.",
+      });
+    }
 
+    if (
+      String(user.role || "")
+        .trim()
+        .toLowerCase() !== "merchant"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "This account is not registered as a merchant.",
+      });
+    }
+
+    if (user.is_active === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been deactivated. Please contact support.",
+      });
+    }
+
+    /*
+     * When already logged in, verify that the incoming device
+     * matches the device stored for this merchant user_id.
+     */
     if (user.is_verified === true) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
-        where: { user_id: user.user_id },
-        select: { device_id: true },
+        where: {
+          user_id: user.user_id,
+        },
+        select: {
+          device_id: true,
+        },
       });
-      const dbDeviceId = deviceRecord?.device_id ? String(deviceRecord.device_id) : null;
-      if (!dbDeviceId || dbDeviceId !== deviceId) {
+
+      const storedDeviceId = deviceRecord?.device_id
+        ? String(deviceRecord.device_id)
+        : null;
+
+      if (!storedDeviceId || storedDeviceId !== deviceId) {
         return res.status(409).json({
-          error: "This account appears to be logged in on another device. Please log out from the other device first.",
+          success: false,
+          message:
+            "This account is already logged in on another device. Please log out from the other device first.",
         });
       }
     }
 
+    /*
+     * Store or update the device for this specific merchant
+     * user account.
+     */
     await prisma.all_device_ids.upsert({
-      where: { user_id: user.user_id },
-      update: { device_id: deviceId, last_seen: new Date() },
-      create: { user_id: user.user_id, device_id: deviceId, last_seen: new Date() },
+      where: {
+        user_id: user.user_id,
+      },
+      update: {
+        device_id: deviceId,
+        last_seen: new Date(),
+      },
+      create: {
+        user_id: user.user_id,
+        device_id: deviceId,
+        last_seen: new Date(),
+      },
     });
 
     await prisma.users.update({
-      where: { user_id: user.user_id },
-      data: { is_verified: true, last_login: new Date() },
+      where: {
+        user_id: user.user_id,
+      },
+      data: {
+        is_verified: true,
+        last_login: new Date(),
+      },
     });
 
     const business = await prisma.merchant_business_details.findFirst({
-      where: { user_id: user.user_id },
-      orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
-      select: { business_id: true, business_name: true, owner_type: true, business_logo: true, address: true },
+      where: {
+        user_id: user.user_id,
+      },
+      orderBy: [
+        {
+          created_at: "desc",
+        },
+        {
+          business_id: "desc",
+        },
+      ],
+      select: {
+        business_id: true,
+        business_name: true,
+        owner_type: true,
+        business_logo: true,
+        address: true,
+      },
     });
 
-    const payload = { user_id: Number(user.user_id), role: user.role, user_name: user.user_name };
-    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, { expiresIn: "60m" });
-    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, { expiresIn: "1440m" });
+    if (!business) {
+      return res.status(404).json({
+        success: false,
+        message:
+          "Merchant business details were not found. Please contact support.",
+      });
+    }
+
+    if (!process.env.ACCESS_TOKEN_SECRET) {
+      throw new Error("ACCESS_TOKEN_SECRET is not configured");
+    }
+
+    if (!process.env.REFRESH_TOKEN_SECRET) {
+      throw new Error("REFRESH_TOKEN_SECRET is not configured");
+    }
+
+    const tokenPayload = {
+      user_id: Number(user.user_id),
+      role: user.role,
+      user_name: user.user_name,
+      phone: user.phone,
+    };
+
+    const accessToken = jwt.sign(
+      tokenPayload,
+      process.env.ACCESS_TOKEN_SECRET,
+      {
+        expiresIn: "60m",
+      },
+    );
+
+    const refreshToken = jwt.sign(
+      tokenPayload,
+      process.env.REFRESH_TOKEN_SECRET,
+      {
+        expiresIn: "1440m",
+      },
+    );
 
     return res.status(200).json({
-      message: "Login successful",
-      token: { access_token, access_token_time: 60, refresh_token, refresh_token_time: 10 },
+      success: true,
+      message: "Login successful.",
+      token: {
+        access_token: accessToken,
+        access_token_time: 60,
+        refresh_token: refreshToken,
+        refresh_token_time: 1440,
+      },
       user: {
         user_id: Number(user.user_id),
         user_name: user.user_name,
@@ -309,16 +628,29 @@ async function loginByEmail(req, res) {
         email: user.email,
         is_verified: 1,
         device_id: deviceId,
-        owner_type: business?.owner_type ?? null,
-        business_id: business?.business_id ? Number(business.business_id) : null,
-        business_name: business?.business_name ?? null,
-        business_logo: business?.business_logo ?? null,
-        address: business?.address ?? null,
+
+        owner_type: business.owner_type ?? null,
+
+        business_id: business.business_id ? Number(business.business_id) : null,
+
+        business_name: business.business_name ?? null,
+
+        business_logo: business.business_logo ?? null,
+
+        address: business.address ?? null,
       },
     });
-  } catch (err) {
-    console.error("loginByEmail error:", err.message);
-    return res.status(500).json({ error: "Login failed due to server error" });
+  } catch (error) {
+    console.error("Merchant login error:", {
+      message: error?.message,
+      code: error?.code,
+      stack: error?.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed due to a server error. Please try again later.",
+    });
   }
 }
 
@@ -326,7 +658,10 @@ async function loginByEmail(req, res) {
 
 function parseOwnersQuery(req) {
   const q = (req.query.q || "").toString().trim().toLowerCase();
-  const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10), 1), 200);
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit || "50", 10), 1),
+    200,
+  );
   const offset = Math.max(parseInt(req.query.offset || "0", 10), 0);
   return { q, limit, offset };
 }
@@ -419,23 +754,23 @@ async function listFoodOwners(req, res) {
   const startTime = Date.now();
   requestCount++;
   const requestNumber = requestCount;
-  
+
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-    
+
     // Generate unique cache key
-    const cacheKey = `food_owners:q:${q || 'none'}:limit:${limit}:offset:${offset}`;
-    
+    const cacheKey = `food_owners:q:${q || "none"}:limit:${limit}:offset:${offset}`;
+
     console.log(`\n📊 Request #${requestNumber} - ${new Date().toISOString()}`);
     console.log(`🔍 Cache Key: ${cacheKey}`);
-    
+
     // 🔍 TRY TO GET FROM CACHE FIRST
     const cachedData = await cache.get(cacheKey);
-    
+
     if (cachedData) {
       const responseTime = Date.now() - startTime;
       console.log(`✅ CACHE HIT! Response time: ${responseTime}ms 🚀`);
-      
+
       return res.status(200).json({
         success: true,
         kind: "food",
@@ -443,13 +778,13 @@ async function listFoodOwners(req, res) {
         data: cachedData.data,
         fromCache: true,
         responseTimeMs: responseTime,
-        requestNumber: requestNumber
+        requestNumber: requestNumber,
       });
     }
-    
+
     console.log(`❌ CACHE MISS! Fetching from database...`);
     const dbStartTime = Date.now();
-    
+
     // 📊 FETCH FROM DATABASE
     const whereCondition = {};
     if (q) {
@@ -462,15 +797,25 @@ async function listFoodOwners(req, res) {
     const businesses = await prisma.merchant_business_details.findMany({
       where: { owner_type: "food", ...whereCondition },
       include: {
-        users: { select: { user_id: true, user_name: true, email: true, phone: true, profile_image: true } },
-        merchant_business_types: { include: { business_types: { select: { id: true, name: true } } } },
+        users: {
+          select: {
+            user_id: true,
+            user_name: true,
+            email: true,
+            phone: true,
+            profile_image: true,
+          },
+        },
+        merchant_business_types: {
+          include: { business_types: { select: { id: true, name: true } } },
+        },
       },
       orderBy: { created_at: "desc" },
       skip: offset,
       take: limit,
     });
 
-    const businessIds = businesses.map(b => b.business_id);
+    const businessIds = businesses.map((b) => b.business_id);
     const ratings = await prisma.food_ratings.groupBy({
       by: ["business_id"],
       where: { business_id: { in: businessIds } },
@@ -486,7 +831,7 @@ async function listFoodOwners(req, res) {
       });
     }
 
-    const data = businesses.map(b => ({
+    const data = businesses.map((b) => ({
       business_id: Number(b.business_id),
       owner_type: b.owner_type,
       business_name: b.business_name,
@@ -499,7 +844,8 @@ async function listFoodOwners(req, res) {
       delivery_option: b.delivery_option,
       min_amount_for_fd: b.min_amount_for_fd,
       special_celebration: b.special_celebration,
-      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      special_celebration_discount_percentage:
+        b.special_celebration_discount_percentage,
       opening_time: b.opening_time,
       closing_time: b.closing_time,
       holidays: b.holidays,
@@ -514,7 +860,7 @@ async function listFoodOwners(req, res) {
         phone: b.users.phone,
         profile_image: b.users.profile_image || null,
       },
-      business_types: b.merchant_business_types.map(mbt => ({
+      business_types: b.merchant_business_types.map((mbt) => ({
         business_type_id: Number(mbt.business_types.id),
         name: mbt.business_types.name,
       })),
@@ -524,18 +870,18 @@ async function listFoodOwners(req, res) {
 
     const dbTime = Date.now() - dbStartTime;
     console.log(`📊 Database query took: ${dbTime}ms`);
-    
+
     // 💾 STORE IN CACHE (5 minutes TTL)
     const responseData = {
       count: data.length,
-      data: data
+      data: data,
     };
-    
+
     await cache.set(cacheKey, responseData, 300);
-    
+
     const totalTime = Date.now() - startTime;
     console.log(`💾 Cached for next request. Total time: ${totalTime}ms`);
-    
+
     return res.status(200).json({
       success: true,
       kind: "food",
@@ -544,15 +890,14 @@ async function listFoodOwners(req, res) {
       fromCache: false,
       dbTimeMs: dbTime,
       totalTimeMs: totalTime,
-      requestNumber: requestNumber
+      requestNumber: requestNumber,
     });
-    
   } catch (err) {
     console.error("listFoodOwners error:", err);
-    return res.status(500).json({ 
-      success: false, 
+    return res.status(500).json({
+      success: false,
       message: "Failed to fetch food owners.",
-      error: err.message 
+      error: err.message,
     });
   }
 }
@@ -570,15 +915,25 @@ async function listMartOwners(req, res) {
     const businesses = await prisma.merchant_business_details.findMany({
       where: { owner_type: "mart", ...whereCondition },
       include: {
-        users: { select: { user_id: true, user_name: true, email: true, phone: true, profile_image: true } },
-        merchant_business_types: { include: { business_types: { select: { id: true, name: true } } } },
+        users: {
+          select: {
+            user_id: true,
+            user_name: true,
+            email: true,
+            phone: true,
+            profile_image: true,
+          },
+        },
+        merchant_business_types: {
+          include: { business_types: { select: { id: true, name: true } } },
+        },
       },
       orderBy: { created_at: "desc" },
       skip: offset,
       take: limit,
     });
 
-    const businessIds = businesses.map(b => b.business_id);
+    const businessIds = businesses.map((b) => b.business_id);
     const ratings = await prisma.mart_ratings.groupBy({
       by: ["business_id"],
       where: { business_id: { in: businessIds } },
@@ -594,7 +949,7 @@ async function listMartOwners(req, res) {
       });
     }
 
-    const data = businesses.map(b => ({
+    const data = businesses.map((b) => ({
       business_id: Number(b.business_id),
       owner_type: b.owner_type,
       business_name: b.business_name,
@@ -607,7 +962,8 @@ async function listMartOwners(req, res) {
       delivery_option: b.delivery_option,
       min_amount_for_fd: b.min_amount_for_fd,
       special_celebration: b.special_celebration,
-      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      special_celebration_discount_percentage:
+        b.special_celebration_discount_percentage,
       opening_time: b.opening_time,
       closing_time: b.closing_time,
       holidays: b.holidays,
@@ -622,7 +978,7 @@ async function listMartOwners(req, res) {
         phone: b.users.phone,
         profile_image: b.users.profile_image || null,
       },
-      business_types: b.merchant_business_types.map(mbt => ({
+      business_types: b.merchant_business_types.map((mbt) => ({
         business_type_id: Number(mbt.business_types.id),
         name: mbt.business_types.name,
       })),
@@ -630,17 +986,23 @@ async function listMartOwners(req, res) {
       total_comments: ratingsMap.get(b.business_id)?.total_comments || 0,
     }));
 
-    return res.status(200).json({ success: true, kind: "mart", count: data.length, data });
+    return res
+      .status(200)
+      .json({ success: true, kind: "mart", count: data.length, data });
   } catch (err) {
     console.error("listMartOwners error:", err);
-    return res.status(500).json({ success: false, message: "Failed to fetch mart owners." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch mart owners." });
   }
 }
 
 async function listFoodOwnersWithCelebration(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-    const whereCondition = { special_celebration_discount_percentage: { not: null } };
+    const whereCondition = {
+      special_celebration_discount_percentage: { not: null },
+    };
     if (q) {
       whereCondition.OR = [
         { business_name: { contains: q, mode: "insensitive" } },
@@ -650,33 +1012,42 @@ async function listFoodOwnersWithCelebration(req, res) {
 
     const businesses = await prisma.merchant_business_details.findMany({
       where: { owner_type: "food", ...whereCondition },
-      include: { users: { select: { user_id: true, user_name: true, phone: true } } },
+      include: {
+        users: { select: { user_id: true, user_name: true, phone: true } },
+      },
       orderBy: { created_at: "desc" },
       skip: offset,
       take: limit,
     });
 
-    const data = businesses.map(b => ({
+    const data = businesses.map((b) => ({
       business_id: Number(b.business_id),
       business_name: b.business_name,
       business_logo: b.business_logo,
       special_celebration: b.special_celebration,
-      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      special_celebration_discount_percentage:
+        b.special_celebration_discount_percentage,
       address: b.address,
       phone: b.users?.phone || null,
     }));
 
-    return res.status(200).json({ success: true, kind: "food", count: data.length, data });
+    return res
+      .status(200)
+      .json({ success: true, kind: "food", count: data.length, data });
   } catch (err) {
     console.error("listFoodOwnersWithCelebration error:", err);
-    return res.status(500).json({ success: false, message: "Failed to fetch food owners." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch food owners." });
   }
 }
 
 async function listMartOwnersWithCelebration(req, res) {
   try {
     const { q, limit, offset } = parseOwnersQuery(req);
-    const whereCondition = { special_celebration_discount_percentage: { not: null } };
+    const whereCondition = {
+      special_celebration_discount_percentage: { not: null },
+    };
     if (q) {
       whereCondition.OR = [
         { business_name: { contains: q, mode: "insensitive" } },
@@ -686,26 +1057,33 @@ async function listMartOwnersWithCelebration(req, res) {
 
     const businesses = await prisma.merchant_business_details.findMany({
       where: { owner_type: "mart", ...whereCondition },
-      include: { users: { select: { user_id: true, user_name: true, phone: true } } },
+      include: {
+        users: { select: { user_id: true, user_name: true, phone: true } },
+      },
       orderBy: { created_at: "desc" },
       skip: offset,
       take: limit,
     });
 
-    const data = businesses.map(b => ({
+    const data = businesses.map((b) => ({
       business_id: Number(b.business_id),
       business_name: b.business_name,
       business_logo: b.business_logo,
       special_celebration: b.special_celebration,
-      special_celebration_discount_percentage: b.special_celebration_discount_percentage,
+      special_celebration_discount_percentage:
+        b.special_celebration_discount_percentage,
       address: b.address,
       phone: b.users?.phone || null,
     }));
 
-    return res.status(200).json({ success: true, kind: "mart", count: data.length, data });
+    return res
+      .status(200)
+      .json({ success: true, kind: "mart", count: data.length, data });
   } catch (err) {
     console.error("listMartOwnersWithCelebration error:", err);
-    return res.status(500).json({ success: false, message: "Failed to fetch mart owners." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch mart owners." });
   }
 }
 

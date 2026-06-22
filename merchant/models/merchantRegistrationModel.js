@@ -1,61 +1,194 @@
 const { prisma } = require("../lib/prisma");
 const bcrypt = require("bcryptjs");
 
-/* ------------------------ helpers ------------------------ */
+/* =========================================================
+   HELPERS
+========================================================= */
 
 function toIdArray(input) {
   if (input == null) return [];
+
   const parts = Array.isArray(input) ? input : String(input).split(",");
-  const out = [];
-  for (const p of parts) {
-    const n = Number(String(p).trim());
-    if (Number.isInteger(n) && n > 0 && !out.includes(n)) out.push(n);
+
+  const output = [];
+
+  for (const part of parts) {
+    const value = Number(String(part).trim());
+
+    if (Number.isInteger(value) && value > 0 && !output.includes(value)) {
+      output.push(value);
+    }
   }
-  return out;
+
+  return output;
+}
+
+function normalizeEmail(value) {
+  if (value === null || value === undefined) return null;
+
+  const normalized = String(value).trim().toLowerCase();
+
+  return normalized || null;
+}
+
+function normalizePhone(value) {
+  if (value === null || value === undefined) return null;
+
+  let normalized = String(value)
+    .trim()
+    .replace(/[^\d+]/g, "");
+
+  if (!normalized) return null;
+
+  if (normalized.startsWith("00")) {
+    normalized = `+${normalized.slice(2)}`;
+  }
+
+  if (normalized.startsWith("+975")) {
+    return normalized;
+  }
+
+  if (normalized.startsWith("975")) {
+    return `+${normalized}`;
+  }
+
+  if (normalized.startsWith("+")) {
+    return normalized;
+  }
+
+  return `+975${normalized}`;
+}
+
+function normalizeRole(value, defaultRole = "merchant") {
+  const normalized =
+    value !== null && value !== undefined
+      ? String(value).trim().toLowerCase()
+      : "";
+
+  return normalized || defaultRole;
+}
+
+function normalizeText(value) {
+  if (value === null || value === undefined) return "";
+
+  return String(value).trim();
+}
+
+function getPrismaConstraintTarget(error) {
+  const target = error?.meta?.target;
+
+  if (Array.isArray(target)) {
+    return target.map((item) => String(item).toLowerCase()).join(",");
+  }
+
+  if (target !== null && target !== undefined) {
+    return String(target).toLowerCase();
+  }
+
+  return "";
 }
 
 async function mapTypeNamesToIds(names) {
-  if (!names || !names.length) return [];
-  const trimmed = names.map((x) => String(x).trim()).filter(Boolean);
-  if (!trimmed.length) return [];
-  
-  const allBusinessTypes = await prisma.business_types.findMany();
-  const matched = allBusinessTypes.filter((bt) =>
-    trimmed.some((name) => bt.name?.toLowerCase() === name.toLowerCase())
-  );
-  return matched.map((bt) => bt.id);
+  if (!Array.isArray(names) || names.length === 0) {
+    return [];
+  }
+
+  const normalizedNames = names
+    .map((name) => String(name).trim().toLowerCase())
+    .filter(Boolean);
+
+  if (normalizedNames.length === 0) {
+    return [];
+  }
+
+  const businessTypes = await prisma.business_types.findMany({
+    select: {
+      id: true,
+      name: true,
+    },
+  });
+
+  return businessTypes
+    .filter((businessType) =>
+      normalizedNames.includes(
+        String(businessType.name || "")
+          .trim()
+          .toLowerCase(),
+      ),
+    )
+    .map((businessType) => Number(businessType.id));
 }
 
 async function filterValidTypeIds(typeIds) {
-  if (!typeIds.length) return [];
-  const numericIds = typeIds.map(id => Number(id));
+  if (!Array.isArray(typeIds) || typeIds.length === 0) {
+    return [];
+  }
+
+  const numericIds = typeIds
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+
   const validTypes = await prisma.business_types.findMany({
-    where: { id: { in: numericIds } },
-    select: { id: true },
+    where: {
+      id: {
+        in: numericIds,
+      },
+    },
+    select: {
+      id: true,
+    },
   });
-  const validSet = new Set(validTypes.map((t) => Number(t.id)));
-  return numericIds.filter((id) => validSet.has(id));
+
+  const validIdSet = new Set(validTypes.map((type) => Number(type.id)));
+
+  return numericIds.filter((id) => validIdSet.has(id));
 }
 
-async function checkScopedUsernameExists(user_name, role, ownerType) {
-  const allUsers = await prisma.users.findMany({
-    where: { user_name: user_name, role: role },
-    include: { merchant_business_details: true },
+async function checkScopedUsernameExists(userName, role, ownerType) {
+  const normalizedUserName = normalizeText(userName);
+  const normalizedRole = normalizeRole(role);
+  const normalizedOwnerType = normalizeText(ownerType).toLowerCase();
+
+  if (!normalizedUserName || !normalizedRole || !normalizedOwnerType) {
+    return false;
+  }
+
+  const users = await prisma.users.findMany({
+    where: {
+      user_name: normalizedUserName,
+      role: normalizedRole,
+    },
+    include: {
+      merchant_business_details: {
+        select: {
+          owner_type: true,
+        },
+      },
+    },
   });
-  const matchingUsers = allUsers.filter(
-    (user) => user.user_name?.toLowerCase() === user_name.toLowerCase()
-  );
-  return matchingUsers.some((user) =>
-    user.merchant_business_details?.some(
-      (business) => business.owner_type?.toLowerCase() === ownerType.toLowerCase()
-    )
-  );
+
+  return users.some((user) => {
+    const sameUsername =
+      String(user.user_name || "")
+        .trim()
+        .toLowerCase() === normalizedUserName.toLowerCase();
+
+    if (!sameUsername) return false;
+
+    return user.merchant_business_details.some(
+      (business) =>
+        String(business.owner_type || "")
+          .trim()
+          .toLowerCase() === normalizedOwnerType,
+    );
+  });
 }
 
-/* ------------------------ create/register with TRANSACTION ------------------------ */
+/* =========================================================
+   REGISTER MERCHANT
+========================================================= */
 
 async function registerMerchantModel(data) {
-  // Validate all inputs first (before transaction)
   const {
     user_name,
     email,
@@ -82,217 +215,519 @@ async function registerMerchantModel(data) {
     special_celebration_discount_percentage,
   } = data;
 
-  const role = (data.role || "merchant").toLowerCase();
-  const ownerType = String(owner_type || "").toLowerCase();
-  const cidStr = cid == null ? "" : String(cid).trim();
+  const normalizedUserName = normalizeText(user_name);
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedPhone = normalizePhone(phone);
+  const normalizedRole = normalizeRole(data.role, "merchant");
 
-  // Validation - all required fields
-  if (!user_name) throw new Error("user_name is required");
-  if (!email) throw new Error("email is required");
-  if (!phone) throw new Error("phone is required");
-  if (!cidStr) throw new Error("cid is required for merchants");
-  if (cidStr.length !== 11) throw new Error("cid must be exactly 11 characters long");
-  if (!password) throw new Error("password is required");
-  if (!business_name) throw new Error("business_name is required");
-  if (!ownerType) throw new Error("owner_type is required");
-  if (!bank_name) throw new Error("bank_name is required");
-  if (!account_holder_name) throw new Error("account_holder_name is required");
-  if (!account_number) throw new Error("account_number is required");
+  const normalizedOwnerType = normalizeText(owner_type).toLowerCase();
 
-  // Business type resolution
-  let incomingIds = toIdArray(business_type_ids);
-  if (!incomingIds.length && Array.isArray(business_types) && business_types.length) {
-    const mapped = await mapTypeNamesToIds(business_types);
-    incomingIds = toIdArray(mapped);
+  const normalizedCid = normalizeText(cid);
+  const normalizedPassword =
+    password !== null && password !== undefined ? String(password) : "";
+
+  const normalizedBusinessName = normalizeText(business_name);
+
+  const normalizedBankName = normalizeText(bank_name);
+
+  const normalizedAccountHolderName = normalizeText(account_holder_name);
+
+  const normalizedAccountNumber = normalizeText(account_number);
+
+  /* ---------------- validation ---------------- */
+
+  if (!normalizedUserName) {
+    throw new Error("user_name is required");
   }
-  if (!incomingIds.length) {
+
+  if (!normalizedEmail) {
+    throw new Error("email is required");
+  }
+
+  if (!normalizedPhone) {
+    throw new Error("phone is required");
+  }
+
+  if (!normalizedCid) {
+    throw new Error("cid is required for merchants");
+  }
+
+  if (!/^\d{11}$/.test(normalizedCid)) {
+    throw new Error("cid must contain exactly 11 digits");
+  }
+
+  if (!normalizedPassword) {
+    throw new Error("password is required");
+  }
+
+  if (normalizedPassword.length < 6) {
+    throw new Error("password must contain at least 6 characters");
+  }
+
+  if (!normalizedBusinessName) {
+    throw new Error("business_name is required");
+  }
+
+  if (!normalizedOwnerType) {
+    throw new Error("owner_type is required");
+  }
+
+  if (!normalizedBankName) {
+    throw new Error("bank_name is required");
+  }
+
+  if (!normalizedAccountHolderName) {
+    throw new Error("account_holder_name is required");
+  }
+
+  if (!normalizedAccountNumber) {
+    throw new Error("account_number is required");
+  }
+
+  if (normalizedRole !== "merchant") {
+    throw new Error(
+      "Invalid role. Merchant registration requires the merchant role.",
+    );
+  }
+
+  /* ---------------- business types ---------------- */
+
+  let incomingTypeIds = toIdArray(business_type_ids);
+
+  if (
+    incomingTypeIds.length === 0 &&
+    Array.isArray(business_types) &&
+    business_types.length > 0
+  ) {
+    const mappedTypeIds = await mapTypeNamesToIds(business_types);
+
+    incomingTypeIds = toIdArray(mappedTypeIds);
+  }
+
+  if (incomingTypeIds.length === 0) {
     throw new Error("At least one business type is required.");
   }
 
-  // Validate all business type IDs exist
-  const validTypeIds = await filterValidTypeIds(incomingIds);
-  if (validTypeIds.length !== incomingIds.length) {
-    const invalidIds = incomingIds.filter(id => !validTypeIds.includes(Number(id)));
-    throw new Error(`Invalid business_type_ids: ${invalidIds.join(", ")}. These IDs do not exist.`);
+  const validTypeIds = await filterValidTypeIds(incomingTypeIds);
+
+  if (validTypeIds.length !== incomingTypeIds.length) {
+    const invalidIds = incomingTypeIds.filter(
+      (id) => !validTypeIds.includes(Number(id)),
+    );
+
+    throw new Error(
+      `Invalid business_type_ids: ${invalidIds.join(
+        ", ",
+      )}. These IDs do not exist.`,
+    );
   }
 
-  // Check for existing email, phone, username before transaction
-  const existingEmail = await prisma.users.findFirst({ where: { email: email } });
-  if (existingEmail) throw new Error("Email already exists. Please use another email.");
+  /* ---------------- duplicate checks ---------------- */
 
-  const existingPhone = await prisma.users.findFirst({ where: { phone: phone } });
-  if (existingPhone) throw new Error("Phone number already exists. Please use another phone.");
+  /*
+   * Phone is now unique by phone + role.
+   *
+   * Same phone + user       = allowed
+   * Same phone + driver     = allowed
+   * Same phone + merchant   = allowed once
+   */
+  const existingPhoneRole = await prisma.users.findFirst({
+    where: {
+      phone: normalizedPhone,
+      role: normalizedRole,
+    },
+    select: {
+      user_id: true,
+    },
+  });
 
-  const usernameExists = await checkScopedUsernameExists(user_name, role, ownerType);
+  if (existingPhoneRole) {
+    throw new Error(
+      "This phone number is already registered for the merchant role. Please login instead.",
+    );
+  }
+
+  /*
+   * Email is still globally unique in your current schema.
+   */
+  const existingEmail = await prisma.users.findFirst({
+    where: {
+      email: normalizedEmail,
+    },
+    select: {
+      user_id: true,
+      role: true,
+    },
+  });
+
+  if (existingEmail) {
+    throw new Error(
+      "This email address is already registered. Please use another email address or login.",
+    );
+  }
+
+  /*
+   * CID is still globally unique in your current schema.
+   */
+  const existingCid = await prisma.users.findFirst({
+    where: {
+      cid: normalizedCid,
+    },
+    select: {
+      user_id: true,
+      role: true,
+    },
+  });
+
+  if (existingCid) {
+    throw new Error("This CID number is already registered.");
+  }
+
+  const usernameExists = await checkScopedUsernameExists(
+    normalizedUserName,
+    normalizedRole,
+    normalizedOwnerType,
+  );
+
   if (usernameExists) {
-    throw new Error("Username already exists for this owner type. Choose another username or change owner_type.");
+    throw new Error(
+      "Username already exists for this owner type. Choose another username or change owner_type.",
+    );
   }
 
-  // Start transaction for actual database writes
-  return await prisma.$transaction(async (tx) => {
-    // Create user
-    const password_hash = await bcrypt.hash(password, 10);
-    const newUser = await tx.users.create({
-      data: {
-        user_name: user_name,
-        email: email,
-        phone: phone,
-        cid: cidStr,
-        password_hash: password_hash,
-        role: role,
-        is_active: true,
-      },
-    });
-    const user_id = newUser.user_id;
+  const minimumFreeDeliveryAmount =
+    min_amount_for_fd !== undefined &&
+    min_amount_for_fd !== null &&
+    min_amount_for_fd !== ""
+      ? Number(min_amount_for_fd)
+      : 0;
 
-    const minFD = min_amount_for_fd !== undefined && min_amount_for_fd !== null && min_amount_for_fd !== ""
-      ? Number(min_amount_for_fd) : 0;
+  if (
+    !Number.isFinite(minimumFreeDeliveryAmount) ||
+    minimumFreeDeliveryAmount < 0
+  ) {
+    throw new Error("min_amount_for_fd must be a valid non-negative number");
+  }
 
-    // Create business
+  const parsedLatitude =
+    latitude === null || latitude === undefined || latitude === ""
+      ? null
+      : Number(latitude);
+
+  const parsedLongitude =
+    longitude === null || longitude === undefined || longitude === ""
+      ? null
+      : Number(longitude);
+
+  if (parsedLatitude !== null && !Number.isFinite(parsedLatitude)) {
+    throw new Error("Invalid latitude");
+  }
+
+  if (parsedLongitude !== null && !Number.isFinite(parsedLongitude)) {
+    throw new Error("Invalid longitude");
+  }
+
+  /* ---------------- transaction ---------------- */
+
+  return prisma.$transaction(async (tx) => {
+    const passwordHash = await bcrypt.hash(normalizedPassword, 10);
+
+    let newUser;
+
+    try {
+      newUser = await tx.users.create({
+        data: {
+          user_name: normalizedUserName,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          cid: normalizedCid,
+          password_hash: passwordHash,
+          role: normalizedRole,
+          is_active: true,
+          is_verified: false,
+        },
+      });
+    } catch (error) {
+      if (error?.code === "P2002") {
+        const target = getPrismaConstraintTarget(error);
+
+        const duplicatePhoneRole =
+          target.includes("users_phone_role_unique") ||
+          (target.includes("phone") && target.includes("role"));
+
+        if (duplicatePhoneRole) {
+          throw new Error(
+            "This phone number is already registered for the merchant role. Please login instead.",
+          );
+        }
+
+        if (target.includes("email")) {
+          throw new Error(
+            "This email address is already registered. Please use another email address or login.",
+          );
+        }
+
+        if (target.includes("cid")) {
+          throw new Error("This CID number is already registered.");
+        }
+
+        throw new Error(
+          "A merchant account already exists with the provided information.",
+        );
+      }
+
+      throw error;
+    }
+
+    const userId = newUser.user_id;
+
     const newBusiness = await tx.merchant_business_details.create({
       data: {
-        user_id: user_id,
-        business_name: business_name,
-        business_license_number: business_license_number || null,
+        user_id: userId,
+        business_name: normalizedBusinessName,
+        business_license_number: business_license_number
+          ? normalizeText(business_license_number)
+          : null,
         license_image: license_image || null,
-        latitude: latitude ?? null,
-        longitude: longitude ?? null,
-        address: address || null,
+        latitude: parsedLatitude,
+        longitude: parsedLongitude,
+        address: address ? normalizeText(address) : null,
         business_logo: business_logo || null,
         delivery_option: delivery_option || "SELF",
-        owner_type: ownerType || null,
-        min_amount_for_fd: minFD,
+        owner_type: normalizedOwnerType,
+        min_amount_for_fd: minimumFreeDeliveryAmount,
         special_celebration: special_celebration || null,
-        special_celebration_discount_percentage: special_celebration_discount_percentage || null,
+        special_celebration_discount_percentage:
+          special_celebration_discount_percentage || null,
       },
     });
-    const business_id = newBusiness.business_id;
 
-    // Add business types
+    const businessId = newBusiness.business_id;
+
     for (const typeId of validTypeIds) {
       await tx.merchant_business_types.create({
-        data: { business_id: business_id, business_type_id: typeId },
+        data: {
+          business_id: businessId,
+          business_type_id: typeId,
+        },
       });
     }
 
-    // Create bank details
     await tx.merchant_bank_details.create({
       data: {
-        user_id: user_id,
-        bank_name: bank_name,
-        account_holder_name: account_holder_name,
-        account_number: account_number,
+        user_id: userId,
+        bank_name: normalizedBankName,
+        account_holder_name: normalizedAccountHolderName,
+        account_number: normalizedAccountNumber,
         bank_qr_code_image: bank_qr_code_image || null,
       },
     });
 
     return {
-      user_id: Number(user_id),
-      business_id: Number(business_id),
-      business_type_ids: validTypeIds.map(id => Number(id)),
+      user_id: Number(userId),
+      business_id: Number(businessId),
+      business_type_ids: validTypeIds.map((id) => Number(id)),
     };
   });
 }
 
-/* ------------------------ UPDATE: business details ------------------------ */
+/* =========================================================
+   UPDATE MERCHANT BUSINESS
+========================================================= */
 
-async function updateMerchantDetailsModel(business_id, data) {
-  return await prisma.$transaction(async (tx) => {
+async function updateMerchantDetailsModel(businessId, data) {
+  return prisma.$transaction(async (tx) => {
     const existingBusiness = await tx.merchant_business_details.findUnique({
-      where: { business_id: business_id },
+      where: {
+        business_id: businessId,
+      },
     });
-    if (!existingBusiness) throw new Error("Business not found");
+
+    if (!existingBusiness) {
+      throw new Error("Business not found");
+    }
 
     const updateData = {};
 
-    const setIfProvided = (col, val, transform = (v) => v) => {
-      if (val !== undefined) updateData[col] = transform(val);
+    const setIfProvided = (column, value, transform = (item) => item) => {
+      if (value !== undefined) {
+        updateData[column] = transform(value);
+      }
     };
 
-    // Helper for time strings
-    const toDateTime = (timeStr) => {
-      if (!timeStr) return null;
-      const [hours, minutes, seconds = '00'] = timeStr.split(':');
+    const toDateTime = (timeString) => {
+      if (!timeString) return null;
+
+      const [hours, minutes, seconds = "00"] = String(timeString).split(":");
+
       const date = new Date();
-      date.setHours(parseInt(hours, 10));
-      date.setMinutes(parseInt(minutes, 10));
-      date.setSeconds(parseInt(seconds, 10));
+
+      date.setHours(Number(hours));
+      date.setMinutes(Number(minutes));
+      date.setSeconds(Number(seconds));
       date.setMilliseconds(0);
+
       return date;
     };
 
     setIfProvided("business_name", data.business_name);
+
     setIfProvided("business_license_number", data.business_license_number);
+
     setIfProvided("license_image", data.license_image);
-    setIfProvided("latitude", data.latitude, (v) => (v === "" || v === null ? null : Number(v)));
-    setIfProvided("longitude", data.longitude, (v) => (v === "" || v === null ? null : Number(v)));
+
+    setIfProvided("latitude", data.latitude, (value) =>
+      value === "" || value === null ? null : Number(value),
+    );
+
+    setIfProvided("longitude", data.longitude, (value) =>
+      value === "" || value === null ? null : Number(value),
+    );
+
     setIfProvided("address", data.address);
+
     setIfProvided("business_logo", data.business_logo);
+
     setIfProvided("delivery_option", data.delivery_option);
-    setIfProvided("owner_type", data.owner_type, (v) => v ? String(v).toLowerCase() : undefined);
+
+    setIfProvided("owner_type", data.owner_type, (value) =>
+      value ? String(value).trim().toLowerCase() : undefined,
+    );
+
     setIfProvided("opening_time", data.opening_time, toDateTime);
+
     setIfProvided("closing_time", data.closing_time, toDateTime);
-    setIfProvided("kitchen_closing_time", data.kitchen_closing_time, toDateTime);
+
+    setIfProvided(
+      "kitchen_closing_time",
+      data.kitchen_closing_time,
+      toDateTime,
+    );
+
     setIfProvided("special_celebration", data.special_celebration);
-    setIfProvided("special_celebration_discount_percentage", data.special_celebration_discount_percentage);
-    setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (v) => {
-      if (v === "" || v == null) return 0;
-      return Number(v);
+
+    setIfProvided(
+      "special_celebration_discount_percentage",
+      data.special_celebration_discount_percentage,
+    );
+
+    setIfProvided("min_amount_for_fd", data.min_amount_for_fd, (value) => {
+      if (value === "" || value == null) {
+        return 0;
+      }
+
+      const numberValue = Number(value);
+
+      if (!Number.isFinite(numberValue) || numberValue < 0) {
+        throw new Error("Invalid min_amount_for_fd");
+      }
+
+      return numberValue;
     });
 
-    // Handle holidays
     if (data.holidays !== undefined) {
-      let arr = [];
+      let holidays = [];
+
       if (Array.isArray(data.holidays)) {
-        arr = data.holidays;
+        holidays = data.holidays;
       } else if (typeof data.holidays === "string") {
-        arr = data.holidays.split(",").map((s) => s.trim()).filter(Boolean);
+        holidays = data.holidays
+          .split(",")
+          .map((day) => day.trim())
+          .filter(Boolean);
       }
-      updateData.holidays = JSON.stringify(arr);
+
+      updateData.holidays = JSON.stringify(holidays);
     }
 
     if (Object.keys(updateData).length > 0) {
       updateData.updated_at = new Date();
+
       await tx.merchant_business_details.update({
-        where: { business_id: business_id },
+        where: {
+          business_id: businessId,
+        },
         data: updateData,
       });
     }
 
-    // Update business type associations
-    let incomingIds = toIdArray(data.business_type_ids);
-    if (!incomingIds.length && Array.isArray(data.business_types) && data.business_types.length) {
-      const mapped = await mapTypeNamesToIds(data.business_types);
-      incomingIds = toIdArray(mapped);
+    let incomingTypeIds = toIdArray(data.business_type_ids);
+
+    if (
+      incomingTypeIds.length === 0 &&
+      Array.isArray(data.business_types) &&
+      data.business_types.length > 0
+    ) {
+      const mappedIds = await mapTypeNamesToIds(data.business_types);
+
+      incomingTypeIds = toIdArray(mappedIds);
     }
 
-    if (data.business_type_ids !== undefined || data.business_types !== undefined) {
-      const validIds = await filterValidTypeIds(incomingIds);
-      if (validIds.length !== incomingIds.length && incomingIds.length > 0) {
-        const invalidIds = incomingIds.filter(id => !validIds.includes(Number(id)));
-        throw new Error(`Invalid business_type_ids: ${invalidIds.join(", ")}. These IDs do not exist.`);
+    if (
+      data.business_type_ids !== undefined ||
+      data.business_types !== undefined
+    ) {
+      const validIds = await filterValidTypeIds(incomingTypeIds);
+
+      if (
+        validIds.length !== incomingTypeIds.length &&
+        incomingTypeIds.length > 0
+      ) {
+        const invalidIds = incomingTypeIds.filter(
+          (id) => !validIds.includes(Number(id)),
+        );
+
+        throw new Error(
+          `Invalid business_type_ids: ${invalidIds.join(
+            ", ",
+          )}. These IDs do not exist.`,
+        );
       }
 
-      await tx.merchant_business_types.deleteMany({ where: { business_id: business_id } });
+      await tx.merchant_business_types.deleteMany({
+        where: {
+          business_id: businessId,
+        },
+      });
+
       for (const typeId of validIds) {
         await tx.merchant_business_types.create({
-          data: { business_id: business_id, business_type_id: typeId },
+          data: {
+            business_id: businessId,
+            business_type_id: typeId,
+          },
         });
       }
     }
 
-    return { business_id: Number(business_id) };
+    return {
+      business_id: Number(businessId),
+    };
   });
 }
 
-/* ------------------------ FINDERS ------------------------ */
+/* =========================================================
+   LOGIN FINDER
+========================================================= */
 
 async function findCandidatesByEmail(email) {
-  const em = String(email || "").trim();
-  if (!em) return [];
+  const normalizedEmail =
+    email !== null && email !== undefined
+      ? String(email).trim().toLowerCase()
+      : "";
 
-  const allUsers = await prisma.users.findMany({
-    orderBy: { user_id: "desc" },
+  if (!normalizedEmail) {
+    return [];
+  }
+
+  return prisma.users.findMany({
+    where: {
+      email: normalizedEmail,
+      role: "merchant",
+    },
+    orderBy: {
+      user_id: "desc",
+    },
     select: {
       user_id: true,
       user_name: true,
@@ -301,10 +736,9 @@ async function findCandidatesByEmail(email) {
       role: true,
       password_hash: true,
       is_active: true,
+      is_verified: true,
     },
   });
-
-  return allUsers.filter((user) => user.email?.toLowerCase() === em.toLowerCase());
 }
 
 module.exports = {
