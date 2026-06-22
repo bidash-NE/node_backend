@@ -40,7 +40,10 @@ export const options = {
 
 export default function () {
   const uid = `${RUN_ID}${__VU}${__ITER}`;
-  const phone = `${PHONE_PREFIX}${uid}`.slice(0, 13);
+  // Full RUN_ID/VU/iteration digits preserved (no truncation) so every call
+  // across every run gets a distinct phone number. phone column is
+  // VARCHAR(20); 6 (prefix) + 6 (RUN_ID) + 4 (VU) + 3 (ITER) = 19 chars.
+  const phone = `${PHONE_PREFIX}${RUN_ID}${String(__VU).padStart(4, "0")}${String(__ITER).padStart(3, "0")}`;
   const email = `loadtestreg${uid}@example.test`;
   const deviceId = `loadtest-reg-device-${uid}`;
 

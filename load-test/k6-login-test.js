@@ -58,7 +58,10 @@ export function setup() {
 
     for (let i = start; i < end; i++) {
       const uid = `${runId}${i}`;
-      const phone = `${PHONE_PREFIX}${uid}`.slice(0, 13);
+      // Full runId/index digits preserved (no truncation) so every seeded
+      // account gets a distinct phone number. phone column is VARCHAR(20);
+      // 6 (prefix) + 6 (runId) + 4 (index) = 16 chars.
+      const phone = `${PHONE_PREFIX}${runId}${String(i).padStart(4, "0")}`;
       const email = `loginseed${uid}@example.test`;
       const deviceId = `loginseed-device-${uid}`;
 
