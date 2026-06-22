@@ -801,28 +801,8 @@ const loginUser = async (req, res) => {
     const merchantDesktopNoDevice = isMerchant && desktop === true;
     const financeNoDevice = isFinance && desktop === true;
 
-<<<<<<< Updated upstream
     // Device conflict check - skip for finance, admin, demo/review accounts,
     // and logins that don't supply a device_id (device_id is optional)
-=======
-    if (
-      !adminNoDevice &&
-      !merchantDesktopNoDevice &&
-      !financeNoDevice &&
-      !deviceId
-    ) {
-      return errorResponse(
-        res,
-        400,
-        "Device information is required for login. Please restart the application.",
-      );
-    }
-
-    /*
-     * Verify that the account is still connected to the same
-     * registered device.
-     */
->>>>>>> Stashed changes
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
