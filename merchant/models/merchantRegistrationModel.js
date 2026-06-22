@@ -230,11 +230,8 @@ async function registerMerchantModel(data) {
     password !== null && password !== undefined ? String(password) : "";
 
   const normalizedBusinessName = normalizeText(business_name);
-
   const normalizedBankName = normalizeText(bank_name);
-
   const normalizedAccountHolderName = normalizeText(account_holder_name);
-
   const normalizedAccountNumber = normalizeText(account_number);
 
   /* =========================================================
@@ -335,10 +332,6 @@ async function registerMerchantModel(data) {
 
   /*
    * Phone is unique by phone + role.
-   *
-   * Same phone under a user role is allowed.
-   * Same phone under a driver role is allowed.
-   * Same phone under a merchant role is rejected.
    */
   const existingPhoneRole = await prisma.users.findFirst({
     where: {
@@ -360,9 +353,6 @@ async function registerMerchantModel(data) {
 
   /*
    * Email is unique by email + role.
-   *
-   * An email already used by a normal user or driver can
-   * therefore be used to create a merchant account.
    */
   const existingEmailRole = await prisma.users.findFirst({
     where: {
@@ -383,8 +373,11 @@ async function registerMerchantModel(data) {
   }
 
   /*
-   * CID remains globally unique because the current database
-   * has a global unique index on cid.
+   * CID is unique by CID + role.
+   *
+   * Important:
+   * Use existingCidRole consistently.
+   * Do not use the old variable name existingCid.
    */
   const existingCidRole = await prisma.users.findFirst({
     where: {
@@ -402,10 +395,6 @@ async function registerMerchantModel(data) {
     throw new Error(
       "This CID number is already registered for the merchant role. Please login instead.",
     );
-  }
-
-  if (existingCid) {
-    throw new Error("This CID number is already registered.");
   }
 
   const usernameExists = await checkScopedUsernameExists(
@@ -525,7 +514,6 @@ async function registerMerchantModel(data) {
     const newBusiness = await tx.merchant_business_details.create({
       data: {
         user_id: userId,
-
         business_name: normalizedBusinessName,
 
         business_license_number: business_license_number
@@ -533,25 +521,24 @@ async function registerMerchantModel(data) {
           : null,
 
         license_image: license_image || null,
-
         latitude: parsedLatitude,
-
         longitude: parsedLongitude,
 
         address: address ? normalizeText(address) : null,
 
         business_logo: business_logo || null,
-
         delivery_option: delivery_option || "SELF",
-
         owner_type: normalizedOwnerType,
-
         min_amount_for_fd: minimumFreeDeliveryAmount,
 
         special_celebration: special_celebration || null,
 
         special_celebration_discount_percentage:
-          special_celebration_discount_percentage || null,
+          special_celebration_discount_percentage !== undefined &&
+          special_celebration_discount_percentage !== null &&
+          special_celebration_discount_percentage !== ""
+            ? Number(special_celebration_discount_percentage)
+            : null,
       },
     });
 
@@ -569,13 +556,9 @@ async function registerMerchantModel(data) {
     await tx.merchant_bank_details.create({
       data: {
         user_id: userId,
-
         bank_name: normalizedBankName,
-
         account_holder_name: normalizedAccountHolderName,
-
         account_number: normalizedAccountNumber,
-
         bank_qr_code_image: bank_qr_code_image || null,
       },
     });
