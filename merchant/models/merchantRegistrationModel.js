@@ -215,14 +215,17 @@ async function registerMerchantModel(data) {
     special_celebration_discount_percentage,
   } = data;
 
+  /* =========================================================
+     NORMALIZATION
+  ========================================================= */
+
   const normalizedUserName = normalizeText(user_name);
   const normalizedEmail = normalizeEmail(email);
   const normalizedPhone = normalizePhone(phone);
   const normalizedRole = normalizeRole(data.role, "merchant");
-
   const normalizedOwnerType = normalizeText(owner_type).toLowerCase();
-
   const normalizedCid = normalizeText(cid);
+
   const normalizedPassword =
     password !== null && password !== undefined ? String(password) : "";
 
@@ -234,7 +237,9 @@ async function registerMerchantModel(data) {
 
   const normalizedAccountNumber = normalizeText(account_number);
 
-  /* ---------------- validation ---------------- */
+  /* =========================================================
+     VALIDATION
+  ========================================================= */
 
   if (!normalizedUserName) {
     throw new Error("user_name is required");
@@ -290,7 +295,9 @@ async function registerMerchantModel(data) {
     );
   }
 
-  /* ---------------- business types ---------------- */
+  /* =========================================================
+     BUSINESS TYPES
+  ========================================================= */
 
   let incomingTypeIds = toIdArray(business_type_ids);
 
@@ -322,14 +329,16 @@ async function registerMerchantModel(data) {
     );
   }
 
-  /* ---------------- duplicate checks ---------------- */
+  /* =========================================================
+     DUPLICATE CHECKS
+  ========================================================= */
 
   /*
-   * Phone is now unique by phone + role.
+   * Phone is unique by phone + role.
    *
-   * Same phone + user       = allowed
-   * Same phone + driver     = allowed
-   * Same phone + merchant   = allowed once
+   * Same phone under a user role is allowed.
+   * Same phone under a driver role is allowed.
+   * Same phone under a merchant role is rejected.
    */
   const existingPhoneRole = await prisma.users.findFirst({
     where: {
@@ -338,6 +347,8 @@ async function registerMerchantModel(data) {
     },
     select: {
       user_id: true,
+      phone: true,
+      role: true,
     },
   });
 
@@ -348,26 +359,32 @@ async function registerMerchantModel(data) {
   }
 
   /*
-   * Email is still globally unique in your current schema.
+   * Email is unique by email + role.
+   *
+   * An email already used by a normal user or driver can
+   * therefore be used to create a merchant account.
    */
-  const existingEmail = await prisma.users.findFirst({
+  const existingEmailRole = await prisma.users.findFirst({
     where: {
       email: normalizedEmail,
+      role: normalizedRole,
     },
     select: {
       user_id: true,
+      email: true,
       role: true,
     },
   });
 
-  if (existingEmail) {
+  if (existingEmailRole) {
     throw new Error(
-      "This email address is already registered. Please use another email address or login.",
+      "This email address is already registered for the merchant role. Please login instead.",
     );
   }
 
   /*
-   * CID is still globally unique in your current schema.
+   * CID remains globally unique because the current database
+   * has a global unique index on cid.
    */
   const existingCid = await prisma.users.findFirst({
     where: {
@@ -375,6 +392,7 @@ async function registerMerchantModel(data) {
     },
     select: {
       user_id: true,
+      cid: true,
       role: true,
     },
   });
@@ -394,6 +412,10 @@ async function registerMerchantModel(data) {
       "Username already exists for this owner type. Choose another username or change owner_type.",
     );
   }
+
+  /* =========================================================
+     NUMERIC VALIDATION
+  ========================================================= */
 
   const minimumFreeDeliveryAmount =
     min_amount_for_fd !== undefined &&
@@ -427,7 +449,9 @@ async function registerMerchantModel(data) {
     throw new Error("Invalid longitude");
   }
 
-  /* ---------------- transaction ---------------- */
+  /* =========================================================
+     TRANSACTION
+  ========================================================= */
 
   return prisma.$transaction(async (tx) => {
     const passwordHash = await bcrypt.hash(normalizedPassword, 10);
@@ -455,15 +479,19 @@ async function registerMerchantModel(data) {
           target.includes("users_phone_role_unique") ||
           (target.includes("phone") && target.includes("role"));
 
+        const duplicateEmailRole =
+          target.includes("users_email_role_unique") ||
+          (target.includes("email") && target.includes("role"));
+
         if (duplicatePhoneRole) {
           throw new Error(
             "This phone number is already registered for the merchant role. Please login instead.",
           );
         }
 
-        if (target.includes("email")) {
+        if (duplicateEmailRole) {
           throw new Error(
-            "This email address is already registered. Please use another email address or login.",
+            "This email address is already registered for the merchant role. Please login instead.",
           );
         }
 
@@ -484,19 +512,31 @@ async function registerMerchantModel(data) {
     const newBusiness = await tx.merchant_business_details.create({
       data: {
         user_id: userId,
+
         business_name: normalizedBusinessName,
+
         business_license_number: business_license_number
           ? normalizeText(business_license_number)
           : null,
+
         license_image: license_image || null,
+
         latitude: parsedLatitude,
+
         longitude: parsedLongitude,
+
         address: address ? normalizeText(address) : null,
+
         business_logo: business_logo || null,
+
         delivery_option: delivery_option || "SELF",
+
         owner_type: normalizedOwnerType,
+
         min_amount_for_fd: minimumFreeDeliveryAmount,
+
         special_celebration: special_celebration || null,
+
         special_celebration_discount_percentage:
           special_celebration_discount_percentage || null,
       },
@@ -516,9 +556,13 @@ async function registerMerchantModel(data) {
     await tx.merchant_bank_details.create({
       data: {
         user_id: userId,
+
         bank_name: normalizedBankName,
+
         account_holder_name: normalizedAccountHolderName,
+
         account_number: normalizedAccountNumber,
+
         bank_qr_code_image: bank_qr_code_image || null,
       },
     });
