@@ -78,15 +78,18 @@ function handleUploadError(err, req, res, next) {
 }
 
 /* ---------------- limiters ---------------- */
+// TEMP LOAD-TEST BYPASS (2026-06-22): defaults raised to effectively
+// unlimited for 1000-user capacity testing. REVERT to 10 / 20 before any
+// production deploy.
 const registerLimiter = makeLimiter({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 10,
+  max: Number(process.env.REGISTER_RATE_LIMIT_MAX || 1000000),
   message: "Too many registration attempts. Please try again later.",
 });
 
 const loginLimiter = makeLimiter({
   windowMs: 2 * 60 * 1000, // 2 min
-  max: 20,
+  max: Number(process.env.LOGIN_RATE_LIMIT_MAX || 1000000),
   message: "Too many login attempts. Please try again later.",
 });
 
