@@ -10,10 +10,10 @@ const isValidEmail = (email) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
 /* =========================================================
-   SEND EMAIL OTP
+   SEND REGISTRATION EMAIL OTP
 
-   This function does not check the users table.
-   OTP is sent regardless of existing roles/accounts.
+   OTP is sent regardless of whether the email already exists.
+   Duplicate-account validation is handled during registration.
 ========================================================= */
 
 exports.sendOtp = async (req, res) => {
@@ -23,67 +23,69 @@ exports.sendOtp = async (req, res) => {
     if (!emailRaw) {
       return res.status(400).json({
         success: false,
-        message: "Email is required.",
+        message: "Email is required",
       });
     }
 
     if (!isValidEmail(emailRaw)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid email address.",
+        message: "Invalid email address",
       });
     }
 
     if (!EmailService.isConfigured()) {
       return res.status(500).json({
         success: false,
-        message:
-          "SMTP is not configured. Check SMTP_HOST, SMTP_USER and SMTP_PASS.",
+        message: "SMTP not configured. Check SMTP_HOST/SMTP_USER/SMTP_PASS",
       });
     }
 
     const cleanEmail = normalizeEmail(emailRaw);
+    const otp = OtpModel.generateOtp();
 
     /*
-     * Do not check whether the email already exists.
-     * Registration will perform the final duplicate validation.
+     * Do not check whether the email is already registered.
+     *
+     * The OTP endpoint only verifies ownership of the email.
+     * Registration will later decide whether the account can
+     * be created.
      */
-
-    const otp = OtpModel.generateOtp();
 
     await OtpModel.storeOtp(cleanEmail, otp, 300);
 
     const info = await EmailService.sendRegistrationOtp(cleanEmail, otp);
 
     if (!info?.accepted || info.accepted.length === 0) {
+      /*
+       * Remove the stored OTP when SMTP does not accept
+       * the recipient.
+       */
       await OtpModel.deleteOtp(cleanEmail);
 
       return res.status(500).json({
         success: false,
-        message: "SMTP did not accept the recipient.",
+        message: "SMTP did not accept recipient",
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "OTP sent to email.",
-      email: cleanEmail,
+      message: "OTP sent to email",
     });
-  } catch (error) {
-    console.error("Send email OTP error:", {
-      message: error?.message,
-      stack: error?.stack,
-    });
+  } catch (err) {
+    console.error("Send OTP error:", err);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to send OTP. Please try again.",
+      message: "Failed to send OTP",
+      error: err?.message || String(err),
     });
   }
 };
 
 /* =========================================================
-   VERIFY EMAIL OTP
+   VERIFY REGISTRATION EMAIL OTP
 ========================================================= */
 
 exports.verifyOtp = async (req, res) => {
@@ -94,18 +96,19 @@ exports.verifyOtp = async (req, res) => {
     if (!emailRaw || !otpRaw) {
       return res.status(400).json({
         success: false,
-        message: "Email and OTP are required.",
+        message: "Email and OTP are required",
       });
     }
 
     if (!isValidEmail(emailRaw)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid email address.",
+        message: "Invalid email address",
       });
     }
 
     const cleanEmail = normalizeEmail(emailRaw);
+
     const otp = String(otpRaw).trim();
 
     const storedOtp = await OtpModel.getOtp(cleanEmail);
@@ -113,14 +116,14 @@ exports.verifyOtp = async (req, res) => {
     if (!storedOtp) {
       return res.status(410).json({
         success: false,
-        message: "OTP expired. Please request a new OTP.",
+        message: "OTP expired",
       });
     }
 
     if (String(storedOtp).trim() !== otp) {
       return res.status(401).json({
         success: false,
-        message: "Invalid OTP.",
+        message: "Invalid OTP",
       });
     }
 
@@ -130,18 +133,15 @@ exports.verifyOtp = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "OTP verified successfully.",
-      email: cleanEmail,
+      message: "OTP verified successfully",
     });
-  } catch (error) {
-    console.error("Verify email OTP error:", {
-      message: error?.message,
-      stack: error?.stack,
-    });
+  } catch (err) {
+    console.error("Verify OTP error:", err);
 
     return res.status(500).json({
       success: false,
-      message: "OTP verification failed. Please try again.",
+      message: "OTP verification failed",
+      error: err?.message || String(err),
     });
   }
 };
