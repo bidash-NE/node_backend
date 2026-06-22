@@ -1,4 +1,3 @@
-const UserModel = require("../models/userModel");
 const OtpModel = require("../models/otpModel");
 const EmailService = require("../services/emailService");
 
@@ -10,69 +9,82 @@ const normalizeEmail = (email) =>
 const isValidEmail = (email) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
-// ✅ Registration (Email) - TàbDey format
+/* =========================================================
+   SEND EMAIL OTP
+
+   This function does not check the users table.
+   OTP is sent regardless of existing roles/accounts.
+========================================================= */
+
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
 
     if (!emailRaw) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Email is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Email is required.",
+      });
     }
 
     if (!isValidEmail(emailRaw)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid email address" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email address.",
+      });
     }
 
     if (!EmailService.isConfigured()) {
       return res.status(500).json({
         success: false,
-        message: "SMTP not configured. Check SMTP_HOST/SMTP_USER/SMTP_PASS",
+        message:
+          "SMTP is not configured. Check SMTP_HOST, SMTP_USER and SMTP_PASS.",
       });
     }
 
     const cleanEmail = normalizeEmail(emailRaw);
+
+    /*
+     * Do not check whether the email already exists.
+     * Registration will perform the final duplicate validation.
+     */
+
     const otp = OtpModel.generateOtp();
 
-    // Check if email already registered using UserModel
-    const existingUser = await UserModel.findUserByEmail(cleanEmail);
-
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "Email already registered. OTP not sent.",
-      });
-    }
-
-    // Store OTP in Redis using OtpModel
     await OtpModel.storeOtp(cleanEmail, otp, 300);
 
-    // Send email using EmailService
     const info = await EmailService.sendRegistrationOtp(cleanEmail, otp);
 
     if (!info?.accepted || info.accepted.length === 0) {
+      await OtpModel.deleteOtp(cleanEmail);
+
       return res.status(500).json({
         success: false,
-        message: "SMTP did not accept recipient",
+        message: "SMTP did not accept the recipient.",
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: "OTP sent to email",
+      message: "OTP sent to email.",
+      email: cleanEmail,
     });
-  } catch (err) {
-    console.error("Send OTP error:", err);
+  } catch (error) {
+    console.error("Send email OTP error:", {
+      message: error?.message,
+      stack: error?.stack,
+    });
+
     return res.status(500).json({
       success: false,
-      message: "Failed to send OTP",
-      error: err?.message || String(err),
+      message: "Failed to send OTP. Please try again.",
     });
   }
 };
+
+/* =========================================================
+   VERIFY EMAIL OTP
+========================================================= */
 
 exports.verifyOtp = async (req, res) => {
   try {
@@ -82,50 +94,54 @@ exports.verifyOtp = async (req, res) => {
     if (!emailRaw || !otpRaw) {
       return res.status(400).json({
         success: false,
-        message: "Email and OTP are required",
+        message: "Email and OTP are required.",
       });
     }
 
     if (!isValidEmail(emailRaw)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Invalid email address" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email address.",
+      });
     }
 
     const cleanEmail = normalizeEmail(emailRaw);
     const otp = String(otpRaw).trim();
 
-    // Get stored OTP using OtpModel
     const storedOtp = await OtpModel.getOtp(cleanEmail);
 
     if (!storedOtp) {
       return res.status(410).json({
         success: false,
-        message: "OTP expired",
+        message: "OTP expired. Please request a new OTP.",
       });
     }
 
     if (String(storedOtp).trim() !== otp) {
       return res.status(401).json({
         success: false,
-        message: "Invalid OTP",
+        message: "Invalid OTP.",
       });
     }
 
-    // Store verified flag and delete OTP using OtpModel
     await OtpModel.storeVerifiedFlag(cleanEmail, 900);
+
     await OtpModel.deleteOtp(cleanEmail);
 
     return res.status(200).json({
       success: true,
-      message: "OTP verified successfully",
+      message: "OTP verified successfully.",
+      email: cleanEmail,
     });
-  } catch (err) {
-    console.error("Verify OTP error:", err);
+  } catch (error) {
+    console.error("Verify email OTP error:", {
+      message: error?.message,
+      stack: error?.stack,
+    });
+
     return res.status(500).json({
       success: false,
-      message: "OTP verification failed",
-      error: err?.message || String(err),
+      message: "OTP verification failed. Please try again.",
     });
   }
 };
