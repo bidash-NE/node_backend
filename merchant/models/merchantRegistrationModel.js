@@ -187,7 +187,6 @@ async function checkScopedUsernameExists(userName, role, ownerType) {
 /* =========================================================
    REGISTER MERCHANT
 ========================================================= */
-
 async function registerMerchantModel(data) {
   const {
     user_name,
@@ -219,20 +218,43 @@ async function registerMerchantModel(data) {
      NORMALIZATION
   ========================================================= */
 
-  const normalizedUserName = normalizeText(user_name);
-  const normalizedEmail = normalizeEmail(email);
-  const normalizedPhone = normalizePhone(phone);
-  const normalizedRole = normalizeRole(data.role, "merchant");
-  const normalizedOwnerType = normalizeText(owner_type).toLowerCase();
-  const normalizedCid = normalizeText(cid);
+  const normalizedUserName =
+    normalizeText(user_name);
+
+  const normalizedEmail =
+    normalizeEmail(email);
+
+  const normalizedPhone =
+    normalizePhone(phone);
+
+  /*
+   * This is the dedicated merchant registration model.
+   * Always create a merchant role.
+   */
+  const normalizedRole = "merchant";
+
+  const normalizedOwnerType =
+    normalizeText(owner_type).toLowerCase();
+
+  const normalizedCid =
+    normalizeText(cid);
 
   const normalizedPassword =
-    password !== null && password !== undefined ? String(password) : "";
+    password !== null && password !== undefined
+      ? String(password)
+      : "";
 
-  const normalizedBusinessName = normalizeText(business_name);
-  const normalizedBankName = normalizeText(bank_name);
-  const normalizedAccountHolderName = normalizeText(account_holder_name);
-  const normalizedAccountNumber = normalizeText(account_number);
+  const normalizedBusinessName =
+    normalizeText(business_name);
+
+  const normalizedBankName =
+    normalizeText(bank_name);
+
+  const normalizedAccountHolderName =
+    normalizeText(account_holder_name);
+
+  const normalizedAccountNumber =
+    normalizeText(account_number);
 
   /* =========================================================
      VALIDATION
@@ -251,11 +273,15 @@ async function registerMerchantModel(data) {
   }
 
   if (!normalizedCid) {
-    throw new Error("cid is required for merchants");
+    throw new Error(
+      "cid is required for merchants",
+    );
   }
 
   if (!/^\d{11}$/.test(normalizedCid)) {
-    throw new Error("cid must contain exactly 11 digits");
+    throw new Error(
+      "cid must contain exactly 11 digits",
+    );
   }
 
   if (!normalizedPassword) {
@@ -263,32 +289,38 @@ async function registerMerchantModel(data) {
   }
 
   if (normalizedPassword.length < 6) {
-    throw new Error("password must contain at least 6 characters");
+    throw new Error(
+      "password must contain at least 6 characters",
+    );
   }
 
   if (!normalizedBusinessName) {
-    throw new Error("business_name is required");
+    throw new Error(
+      "business_name is required",
+    );
   }
 
   if (!normalizedOwnerType) {
-    throw new Error("owner_type is required");
+    throw new Error(
+      "owner_type is required",
+    );
   }
 
   if (!normalizedBankName) {
-    throw new Error("bank_name is required");
+    throw new Error(
+      "bank_name is required",
+    );
   }
 
   if (!normalizedAccountHolderName) {
-    throw new Error("account_holder_name is required");
+    throw new Error(
+      "account_holder_name is required",
+    );
   }
 
   if (!normalizedAccountNumber) {
-    throw new Error("account_number is required");
-  }
-
-  if (normalizedRole !== "merchant") {
     throw new Error(
-      "Invalid role. Merchant registration requires the merchant role.",
+      "account_number is required",
     );
   }
 
@@ -296,116 +328,44 @@ async function registerMerchantModel(data) {
      BUSINESS TYPES
   ========================================================= */
 
-  let incomingTypeIds = toIdArray(business_type_ids);
+  let incomingTypeIds =
+    toIdArray(business_type_ids);
 
   if (
     incomingTypeIds.length === 0 &&
     Array.isArray(business_types) &&
     business_types.length > 0
   ) {
-    const mappedTypeIds = await mapTypeNamesToIds(business_types);
+    const mappedTypeIds =
+      await mapTypeNamesToIds(business_types);
 
-    incomingTypeIds = toIdArray(mappedTypeIds);
+    incomingTypeIds =
+      toIdArray(mappedTypeIds);
   }
 
   if (incomingTypeIds.length === 0) {
-    throw new Error("At least one business type is required.");
+    throw new Error(
+      "At least one business type is required.",
+    );
   }
 
-  const validTypeIds = await filterValidTypeIds(incomingTypeIds);
+  const validTypeIds =
+    await filterValidTypeIds(incomingTypeIds);
 
-  if (validTypeIds.length !== incomingTypeIds.length) {
-    const invalidIds = incomingTypeIds.filter(
-      (id) => !validTypeIds.includes(Number(id)),
-    );
+  if (
+    validTypeIds.length !==
+    incomingTypeIds.length
+  ) {
+    const invalidIds =
+      incomingTypeIds.filter(
+        (id) =>
+          !validTypeIds.includes(Number(id)),
+      );
 
     throw new Error(
       `Invalid business_type_ids: ${invalidIds.join(
         ", ",
       )}. These IDs do not exist.`,
-    );
-  }
-
-  /* =========================================================
-     DUPLICATE CHECKS
-  ========================================================= */
-
-  /*
-   * Phone is unique by phone + role.
-   */
-  const existingPhoneRole = await prisma.users.findFirst({
-    where: {
-      phone: normalizedPhone,
-      role: normalizedRole,
-    },
-    select: {
-      user_id: true,
-      phone: true,
-      role: true,
-    },
-  });
-
-  if (existingPhoneRole) {
-    throw new Error(
-      "This phone number is already registered for the merchant role. Please login instead.",
-    );
-  }
-
-  /*
-   * Email is unique by email + role.
-   */
-  const existingEmailRole = await prisma.users.findFirst({
-    where: {
-      email: normalizedEmail,
-      role: normalizedRole,
-    },
-    select: {
-      user_id: true,
-      email: true,
-      role: true,
-    },
-  });
-
-  if (existingEmailRole) {
-    throw new Error(
-      "This email address is already registered for the merchant role. Please login instead.",
-    );
-  }
-
-  /*
-   * CID is unique by CID + role.
-   *
-   * Important:
-   * Use existingCidRole consistently.
-   * Do not use the old variable name existingCid.
-   */
-  const existingCidRole = await prisma.users.findFirst({
-    where: {
-      cid: normalizedCid,
-      role: normalizedRole,
-    },
-    select: {
-      user_id: true,
-      cid: true,
-      role: true,
-    },
-  });
-
-  if (existingCidRole) {
-    throw new Error(
-      "This CID number is already registered for the merchant role. Please login instead.",
-    );
-  }
-
-  const usernameExists = await checkScopedUsernameExists(
-    normalizedUserName,
-    normalizedRole,
-    normalizedOwnerType,
-  );
-
-  if (usernameExists) {
-    throw new Error(
-      "Username already exists for this owner type. Choose another username or change owner_type.",
     );
   }
 
@@ -421,28 +381,82 @@ async function registerMerchantModel(data) {
       : 0;
 
   if (
-    !Number.isFinite(minimumFreeDeliveryAmount) ||
+    !Number.isFinite(
+      minimumFreeDeliveryAmount,
+    ) ||
     minimumFreeDeliveryAmount < 0
   ) {
-    throw new Error("min_amount_for_fd must be a valid non-negative number");
+    throw new Error(
+      "min_amount_for_fd must be a valid non-negative number",
+    );
   }
 
   const parsedLatitude =
-    latitude === null || latitude === undefined || latitude === ""
+    latitude === null ||
+    latitude === undefined ||
+    latitude === ""
       ? null
       : Number(latitude);
 
   const parsedLongitude =
-    longitude === null || longitude === undefined || longitude === ""
+    longitude === null ||
+    longitude === undefined ||
+    longitude === ""
       ? null
       : Number(longitude);
 
-  if (parsedLatitude !== null && !Number.isFinite(parsedLatitude)) {
+  if (
+    parsedLatitude !== null &&
+    !Number.isFinite(parsedLatitude)
+  ) {
     throw new Error("Invalid latitude");
   }
 
-  if (parsedLongitude !== null && !Number.isFinite(parsedLongitude)) {
+  if (
+    parsedLongitude !== null &&
+    !Number.isFinite(parsedLongitude)
+  ) {
     throw new Error("Invalid longitude");
+  }
+
+  const parsedCelebrationDiscount =
+    special_celebration_discount_percentage ===
+      undefined ||
+    special_celebration_discount_percentage ===
+      null ||
+    special_celebration_discount_percentage ===
+      ""
+      ? null
+      : Number(
+          special_celebration_discount_percentage,
+        );
+
+  if (
+    parsedCelebrationDiscount !== null &&
+    !Number.isFinite(
+      parsedCelebrationDiscount,
+    )
+  ) {
+    throw new Error(
+      "special_celebration_discount_percentage must be a valid number",
+    );
+  }
+
+  /* =========================================================
+     USERNAME CHECK
+  ========================================================= */
+
+  const usernameExists =
+    await checkScopedUsernameExists(
+      normalizedUserName,
+      normalizedRole,
+      normalizedOwnerType,
+    );
+
+  if (usernameExists) {
+    throw new Error(
+      "Username already exists for this owner type. Choose another username or change owner_type.",
+    );
   }
 
   /* =========================================================
@@ -450,38 +464,188 @@ async function registerMerchantModel(data) {
   ========================================================= */
 
   return prisma.$transaction(async (tx) => {
-    const passwordHash = await bcrypt.hash(normalizedPassword, 10);
+    /*
+     * Same phone + same merchant role is not allowed.
+     */
+    const existingPhoneRole =
+      await tx.users.findFirst({
+        where: {
+          phone: normalizedPhone,
+          role: normalizedRole,
+        },
+        select: {
+          user_id: true,
+          role: true,
+        },
+      });
+
+    if (existingPhoneRole) {
+      throw new Error(
+        "This phone number is already registered for the merchant role. Please login instead.",
+      );
+    }
+
+    /*
+     * Same email + same merchant role is not allowed.
+     */
+    const existingEmailRole =
+      await tx.users.findFirst({
+        where: {
+          email: normalizedEmail,
+          role: normalizedRole,
+        },
+        select: {
+          user_id: true,
+          role: true,
+        },
+      });
+
+    if (existingEmailRole) {
+      throw new Error(
+        "This email address is already registered for the merchant role. Please login instead.",
+      );
+    }
+
+    /*
+     * Same CID + same merchant role is not allowed.
+     */
+    const existingCidRole =
+      await tx.users.findFirst({
+        where: {
+          cid: normalizedCid,
+          role: normalizedRole,
+        },
+        select: {
+          user_id: true,
+          role: true,
+        },
+      });
+
+    if (existingCidRole) {
+      throw new Error(
+        "This CID number is already registered for the merchant role. Please login instead.",
+      );
+    }
+
+    /*
+     * Find accounts in any role sharing either the email
+     * or phone number.
+     *
+     * The new merchant password must differ from every
+     * related account password.
+     */
+    const relatedAccounts =
+      await tx.users.findMany({
+        where: {
+          OR: [
+            {
+              email: normalizedEmail,
+            },
+            {
+              phone: normalizedPhone,
+            },
+          ],
+        },
+        select: {
+          user_id: true,
+          role: true,
+          email: true,
+          phone: true,
+          password_hash: true,
+        },
+        orderBy: {
+          user_id: "asc",
+        },
+      });
+
+    for (
+      const relatedAccount
+      of relatedAccounts
+    ) {
+      if (!relatedAccount?.password_hash) {
+        continue;
+      }
+
+      const passwordAlreadyUsed =
+        await bcrypt.compare(
+          normalizedPassword,
+          relatedAccount.password_hash,
+        );
+
+      if (passwordAlreadyUsed) {
+        const existingRole =
+          normalizeRole(
+            relatedAccount.role,
+            "another",
+          );
+
+        throw new Error(
+          `This password is already being used by your ${existingRole} account. Please choose a different password for the merchant account.`,
+        );
+      }
+    }
+
+    const passwordHash =
+      await bcrypt.hash(
+        normalizedPassword,
+        10,
+      );
 
     let newUser;
 
     try {
       newUser = await tx.users.create({
         data: {
-          user_name: normalizedUserName,
-          email: normalizedEmail,
-          phone: normalizedPhone,
-          cid: normalizedCid,
-          password_hash: passwordHash,
-          role: normalizedRole,
-          is_active: true,
-          is_verified: false,
+          user_name:
+            normalizedUserName,
+
+          email:
+            normalizedEmail,
+
+          phone:
+            normalizedPhone,
+
+          cid:
+            normalizedCid,
+
+          password_hash:
+            passwordHash,
+
+          role:
+            normalizedRole,
+
+          is_active:
+            true,
+
+          is_verified:
+            false,
         },
       });
     } catch (error) {
       if (error?.code === "P2002") {
-        const target = getPrismaConstraintTarget(error);
+        const target =
+          getPrismaConstraintTarget(error);
 
         const duplicatePhoneRole =
-          target.includes("users_phone_role_unique") ||
-          (target.includes("phone") && target.includes("role"));
+          target.includes(
+            "users_phone_role_unique",
+          ) ||
+          (target.includes("phone") &&
+            target.includes("role"));
 
         const duplicateEmailRole =
-          target.includes("users_email_role_unique") ||
-          (target.includes("email") && target.includes("role"));
+          target.includes(
+            "users_email_role_unique",
+          ) ||
+          (target.includes("email") &&
+            target.includes("role"));
 
         const duplicateCidRole =
-          target.includes("users_cid_role_unique") ||
-          (target.includes("cid") && target.includes("role"));
+          target.includes(
+            "users_cid_role_unique",
+          ) ||
+          (target.includes("cid") &&
+            target.includes("role"));
 
         if (duplicatePhoneRole) {
           throw new Error(
@@ -511,65 +675,104 @@ async function registerMerchantModel(data) {
 
     const userId = newUser.user_id;
 
-    const newBusiness = await tx.merchant_business_details.create({
-      data: {
-        user_id: userId,
-        business_name: normalizedBusinessName,
+    const newBusiness =
+      await tx.merchant_business_details.create({
+        data: {
+          user_id:
+            userId,
 
-        business_license_number: business_license_number
-          ? normalizeText(business_license_number)
-          : null,
+          business_name:
+            normalizedBusinessName,
 
-        license_image: license_image || null,
-        latitude: parsedLatitude,
-        longitude: parsedLongitude,
+          business_license_number:
+            business_license_number
+              ? normalizeText(
+                  business_license_number,
+                )
+              : null,
 
-        address: address ? normalizeText(address) : null,
+          license_image:
+            license_image || null,
 
-        business_logo: business_logo || null,
-        delivery_option: delivery_option || "SELF",
-        owner_type: normalizedOwnerType,
-        min_amount_for_fd: minimumFreeDeliveryAmount,
+          latitude:
+            parsedLatitude,
 
-        special_celebration: special_celebration || null,
+          longitude:
+            parsedLongitude,
 
-        special_celebration_discount_percentage:
-          special_celebration_discount_percentage !== undefined &&
-          special_celebration_discount_percentage !== null &&
-          special_celebration_discount_percentage !== ""
-            ? Number(special_celebration_discount_percentage)
-            : null,
-      },
-    });
+          address:
+            address
+              ? normalizeText(address)
+              : null,
 
-    const businessId = newBusiness.business_id;
+          business_logo:
+            business_logo || null,
+
+          delivery_option:
+            delivery_option || "SELF",
+
+          owner_type:
+            normalizedOwnerType,
+
+          min_amount_for_fd:
+            minimumFreeDeliveryAmount,
+
+          special_celebration:
+            special_celebration || null,
+
+          special_celebration_discount_percentage:
+            parsedCelebrationDiscount,
+        },
+      });
+
+    const businessId =
+      newBusiness.business_id;
 
     for (const typeId of validTypeIds) {
       await tx.merchant_business_types.create({
         data: {
-          business_id: businessId,
-          business_type_id: typeId,
+          business_id:
+            businessId,
+
+          business_type_id:
+            typeId,
         },
       });
     }
 
     await tx.merchant_bank_details.create({
       data: {
-        user_id: userId,
-        bank_name: normalizedBankName,
-        account_holder_name: normalizedAccountHolderName,
-        account_number: normalizedAccountNumber,
-        bank_qr_code_image: bank_qr_code_image || null,
+        user_id:
+          userId,
+
+        bank_name:
+          normalizedBankName,
+
+        account_holder_name:
+          normalizedAccountHolderName,
+
+        account_number:
+          normalizedAccountNumber,
+
+        bank_qr_code_image:
+          bank_qr_code_image || null,
       },
     });
 
     return {
       user_id: Number(userId),
-      business_id: Number(businessId),
-      business_type_ids: validTypeIds.map((id) => Number(id)),
+
+      business_id:
+        Number(businessId),
+
+      business_type_ids:
+        validTypeIds.map(
+          (id) => Number(id),
+        ),
     };
   });
 }
+
 
 /* =========================================================
    UPDATE MERCHANT BUSINESS
@@ -780,6 +983,7 @@ async function findCandidatesByEmail(email) {
     },
   });
 }
+
 
 module.exports = {
   registerMerchantModel,

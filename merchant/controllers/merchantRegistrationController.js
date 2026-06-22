@@ -36,10 +36,38 @@ const fromBodyToStoredPath = (val) => {
 };
 
 /* ---------------- register ---------------- */
-
 async function registerMerchant(req, res) {
+  const files = req.files || {};
+
+  /*
+   * Remove files created during a failed registration.
+   * This prevents unused compressed images from accumulating.
+   */
+  const removeUploadedFiles = () => {
+    const uploadedFiles = Object.values(files)
+      .flat()
+      .filter(Boolean);
+
+    for (const file of uploadedFiles) {
+      if (!file?.path) {
+        continue;
+      }
+
+      try {
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+      } catch (cleanupError) {
+        console.error(
+          "Failed to remove uploaded merchant file:",
+          file.path,
+          cleanupError?.message || cleanupError,
+        );
+      }
+    }
+  };
+
   try {
-    const files = req.files || {};
     const body = req.body || {};
 
     const normalizeBhutanPhone = (raw) => {
@@ -95,12 +123,16 @@ async function registerMerchant(req, res) {
 
       const numberValue = Number(value);
 
-      return Number.isFinite(numberValue) ? numberValue : null;
+      return Number.isFinite(numberValue)
+        ? numberValue
+        : null;
     };
 
     const toLowerOrDefault = (value, defaultValue) => {
       const normalized =
-        value !== undefined && value !== null ? String(value).trim() : "";
+        value !== undefined && value !== null
+          ? String(value).trim()
+          : "";
 
       return (normalized || defaultValue).toLowerCase();
     };
@@ -117,10 +149,28 @@ async function registerMerchant(req, res) {
       ? toRelPath(files.bank_qr_code_image[0])
       : fromBodyToStoredPath(body.bank_qr_code_image);
 
-    const normalizedPhone = normalizeBhutanPhone(body.phone);
-    const normalizedEmail = normalizeEmail(body.email);
+    const normalizedPhone =
+      normalizeBhutanPhone(body.phone);
+
+    const normalizedEmail =
+      normalizeEmail(body.email);
+
+    const normalizedCid =
+      body.cid !== null &&
+      body.cid !== undefined &&
+      String(body.cid).trim() !== ""
+        ? String(body.cid).trim()
+        : null;
+
+    const password =
+      body.password !== null &&
+      body.password !== undefined
+        ? String(body.password)
+        : "";
 
     if (!normalizedPhone) {
+      removeUploadedFiles();
+
       return res.status(400).json({
         success: false,
         message: "A valid phone number is required.",
@@ -128,20 +178,56 @@ async function registerMerchant(req, res) {
     }
 
     if (!normalizedEmail) {
+      removeUploadedFiles();
+
       return res.status(400).json({
         success: false,
         message: "A valid email address is required.",
       });
     }
 
-    const role = toLowerOrDefault(body.role, "merchant");
+    if (!normalizedCid) {
+      removeUploadedFiles();
 
-    if (role !== "merchant") {
       return res.status(400).json({
         success: false,
-        message: "Merchant registration requires the merchant role.",
+        message: "CID number is required.",
       });
     }
+
+    if (!/^\d{11}$/.test(normalizedCid)) {
+      removeUploadedFiles();
+
+      return res.status(400).json({
+        success: false,
+        message: "CID must contain exactly 11 digits.",
+      });
+    }
+
+    if (!password) {
+      removeUploadedFiles();
+
+      return res.status(400).json({
+        success: false,
+        message: "Password is required.",
+      });
+    }
+
+    if (password.length < 6) {
+      removeUploadedFiles();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password must contain at least 6 characters.",
+      });
+    }
+
+    /*
+     * This endpoint always creates merchant accounts.
+     * Do not trust a role supplied by the frontend.
+     */
+    const role = "merchant";
 
     let businessTypes;
 
@@ -158,7 +244,8 @@ async function registerMerchant(req, res) {
     }
 
     const minimumFreeDeliveryAmount =
-      body.min_amount_for_fd !== undefined && body.min_amount_for_fd !== ""
+      body.min_amount_for_fd !== undefined &&
+      body.min_amount_for_fd !== ""
         ? Number(body.min_amount_for_fd)
         : 0;
 
@@ -166,6 +253,8 @@ async function registerMerchant(req, res) {
       !Number.isFinite(minimumFreeDeliveryAmount) ||
       minimumFreeDeliveryAmount < 0
     ) {
+      removeUploadedFiles();
+
       return res.status(400).json({
         success: false,
         message:
@@ -177,50 +266,80 @@ async function registerMerchant(req, res) {
       user_name: body.user_name,
       email: normalizedEmail,
       phone: normalizedPhone,
-      cid: body.cid,
-      password: body.password,
+      cid: normalizedCid,
+      password,
       role,
 
       business_name: body.business_name,
-      business_type_ids: body.business_type_ids ?? null,
+
+      business_type_ids:
+        body.business_type_ids ?? null,
+
       business_types: businessTypes,
-      business_license_number: body.business_license_number,
+
+      business_license_number:
+        body.business_license_number,
+
       license_image: licenseImage,
 
       latitude: toNumberOrNull(body.latitude),
       longitude: toNumberOrNull(body.longitude),
+
       address: body.address || null,
       business_logo: businessLogo,
-      delivery_option: body.delivery_option,
 
-      owner_type: toLowerOrDefault(body.owner_type, "individual"),
+      delivery_option:
+        body.delivery_option || "SELF",
 
-      min_amount_for_fd: minimumFreeDeliveryAmount,
+      owner_type: toLowerOrDefault(
+        body.owner_type,
+        "individual",
+      ),
+
+      min_amount_for_fd:
+        minimumFreeDeliveryAmount,
 
       bank_name: body.bank_name,
-      account_holder_name: body.account_holder_name,
-      account_number: body.account_number,
-      bank_qr_code_image: bankQrCodeImage,
 
-      special_celebration: body.special_celebration || null,
+      account_holder_name:
+        body.account_holder_name,
+
+      account_number:
+        body.account_number,
+
+      bank_qr_code_image:
+        bankQrCodeImage,
+
+      special_celebration:
+        body.special_celebration || null,
 
       special_celebration_discount_percentage:
-        body.special_celebration_discount_percentage || null,
+        body.special_celebration_discount_percentage ??
+        null,
     };
 
-    const result = await registerMerchantModel(payload);
+    const result =
+      await registerMerchantModel(payload);
 
     return res.status(201).json({
       success: true,
       message: "Merchant registered successfully.",
       user_id: result.user_id,
       business_id: result.business_id,
-      business_type_ids: result.business_type_ids,
+      business_type_ids:
+        result.business_type_ids,
       phone: normalizedPhone,
       email: normalizedEmail,
+      cid: normalizedCid,
       role: "merchant",
     });
   } catch (error) {
+    /*
+     * Registration failed after Multer processed the files.
+     * Remove those newly generated files.
+     */
+    removeUploadedFiles();
+
     console.error("Merchant registration error:", {
       message: error?.message,
       code: error?.code,
@@ -228,18 +347,21 @@ async function registerMerchant(req, res) {
       stack: error?.stack,
     });
 
-    const message = error?.message || "Merchant registration failed.";
+    const message =
+      error?.message ||
+      "Merchant registration failed.";
 
-    const isDuplicate = /already registered|already exists|exists/i.test(
-      message,
-    );
-
-    const isValidation =
-      /required|invalid|must contain|must be|exactly|at least one|business_type_ids|greater than|non-negative/i.test(
+    const isConflict =
+      /already registered|already exists|already being used|choose a different password|same login credentials/i.test(
         message,
       );
 
-    if (isDuplicate) {
+    const isValidation =
+      /required|invalid|must contain|must be|exactly|at least one|at least 6|business_type_ids|greater than|non-negative/i.test(
+        message,
+      );
+
+    if (isConflict) {
       return res.status(409).json({
         success: false,
         message,
@@ -255,10 +377,13 @@ async function registerMerchant(req, res) {
 
     return res.status(500).json({
       success: false,
-      message: "Merchant registration failed. Please try again later.",
+      message:
+        "Merchant registration failed. Please try again later.",
     });
   }
 }
+
+
 
 /* ---------------- update business details ---------------- */
 

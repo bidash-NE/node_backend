@@ -135,7 +135,6 @@ function getPrismaConstraintTarget(error) {
 /* =========================================================
    REGISTER USER
 ========================================================= */
-
 const registerUser = async (req, res) => {
   let userId = null;
   let driverId = null;
@@ -208,12 +207,12 @@ const registerUser = async (req, res) => {
       );
     }
 
-    /*
-     * CID remains optional for roles that do not require it.
-     * When supplied, it must contain exactly 11 digits.
-     */
     if (normalizedCid && !/^\d{11}$/.test(normalizedCid)) {
-      return errorResponse(res, 400, "CID must contain exactly 11 digits.");
+      return errorResponse(
+        res,
+        400,
+        "CID must contain exactly 11 digits.",
+      );
     }
 
     const deviceID = safeDeviceId(
@@ -224,17 +223,17 @@ const registerUser = async (req, res) => {
         null,
     );
 
-    /*
-     * Admin, finance and organizer accounts do not require
-     * a registered mobile device during registration.
-     */
     const requiresDevice =
       normalizedRole !== "admin" &&
       normalizedRole !== "finance" &&
       normalizedRole !== "organizer";
 
     if (requiresDevice && !deviceID) {
-      return errorResponse(res, 400, "Device ID is required for registration.");
+      return errorResponse(
+        res,
+        400,
+        "Device ID is required for registration.",
+      );
     }
 
     /* =========================================================
@@ -296,6 +295,31 @@ const registerUser = async (req, res) => {
           "Vehicle capacity must be greater than zero.",
         );
       }
+
+      if (
+        vehicle.year !== null &&
+        vehicle.year !== undefined &&
+        vehicle.year !== "" &&
+        !Number.isInteger(Number(vehicle.year))
+      ) {
+        return errorResponse(
+          res,
+          400,
+          "Vehicle year must be a valid whole number.",
+        );
+      }
+
+      if (vehicle.insurance_expiry) {
+        const insuranceExpiry = new Date(vehicle.insurance_expiry);
+
+        if (Number.isNaN(insuranceExpiry.getTime())) {
+          return errorResponse(
+            res,
+            400,
+            "Vehicle insurance expiry date is invalid.",
+          );
+        }
+      }
     }
 
     /* =========================================================
@@ -304,22 +328,24 @@ const registerUser = async (req, res) => {
 
     await prisma.$transaction(async (prismaTx) => {
       /*
-       * Phone is unique by phone + role.
+       * Same phone and same role cannot be registered again.
        */
-      const existingPhoneRoleAccount = await prismaTx.users.findFirst({
-        where: {
-          phone: normalizedPhone,
-          role: normalizedRole,
-        },
-        select: {
-          user_id: true,
-          phone: true,
-          role: true,
-        },
-      });
+      const existingPhoneRoleAccount =
+        await prismaTx.users.findFirst({
+          where: {
+            phone: normalizedPhone,
+            role: normalizedRole,
+          },
+          select: {
+            user_id: true,
+            role: true,
+          },
+        });
 
       if (existingPhoneRoleAccount) {
-        const duplicateError = new Error("phone_role_already_exists");
+        const duplicateError = new Error(
+          "phone_role_already_exists",
+        );
 
         duplicateError.registrationRole = normalizedRole;
 
@@ -327,55 +353,107 @@ const registerUser = async (req, res) => {
       }
 
       /*
-       * Email is unique by email + role.
-       *
-       * The same email can therefore be used for different roles,
-       * but only once within the same role.
+       * Same email and same role cannot be registered again.
        */
-      const existingEmailRoleAccount = await prismaTx.users.findFirst({
-        where: {
-          email: normalizedEmail,
-          role: normalizedRole,
-        },
-        select: {
-          user_id: true,
-          email: true,
-          role: true,
-        },
-      });
-
-      if (existingEmailRoleAccount) {
-        const duplicateEmailError = new Error("email_role_already_exists");
-
-        duplicateEmailError.registrationRole = normalizedRole;
-
-        throw duplicateEmailError;
-      }
-
-      /*
-       * CID is unique by CID + role.
-       *
-       * CID is checked only when supplied.
-       */
-      if (normalizedCid) {
-        const existingCidRoleAccount = await prismaTx.users.findFirst({
+      const existingEmailRoleAccount =
+        await prismaTx.users.findFirst({
           where: {
-            cid: normalizedCid,
+            email: normalizedEmail,
             role: normalizedRole,
           },
           select: {
             user_id: true,
-            cid: true,
             role: true,
           },
         });
 
+      if (existingEmailRoleAccount) {
+        const duplicateError = new Error(
+          "email_role_already_exists",
+        );
+
+        duplicateError.registrationRole = normalizedRole;
+
+        throw duplicateError;
+      }
+
+      /*
+       * Same CID and same role cannot be registered again.
+       */
+      if (normalizedCid) {
+        const existingCidRoleAccount =
+          await prismaTx.users.findFirst({
+            where: {
+              cid: normalizedCid,
+              role: normalizedRole,
+            },
+            select: {
+              user_id: true,
+              role: true,
+            },
+          });
+
         if (existingCidRoleAccount) {
-          const duplicateCidError = new Error("cid_role_already_exists");
+          const duplicateError = new Error(
+            "cid_role_already_exists",
+          );
 
-          duplicateCidError.registrationRole = normalizedRole;
+          duplicateError.registrationRole = normalizedRole;
 
-          throw duplicateCidError;
+          throw duplicateError;
+        }
+      }
+
+      /*
+       * Search all accounts sharing the submitted phone or email,
+       * regardless of role.
+       *
+       * The new password must not match any of those accounts.
+       * This allows the common login endpoint to determine the
+       * intended role from identifier + password.
+       */
+      const relatedAccounts = await prismaTx.users.findMany({
+        where: {
+          OR: [
+            {
+              email: normalizedEmail,
+            },
+            {
+              phone: normalizedPhone,
+            },
+          ],
+        },
+        select: {
+          user_id: true,
+          role: true,
+          email: true,
+          phone: true,
+          password_hash: true,
+        },
+        orderBy: {
+          user_id: "asc",
+        },
+      });
+
+      for (const relatedAccount of relatedAccounts) {
+        if (!relatedAccount?.password_hash) {
+          continue;
+        }
+
+        const passwordAlreadyUsed = await bcrypt.compare(
+          password,
+          relatedAccount.password_hash,
+        );
+
+        if (passwordAlreadyUsed) {
+          const passwordError = new Error(
+            "password_already_used_for_related_account",
+          );
+
+          passwordError.existingRole =
+            normalizeRole(relatedAccount.role) || "another";
+
+          throw passwordError;
         }
       }
 
@@ -425,12 +503,15 @@ const registerUser = async (req, res) => {
       ========================================================= */
 
       if (normalizedRole === "driver") {
-        const longitude = Number(driver.current_location.coordinates[0]);
+        const longitude = Number(
+          driver.current_location.coordinates[0],
+        );
 
-        const latitude = Number(driver.current_location.coordinates[1]);
+        const latitude = Number(
+          driver.current_location.coordinates[1],
+        );
 
         const licenseExpiry = new Date(driver.license_expiry);
-
         const vehicleCapacity = Number(vehicle.capacity);
 
         await prismaTx.$executeRaw`
@@ -490,8 +571,12 @@ const registerUser = async (req, res) => {
             await prismaTx.driver_documents.create({
               data: {
                 driver_id: newDriver.driver_id,
-                document_type: String(document.document_type).trim(),
-                document_url: String(document.document_url).trim(),
+                document_type: String(
+                  document.document_type,
+                ).trim(),
+                document_url: String(
+                  document.document_url,
+                ).trim(),
               },
             });
           }
@@ -501,22 +586,32 @@ const registerUser = async (req, res) => {
           data: {
             driver_id: newDriver.driver_id,
 
-            make: vehicle.make ? String(vehicle.make).trim() : null,
+            make: vehicle.make
+              ? String(vehicle.make).trim()
+              : null,
 
-            model: vehicle.model ? String(vehicle.model).trim() : null,
+            model: vehicle.model
+              ? String(vehicle.model).trim()
+              : null,
 
             year:
-              vehicle.year !== null && vehicle.year !== undefined
+              vehicle.year !== null &&
+              vehicle.year !== undefined &&
+              vehicle.year !== ""
                 ? Number(vehicle.year)
                 : null,
 
-            color: vehicle.color ? String(vehicle.color).trim() : null,
+            color: vehicle.color
+              ? String(vehicle.color).trim()
+              : null,
 
             license_plate: vehicle.license_plate
               ? String(vehicle.license_plate).trim()
               : null,
 
-            vehicle_type: String(vehicle.vehicle_type).trim(),
+            vehicle_type: String(
+              vehicle.vehicle_type,
+            ).trim(),
 
             actual_capacity: vehicleCapacity,
             available_capacity: vehicleCapacity,
@@ -543,7 +638,9 @@ const registerUser = async (req, res) => {
               ? new Date(vehicle.insurance_expiry)
               : null,
 
-            code: vehicle.code ? String(vehicle.code).trim() : null,
+            code: vehicle.code
+              ? String(vehicle.code).trim()
+              : null,
           },
         });
       }
@@ -580,13 +677,11 @@ const registerUser = async (req, res) => {
     });
   } catch (err) {
     console.error("Registration error:", err?.message || err);
-
     console.error("Registration error code:", err?.code || null);
-
     console.error("Registration error metadata:", err?.meta || null);
 
     /* =========================================================
-       EXPLICIT DUPLICATE CHECK RESPONSES
+       DUPLICATE RESPONSES
     ========================================================= */
 
     if (err?.message === "phone_role_already_exists") {
@@ -619,6 +714,19 @@ const registerUser = async (req, res) => {
       );
     }
 
+    if (
+      err?.message ===
+      "password_already_used_for_related_account"
+    ) {
+      return errorResponse(
+        res,
+        409,
+        `This password is already being used by your ${
+          err.existingRole || "other"
+        } account. Please choose a different password for the ${normalizedRole} account.`,
+      );
+    }
+
     /* =========================================================
        PRISMA UNIQUE CONSTRAINT RESPONSES
     ========================================================= */
@@ -626,7 +734,8 @@ const registerUser = async (req, res) => {
     if (err?.code === "P2002") {
       const target = getPrismaConstraintTarget(err);
 
-      const requestedRole = normalizeRole(req.body?.user?.role) || "selected";
+      const requestedRole =
+        normalizeRole(req.body?.user?.role) || "selected";
 
       const isPhoneRoleConstraint =
         target.includes("users_phone_role_unique") ||
@@ -695,19 +804,31 @@ const registerUser = async (req, res) => {
   }
 };
 
+
 /* =========================================================
    LOGIN USER
 ========================================================= */
-
 const loginUser = async (req, res) => {
   try {
     const body = req.body || {};
 
-    const phone = body.phone ? normalizeBhutanPhone(body.phone) : null;
+    const phone = body.phone
+      ? normalizeBhutanPhone(body.phone)
+      : null;
 
-    const email = body.email ? normalizeEmail(body.email) : null;
+    const email = body.email
+      ? normalizeEmail(body.email)
+      : null;
 
-    const requestedRole = body.role ? normalizeRole(body.role) : null;
+    /*
+     * Role is optional.
+     *
+     * Current applications may send role or may not send role.
+     * The backend selects the account using identifier + password.
+     */
+    const requestedRole = body.role
+      ? normalizeRole(body.role)
+      : null;
 
     const password =
       body.password !== null && body.password !== undefined
@@ -715,7 +836,11 @@ const loginUser = async (req, res) => {
         : null;
 
     if (!password) {
-      return errorResponse(res, 400, "Password is required.");
+      return errorResponse(
+        res,
+        400,
+        "Password is required.",
+      );
     }
 
     if (!phone && !email) {
@@ -726,31 +851,26 @@ const loginUser = async (req, res) => {
       );
     }
 
-    /*
-     * Role should be sent because the same phone can now exist
-     * under several roles.
-     */
-    if (!requestedRole) {
-      return errorResponse(res, 400, "Role is required for login.");
-    }
-
     const desktop = truthy(body.desktop);
 
     const deviceId = safeDeviceId(
-      body.device_id ?? body.deviceID ?? body.deviceId ?? body.deviceid ?? null,
+      body.device_id ??
+        body.deviceID ??
+        body.deviceId ??
+        body.deviceid ??
+        null,
     );
+
+    /* =========================================================
+       FIND ALL MATCHING IDENTIFIER ACCOUNTS
+    ========================================================= */
 
     let candidates = [];
 
     if (email) {
-      /*
-       * Email remains globally unique, but role is still checked
-       * to prevent one application from logging into another role.
-       */
       candidates = await prisma.users.findMany({
         where: {
           email,
-          role: requestedRole,
         },
         select: {
           user_id: true,
@@ -765,13 +885,11 @@ const loginUser = async (req, res) => {
         orderBy: {
           user_id: "desc",
         },
-        take: 5,
       });
     } else {
       candidates = await prisma.users.findMany({
         where: {
           phone,
-          role: requestedRole,
         },
         select: {
           user_id: true,
@@ -786,7 +904,6 @@ const loginUser = async (req, res) => {
         orderBy: {
           user_id: "desc",
         },
-        take: 5,
       });
     }
 
@@ -794,16 +911,22 @@ const loginUser = async (req, res) => {
       return errorResponse(
         res,
         404,
-        `No ${requestedRole} account was found with this ${
+        `No account was found with this ${
           email ? "email address" : "phone number"
         }.`,
       );
     }
 
-    let pickedUser = null;
+    /* =========================================================
+       MATCH PASSWORD AGAINST ALL ACCOUNTS
+    ========================================================= */
+
+    let passwordMatchedUsers = [];
 
     for (const candidate of candidates) {
-      if (!candidate?.password_hash) continue;
+      if (!candidate?.password_hash) {
+        continue;
+      }
 
       const passwordMatches = await bcrypt.compare(
         password,
@@ -811,14 +934,50 @@ const loginUser = async (req, res) => {
       );
 
       if (passwordMatches) {
-        pickedUser = candidate;
-        break;
+        passwordMatchedUsers.push(candidate);
       }
     }
 
-    if (!pickedUser) {
-      return errorResponse(res, 401, "Incorrect password. Please try again.");
+    if (passwordMatchedUsers.length === 0) {
+      return errorResponse(
+        res,
+        401,
+        "Incorrect password. Please try again.",
+      );
     }
+
+    /*
+     * Older accounts may already have identical passwords.
+     * When role is supplied, use it to resolve that ambiguity.
+     */
+    if (
+      passwordMatchedUsers.length > 1 &&
+      requestedRole
+    ) {
+      const matchingRequestedRole =
+        passwordMatchedUsers.filter(
+          (candidate) =>
+            normalizeRole(candidate.role) === requestedRole,
+        );
+
+      if (matchingRequestedRole.length === 1) {
+        passwordMatchedUsers = matchingRequestedRole;
+      }
+    }
+
+    if (passwordMatchedUsers.length > 1) {
+      return errorResponse(
+        res,
+        409,
+        "Multiple accounts use the same login credentials. Please reset the password for one of these accounts.",
+      );
+    }
+
+    const pickedUser = passwordMatchedUsers[0];
+
+    /* =========================================================
+       LOAD SELECTED ACCOUNT
+    ========================================================= */
 
     const user = await prisma.users.findUnique({
       where: {
@@ -853,9 +1012,10 @@ const loginUser = async (req, res) => {
       );
     }
 
-    /*
-     * Drivers cannot log in until approval_status is approved.
-     */
+    /* =========================================================
+       DRIVER APPROVAL CHECK
+    ========================================================= */
+
     if (normalizeRole(user.role) === "driver") {
       const driverRecord = await prisma.drivers.findFirst({
         where: {
@@ -887,14 +1047,21 @@ const loginUser = async (req, res) => {
     }
 
     const roleLower = normalizeRole(user.role);
+
     const isMerchant = roleLower === "merchant";
     const isFinance = roleLower === "finance";
     const adminNoDevice = isAdminRole(user.role);
-    const merchantDesktopNoDevice = isMerchant && desktop === true;
-    const financeNoDevice = isFinance && desktop === true;
 
-    // Device conflict check - skip for finance, admin, demo/review accounts,
-    // and logins that don't supply a device_id (device_id is optional)
+    const merchantDesktopNoDevice =
+      isMerchant && desktop === true;
+
+    const financeNoDevice =
+      isFinance && desktop === true;
+
+    /* =========================================================
+       DEVICE CONFLICT CHECK
+    ========================================================= */
+
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
@@ -903,20 +1070,25 @@ const loginUser = async (req, res) => {
       user.is_verified === true &&
       deviceId
     ) {
-      const deviceRecord = await prisma.all_device_ids.findUnique({
-        where: {
-          user_id: user.user_id,
-        },
-        select: {
-          device_id: true,
-        },
-      });
+      const deviceRecord =
+        await prisma.all_device_ids.findUnique({
+          where: {
+            user_id: user.user_id,
+          },
+          select: {
+            device_id: true,
+          },
+        });
 
-      const databaseDeviceId = deviceRecord?.device_id
-        ? String(deviceRecord.device_id)
-        : null;
+      const databaseDeviceId =
+        deviceRecord?.device_id
+          ? String(deviceRecord.device_id)
+          : null;
 
-      if (!databaseDeviceId || databaseDeviceId !== deviceId) {
+      if (
+        !databaseDeviceId ||
+        databaseDeviceId !== deviceId
+      ) {
         return errorResponse(
           res,
           409,
@@ -924,6 +1096,10 @@ const loginUser = async (req, res) => {
         );
       }
     }
+
+    /* =========================================================
+       SAVE OR UPDATE DEVICE
+    ========================================================= */
 
     if (
       !adminNoDevice &&
@@ -954,6 +1130,10 @@ const loginUser = async (req, res) => {
       }
     }
 
+    /* =========================================================
+       UPDATE LOGIN STATUS
+    ========================================================= */
+
     try {
       await prisma.users.update({
         where: {
@@ -973,6 +1153,10 @@ const loginUser = async (req, res) => {
       );
     }
 
+    /* =========================================================
+       LOAD MERCHANT DETAILS
+    ========================================================= */
+
     let ownerType = null;
     let businessId = null;
     let businessName = null;
@@ -981,34 +1165,41 @@ const loginUser = async (req, res) => {
 
     if (isMerchant) {
       try {
-        const business = await prisma.merchant_business_details.findFirst({
-          where: {
-            user_id: user.user_id,
-          },
-          orderBy: [
-            {
-              created_at: "desc",
+        const business =
+          await prisma.merchant_business_details.findFirst({
+            where: {
+              user_id: user.user_id,
             },
-            {
-              business_id: "desc",
+            orderBy: [
+              {
+                created_at: "desc",
+              },
+              {
+                business_id: "desc",
+              },
+            ],
+            select: {
+              business_id: true,
+              business_name: true,
+              owner_type: true,
+              business_logo: true,
+              address: true,
             },
-          ],
-          select: {
-            business_id: true,
-            business_name: true,
-            owner_type: true,
-            business_logo: true,
-            address: true,
-          },
-        });
+          });
 
         if (business) {
           ownerType = business.owner_type ?? null;
+
           businessId = business.business_id
             ? toNumber(business.business_id)
             : null;
-          businessName = business.business_name ?? null;
-          businessLogo = business.business_logo ?? null;
+
+          businessName =
+            business.business_name ?? null;
+
+          businessLogo =
+            business.business_logo ?? null;
+
           address = business.address ?? null;
         }
       } catch (businessError) {
@@ -1017,6 +1208,22 @@ const loginUser = async (req, res) => {
           businessError?.message || businessError,
         );
       }
+    }
+
+    /* =========================================================
+       TOKEN VALIDATION AND CREATION
+    ========================================================= */
+
+    if (!process.env.ACCESS_TOKEN_SECRET) {
+      throw new Error(
+        "ACCESS_TOKEN_SECRET is not configured.",
+      );
+    }
+
+    if (!process.env.REFRESH_TOKEN_SECRET) {
+      throw new Error(
+        "REFRESH_TOKEN_SECRET is not configured.",
+      );
     }
 
     const tokenPayload = {
@@ -1042,6 +1249,10 @@ const loginUser = async (req, res) => {
       },
     );
 
+    /* =========================================================
+       RESPONSE
+    ========================================================= */
+
     const userResponse = {
       user_id: toNumber(user.user_id),
       user_name: user.user_name,
@@ -1057,13 +1268,19 @@ const loginUser = async (req, res) => {
       userResponse.business_name = businessName;
       userResponse.business_logo = businessLogo;
       userResponse.address = address;
+
       userResponse.device_id =
-        adminNoDevice || merchantDesktopNoDevice ? null : deviceId;
+        adminNoDevice || merchantDesktopNoDevice
+          ? null
+          : deviceId;
     } else if (isFinance) {
       userResponse.device_id =
-        adminNoDevice || financeNoDevice ? null : deviceId;
+        adminNoDevice || financeNoDevice
+          ? null
+          : deviceId;
     } else {
-      userResponse.device_id = adminNoDevice ? null : deviceId;
+      userResponse.device_id =
+        adminNoDevice ? null : deviceId;
     }
 
     return res.status(200).json({
@@ -1087,6 +1304,7 @@ const loginUser = async (req, res) => {
     );
   }
 };
+
 
 /* =========================================================
    LOGOUT USER
