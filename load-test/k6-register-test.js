@@ -67,5 +67,13 @@ export default function () {
     "not rate limited": (r) => r.status !== 429,
   });
 
+  // Sample ~10% of failures so we can see *why* requests are failing
+  // (timeout/status 0, 500, 409, etc.) without flooding the terminal.
+  if (res.status !== 201 && Math.random() < 0.1) {
+    console.log(
+      `FAIL status=${res.status} duration=${Math.round(res.timings.duration)}ms body=${String(res.body).slice(0, 200)}`,
+    );
+  }
+
   sleep(1);
 }
