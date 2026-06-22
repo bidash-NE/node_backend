@@ -158,6 +158,14 @@ const registerUser = async (req, res) => {
     const normalizedPhone = normalizeBhutanPhone(user.phone);
     const normalizedEmail = normalizeEmail(user.email);
     const normalizedRole = normalizeRole(user.role);
+
+    const normalizedCid =
+      user.cid !== null &&
+      user.cid !== undefined &&
+      String(user.cid).trim() !== ""
+        ? String(user.cid).trim()
+        : null;
+
     const userName =
       user.user_name !== null && user.user_name !== undefined
         ? String(user.user_name).trim()
@@ -167,6 +175,10 @@ const registerUser = async (req, res) => {
       user.password !== null && user.password !== undefined
         ? String(user.password)
         : "";
+
+    /* =========================================================
+       BASIC VALIDATION
+    ========================================================= */
 
     if (!userName) {
       return errorResponse(res, 400, "User name is required.");
@@ -196,6 +208,14 @@ const registerUser = async (req, res) => {
       );
     }
 
+    /*
+     * CID remains optional for roles that do not require it.
+     * When supplied, it must contain exactly 11 digits.
+     */
+    if (normalizedCid && !/^\d{11}$/.test(normalizedCid)) {
+      return errorResponse(res, 400, "CID must contain exactly 11 digits.");
+    }
+
     const deviceID = safeDeviceId(
       driver?.device_id ??
         body.device_id ??
@@ -217,11 +237,10 @@ const registerUser = async (req, res) => {
       return errorResponse(res, 400, "Device ID is required for registration.");
     }
 
-    /*
-     * Validate driver data before opening the database transaction.
-     * This avoids creating or hashing unnecessary data when required
-     * driver information is missing.
-     */
+    /* =========================================================
+       DRIVER VALIDATION
+    ========================================================= */
+
     if (normalizedRole === "driver") {
       const coordinates = driver?.current_location?.coordinates;
 
@@ -279,15 +298,13 @@ const registerUser = async (req, res) => {
       }
     }
 
+    /* =========================================================
+       DATABASE TRANSACTION
+    ========================================================= */
+
     await prisma.$transaction(async (prismaTx) => {
       /*
-       * Explicitly check the composite unique combination.
-       *
-       * Same phone + different role:
-       * Allowed.
-       *
-       * Same phone + same role:
-       * Rejected.
+       * Phone is unique by phone + role.
        */
       const existingPhoneRoleAccount = await prismaTx.users.findFirst({
         where: {
@@ -303,31 +320,63 @@ const registerUser = async (req, res) => {
 
       if (existingPhoneRoleAccount) {
         const duplicateError = new Error("phone_role_already_exists");
+
         duplicateError.registrationRole = normalizedRole;
+
         throw duplicateError;
       }
 
       /*
-       * Email is still globally unique in the current database schema.
+       * Email is unique by email + role.
        *
-       * Therefore, the same email cannot currently be used for another
-       * role unless the email constraint is also changed to composite
-       * uniqueness.
+       * The same email can therefore be used for different roles,
+       * but only once within the same role.
        */
-      const existingEmailAccount = await prismaTx.users.findUnique({
+      const existingEmailRoleAccount = await prismaTx.users.findFirst({
         where: {
           email: normalizedEmail,
+          role: normalizedRole,
         },
         select: {
           user_id: true,
+          email: true,
           role: true,
         },
       });
 
-      if (existingEmailAccount) {
-        const duplicateEmailError = new Error("email_already_exists");
-        duplicateEmailError.existingRole = existingEmailAccount.role;
+      if (existingEmailRoleAccount) {
+        const duplicateEmailError = new Error("email_role_already_exists");
+
+        duplicateEmailError.registrationRole = normalizedRole;
+
         throw duplicateEmailError;
+      }
+
+      /*
+       * CID is unique by CID + role.
+       *
+       * CID is checked only when supplied.
+       */
+      if (normalizedCid) {
+        const existingCidRoleAccount = await prismaTx.users.findFirst({
+          where: {
+            cid: normalizedCid,
+            role: normalizedRole,
+          },
+          select: {
+            user_id: true,
+            cid: true,
+            role: true,
+          },
+        });
+
+        if (existingCidRoleAccount) {
+          const duplicateCidError = new Error("cid_role_already_exists");
+
+          duplicateCidError.registrationRole = normalizedRole;
+
+          throw duplicateCidError;
+        }
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -337,6 +386,7 @@ const registerUser = async (req, res) => {
           user_name: userName,
           email: normalizedEmail,
           phone: normalizedPhone,
+          cid: normalizedCid,
           password_hash: hashedPassword,
           is_verified: false,
           is_active: true,
@@ -345,6 +395,10 @@ const registerUser = async (req, res) => {
       });
 
       userId = toNumber(newUser.user_id);
+
+      /* =========================================================
+         DEVICE REGISTRATION
+      ========================================================= */
 
       if (requiresDevice) {
         if (normalizedRole === "driver") {
@@ -366,16 +420,19 @@ const registerUser = async (req, res) => {
         }
       }
 
+      /* =========================================================
+         DRIVER RECORDS
+      ========================================================= */
+
       if (normalizedRole === "driver") {
         const longitude = Number(driver.current_location.coordinates[0]);
+
         const latitude = Number(driver.current_location.coordinates[1]);
+
         const licenseExpiry = new Date(driver.license_expiry);
+
         const vehicleCapacity = Number(vehicle.capacity);
 
-        /*
-         * current_location is an unsupported Prisma POINT field.
-         * Raw SQL is used to preserve SRID 4326.
-         */
         await prismaTx.$executeRaw`
           INSERT INTO drivers (
             user_id,
@@ -443,19 +500,27 @@ const registerUser = async (req, res) => {
         await prismaTx.driver_vehicles.create({
           data: {
             driver_id: newDriver.driver_id,
+
             make: vehicle.make ? String(vehicle.make).trim() : null,
+
             model: vehicle.model ? String(vehicle.model).trim() : null,
+
             year:
               vehicle.year !== null && vehicle.year !== undefined
                 ? Number(vehicle.year)
                 : null,
+
             color: vehicle.color ? String(vehicle.color).trim() : null,
+
             license_plate: vehicle.license_plate
               ? String(vehicle.license_plate).trim()
               : null,
+
             vehicle_type: String(vehicle.vehicle_type).trim(),
+
             actual_capacity: vehicleCapacity,
             available_capacity: vehicleCapacity,
+
             features: (() => {
               const features = vehicle.features;
 
@@ -473,14 +538,20 @@ const registerUser = async (req, res) => {
 
               return String(features);
             })(),
+
             insurance_expiry: vehicle.insurance_expiry
               ? new Date(vehicle.insurance_expiry)
               : null,
+
             code: vehicle.code ? String(vehicle.code).trim() : null,
           },
         });
       }
     });
+
+    /* =========================================================
+       SUCCESS RESPONSE
+    ========================================================= */
 
     let message = "Registration successful.";
 
@@ -504,17 +575,20 @@ const registerUser = async (req, res) => {
       driver_id: driverId,
       phone: normalizedPhone,
       email: normalizedEmail,
+      cid: normalizedCid,
       role: normalizedRole,
     });
   } catch (err) {
     console.error("Registration error:", err?.message || err);
+
     console.error("Registration error code:", err?.code || null);
+
     console.error("Registration error metadata:", err?.meta || null);
 
-    /*
-     * User-friendly duplicate phone-and-role response from
-     * the explicit pre-registration check.
-     */
+    /* =========================================================
+       EXPLICIT DUPLICATE CHECK RESPONSES
+    ========================================================= */
+
     if (err?.message === "phone_role_already_exists") {
       return errorResponse(
         res,
@@ -525,28 +599,46 @@ const registerUser = async (req, res) => {
       );
     }
 
-    if (err?.message === "email_already_exists") {
+    if (err?.message === "email_role_already_exists") {
       return errorResponse(
         res,
         409,
-        "This email address is already registered. Please use a different email address or login.",
+        `This email address is already registered for the ${
+          err.registrationRole || "selected"
+        } role. Please login instead.`,
       );
     }
 
-    /*
-     * P2002 remains necessary because two registration requests
-     * could pass the explicit lookup at nearly the same time.
-     *
-     * The database composite unique index provides the final
-     * protection against duplicate phone-and-role accounts.
-     */
+    if (err?.message === "cid_role_already_exists") {
+      return errorResponse(
+        res,
+        409,
+        `This CID number is already registered for the ${
+          err.registrationRole || "selected"
+        } role. Please login instead.`,
+      );
+    }
+
+    /* =========================================================
+       PRISMA UNIQUE CONSTRAINT RESPONSES
+    ========================================================= */
+
     if (err?.code === "P2002") {
       const target = getPrismaConstraintTarget(err);
+
       const requestedRole = normalizeRole(req.body?.user?.role) || "selected";
 
       const isPhoneRoleConstraint =
         target.includes("users_phone_role_unique") ||
         (target.includes("phone") && target.includes("role"));
+
+      const isEmailRoleConstraint =
+        target.includes("users_email_role_unique") ||
+        (target.includes("email") && target.includes("role"));
+
+      const isCidRoleConstraint =
+        target.includes("users_cid_role_unique") ||
+        (target.includes("cid") && target.includes("role"));
 
       if (isPhoneRoleConstraint) {
         return errorResponse(
@@ -556,19 +648,19 @@ const registerUser = async (req, res) => {
         );
       }
 
-      if (target.includes("email")) {
+      if (isEmailRoleConstraint) {
         return errorResponse(
           res,
           409,
-          "This email address is already registered. Please use a different email address or login.",
+          `This email address is already registered for the ${requestedRole} role. Please login instead.`,
         );
       }
 
-      if (target.includes("cid")) {
+      if (isCidRoleConstraint) {
         return errorResponse(
           res,
           409,
-          "This CID number is already registered.",
+          `This CID number is already registered for the ${requestedRole} role. Please login instead.`,
         );
       }
 

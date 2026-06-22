@@ -1781,7 +1781,7 @@ model users {
   is_verified               Boolean?                    @default(false)
   is_active                 Boolean?                    @default(true)
   last_login                DateTime?                   @db.Timestamp(0)
-  cid                       String?                     @unique(map: "cid") @db.VarChar(11)
+  cid                       String?                     @db.VarChar(11)
   tier                      String?                     @default("bronze") @db.VarChar(50)
   segment                   String?                     @default("regular") @db.VarChar(50)
   admin_logs                admin_logs[]
@@ -1810,6 +1810,7 @@ model users {
 
   @@unique([email, role], map: "users_email_role_unique")
   @@unique([phone, role], map: "users_phone_role_unique")
+  @@unique([cid, role], map: "users_cid_role_unique")
   @@index([is_active], map: "is_active")
   @@index([role], map: "role")
 }

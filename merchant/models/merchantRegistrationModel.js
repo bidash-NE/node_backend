@@ -386,9 +386,10 @@ async function registerMerchantModel(data) {
    * CID remains globally unique because the current database
    * has a global unique index on cid.
    */
-  const existingCid = await prisma.users.findFirst({
+  const existingCidRole = await prisma.users.findFirst({
     where: {
       cid: normalizedCid,
+      role: normalizedRole,
     },
     select: {
       user_id: true,
@@ -396,6 +397,12 @@ async function registerMerchantModel(data) {
       role: true,
     },
   });
+
+  if (existingCidRole) {
+    throw new Error(
+      "This CID number is already registered for the merchant role. Please login instead.",
+    );
+  }
 
   if (existingCid) {
     throw new Error("This CID number is already registered.");
@@ -483,6 +490,10 @@ async function registerMerchantModel(data) {
           target.includes("users_email_role_unique") ||
           (target.includes("email") && target.includes("role"));
 
+        const duplicateCidRole =
+          target.includes("users_cid_role_unique") ||
+          (target.includes("cid") && target.includes("role"));
+
         if (duplicatePhoneRole) {
           throw new Error(
             "This phone number is already registered for the merchant role. Please login instead.",
@@ -495,8 +506,10 @@ async function registerMerchantModel(data) {
           );
         }
 
-        if (target.includes("cid")) {
-          throw new Error("This CID number is already registered.");
+        if (duplicateCidRole) {
+          throw new Error(
+            "This CID number is already registered for the merchant role. Please login instead.",
+          );
         }
 
         throw new Error(
