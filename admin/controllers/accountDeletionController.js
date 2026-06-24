@@ -1,6 +1,9 @@
 const model = require("../models/accountDeletionModel");
 
 // POST /api/user/account-deletion
+// Self-service: deletes the account and wallet data immediately. No admin
+// review gate — App Store guideline 5.1.1(v) only permits requiring customer
+// service to complete deletion for highly-regulated industries.
 exports.submitRequest = async (req, res) => {
   const user_id = req.user?.user_id || req.user?.id;
   if (!user_id) {
@@ -8,25 +11,16 @@ exports.submitRequest = async (req, res) => {
   }
 
   try {
-    const existing = await model.findPendingByUser(user_id);
-    if (existing) {
-      return res.status(400).json({
-        success: false,
-        error: "You already have a pending deletion request.",
-      });
-    }
-
     const reason = req.body?.reason?.trim()?.slice(0, 1000) || null;
-    const record = await model.createRequest(user_id, reason);
+    const result = await model.selfDeleteAccount(user_id, reason);
 
-    return res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message:
-        "Your account deletion request has been submitted. An admin will review it within 7 business days.",
+      message: "Your account and all associated data have been permanently deleted.",
       data: {
-        request_id: Number(record.request_id),
-        status: record.status,
-        requested_at: record.requested_at,
+        request_id: result.request_id,
+        deleted_user_id: result.user_id,
+        resolved_at: new Date().toISOString(),
       },
     });
   } catch (err) {

@@ -1,23 +1,5 @@
 const { prisma } = require("../lib/prisma.js");
 
-async function findPendingByUser(user_id) {
-  return prisma.account_deletion_requests.findFirst({
-    where: { user_id: Number(user_id), status: "pending" },
-    select: { request_id: true, status: true, requested_at: true },
-  });
-}
-
-async function createRequest(user_id, reason) {
-  return prisma.account_deletion_requests.create({
-    data: {
-      user_id: Number(user_id),
-      reason: reason || null,
-      status: "pending",
-    },
-    select: { request_id: true, status: true, requested_at: true },
-  });
-}
-
 async function getLatestByUser(user_id) {
   return prisma.account_deletion_requests.findFirst({
     where: { user_id: Number(user_id) },
@@ -84,13 +66,9 @@ async function findRequestById(request_id) {
   });
 }
 
-async function approveAndDeleteUser(request_id, resolved_by) {
-  const req = await findRequestById(request_id);
-  if (!req) return { notFound: true };
-  if (req.status !== "pending") return { alreadyResolved: true };
-
-  const uid = Number(req.user_id);
-
+// Wipes wallet data and anonymizes admin_logs for a user. Does not delete the
+// user row itself — callers delete it after recording the resolved request.
+async function cleanupUserData(uid) {
   // Get wallet_id before deleting anything
   const wallet = await prisma.wallets.findUnique({
     where: { user_id: uid },
@@ -113,6 +91,16 @@ async function approveAndDeleteUser(request_id, resolved_by) {
     });
   }
   await prisma.wallets.deleteMany({ where: { user_id: uid } });
+}
+
+async function approveAndDeleteUser(request_id, resolved_by) {
+  const req = await findRequestById(request_id);
+  if (!req) return { notFound: true };
+  if (req.status !== "pending") return { alreadyResolved: true };
+
+  const uid = Number(req.user_id);
+
+  await cleanupUserData(uid);
 
   // Mark approved before deleting user — the FK is SetNull, so after user deletion
   // user_id becomes NULL automatically, but status/resolved_at are preserved.
@@ -129,6 +117,30 @@ async function approveAndDeleteUser(request_id, resolved_by) {
   await prisma.users.delete({ where: { user_id: uid } });
 
   return { deleted: true, user_id: uid };
+}
+
+// Self-service deletion: the user is both requester and approver. Deletes the
+// account immediately (no admin review) — App Store 5.1.1(v) only allows a
+// customer-service gate for highly-regulated industries, which TabDey is not.
+// The account_deletion_requests row is kept as an audit trail of who/when.
+async function selfDeleteAccount(user_id, reason) {
+  const uid = Number(user_id);
+
+  const record = await prisma.account_deletion_requests.create({
+    data: { user_id: uid, reason: reason || null, status: "pending" },
+    select: { request_id: true },
+  });
+
+  await cleanupUserData(uid);
+
+  await prisma.account_deletion_requests.update({
+    where: { request_id: record.request_id },
+    data: { status: "approved", resolved_at: new Date(), resolved_by: null },
+  });
+
+  await prisma.users.delete({ where: { user_id: uid } });
+
+  return { deleted: true, user_id: uid, request_id: Number(record.request_id) };
 }
 
 async function rejectRequest(request_id, resolved_by, reject_note) {
@@ -156,10 +168,9 @@ async function rejectRequest(request_id, resolved_by, reject_note) {
 }
 
 module.exports = {
-  findPendingByUser,
-  createRequest,
   getLatestByUser,
   listRequests,
   approveAndDeleteUser,
+  selfDeleteAccount,
   rejectRequest,
 };
