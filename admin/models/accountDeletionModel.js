@@ -66,31 +66,16 @@ async function findRequestById(request_id) {
   });
 }
 
-// Wipes wallet data and anonymizes admin_logs for a user. Does not delete the
-// user row itself — callers delete it after recording the resolved request.
+// admin_logs has a real FK to users with no cascade, so it must be detached
+// before the user row can be deleted. Wallet tables (wallets, wallet_ledger,
+// wallet_holds, wallet_transaction_logs, wallet_transactions) have no FK to
+// users in the schema — they're intentionally left untouched so financial
+// records survive account deletion.
 async function cleanupUserData(uid) {
-  // Get wallet_id before deleting anything
-  const wallet = await prisma.wallets.findUnique({
-    where: { user_id: uid },
-    select: { wallet_id: true },
-  });
-
-  // Preserve audit trail: null-out user_id in admin_logs rather than deleting rows
   await prisma.admin_logs.updateMany({
     where: { user_id: uid },
     data: { user_id: null },
   });
-
-  // Wallet data (no cascade from users table)
-  await prisma.wallet_transaction_logs.deleteMany({ where: { user_id: uid } });
-  await prisma.wallet_ledger.deleteMany({ where: { user_id: uid } });
-  await prisma.wallet_holds.deleteMany({ where: { user_id: uid } });
-  if (wallet?.wallet_id) {
-    await prisma.wallet_transactions.deleteMany({
-      where: { OR: [{ tnx_from: wallet.wallet_id }, { tnx_to: wallet.wallet_id }] },
-    });
-  }
-  await prisma.wallets.deleteMany({ where: { user_id: uid } });
 }
 
 async function approveAndDeleteUser(request_id, resolved_by) {
@@ -119,28 +104,17 @@ async function approveAndDeleteUser(request_id, resolved_by) {
   return { deleted: true, user_id: uid };
 }
 
-// Self-service deletion: the user is both requester and approver. Deletes the
-// account immediately (no admin review) — App Store 5.1.1(v) only allows a
-// customer-service gate for highly-regulated industries, which TabDey is not.
-// The account_deletion_requests row is kept as an audit trail of who/when.
-async function selfDeleteAccount(user_id, reason) {
+// Self-service deletion: an authenticated user deletes their own row from
+// users by their own user_id (taken from their access token). Immediate, no
+// admin review — App Store 5.1.1(v) only allows a customer-service gate for
+// highly-regulated industries, which TabDey is not.
+async function selfDeleteAccount(user_id) {
   const uid = Number(user_id);
 
-  const record = await prisma.account_deletion_requests.create({
-    data: { user_id: uid, reason: reason || null, status: "pending" },
-    select: { request_id: true },
-  });
-
   await cleanupUserData(uid);
-
-  await prisma.account_deletion_requests.update({
-    where: { request_id: record.request_id },
-    data: { status: "approved", resolved_at: new Date(), resolved_by: null },
-  });
-
   await prisma.users.delete({ where: { user_id: uid } });
 
-  return { deleted: true, user_id: uid, request_id: Number(record.request_id) };
+  return { deleted: true, user_id: uid };
 }
 
 async function rejectRequest(request_id, resolved_by, reject_note) {

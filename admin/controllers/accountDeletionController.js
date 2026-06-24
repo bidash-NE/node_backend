@@ -1,9 +1,10 @@
 const model = require("../models/accountDeletionModel");
 
 // POST /api/user/account-deletion
-// Self-service: deletes the account and wallet data immediately. No admin
-// review gate — App Store guideline 5.1.1(v) only permits requiring customer
-// service to complete deletion for highly-regulated industries.
+// Self-service: deletes the caller's own users row by their own user_id
+// (from their access token), immediately. No admin review gate — App Store
+// guideline 5.1.1(v) only permits requiring customer service to complete
+// deletion for highly-regulated industries.
 exports.submitRequest = async (req, res) => {
   const user_id = req.user?.user_id || req.user?.id;
   if (!user_id) {
@@ -11,14 +12,12 @@ exports.submitRequest = async (req, res) => {
   }
 
   try {
-    const reason = req.body?.reason?.trim()?.slice(0, 1000) || null;
-    const result = await model.selfDeleteAccount(user_id, reason);
+    const result = await model.selfDeleteAccount(user_id);
 
     return res.status(200).json({
       success: true,
-      message: "Your account and all associated data have been permanently deleted.",
+      message: "Your account has been permanently deleted.",
       data: {
-        request_id: result.request_id,
         deleted_user_id: result.user_id,
         resolved_at: new Date().toISOString(),
       },
