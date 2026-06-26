@@ -12,12 +12,9 @@ const {
   listMartOwnersWithCelebration,
 } = require("../controllers/merchantRegistrationController");
 
-// TEMP LOAD-TEST BYPASS (2026-06-22): default raised to effectively
-// unlimited for 1000-user capacity testing. REVERT to 7 before any
-// production deploy.
 let rateLimiter = rateLimit({
   windowMs: 2 * 60 * 1000,
-  max: Number(process.env.MERCHANT_AUTH_RATE_LIMIT_MAX || 1000000),
+  max: 7,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {

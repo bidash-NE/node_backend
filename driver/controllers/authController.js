@@ -1,3 +1,4 @@
+const UserModel = require("../models/userModel");
 const OtpModel = require("../models/otpModel");
 const EmailService = require("../services/emailService");
 
@@ -9,29 +10,21 @@ const normalizeEmail = (email) =>
 const isValidEmail = (email) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
-/* =========================================================
-   SEND REGISTRATION EMAIL OTP
-
-   OTP is sent regardless of whether the email already exists.
-   Duplicate-account validation is handled during registration.
-========================================================= */
-
+// ✅ Registration (Email) - TàbDey format
 exports.sendOtp = async (req, res) => {
   try {
     const emailRaw = req.body?.email;
 
     if (!emailRaw) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is required",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Email is required" });
     }
 
     if (!isValidEmail(emailRaw)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid email address",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address" });
     }
 
     if (!EmailService.isConfigured()) {
@@ -44,25 +37,23 @@ exports.sendOtp = async (req, res) => {
     const cleanEmail = normalizeEmail(emailRaw);
     const otp = OtpModel.generateOtp();
 
-    /*
-     * Do not check whether the email is already registered.
-     *
-     * The OTP endpoint only verifies ownership of the email.
-     * Registration will later decide whether the account can
-     * be created.
-     */
+    // Check if email already registered using UserModel
+    const existingUser = await UserModel.findUserByEmail(cleanEmail);
 
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered. OTP not sent.",
+      });
+    }
+
+    // Store OTP in Redis using OtpModel
     await OtpModel.storeOtp(cleanEmail, otp, 300);
 
+    // Send email using EmailService
     const info = await EmailService.sendRegistrationOtp(cleanEmail, otp);
 
     if (!info?.accepted || info.accepted.length === 0) {
-      /*
-       * Remove the stored OTP when SMTP does not accept
-       * the recipient.
-       */
-      await OtpModel.deleteOtp(cleanEmail);
-
       return res.status(500).json({
         success: false,
         message: "SMTP did not accept recipient",
@@ -75,7 +66,6 @@ exports.sendOtp = async (req, res) => {
     });
   } catch (err) {
     console.error("Send OTP error:", err);
-
     return res.status(500).json({
       success: false,
       message: "Failed to send OTP",
@@ -83,10 +73,6 @@ exports.sendOtp = async (req, res) => {
     });
   }
 };
-
-/* =========================================================
-   VERIFY REGISTRATION EMAIL OTP
-========================================================= */
 
 exports.verifyOtp = async (req, res) => {
   try {
@@ -101,16 +87,15 @@ exports.verifyOtp = async (req, res) => {
     }
 
     if (!isValidEmail(emailRaw)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid email address",
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid email address" });
     }
 
     const cleanEmail = normalizeEmail(emailRaw);
-
     const otp = String(otpRaw).trim();
 
+    // Get stored OTP using OtpModel
     const storedOtp = await OtpModel.getOtp(cleanEmail);
 
     if (!storedOtp) {
@@ -127,8 +112,8 @@ exports.verifyOtp = async (req, res) => {
       });
     }
 
+    // Store verified flag and delete OTP using OtpModel
     await OtpModel.storeVerifiedFlag(cleanEmail, 900);
-
     await OtpModel.deleteOtp(cleanEmail);
 
     return res.status(200).json({
@@ -137,7 +122,6 @@ exports.verifyOtp = async (req, res) => {
     });
   } catch (err) {
     console.error("Verify OTP error:", err);
-
     return res.status(500).json({
       success: false,
       message: "OTP verification failed",

@@ -1,5 +1,4 @@
 // controllers/smsOtpController.js
-
 const { prisma } = require("../lib/prisma.js");
 const redis = require("../models/redisClient");
 const jwt = require("jsonwebtoken");
@@ -14,7 +13,6 @@ function toNumber(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "bigint") return Number(value);
   if (typeof value === "number") return value;
-
   return Number(value);
 }
 
@@ -29,23 +27,15 @@ function normalizePhone(input) {
   const raw = String(input || "").trim();
   const digits = raw.replace(/[^\d]/g, "");
 
-  if (digits.length === 8) {
-    return `975${digits}`;
-  }
-
-  if (digits.length === 11 && digits.startsWith("975")) {
-    return digits;
-  }
+  if (digits.length === 8) return `975${digits}`;
+  if (digits.length === 11 && digits.startsWith("975")) return digits;
 
   return null;
 }
 
 function normalizePhoneForDbVariants(input) {
   const phone = normalizePhone(input);
-
-  if (!phone) {
-    return [];
-  }
+  if (!phone) return [];
 
   return Array.from(new Set([phone, `+${phone}`]));
 }
@@ -54,13 +44,11 @@ function normalizeEmail(input) {
   const email = String(input || "")
     .trim()
     .toLowerCase();
-
   return email || null;
 }
 
 function safeDeviceId(input) {
   const deviceId = String(input || "").trim();
-
   return deviceId || null;
 }
 
@@ -69,28 +57,18 @@ function makeOtp() {
 }
 
 function maskPhone(phone) {
-  const value = String(phone || "");
-
-  if (value.length <= 4) {
-    return value;
-  }
-
-  return `${value.slice(0, 3)}****${value.slice(-4)}`;
+  const s = String(phone || "");
+  if (s.length <= 4) return s;
+  return `${s.slice(0, 3)}****${s.slice(-4)}`;
 }
 
 function truthy(value) {
   if (value === true) return true;
   if (value === false) return false;
-  if (value === null || value === undefined) return false;
+  if (value == null) return false;
 
-  const normalized = String(value).trim().toLowerCase();
-
-  return (
-    normalized === "true" ||
-    normalized === "1" ||
-    normalized === "yes" ||
-    normalized === "y"
-  );
+  const s = String(value).trim().toLowerCase();
+  return s === "true" || s === "1" || s === "yes" || s === "y";
 }
 
 function isOne(value) {
@@ -102,69 +80,56 @@ function isZero(value) {
 }
 
 function isAdminRole(role) {
-  const normalizedRole = String(role || "")
+  const r = String(role || "")
     .toLowerCase()
     .trim();
 
   return (
-    normalizedRole === "admin" ||
-    normalizedRole === "super admin" ||
-    normalizedRole === "super_admin" ||
-    normalizedRole === "superadmin" ||
-    normalizedRole === "finance"
+    r === "admin" ||
+    r === "super admin" ||
+    r === "super_admin" ||
+    r === "superadmin" ||
+    r === "finance"
   );
 }
 
 /* ===================== SMS GATEWAY ===================== */
 
 async function sendViaGateway({ to, text, from }) {
-  if (!SMS_MASTER_KEY) {
-    throw new Error("SMS_MASTER_KEY missing in .env");
-  }
-
-  if (!SMS_URL) {
-    throw new Error("SMS_URL missing in .env");
-  }
-
-  if (!from) {
-    throw new Error("SMS_FROM missing in .env");
-  }
+  if (!SMS_MASTER_KEY) throw new Error("SMS_MASTER_KEY missing in .env");
+  if (!SMS_URL) throw new Error("SMS_URL missing in .env");
+  if (!from) throw new Error("SMS_FROM missing in .env");
 
   console.log("Attempting to send SMS to URL:", SMS_URL);
-
   console.log("Phone number:", to);
 
   try {
-    const response = await fetch(SMS_URL, {
+    const resp = await fetch(SMS_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-api-key": SMS_MASTER_KEY,
       },
-      body: JSON.stringify({
-        to,
-        text,
-        from,
-      }),
+      body: JSON.stringify({ to, text, from }),
       signal: AbortSignal.timeout(10000),
     });
 
-    const responseText = await response.text();
+    const bodyText = await resp.text();
 
-    if (!response.ok) {
-      throw new Error(`SMS gateway error ${response.status}: ${responseText}`);
+    if (!resp.ok) {
+      throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
     }
 
-    return responseText;
-  } catch (error) {
+    return bodyText;
+  } catch (err) {
     console.error("Fetch error details:", {
-      name: error?.name,
-      message: error?.message,
-      cause: error?.cause,
-      code: error?.code,
+      name: err.name,
+      message: err.message,
+      cause: err.cause,
+      code: err.code,
     });
 
-    throw error;
+    throw err;
   }
 }
 
@@ -175,14 +140,7 @@ async function findSingleUserForDeviceChange({ phone, email }) {
 
   if (email) {
     users = await prisma.$queryRaw`
-      SELECT
-        user_id,
-        user_name,
-        phone,
-        email,
-        role,
-        is_active,
-        is_verified
+      SELECT user_id, user_name, phone, email, role, is_active, is_verified
       FROM users
       WHERE LOWER(email) = ${email}
       ORDER BY user_id DESC
@@ -201,9 +159,7 @@ async function findSingleUserForDeviceChange({ phone, email }) {
 
     users = await prisma.users.findMany({
       where: {
-        OR: phoneVariants.map((phoneVariant) => ({
-          phone: phoneVariant,
-        })),
+        OR: phoneVariants.map((p) => ({ phone: p })),
       },
       select: {
         user_id: true,
@@ -214,9 +170,7 @@ async function findSingleUserForDeviceChange({ phone, email }) {
         is_active: true,
         is_verified: true,
       },
-      orderBy: {
-        user_id: "desc",
-      },
+      orderBy: { user_id: "desc" },
       take: 2,
     });
   }
@@ -240,7 +194,6 @@ async function findSingleUserForDeviceChange({ phone, email }) {
   }
 
   const user = users[0];
-
   user.user_id = toNumber(user.user_id);
 
   return {
@@ -261,12 +214,8 @@ async function validateUserCanLogin(user) {
 
   if (user.role === "driver") {
     const driverRecord = await prisma.drivers.findFirst({
-      where: {
-        user_id: user.user_id,
-      },
-      select: {
-        approval_status: true,
-      },
+      where: { user_id: user.user_id },
+      select: { approval_status: true },
     });
 
     const status = driverRecord?.approval_status ?? "pending";
@@ -290,9 +239,7 @@ async function validateUserCanLogin(user) {
     }
   }
 
-  return {
-    ok: true,
-  };
+  return { ok: true };
 }
 
 /* ===================== NORMAL LOGIN RESPONSE BUILDER ===================== */
@@ -303,13 +250,10 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
     .trim();
 
   const isMerchant = roleLower === "merchant";
-
   const isFinance = roleLower === "finance";
 
   const adminNoDevice = isAdminRole(user.role);
-
   const merchantDesktopNoDevice = isMerchant && desktop === true;
-
   const financeNoDevice = isFinance && desktop === true;
 
   let owner_type = null;
@@ -321,17 +265,8 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
   if (isMerchant) {
     try {
       const business = await prisma.merchant_business_details.findFirst({
-        where: {
-          user_id: user.user_id,
-        },
-        orderBy: [
-          {
-            created_at: "desc",
-          },
-          {
-            business_id: "desc",
-          },
-        ],
+        where: { user_id: user.user_id },
+        orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
         select: {
           business_id: true,
           business_name: true,
@@ -343,19 +278,15 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
 
       if (business) {
         owner_type = business.owner_type ?? null;
-
         business_id = business.business_id
           ? toNumber(business.business_id)
           : null;
-
         business_name = business.business_name ?? null;
-
         business_logo = business.business_logo ?? null;
-
         address = business.address ?? null;
       }
-    } catch (error) {
-      console.error("merchant extras fetch failed:", error?.message || error);
+    } catch (e) {
+      console.error("merchant extras fetch failed:", e?.message || e);
     }
   }
 
@@ -385,15 +316,10 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
 
   if (isMerchant) {
     userResponse.owner_type = owner_type;
-
     userResponse.business_id = business_id;
-
     userResponse.business_name = business_name;
-
     userResponse.business_logo = business_logo;
-
     userResponse.address = address;
-
     userResponse.device_id =
       adminNoDevice || merchantDesktopNoDevice ? null : deviceId;
   } else if (isFinance) {
@@ -417,18 +343,9 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
 
 /* ===================== REGISTRATION SMS OTP ===================== */
 
-/*
- * This endpoint intentionally does not check the users table.
- *
- * It sends an OTP regardless of whether the phone is already
- * registered under any role.
- *
- * The registration controller will later validate whether the
- * requested phone and role combination is allowed.
- */
 exports.sendSmsOtp = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body?.phone);
+    const phone = normalizePhone(req.body.phone);
 
     if (!phone) {
       return res.status(400).json({
@@ -437,9 +354,23 @@ exports.sendSmsOtp = async (req, res) => {
       });
     }
 
-    const rateLimitKey = `otp_sms_rl:${phone}`;
+    const existingUser = await prisma.users.findFirst({
+      where: {
+        OR: [{ phone: phone }, { phone: `+${phone}` }],
+      },
+      select: { user_id: true },
+    });
 
-    if (await redis.get(rateLimitKey)) {
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone already registered. OTP not sent.",
+      });
+    }
+
+    const rlKey = `otp_sms_rl:${phone}`;
+
+    if (await redis.get(rlKey)) {
       return res.status(429).json({
         success: false,
         message: "Please wait before requesting another OTP.",
@@ -448,13 +379,8 @@ exports.sendSmsOtp = async (req, res) => {
 
     const otp = makeOtp();
 
-    await redis.set(`otp_sms:${phone}`, otp, {
-      ex: 300,
-    });
-
-    await redis.set(rateLimitKey, "1", {
-      ex: 30,
-    });
+    await redis.set(`otp_sms:${phone}`, otp, { ex: 300 });
+    await redis.set(rlKey, "1", { ex: 30 });
 
     const text =
       `Registration Verification code\n\n` +
@@ -462,7 +388,7 @@ exports.sendSmsOtp = async (req, res) => {
       `This code is valid for 5 minutes.\n` +
       `Do not share this code with anyone.`;
 
-    const gatewayResponse = await sendViaGateway({
+    const gatewayResp = await sendViaGateway({
       to: phone,
       text,
       from: SMS_FROM,
@@ -471,10 +397,10 @@ exports.sendSmsOtp = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "OTP sent via SMS",
-      gateway: gatewayResponse,
+      gateway: gatewayResp,
     });
-  } catch (error) {
-    console.error("SMS OTP send error:", error?.message || error);
+  } catch (err) {
+    console.error("SMS OTP send error:", err.message);
 
     return res.status(500).json({
       success: false,
@@ -485,9 +411,8 @@ exports.sendSmsOtp = async (req, res) => {
 
 exports.verifySmsOtp = async (req, res) => {
   try {
-    const phone = normalizePhone(req.body?.phone);
-
-    const otp = String(req.body?.otp || "").trim();
+    const phone = normalizePhone(req.body.phone);
+    const otp = String(req.body.otp || "").trim();
 
     if (!phone || !otp) {
       return res.status(400).json({
@@ -512,18 +437,15 @@ exports.verifySmsOtp = async (req, res) => {
       });
     }
 
-    await redis.set(`verified_sms:${phone}`, "true", {
-      ex: 900,
-    });
-
+    await redis.set(`verified_sms:${phone}`, "true", { ex: 900 });
     await redis.del(`otp_sms:${phone}`);
 
     return res.status(200).json({
       success: true,
       message: "OTP verified successfully",
     });
-  } catch (error) {
-    console.error("SMS OTP verify error:", error?.message || error);
+  } catch (err) {
+    console.error("SMS OTP verify error:", err.message);
 
     return res.status(500).json({
       success: false,
@@ -539,7 +461,6 @@ exports.changeDeviceOTP = async (req, res) => {
     const body = req.body || {};
 
     const phone = body.phone ? normalizePhone(body.phone) : null;
-
     const email = body.email ? normalizeEmail(body.email) : null;
 
     const deviceId = safeDeviceId(
@@ -580,15 +501,11 @@ exports.changeDeviceOTP = async (req, res) => {
     const roleLower = String(user.role || "")
       .toLowerCase()
       .trim();
-
     const isMerchant = roleLower === "merchant";
-
     const isFinance = roleLower === "finance";
 
     const adminNoDevice = isAdminRole(user.role);
-
     const merchantDesktopNoDevice = isMerchant && desktop === true;
-
     const financeNoDevice = isFinance && desktop === true;
 
     if (adminNoDevice || merchantDesktopNoDevice || financeNoDevice) {
@@ -600,19 +517,15 @@ exports.changeDeviceOTP = async (req, res) => {
     }
 
     const deviceRecord = await prisma.all_device_ids.findUnique({
-      where: {
-        user_id: user.user_id,
-      },
-      select: {
-        device_id: true,
-      },
+      where: { user_id: user.user_id },
+      select: { device_id: true },
     });
 
-    const databaseDeviceId = deviceRecord?.device_id
+    const dbDeviceId = deviceRecord?.device_id
       ? String(deviceRecord.device_id)
       : null;
 
-    if (!databaseDeviceId) {
+    if (!dbDeviceId) {
       return errorResponse(
         res,
         400,
@@ -620,7 +533,7 @@ exports.changeDeviceOTP = async (req, res) => {
       );
     }
 
-    if (databaseDeviceId === deviceId) {
+    if (dbDeviceId === deviceId) {
       return errorResponse(
         res,
         400,
@@ -638,9 +551,9 @@ exports.changeDeviceOTP = async (req, res) => {
       );
     }
 
-    const rateLimitKey = `change_device_otp_rl:${user.user_id}`;
+    const rlKey = `change_device_otp_rl:${user.user_id}`;
 
-    if (await redis.get(rateLimitKey)) {
+    if (await redis.get(rlKey)) {
       return errorResponse(
         res,
         429,
@@ -662,14 +575,10 @@ exports.changeDeviceOTP = async (req, res) => {
     await redis.set(
       `change_device_otp:${user.user_id}`,
       JSON.stringify(pendingPayload),
-      {
-        ex: 300,
-      },
+      { ex: 300 },
     );
 
-    await redis.set(rateLimitKey, "1", {
-      ex: 30,
-    });
+    await redis.set(rlKey, "1", { ex: 30 });
 
     const text =
       `Device Change Verification Code\n\n` +
@@ -678,7 +587,7 @@ exports.changeDeviceOTP = async (req, res) => {
       `This code is valid for 5 minutes.\n` +
       `Do not share this code with anyone.`;
 
-    const gatewayResponse = await sendViaGateway({
+    const gatewayResp = await sendViaGateway({
       to: smsPhone,
       text,
       from: SMS_FROM,
@@ -689,13 +598,11 @@ exports.changeDeviceOTP = async (req, res) => {
       message: "OTP sent via SMS for device verification.",
       phone: maskPhone(smsPhone),
       ...(process.env.NODE_ENV !== "production"
-        ? {
-            gateway: gatewayResponse,
-          }
+        ? { gateway: gatewayResp }
         : {}),
     });
-  } catch (error) {
-    console.error("changeDeviceOTP error:", error?.message || error);
+  } catch (err) {
+    console.error("changeDeviceOTP error:", err.message);
 
     return errorResponse(
       res,
@@ -712,7 +619,6 @@ exports.changeDeviceOTPVerify = async (req, res) => {
     const body = req.body || {};
 
     const phone = body.phone ? normalizePhone(body.phone) : null;
-
     const email = body.email ? normalizeEmail(body.email) : null;
 
     const otp = String(body.otp || "").trim();
@@ -756,9 +662,7 @@ exports.changeDeviceOTPVerify = async (req, res) => {
       return errorResponse(res, eligible.status, eligible.message);
     }
 
-    const pendingKey = `change_device_otp:${user.user_id}`;
-
-    const pendingRaw = await redis.get(pendingKey);
+    const pendingRaw = await redis.get(`change_device_otp:${user.user_id}`);
 
     if (!pendingRaw) {
       return errorResponse(res, 410, "OTP expired. Please request a new OTP.");
@@ -769,14 +673,14 @@ exports.changeDeviceOTPVerify = async (req, res) => {
     try {
       pending =
         typeof pendingRaw === "string" ? JSON.parse(pendingRaw) : pendingRaw;
-    } catch (_parseError) {
-      await redis.del(pendingKey);
+    } catch (e) {
+      await redis.del(`change_device_otp:${user.user_id}`);
 
       return errorResponse(res, 410, "OTP expired. Please request a new OTP.");
     }
 
     if (toNumber(pending.user_id) !== toNumber(user.user_id)) {
-      await redis.del(pendingKey);
+      await redis.del(`change_device_otp:${user.user_id}`);
 
       return errorResponse(
         res,
@@ -797,12 +701,10 @@ exports.changeDeviceOTPVerify = async (req, res) => {
       return errorResponse(res, 401, "Invalid OTP.");
     }
 
-    await redis.del(pendingKey);
+    await redis.del(`change_device_otp:${user.user_id}`);
 
     await prisma.all_device_ids.upsert({
-      where: {
-        user_id: user.user_id,
-      },
+      where: { user_id: user.user_id },
       update: {
         device_id: deviceId,
         last_seen: new Date(),
@@ -815,9 +717,7 @@ exports.changeDeviceOTPVerify = async (req, res) => {
     });
 
     await prisma.users.update({
-      where: {
-        user_id: user.user_id,
-      },
+      where: { user_id: user.user_id },
       data: {
         is_verified: true,
         last_login: new Date(),
@@ -833,8 +733,8 @@ exports.changeDeviceOTPVerify = async (req, res) => {
     });
 
     return res.status(200).json(loginResponse);
-  } catch (error) {
-    console.error("changeDeviceOTPVerify error:", error);
+  } catch (err) {
+    console.error("changeDeviceOTPVerify error:", err);
 
     return errorResponse(
       res,

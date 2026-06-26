@@ -2,10 +2,7 @@ const { prisma } = require("../lib/prisma.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-/* =========================================================
-   COMMON HELPERS
-========================================================= */
-
+// Helper function to convert BigInt safely
 function toNumber(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "bigint") return Number(value);
@@ -13,473 +10,79 @@ function toNumber(value) {
   return value;
 }
 
+// Helper function for consistent error responses
 function errorResponse(res, statusCode, message) {
-  return res.status(statusCode).json({
-    success: false,
-    message,
-  });
+  return res.status(statusCode).json({ success: false, message });
 }
 
-function normalizeBhutanPhone(raw) {
-  if (raw === null || raw === undefined) return null;
-
-  let phone = String(raw)
-    .trim()
-    .replace(/[^\d+]/g, "");
-
-  if (!phone) return null;
-
-  if (phone.startsWith("00")) {
-    phone = `+${phone.slice(2)}`;
-  }
-
-  if (phone.startsWith("+975")) {
-    return phone;
-  }
-
-  if (phone.startsWith("975")) {
-    return `+${phone}`;
-  }
-
-  if (phone.startsWith("+")) {
-    return phone;
-  }
-
-  return `+975${phone}`;
-}
-
-function normalizeEmail(raw) {
-  if (raw === null || raw === undefined) return null;
-
-  const email = String(raw).trim().toLowerCase();
-
-  return email || null;
-}
-
-function normalizeRole(raw) {
-  if (raw === null || raw === undefined) return null;
-
-  const role = String(raw).trim().toLowerCase();
-
-  return role || null;
-}
-
-function safeDeviceId(raw) {
-  if (raw === null || raw === undefined) return null;
-
-  const deviceId = String(raw).trim();
-
-  return deviceId || null;
-}
-
-function truthy(value) {
-  if (value === true) return true;
-  if (value === false) return false;
-  if (value === null || value === undefined) return false;
-
-  const normalized = String(value).trim().toLowerCase();
-
-  return (
-    normalized === "true" ||
-    normalized === "1" ||
-    normalized === "yes" ||
-    normalized === "y"
-  );
-}
-
-function isAdminRole(role) {
-  const normalizedRole = normalizeRole(role);
-
-  return (
-    normalizedRole === "admin" ||
-    normalizedRole === "super admin" ||
-    normalizedRole === "super_admin" ||
-    normalizedRole === "superadmin" ||
-    normalizedRole === "finance"
-  );
-}
-
-/*
- * Phone numbers such as App Store review accounts can skip
- * the single-device restriction.
- */
+// Phone numbers (e.g. App Store review demo accounts) that skip the
+// single-device lock so reviewers can log in from any device without an SMS OTP.
 const DEMO_BYPASS_PHONES = ["+97517368132"];
 
 function isDemoBypassPhone(phone) {
   return Boolean(phone) && DEMO_BYPASS_PHONES.includes(phone);
 }
 
-/*
- * Prisma P2002 target can be returned as:
- *
- * ["phone", "role"]
- * "users_phone_role_unique"
- * "phone"
- *
- * This helper converts the target into a searchable string.
- */
-function getPrismaConstraintTarget(error) {
-  const target = error?.meta?.target;
-
-  if (Array.isArray(target)) {
-    return target.map(String).join(",").toLowerCase();
-  }
-
-  if (target !== null && target !== undefined) {
-    return String(target).toLowerCase();
-  }
-
-  return "";
-}
-
-/* =========================================================
-   REGISTER USER
-========================================================= */
+/* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {
   let userId = null;
   let driverId = null;
 
-  try {
-    const body = req.body || {};
-    const user = body.user || null;
-    const driver = body.driver || null;
-    const documents = body.documents || null;
-    const vehicle = body.vehicle || null;
+  const normalizeBhutanPhone = (raw) => {
+    if (raw == null) return null;
+    let s = String(raw)
+      .trim()
+      .replace(/[^\d+]/g, "");
+    if (s.startsWith("00")) s = `+${s.slice(2)}`;
+    if (s.startsWith("+975")) return s;
+    if (s.startsWith("975")) return `+${s}`;
+    if (s.startsWith("+")) return s;
+    return `+975${s}`;
+  };
 
-    if (!user) {
+  try {
+    const { user, driver, documents, vehicle } = req.body;
+
+    if (!user || !user.password || !user.role) {
       return errorResponse(
         res,
         400,
-        "Please provide the required user information.",
+        "Please provide all required user information",
       );
     }
 
     const normalizedPhone = normalizeBhutanPhone(user.phone);
-    const normalizedEmail = normalizeEmail(user.email);
-    const normalizedRole = normalizeRole(user.role);
+    const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
 
-    const normalizedCid =
-      user.cid !== null &&
-      user.cid !== undefined &&
-      String(user.cid).trim() !== ""
-        ? String(user.cid).trim()
-        : null;
-
-    const userName =
-      user.user_name !== null && user.user_name !== undefined
-        ? String(user.user_name).trim()
-        : "";
-
-    const password =
-      user.password !== null && user.password !== undefined
-        ? String(user.password)
-        : "";
-
-    /* =========================================================
-       BASIC VALIDATION
-    ========================================================= */
-
-    if (!userName) {
-      return errorResponse(res, 400, "User name is required.");
-    }
-
-    if (!normalizedPhone) {
-      return errorResponse(res, 400, "Phone number is required.");
-    }
-
-    if (!normalizedEmail) {
-      return errorResponse(res, 400, "Email address is required.");
-    }
-
-    if (!password) {
-      return errorResponse(res, 400, "Password is required.");
-    }
-
-    if (!normalizedRole) {
-      return errorResponse(res, 400, "User role is required.");
-    }
-
-    if (password.length < 6) {
-      return errorResponse(
-        res,
-        400,
-        "Password must contain at least 6 characters.",
-      );
-    }
-
-    if (normalizedCid && !/^\d{11}$/.test(normalizedCid)) {
-      return errorResponse(
-        res,
-        400,
-        "CID must contain exactly 11 digits.",
-      );
-    }
-
-    const deviceID = safeDeviceId(
-      driver?.device_id ??
-        body.device_id ??
-        body.deviceID ??
-        body.deviceId ??
-        null,
-    );
-
+    // Admin and finance roles don't require device
     const requiresDevice =
-      normalizedRole !== "admin" &&
-      normalizedRole !== "finance" &&
-      normalizedRole !== "organizer";
+      user?.role !== "admin" &&
+      user?.role !== "finance" &&
+      user?.role !== "organizer";
 
     if (requiresDevice && !deviceID) {
-      return errorResponse(
-        res,
-        400,
-        "Device ID is required for registration.",
-      );
+      return errorResponse(res, 400, "Device ID is required for registration");
     }
-
-    /* =========================================================
-       DRIVER VALIDATION
-    ========================================================= */
-
-    if (normalizedRole === "driver") {
-      const coordinates = driver?.current_location?.coordinates;
-
-      if (
-        !driver ||
-        !Array.isArray(coordinates) ||
-        coordinates.length < 2 ||
-        !driver.license_number ||
-        !driver.license_expiry
-      ) {
-        return errorResponse(
-          res,
-          400,
-          "Please provide all required driver information, including license and location.",
-        );
-      }
-
-      const longitude = Number(coordinates[0]);
-      const latitude = Number(coordinates[1]);
-
-      if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
-        return errorResponse(
-          res,
-          400,
-          "Driver location coordinates are invalid.",
-        );
-      }
-
-      const licenseExpiry = new Date(driver.license_expiry);
-
-      if (Number.isNaN(licenseExpiry.getTime())) {
-        return errorResponse(
-          res,
-          400,
-          "Driver license expiry date is invalid.",
-        );
-      }
-
-      if (!vehicle || !vehicle.capacity || !vehicle.vehicle_type) {
-        return errorResponse(
-          res,
-          400,
-          "Please provide all required vehicle information.",
-        );
-      }
-
-      const vehicleCapacity = Number(vehicle.capacity);
-
-      if (!Number.isFinite(vehicleCapacity) || vehicleCapacity <= 0) {
-        return errorResponse(
-          res,
-          400,
-          "Vehicle capacity must be greater than zero.",
-        );
-      }
-
-      if (
-        vehicle.year !== null &&
-        vehicle.year !== undefined &&
-        vehicle.year !== "" &&
-        !Number.isInteger(Number(vehicle.year))
-      ) {
-        return errorResponse(
-          res,
-          400,
-          "Vehicle year must be a valid whole number.",
-        );
-      }
-
-      if (vehicle.insurance_expiry) {
-        const insuranceExpiry = new Date(vehicle.insurance_expiry);
-
-        if (Number.isNaN(insuranceExpiry.getTime())) {
-          return errorResponse(
-            res,
-            400,
-            "Vehicle insurance expiry date is invalid.",
-          );
-        }
-      }
-    }
-
-    /* =========================================================
-       DATABASE TRANSACTION
-    ========================================================= */
 
     await prisma.$transaction(async (prismaTx) => {
-      /*
-       * Same phone and same role cannot be registered again.
-       */
-      const existingPhoneRoleAccount =
-        await prismaTx.users.findFirst({
-          where: {
-            phone: normalizedPhone,
-            role: normalizedRole,
-          },
-          select: {
-            user_id: true,
-            role: true,
-          },
-        });
-
-      if (existingPhoneRoleAccount) {
-        const duplicateError = new Error(
-          "phone_role_already_exists",
-        );
-
-        duplicateError.registrationRole = normalizedRole;
-
-        throw duplicateError;
-      }
-
-      /*
-       * Same email and same role cannot be registered again.
-       */
-      const existingEmailRoleAccount =
-        await prismaTx.users.findFirst({
-          where: {
-            email: normalizedEmail,
-            role: normalizedRole,
-          },
-          select: {
-            user_id: true,
-            role: true,
-          },
-        });
-
-      if (existingEmailRoleAccount) {
-        const duplicateError = new Error(
-          "email_role_already_exists",
-        );
-
-        duplicateError.registrationRole = normalizedRole;
-
-        throw duplicateError;
-      }
-
-      /*
-       * Same CID and same role cannot be registered again.
-       */
-      if (normalizedCid) {
-        const existingCidRoleAccount =
-          await prismaTx.users.findFirst({
-            where: {
-              cid: normalizedCid,
-              role: normalizedRole,
-            },
-            select: {
-              user_id: true,
-              role: true,
-            },
-          });
-
-        if (existingCidRoleAccount) {
-          const duplicateError = new Error(
-            "cid_role_already_exists",
-          );
-
-          duplicateError.registrationRole = normalizedRole;
-
-          throw duplicateError;
-        }
-      }
-
-      /*
-       * Search all accounts sharing the submitted phone or email,
-       * regardless of role.
-       *
-       * The new password must not match any of those accounts.
-       * This allows the common login endpoint to determine the
-       * intended role from identifier + password.
-       */
-      const relatedAccounts = await prismaTx.users.findMany({
-        where: {
-          OR: [
-            {
-              email: normalizedEmail,
-            },
-            {
-              phone: normalizedPhone,
-            },
-          ],
-        },
-        select: {
-          user_id: true,
-          role: true,
-          email: true,
-          phone: true,
-          password_hash: true,
-        },
-        orderBy: {
-          user_id: "asc",
-        },
-      });
-
-      for (const relatedAccount of relatedAccounts) {
-        if (!relatedAccount?.password_hash) {
-          continue;
-        }
-
-        const passwordAlreadyUsed = await bcrypt.compare(
-          password,
-          relatedAccount.password_hash,
-        );
-
-        if (passwordAlreadyUsed) {
-          const passwordError = new Error(
-            "password_already_used_for_related_account",
-          );
-
-          passwordError.existingRole =
-            normalizeRole(relatedAccount.role) || "another";
-
-          throw passwordError;
-        }
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
+      const hashedPassword = await bcrypt.hash(user.password, 10);
 
       const newUser = await prismaTx.users.create({
         data: {
-          user_name: userName,
-          email: normalizedEmail,
+          user_name: user.user_name ?? null,
+          email: user.email ? user.email.toLowerCase() : null,
           phone: normalizedPhone,
-          cid: normalizedCid,
           password_hash: hashedPassword,
           is_verified: false,
           is_active: true,
-          role: normalizedRole,
+          role: user.role,
         },
       });
 
       userId = toNumber(newUser.user_id);
 
-      /* =========================================================
-         DEVICE REGISTRATION
-      ========================================================= */
-
       if (requiresDevice) {
-        if (normalizedRole === "driver") {
+        if (user.role === "driver") {
           await prismaTx.driver_devices.create({
             data: {
               user_id: newUser.user_id,
@@ -498,301 +101,152 @@ const registerUser = async (req, res) => {
         }
       }
 
-      /* =========================================================
-         DRIVER RECORDS
-      ========================================================= */
+      // Driver-specific validation (skip for finance, admin, merchant)
+      if (user.role === "driver") {
+        if (
+          !driver ||
+          !driver.current_location?.coordinates ||
+          !driver.license_number ||
+          !driver.license_expiry
+        ) {
+          throw new Error("missing_driver_fields");
+        }
+        if (!vehicle || !vehicle.capacity || !vehicle.vehicle_type) {
+          throw new Error("missing_vehicle_fields");
+        }
 
-      if (normalizedRole === "driver") {
-        const longitude = Number(
-          driver.current_location.coordinates[0],
-        );
+        const lng = driver.current_location.coordinates[0];
+        const lat = driver.current_location.coordinates[1];
 
-        const latitude = Number(
-          driver.current_location.coordinates[1],
-        );
-
-        const licenseExpiry = new Date(driver.license_expiry);
-        const vehicleCapacity = Number(vehicle.capacity);
-
+        // current_location is POINT SRID 4326 NOT NULL — Prisma skips
+        // Unsupported fields, so we use raw SQL for this INSERT.
         await prismaTx.$executeRaw`
           INSERT INTO drivers (
-            user_id,
-            license_number,
-            license_expiry,
-            approval_status,
-            is_approved,
-            rating,
-            total_rides,
-            is_online,
-            current_location,
-            current_location_updated_at
-          )
-          VALUES (
+            user_id, license_number, license_expiry,
+            approval_status, is_approved, rating, total_rides,
+            is_online, current_location, current_location_updated_at
+          ) VALUES (
             ${newUser.user_id},
-            ${String(driver.license_number).trim()},
-            ${licenseExpiry},
-            'pending',
-            0,
-            0.00,
-            0,
-            0,
-            ST_GeomFromText(
-              ${`POINT(${longitude} ${latitude})`},
-              4326
-            ),
+            ${driver.license_number},
+            ${new Date(driver.license_expiry)},
+            'pending', 0, 0.00, 0, 0,
+            ST_GeomFromText(${`POINT(${lng} ${lat})`}, 4326),
             NOW()
           )
         `;
 
         const newDriver = await prismaTx.drivers.findFirst({
-          where: {
-            user_id: newUser.user_id,
-          },
-          select: {
-            driver_id: true,
-          },
-          orderBy: {
-            driver_id: "desc",
-          },
+          where: { user_id: newUser.user_id },
+          select: { driver_id: true },
+          orderBy: { driver_id: "desc" },
         });
 
-        if (!newDriver) {
-          throw new Error("driver_insert_failed");
-        }
+        if (!newDriver) throw new Error("driver_insert_failed");
 
         driverId = toNumber(newDriver.driver_id);
 
         if (Array.isArray(documents) && documents.length > 0) {
-          for (const document of documents) {
-            if (!document?.document_type || !document?.document_url) {
-              throw new Error("invalid_driver_document");
-            }
-
+          for (const doc of documents) {
             await prismaTx.driver_documents.create({
               data: {
                 driver_id: newDriver.driver_id,
-                document_type: String(
-                  document.document_type,
-                ).trim(),
-                document_url: String(
-                  document.document_url,
-                ).trim(),
+                document_type: doc.document_type,
+                document_url: doc.document_url,
               },
             });
           }
         }
 
-        await prismaTx.driver_vehicles.create({
-          data: {
-            driver_id: newDriver.driver_id,
-
-            make: vehicle.make
-              ? String(vehicle.make).trim()
-              : null,
-
-            model: vehicle.model
-              ? String(vehicle.model).trim()
-              : null,
-
-            year:
-              vehicle.year !== null &&
-              vehicle.year !== undefined &&
-              vehicle.year !== ""
-                ? Number(vehicle.year)
+        if (vehicle) {
+          await prismaTx.driver_vehicles.create({
+            data: {
+              driver_id: newDriver.driver_id,
+              make: vehicle.make ?? null,
+              model: vehicle.model ?? null,
+              year: vehicle.year ?? null,
+              color: vehicle.color ?? null,
+              license_plate: vehicle.license_plate ?? null,
+              vehicle_type: vehicle.vehicle_type,
+              actual_capacity: vehicle.capacity,
+              available_capacity: vehicle.capacity,
+              features: (() => {
+                const f = vehicle.features;
+                if (f == null) return null;
+                if (Array.isArray(f)) return f.join(",");
+                if (typeof f === "object") return Object.values(f).join(",");
+                return String(f);
+              })(),
+              insurance_expiry: vehicle.insurance_expiry
+                ? new Date(vehicle.insurance_expiry)
                 : null,
-
-            color: vehicle.color
-              ? String(vehicle.color).trim()
-              : null,
-
-            license_plate: vehicle.license_plate
-              ? String(vehicle.license_plate).trim()
-              : null,
-
-            vehicle_type: String(
-              vehicle.vehicle_type,
-            ).trim(),
-
-            actual_capacity: vehicleCapacity,
-            available_capacity: vehicleCapacity,
-
-            features: (() => {
-              const features = vehicle.features;
-
-              if (features === null || features === undefined) {
-                return null;
-              }
-
-              if (Array.isArray(features)) {
-                return features.join(",");
-              }
-
-              if (typeof features === "object") {
-                return Object.values(features).join(",");
-              }
-
-              return String(features);
-            })(),
-
-            insurance_expiry: vehicle.insurance_expiry
-              ? new Date(vehicle.insurance_expiry)
-              : null,
-
-            code: vehicle.code
-              ? String(vehicle.code).trim()
-              : null,
-          },
-        });
+              code: vehicle.code ?? null,
+            },
+          });
+        }
       }
     });
 
-    /* =========================================================
-       SUCCESS RESPONSE
-    ========================================================= */
-
-    let message = "Registration successful.";
-
-    if (normalizedRole === "driver") {
-      message =
-        "Driver registration successful. Your registration is pending approval.";
-    } else if (normalizedRole === "admin") {
-      message = "Admin registration successful.";
-    } else if (normalizedRole === "finance") {
-      message = "Finance registration successful.";
-    } else if (normalizedRole === "merchant") {
-      message = "Merchant registration successful.";
-    } else if (normalizedRole === "organizer") {
-      message = "Organizer registration successful.";
-    }
+    let message = "Registration successful";
+    if (user.role === "driver") message = "Driver registration successful";
+    if (user.role === "admin") message = "Admin registration successful";
+    if (user.role === "finance") message = "Finance registration successful";
 
     return res.status(201).json({
       success: true,
       message,
       user_id: userId,
-      driver_id: driverId,
       phone: normalizedPhone,
-      email: normalizedEmail,
-      cid: normalizedCid,
-      role: normalizedRole,
     });
   } catch (err) {
     console.error("Registration error:", err?.message || err);
-    console.error("Registration error code:", err?.code || null);
-    console.error("Registration error metadata:", err?.meta || null);
+    console.error("Registration error code:", err?.code, "meta:", err?.meta);
 
-    /* =========================================================
-       DUPLICATE RESPONSES
-    ========================================================= */
-
-    if (err?.message === "phone_role_already_exists") {
-      return errorResponse(
-        res,
-        409,
-        `This phone number is already registered for the ${
-          err.registrationRole || "selected"
-        } role. Please login instead.`,
-      );
-    }
-
-    if (err?.message === "email_role_already_exists") {
-      return errorResponse(
-        res,
-        409,
-        `This email address is already registered for the ${
-          err.registrationRole || "selected"
-        } role. Please login instead.`,
-      );
-    }
-
-    if (err?.message === "cid_role_already_exists") {
-      return errorResponse(
-        res,
-        409,
-        `This CID number is already registered for the ${
-          err.registrationRole || "selected"
-        } role. Please login instead.`,
-      );
-    }
-
-    if (
-      err?.message ===
-      "password_already_used_for_related_account"
-    ) {
-      return errorResponse(
-        res,
-        409,
-        `This password is already being used by your ${
-          err.existingRole || "other"
-        } account. Please choose a different password for the ${normalizedRole} account.`,
-      );
-    }
-
-    /* =========================================================
-       PRISMA UNIQUE CONSTRAINT RESPONSES
-    ========================================================= */
-
-    if (err?.code === "P2002") {
-      const target = getPrismaConstraintTarget(err);
-
-      const requestedRole =
-        normalizeRole(req.body?.user?.role) || "selected";
-
-      const isPhoneRoleConstraint =
-        target.includes("users_phone_role_unique") ||
-        (target.includes("phone") && target.includes("role"));
-
-      const isEmailRoleConstraint =
-        target.includes("users_email_role_unique") ||
-        (target.includes("email") && target.includes("role"));
-
-      const isCidRoleConstraint =
-        target.includes("users_cid_role_unique") ||
-        (target.includes("cid") && target.includes("role"));
-
-      if (isPhoneRoleConstraint) {
-        return errorResponse(
-          res,
-          409,
-          `This phone number is already registered for the ${requestedRole} role. Please login instead.`,
-        );
+    if (err.code === "P2002") {
+      const target = err.meta?.target;
+      if (Array.isArray(target)) {
+        if (target.includes("email")) {
+          return errorResponse(
+            res,
+            409,
+            "This email is already registered. Please use a different email or login.",
+          );
+        }
+        if (target.includes("phone")) {
+          return errorResponse(
+            res,
+            409,
+            "This phone number is already registered. Please use a different number or login.",
+          );
+        }
       }
-
-      if (isEmailRoleConstraint) {
-        return errorResponse(
-          res,
-          409,
-          `This email address is already registered for the ${requestedRole} role. Please login instead.`,
-        );
-      }
-
-      if (isCidRoleConstraint) {
-        return errorResponse(
-          res,
-          409,
-          `This CID number is already registered for the ${requestedRole} role. Please login instead.`,
-        );
-      }
-
       return errorResponse(
         res,
         409,
-        "An account already exists with the provided information.",
+        "Account already exists with this information.",
       );
     }
 
-    if (err?.message === "driver_insert_failed") {
+    if (err.message === "driver_insert_failed") {
       return errorResponse(
         res,
         500,
-        "Failed to create the driver record. Please try again.",
+        "Failed to create driver record. Please try again.",
       );
     }
 
-    if (err?.message === "invalid_driver_document") {
+    if (err.message === "missing_driver_fields") {
       return errorResponse(
         res,
         400,
-        "Every driver document must include a document type and document URL.",
+        "Please provide all required driver information including license and location.",
+      );
+    }
+
+    if (err.message === "missing_vehicle_fields") {
+      return errorResponse(
+        res,
+        400,
+        "Please provide all required vehicle information.",
       );
     }
 
@@ -804,93 +258,90 @@ const registerUser = async (req, res) => {
   }
 };
 
-
-/* =========================================================
-   LOGIN USER
-========================================================= */
+/* ===================== LOGIN ===================== */
 const loginUser = async (req, res) => {
+  const normalizeBhutanPhone = (raw) => {
+    if (raw == null) return null;
+    let s = String(raw)
+      .trim()
+      .replace(/[^\d+]/g, "");
+    if (!s) return null;
+    if (s.startsWith("00")) s = `+${s.slice(2)}`;
+    if (s.startsWith("+975")) return s;
+    if (s.startsWith("975")) return `+${s}`;
+    if (s.startsWith("+")) return s;
+    return `+975${s}`;
+  };
+
+  const normalizeEmail = (raw) => {
+    if (raw == null) return null;
+    const e = String(raw).trim().toLowerCase();
+    return e ? e : null;
+  };
+
+  const safeDeviceId = (raw) => {
+    const v = raw == null ? "" : String(raw).trim();
+    return v ? v : null;
+  };
+
+  const truthy = (v) => {
+    if (v === true) return true;
+    if (v === false) return false;
+    if (v == null) return false;
+    const s = String(v).trim().toLowerCase();
+    return s === "true" || s === "1" || s === "yes" || s === "y";
+  };
+
+  const isAdminRole = (role) => {
+    const r = String(role || "")
+      .toLowerCase()
+      .trim();
+    return (
+      r === "admin" ||
+      r === "super admin" ||
+      r === "super_admin" ||
+      r === "superadmin" ||
+      r === "finance"
+    );
+  };
+
   try {
-    const body = req.body || {};
-
-    const phone = body.phone
-      ? normalizeBhutanPhone(body.phone)
-      : null;
-
-    const email = body.email
-      ? normalizeEmail(body.email)
-      : null;
-
-    /*
-     * Role is optional.
-     *
-     * Current applications may send role or may not send role.
-     * The backend selects the account using identifier + password.
-     */
-    const requestedRole = body.role
-      ? normalizeRole(body.role)
-      : null;
-
-    const password =
-      body.password !== null && body.password !== undefined
-        ? String(body.password)
-        : null;
+    const b = req.body || {};
+    const phone = b.phone ? normalizeBhutanPhone(b.phone) : null;
+    const email = b.email ? normalizeEmail(b.email) : null;
+    const password = b.password != null ? String(b.password) : null;
 
     if (!password) {
-      return errorResponse(
-        res,
-        400,
-        "Password is required.",
-      );
+      return errorResponse(res, 400, "Password is required");
     }
 
     if (!phone && !email) {
       return errorResponse(
         res,
         400,
-        "Please provide either an email address or phone number.",
+        "Please provide either email or phone number to login",
       );
     }
 
-    const desktop = truthy(body.desktop);
-
+    const desktop = truthy(b.desktop);
     const deviceId = safeDeviceId(
-      body.device_id ??
-        body.deviceID ??
-        body.deviceId ??
-        body.deviceid ??
-        null,
+      b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
     );
-
-    /* =========================================================
-       FIND ALL MATCHING IDENTIFIER ACCOUNTS
-    ========================================================= */
 
     let candidates = [];
 
     if (email) {
-      candidates = await prisma.users.findMany({
-        where: {
-          email,
-        },
-        select: {
-          user_id: true,
-          user_name: true,
-          phone: true,
-          email: true,
-          role: true,
-          is_active: true,
-          is_verified: true,
-          password_hash: true,
-        },
-        orderBy: {
-          user_id: "desc",
-        },
-      });
+      const normalizedEmail = email.toLowerCase();
+      candidates = await prisma.$queryRaw`
+        SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
+        FROM users
+        WHERE LOWER(email) = ${normalizedEmail}
+        ORDER BY user_id DESC
+        LIMIT 25
+      `;
     } else {
       candidates = await prisma.users.findMany({
-        where: {
-          phone,
-        },
+        where: { phone: phone },
         select: {
           user_id: true,
           user_name: true,
@@ -901,9 +352,8 @@ const loginUser = async (req, res) => {
           is_verified: true,
           password_hash: true,
         },
-        orderBy: {
-          user_id: "desc",
-        },
+        orderBy: { user_id: "desc" },
+        take: 25,
       });
     }
 
@@ -911,78 +361,26 @@ const loginUser = async (req, res) => {
       return errorResponse(
         res,
         404,
-        `No account was found with this ${
-          email ? "email address" : "phone number"
-        }.`,
+        "No account found with this email or phone number. Please check and try again.",
       );
     }
 
-    /* =========================================================
-       MATCH PASSWORD AGAINST ALL ACCOUNTS
-    ========================================================= */
-
-    let passwordMatchedUsers = [];
-
-    for (const candidate of candidates) {
-      if (!candidate?.password_hash) {
-        continue;
-      }
-
-      const passwordMatches = await bcrypt.compare(
-        password,
-        candidate.password_hash,
-      );
-
-      if (passwordMatches) {
-        passwordMatchedUsers.push(candidate);
+    let picked = null;
+    for (const u of candidates) {
+      if (!u?.password_hash) continue;
+      const ok = await bcrypt.compare(password, u.password_hash);
+      if (ok) {
+        picked = u;
+        break;
       }
     }
 
-    if (passwordMatchedUsers.length === 0) {
-      return errorResponse(
-        res,
-        401,
-        "Incorrect password. Please try again.",
-      );
+    if (!picked) {
+      return errorResponse(res, 401, "Incorrect password. Please try again.");
     }
-
-    /*
-     * Older accounts may already have identical passwords.
-     * When role is supplied, use it to resolve that ambiguity.
-     */
-    if (
-      passwordMatchedUsers.length > 1 &&
-      requestedRole
-    ) {
-      const matchingRequestedRole =
-        passwordMatchedUsers.filter(
-          (candidate) =>
-            normalizeRole(candidate.role) === requestedRole,
-        );
-
-      if (matchingRequestedRole.length === 1) {
-        passwordMatchedUsers = matchingRequestedRole;
-      }
-    }
-
-    if (passwordMatchedUsers.length > 1) {
-      return errorResponse(
-        res,
-        409,
-        "Multiple accounts use the same login credentials. Please reset the password for one of these accounts.",
-      );
-    }
-
-    const pickedUser = passwordMatchedUsers[0];
-
-    /* =========================================================
-       LOAD SELECTED ACCOUNT
-    ========================================================= */
 
     const user = await prisma.users.findUnique({
-      where: {
-        user_id: pickedUser.user_id,
-      },
+      where: { user_id: toNumber(picked.user_id) },
       select: {
         user_id: true,
         user_name: true,
@@ -1008,28 +406,20 @@ const loginUser = async (req, res) => {
       return errorResponse(
         res,
         403,
-        "Your account has been deactivated. Please contact support.",
+        "Your account has been deactivated. Please contact support for assistance.",
       );
     }
 
-    /* =========================================================
-       DRIVER APPROVAL CHECK
-    ========================================================= */
-
-    if (normalizeRole(user.role) === "driver") {
+    // Block drivers whose registration has not yet been approved
+    if (user.role === "driver") {
       const driverRecord = await prisma.drivers.findFirst({
-        where: {
-          user_id: user.user_id,
-        },
-        select: {
-          approval_status: true,
-        },
+        where: { user_id: user.user_id },
+        select: { approval_status: true },
       });
 
-      const approvalStatus =
-        normalizeRole(driverRecord?.approval_status) || "pending";
+      const status = driverRecord?.approval_status ?? "pending";
 
-      if (approvalStatus === "pending") {
+      if (status === "pending") {
         return errorResponse(
           res,
           403,
@@ -1037,70 +427,65 @@ const loginUser = async (req, res) => {
         );
       }
 
-      if (approvalStatus === "rejected") {
+      if (status === "rejected") {
         return errorResponse(
           res,
           403,
-          "Your registration was not approved. Please contact support.",
+          "Your registration was not approved. Please contact support for more information.",
         );
       }
     }
 
-    const roleLower = normalizeRole(user.role);
-
+    const roleLower = String(user.role || "")
+      .toLowerCase()
+      .trim();
     const isMerchant = roleLower === "merchant";
     const isFinance = roleLower === "finance";
     const adminNoDevice = isAdminRole(user.role);
+    const merchantDesktopNoDevice = isMerchant && desktop === true;
+    const financeNoDevice = isFinance && desktop === true;
 
-    const merchantDesktopNoDevice =
-      isMerchant && desktop === true;
+    // Device requirement check - finance and admin can skip device
+    if (
+      !adminNoDevice &&
+      !merchantDesktopNoDevice &&
+      !financeNoDevice &&
+      !deviceId
+    ) {
+      return errorResponse(
+        res,
+        400,
+        "Device information is required for login. Please restart the app.",
+      );
+    }
 
-    const financeNoDevice =
-      isFinance && desktop === true;
-
-    /* =========================================================
-       DEVICE CONFLICT CHECK
-    ========================================================= */
-
+    // Device conflict check - skip for finance, admin, and demo/review accounts
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
       !financeNoDevice &&
       !isDemoBypassPhone(user.phone) &&
-      user.is_verified === true &&
-      deviceId
+      user.is_verified === true
     ) {
-      const deviceRecord =
-        await prisma.all_device_ids.findUnique({
-          where: {
-            user_id: user.user_id,
-          },
-          select: {
-            device_id: true,
-          },
-        });
+      const deviceRecord = await prisma.all_device_ids.findUnique({
+        where: { user_id: user.user_id },
+        select: { device_id: true },
+      });
 
-      const databaseDeviceId =
-        deviceRecord?.device_id
-          ? String(deviceRecord.device_id)
-          : null;
+      const dbDeviceId = deviceRecord?.device_id
+        ? String(deviceRecord.device_id)
+        : null;
 
-      if (
-        !databaseDeviceId ||
-        databaseDeviceId !== deviceId
-      ) {
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
         return errorResponse(
           res,
           409,
-          "You are already logged in on another device. Please log out from that device first.",
+          "You are already logged in on another device. Please logout from that device first.",
         );
       }
     }
 
-    /* =========================================================
-       SAVE OR UPDATE DEVICE
-    ========================================================= */
-
+    // Update device ID - skip for finance and admin
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
@@ -1109,150 +494,90 @@ const loginUser = async (req, res) => {
     ) {
       try {
         await prisma.all_device_ids.upsert({
-          where: {
-            user_id: user.user_id,
-          },
-          update: {
-            device_id: deviceId,
-            last_seen: new Date(),
-          },
+          where: { user_id: user.user_id },
+          update: { device_id: deviceId, last_seen: new Date() },
           create: {
             user_id: user.user_id,
             device_id: deviceId,
             last_seen: new Date(),
           },
         });
-      } catch (deviceError) {
-        console.error(
-          "Device ID save failed:",
-          deviceError?.message || deviceError,
-        );
+      } catch (e) {
+        console.error("device_id save failed:", e?.message || e);
       }
     }
 
-    /* =========================================================
-       UPDATE LOGIN STATUS
-    ========================================================= */
+    if (phone && user.phone && user.phone !== phone) {
+      try {
+        await prisma.users.update({
+          where: { user_id: user.user_id },
+          data: { phone: phone },
+        });
+        user.phone = phone;
+      } catch (e) {
+        console.error("phone normalize update failed:", e?.message || e);
+      }
+    }
 
     try {
       await prisma.users.update({
-        where: {
-          user_id: user.user_id,
-        },
-        data: {
-          is_verified: true,
-          last_login: new Date(),
-        },
+        where: { user_id: user.user_id },
+        data: { is_verified: true, last_login: new Date() },
       });
-
       user.is_verified = true;
-    } catch (updateError) {
-      console.error(
-        "User login status update failed:",
-        updateError?.message || updateError,
-      );
+    } catch (e) {
+      console.error("is_verified update failed:", e?.message || e);
     }
 
-    /* =========================================================
-       LOAD MERCHANT DETAILS
-    ========================================================= */
-
-    let ownerType = null;
-    let businessId = null;
-    let businessName = null;
-    let businessLogo = null;
+    let owner_type = null;
+    let business_id = null;
+    let business_name = null;
+    let business_logo = null;
     let address = null;
 
     if (isMerchant) {
       try {
-        const business =
-          await prisma.merchant_business_details.findFirst({
-            where: {
-              user_id: user.user_id,
-            },
-            orderBy: [
-              {
-                created_at: "desc",
-              },
-              {
-                business_id: "desc",
-              },
-            ],
-            select: {
-              business_id: true,
-              business_name: true,
-              owner_type: true,
-              business_logo: true,
-              address: true,
-            },
-          });
+        const business = await prisma.merchant_business_details.findFirst({
+          where: { user_id: user.user_id },
+          orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
+          select: {
+            business_id: true,
+            business_name: true,
+            owner_type: true,
+            business_logo: true,
+            address: true,
+          },
+        });
 
         if (business) {
-          ownerType = business.owner_type ?? null;
-
-          businessId = business.business_id
+          owner_type = business.owner_type ?? null;
+          business_id = business.business_id
             ? toNumber(business.business_id)
             : null;
-
-          businessName =
-            business.business_name ?? null;
-
-          businessLogo =
-            business.business_logo ?? null;
-
+          business_name = business.business_name ?? null;
+          business_logo = business.business_logo ?? null;
           address = business.address ?? null;
         }
-      } catch (businessError) {
-        console.error(
-          "Merchant details fetch failed:",
-          businessError?.message || businessError,
-        );
+      } catch (e) {
+        console.error("merchant extras fetch failed:", e?.message || e);
       }
     }
 
-    /* =========================================================
-       TOKEN VALIDATION AND CREATION
-    ========================================================= */
-
-    if (!process.env.ACCESS_TOKEN_SECRET) {
-      throw new Error(
-        "ACCESS_TOKEN_SECRET is not configured.",
-      );
-    }
-
-    if (!process.env.REFRESH_TOKEN_SECRET) {
-      throw new Error(
-        "REFRESH_TOKEN_SECRET is not configured.",
-      );
-    }
-
-    const tokenPayload = {
+    const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
       user_name: user.user_name,
       phone: user.phone,
     };
 
-    const accessToken = jwt.sign(
-      tokenPayload,
-      process.env.ACCESS_TOKEN_SECRET,
-      {
-        expiresIn: "60m",
-      },
-    );
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
+    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
+      expiresIn: "1440m",
+    });
 
-    const refreshToken = jwt.sign(
-      tokenPayload,
-      process.env.REFRESH_TOKEN_SECRET,
-      {
-        expiresIn: "1440m",
-      },
-    );
-
-    /* =========================================================
-       RESPONSE
-    ========================================================= */
-
+    // Build user response object
     const userResponse = {
       user_id: toNumber(user.user_id),
       user_name: user.user_name,
@@ -1263,40 +588,33 @@ const loginUser = async (req, res) => {
     };
 
     if (isMerchant) {
-      userResponse.owner_type = ownerType;
-      userResponse.business_id = businessId;
-      userResponse.business_name = businessName;
-      userResponse.business_logo = businessLogo;
+      userResponse.owner_type = owner_type;
+      userResponse.business_id = business_id;
+      userResponse.business_name = business_name;
+      userResponse.business_logo = business_logo;
       userResponse.address = address;
-
       userResponse.device_id =
-        adminNoDevice || merchantDesktopNoDevice
-          ? null
-          : deviceId;
+        adminNoDevice || merchantDesktopNoDevice ? null : deviceId;
     } else if (isFinance) {
       userResponse.device_id =
-        adminNoDevice || financeNoDevice
-          ? null
-          : deviceId;
+        adminNoDevice || financeNoDevice ? null : deviceId;
     } else {
-      userResponse.device_id =
-        adminNoDevice ? null : deviceId;
+      userResponse.device_id = adminNoDevice ? null : deviceId;
     }
 
     return res.status(200).json({
       success: true,
-      message: "Login successful.",
+      message: "Login successful",
       token: {
-        access_token: accessToken,
+        access_token,
         access_token_time: 60,
-        refresh_token: refreshToken,
+        refresh_token,
         refresh_token_time: 1440,
       },
       user: userResponse,
     });
   } catch (err) {
-    console.error("Login error:", err);
-
+    console.error("loginUser error:", err);
     return errorResponse(
       res,
       500,
@@ -1305,28 +623,32 @@ const loginUser = async (req, res) => {
   }
 };
 
-
-/* =========================================================
-   LOGOUT USER
-========================================================= */
-
+/* ===================== LOGOUT ===================== */
 const logoutUser = async (req, res) => {
   try {
-    const userId = Number(req.params.user_id);
+    const { user_id } = req.params;
+    const n = Number(user_id);
 
-    if (!Number.isInteger(userId) || userId <= 0) {
-      return errorResponse(res, 400, "Invalid user information.");
+    if (!Number.isInteger(n) || n <= 0) {
+      return errorResponse(
+        res,
+        400,
+        "Invalid user information. Please try again.",
+      );
     }
 
-    await prisma.users.update({
-      where: {
-        user_id: userId,
-      },
-      data: {
-        is_verified: false,
-        last_login: new Date(),
-      },
+    const result = await prisma.users.update({
+      where: { user_id: n },
+      data: { is_verified: false, last_login: new Date() },
     });
+
+    if (!result) {
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
+    }
 
     return res.status(200).json({
       success: true,
@@ -1334,11 +656,13 @@ const logoutUser = async (req, res) => {
     });
   } catch (err) {
     console.error("Logout error:", err);
-
-    if (err?.code === "P2025") {
-      return errorResponse(res, 404, "Account not found.");
+    if (err.code === "P2025") {
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
-
     return errorResponse(
       res,
       500,
@@ -1347,16 +671,15 @@ const logoutUser = async (req, res) => {
   }
 };
 
-/* =========================================================
-   VERIFY ACTIVE SESSION
-========================================================= */
-
+/* ===================== VERIFY ACTIVE SESSION ===================== */
 const verifyActiveSession = async (req, res) => {
-  const body = req.body || {};
-  const userId = Number(body.user_id);
-  const deviceId = safeDeviceId(body.device_id);
+  const { user_id, device_id } = req.body || {};
 
-  if (!Number.isInteger(userId) || userId <= 0) {
+  const uid = Number(user_id);
+  const deviceId =
+    device_id && String(device_id).trim() ? String(device_id).trim() : null;
+
+  if (!Number.isInteger(uid) || uid <= 0) {
     return errorResponse(res, 400, "Invalid user information.");
   }
 
@@ -1366,9 +689,7 @@ const verifyActiveSession = async (req, res) => {
 
   try {
     const user = await prisma.users.findUnique({
-      where: {
-        user_id: userId,
-      },
+      where: { user_id: uid },
       select: {
         user_id: true,
         user_name: true,
@@ -1386,15 +707,9 @@ const verifyActiveSession = async (req, res) => {
 
     if (user.is_active === false) {
       await prisma.users.update({
-        where: {
-          user_id: userId,
-        },
-        data: {
-          is_verified: false,
-          last_login: new Date(),
-        },
+        where: { user_id: uid },
+        data: { is_verified: false, last_login: new Date() },
       });
-
       return errorResponse(
         res,
         403,
@@ -1403,26 +718,26 @@ const verifyActiveSession = async (req, res) => {
     }
 
     if (user.is_verified === false) {
+      await prisma.users.update({
+        where: { user_id: uid },
+        data: { is_verified: false, last_login: new Date() },
+      });
       return res.status(200).json({
         success: false,
         message: "Session expired. Please login again.",
       });
     }
 
-    if (normalizeRole(user.role) === "driver") {
+    // Block drivers whose registration has not yet been approved
+    if (user.role === "driver") {
       const driverRecord = await prisma.drivers.findFirst({
-        where: {
-          user_id: userId,
-        },
-        select: {
-          approval_status: true,
-        },
+        where: { user_id: uid },
+        select: { approval_status: true },
       });
 
-      const approvalStatus =
-        normalizeRole(driverRecord?.approval_status) || "pending";
+      const status = driverRecord?.approval_status ?? "pending";
 
-      if (approvalStatus === "pending") {
+      if (status === "pending") {
         return res.status(200).json({
           success: false,
           message:
@@ -1431,66 +746,47 @@ const verifyActiveSession = async (req, res) => {
         });
       }
 
-      if (approvalStatus === "rejected") {
+      if (status === "rejected") {
         return res.status(200).json({
           success: false,
           message:
-            "Your registration was not approved. Please contact support.",
+            "Your registration was not approved. Please contact support for more information.",
           approval_status: "rejected",
         });
       }
     }
 
     const deviceRecord = await prisma.all_device_ids.findUnique({
-      where: {
-        user_id: userId,
-      },
-      select: {
-        device_id: true,
-      },
+      where: { user_id: uid },
+      select: { device_id: true },
     });
 
-    const databaseDeviceId = deviceRecord?.device_id
+    const dbDeviceId = deviceRecord?.device_id
       ? String(deviceRecord.device_id)
       : null;
 
-    if (!databaseDeviceId || databaseDeviceId !== deviceId) {
+    if (!dbDeviceId || dbDeviceId !== deviceId) {
       await prisma.users.update({
-        where: {
-          user_id: userId,
-        },
-        data: {
-          is_verified: false,
-          last_login: new Date(),
-        },
+        where: { user_id: uid },
+        data: { is_verified: false, last_login: new Date() },
       });
-
       return res.status(200).json({
         success: false,
-        message: "Session expired due to a device change. Please login again.",
+        message: "Session expired due to device change. Please login again.",
       });
     }
 
-    let ownerType = null;
-    let businessId = null;
-    let businessName = null;
-    let businessLogo = null;
+    let owner_type = null;
+    let business_id = null;
+    let business_name = null;
+    let business_logo = null;
     let address = null;
 
-    if (normalizeRole(user.role) === "merchant") {
+    if (user.role === "merchant") {
       try {
         const business = await prisma.merchant_business_details.findFirst({
-          where: {
-            user_id: userId,
-          },
-          orderBy: [
-            {
-              created_at: "desc",
-            },
-            {
-              business_id: "desc",
-            },
-          ],
+          where: { user_id: uid },
+          orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
           select: {
             owner_type: true,
             business_id: true,
@@ -1501,43 +797,31 @@ const verifyActiveSession = async (req, res) => {
         });
 
         if (business) {
-          ownerType = business.owner_type ?? null;
-          businessId = business.business_id
+          owner_type = business.owner_type ?? null;
+          business_id = business.business_id
             ? toNumber(business.business_id)
             : null;
-          businessName = business.business_name ?? null;
-          businessLogo = business.business_logo ?? null;
+          business_name = business.business_name ?? null;
+          business_logo = business.business_logo ?? null;
           address = business.address ?? null;
         }
-      } catch (businessError) {
-        console.error(
-          "Merchant details fetch failed:",
-          businessError?.message || businessError,
-        );
+      } catch (e) {
+        console.error("merchant extras fetch failed:", e?.message || e);
       }
     }
 
-    const tokenPayload = {
+    const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
       phone: String(user.phone || ""),
     };
 
-    const accessToken = jwt.sign(
-      tokenPayload,
-      process.env.ACCESS_TOKEN_SECRET,
-      {
-        expiresIn: "60m",
-      },
-    );
-
-    const refreshToken = jwt.sign(
-      tokenPayload,
-      process.env.REFRESH_TOKEN_SECRET,
-      {
-        expiresIn: "1440m",
-      },
-    );
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
+    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
+      expiresIn: "1440m",
+    });
 
     const userResponse = {
       user_id: toNumber(user.user_id),
@@ -1549,60 +833,53 @@ const verifyActiveSession = async (req, res) => {
       device_id: deviceId,
     };
 
-    if (normalizeRole(user.role) === "merchant") {
-      userResponse.owner_type = ownerType;
-      userResponse.business_id = businessId;
-      userResponse.business_name = businessName;
-      userResponse.business_logo = businessLogo;
+    if (user.role === "merchant") {
+      userResponse.owner_type = owner_type;
+      userResponse.business_id = business_id;
+      userResponse.business_name = business_name;
+      userResponse.business_logo = business_logo;
       userResponse.address = address;
     }
 
     return res.status(200).json({
       success: true,
-      message: "Session verified successfully.",
+      message: "Session verified successfully",
       token: {
-        access_token: accessToken,
+        access_token,
         access_token_time: 60,
-        refresh_token: refreshToken,
+        refresh_token,
         refresh_token_time: 1440,
       },
       user: userResponse,
     });
   } catch (err) {
-    console.error("Verify active session error:", err);
-
+    console.error("verifyActiveSession error:", err);
     return errorResponse(
       res,
       500,
-      "Unable to verify the session. Please try again later.",
+      "Unable to verify session. Please try again later.",
     );
   }
 };
 
-/* =========================================================
-   REFRESH ACCESS TOKEN
-========================================================= */
-
+/* ===================== REFRESH ACCESS TOKEN ===================== */
 const refreshAccessToken = async (req, res) => {
   try {
     const bodyToken = req.body?.refresh_token;
-    const authorizationHeader = req.headers.authorization || "";
-
-    const headerToken = authorizationHeader.startsWith("Bearer ")
-      ? authorizationHeader.slice("Bearer ".length).trim()
+    const auth = req.headers.authorization || "";
+    const headerToken = auth.startsWith("Bearer ")
+      ? auth.slice("Bearer ".length).trim()
       : null;
-
     const refreshToken = bodyToken || headerToken;
 
     if (!refreshToken) {
       return errorResponse(res, 400, "Refresh token is required.");
     }
 
-    let decodedToken;
-
+    let decoded;
     try {
-      decodedToken = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
-    } catch (_verificationError) {
+      decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    } catch (e) {
       return errorResponse(
         res,
         401,
@@ -1610,9 +887,8 @@ const refreshAccessToken = async (req, res) => {
       );
     }
 
-    const userId = Number(decodedToken?.user_id);
-
-    if (!Number.isInteger(userId) || userId <= 0) {
+    const uid = Number(decoded?.user_id);
+    if (!Number.isInteger(uid) || uid <= 0) {
       return errorResponse(
         res,
         401,
@@ -1621,9 +897,7 @@ const refreshAccessToken = async (req, res) => {
     }
 
     const user = await prisma.users.findUnique({
-      where: {
-        user_id: userId,
-      },
+      where: { user_id: uid },
       select: {
         user_id: true,
         role: true,
@@ -1634,7 +908,11 @@ const refreshAccessToken = async (req, res) => {
     });
 
     if (!user) {
-      return errorResponse(res, 404, "Account not found.");
+      return errorResponse(
+        res,
+        404,
+        "Account not found. Please contact support.",
+      );
     }
 
     if (user.is_active === false) {
@@ -1645,37 +923,33 @@ const refreshAccessToken = async (req, res) => {
       );
     }
 
-    const tokenPayload = {
+    // Allow token refresh for ALL roles regardless of is_verified status
+    // Only check if account is active
+    const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
       phone: user.phone,
     };
 
-    const accessToken = jwt.sign(
-      tokenPayload,
-      process.env.ACCESS_TOKEN_SECRET,
-      {
-        expiresIn: "60m",
-      },
-    );
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
 
     return res.status(200).json({
       success: true,
-      message: "Token refreshed successfully.",
+      message: "Token refreshed successfully",
       token: {
-        access_token: accessToken,
+        access_token,
         access_token_time: 60,
-        refresh_token: refreshToken,
-        refresh_token_time: 1440,
+        refresh_token: refreshToken, // Return the same refresh token
       },
     });
   } catch (err) {
-    console.error("Refresh access token error:", err);
-
+    console.error("refreshAccessToken error:", err);
     return errorResponse(
       res,
       500,
-      "Unable to refresh the session. Please login again.",
+      "Unable to refresh session. Please login again.",
     );
   }
 };

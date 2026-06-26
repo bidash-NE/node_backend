@@ -36,354 +36,109 @@ const fromBodyToStoredPath = (val) => {
 };
 
 /* ---------------- register ---------------- */
+
 async function registerMerchant(req, res) {
-  const files = req.files || {};
-
-  /*
-   * Remove files created during a failed registration.
-   * This prevents unused compressed images from accumulating.
-   */
-  const removeUploadedFiles = () => {
-    const uploadedFiles = Object.values(files)
-      .flat()
-      .filter(Boolean);
-
-    for (const file of uploadedFiles) {
-      if (!file?.path) {
-        continue;
-      }
-
-      try {
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-        }
-      } catch (cleanupError) {
-        console.error(
-          "Failed to remove uploaded merchant file:",
-          file.path,
-          cleanupError?.message || cleanupError,
-        );
-      }
-    }
-  };
-
   try {
-    const body = req.body || {};
+    const f = req.files || {};
+    const b = req.body || {};
 
     const normalizeBhutanPhone = (raw) => {
-      if (raw === null || raw === undefined) {
-        return null;
-      }
-
-      let phone = String(raw)
+      if (raw == null) return null;
+      let s = String(raw)
         .trim()
         .replace(/[^\d+]/g, "");
-
-      if (!phone) {
-        return null;
-      }
-
-      if (phone.startsWith("00")) {
-        phone = `+${phone.slice(2)}`;
-      }
-
-      if (phone.startsWith("+975")) {
-        return phone;
-      }
-
-      if (phone.startsWith("975")) {
-        return `+${phone}`;
-      }
-
-      if (phone.startsWith("+")) {
-        return phone;
-      }
-
-      return `+975${phone}`;
+      if (s.startsWith("00")) s = `+${s.slice(2)}`;
+      if (s.startsWith("+975")) return s;
+      if (s.startsWith("975")) return `+${s}`;
+      if (s.startsWith("+")) return s;
+      return `+975${s}`;
     };
 
-    const normalizeEmail = (raw) => {
-      if (raw === null || raw === undefined) {
-        return null;
-      }
-
-      const email = String(raw).trim().toLowerCase();
-
-      return email || null;
+    const toNumOrNull = (val) => {
+      if (val === undefined || val === null) return null;
+      const s = String(val).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
     };
 
-    const toNumberOrNull = (value) => {
-      if (
-        value === undefined ||
-        value === null ||
-        String(value).trim() === ""
-      ) {
-        return null;
-      }
-
-      const numberValue = Number(value);
-
-      return Number.isFinite(numberValue)
-        ? numberValue
-        : null;
+    const toLowerOrDefault = (val, def) => {
+      const s = val !== undefined && val !== null ? String(val).trim() : "";
+      return (s || def).toLowerCase();
     };
 
-    const toLowerOrDefault = (value, defaultValue) => {
-      const normalized =
-        value !== undefined && value !== null
-          ? String(value).trim()
-          : "";
+    const license_image = f.license_image?.[0]
+      ? toRelPath(f.license_image[0])
+      : fromBodyToStoredPath(b.license_image);
 
-      return (normalized || defaultValue).toLowerCase();
-    };
+    const business_logo = f.business_logo?.[0]
+      ? toRelPath(f.business_logo[0])
+      : fromBodyToStoredPath(b.business_logo);
 
-    const licenseImage = files.license_image?.[0]
-      ? toRelPath(files.license_image[0])
-      : fromBodyToStoredPath(body.license_image);
+    const bank_qr_code_image = f.bank_qr_code_image?.[0]
+      ? toRelPath(f.bank_qr_code_image[0])
+      : fromBodyToStoredPath(b.bank_qr_code_image);
 
-    const businessLogo = files.business_logo?.[0]
-      ? toRelPath(files.business_logo[0])
-      : fromBodyToStoredPath(body.business_logo);
-
-    const bankQrCodeImage = files.bank_qr_code_image?.[0]
-      ? toRelPath(files.bank_qr_code_image[0])
-      : fromBodyToStoredPath(body.bank_qr_code_image);
-
-    const normalizedPhone =
-      normalizeBhutanPhone(body.phone);
-
-    const normalizedEmail =
-      normalizeEmail(body.email);
-
-    const normalizedCid =
-      body.cid !== null &&
-      body.cid !== undefined &&
-      String(body.cid).trim() !== ""
-        ? String(body.cid).trim()
-        : null;
-
-    const password =
-      body.password !== null &&
-      body.password !== undefined
-        ? String(body.password)
-        : "";
-
-    if (!normalizedPhone) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message: "A valid phone number is required.",
-      });
-    }
-
-    if (!normalizedEmail) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message: "A valid email address is required.",
-      });
-    }
-
-    if (!normalizedCid) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message: "CID number is required.",
-      });
-    }
-
-    if (!/^\d{11}$/.test(normalizedCid)) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message: "CID must contain exactly 11 digits.",
-      });
-    }
-
-    if (!password) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message: "Password is required.",
-      });
-    }
-
-    if (password.length < 6) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message:
-          "Password must contain at least 6 characters.",
-      });
-    }
-
-    /*
-     * This endpoint always creates merchant accounts.
-     * Do not trust a role supplied by the frontend.
-     */
-    const role = "merchant";
-
-    let businessTypes;
-
-    if (Array.isArray(body.business_types)) {
-      businessTypes = body.business_types;
-    } else if (
-      typeof body.business_types === "string" &&
-      body.business_types.trim()
-    ) {
-      businessTypes = body.business_types
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
-    }
-
-    const minimumFreeDeliveryAmount =
-      body.min_amount_for_fd !== undefined &&
-      body.min_amount_for_fd !== ""
-        ? Number(body.min_amount_for_fd)
-        : 0;
-
-    if (
-      !Number.isFinite(minimumFreeDeliveryAmount) ||
-      minimumFreeDeliveryAmount < 0
-    ) {
-      removeUploadedFiles();
-
-      return res.status(400).json({
-        success: false,
-        message:
-          "Minimum amount for free delivery must be a valid non-negative number.",
-      });
-    }
+    const normalizedPhone = normalizeBhutanPhone(b.phone);
 
     const payload = {
-      user_name: body.user_name,
-      email: normalizedEmail,
+      user_name: b.user_name,
+      email: b.email,
       phone: normalizedPhone,
-      cid: normalizedCid,
-      password,
-      role,
-
-      business_name: body.business_name,
-
-      business_type_ids:
-        body.business_type_ids ?? null,
-
-      business_types: businessTypes,
-
-      business_license_number:
-        body.business_license_number,
-
-      license_image: licenseImage,
-
-      latitude: toNumberOrNull(body.latitude),
-      longitude: toNumberOrNull(body.longitude),
-
-      address: body.address || null,
-      business_logo: businessLogo,
-
-      delivery_option:
-        body.delivery_option || "SELF",
-
-      owner_type: toLowerOrDefault(
-        body.owner_type,
-        "individual",
-      ),
-
+      cid: b.cid,
+      password: b.password,
+      role: toLowerOrDefault(b.role, "merchant"),
+      business_name: b.business_name,
+      business_type_ids: b.business_type_ids ?? null,
+      business_types: Array.isArray(b.business_types)
+        ? b.business_types
+        : typeof b.business_types === "string" && b.business_types.trim()
+          ? b.business_types
+              .split(",")
+              .map((x) => x.trim())
+              .filter(Boolean)
+          : undefined,
+      business_license_number: b.business_license_number,
+      license_image,
+      latitude: toNumOrNull(b.latitude),
+      longitude: toNumOrNull(b.longitude),
+      address: b.address || null,
+      business_logo,
+      delivery_option: b.delivery_option,
+      owner_type: toLowerOrDefault(b.owner_type, "individual"),
       min_amount_for_fd:
-        minimumFreeDeliveryAmount,
-
-      bank_name: body.bank_name,
-
-      account_holder_name:
-        body.account_holder_name,
-
-      account_number:
-        body.account_number,
-
-      bank_qr_code_image:
-        bankQrCodeImage,
-
-      special_celebration:
-        body.special_celebration || null,
-
+        b.min_amount_for_fd !== undefined && b.min_amount_for_fd !== ""
+          ? Number(b.min_amount_for_fd)
+          : 0,
+      bank_name: b.bank_name,
+      account_holder_name: b.account_holder_name,
+      account_number: b.account_number,
+      bank_qr_code_image,
+      special_celebration: b.special_celebration || null,
       special_celebration_discount_percentage:
-        body.special_celebration_discount_percentage ??
-        null,
+        b.special_celebration_discount_percentage || null,
     };
 
-    const result =
-      await registerMerchantModel(payload);
+    const result = await registerMerchantModel(payload);
 
     return res.status(201).json({
-      success: true,
-      message: "Merchant registered successfully.",
+      message: "Merchant registered successfully",
       user_id: result.user_id,
       business_id: result.business_id,
-      business_type_ids:
-        result.business_type_ids,
+      business_type_ids: result.business_type_ids,
       phone: normalizedPhone,
-      email: normalizedEmail,
-      cid: normalizedCid,
-      role: "merchant",
     });
-  } catch (error) {
-    /*
-     * Registration failed after Multer processed the files.
-     * Remove those newly generated files.
-     */
-    removeUploadedFiles();
-
-    console.error("Merchant registration error:", {
-      message: error?.message,
-      code: error?.code,
-      meta: error?.meta,
-      stack: error?.stack,
-    });
-
-    const message =
-      error?.message ||
-      "Merchant registration failed.";
-
-    const isConflict =
-      /already registered|already exists|already being used|choose a different password|same login credentials/i.test(
-        message,
+  } catch (err) {
+    console.error("Register error:", err.message);
+    const isClientErr =
+      /exists|required|invalid|username|business_type_ids/i.test(
+        err.message || "",
       );
-
-    const isValidation =
-      /required|invalid|must contain|must be|exactly|at least one|at least 6|business_type_ids|greater than|non-negative/i.test(
-        message,
-      );
-
-    if (isConflict) {
-      return res.status(409).json({
-        success: false,
-        message,
-      });
-    }
-
-    if (isValidation) {
-      return res.status(400).json({
-        success: false,
-        message,
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message:
-        "Merchant registration failed. Please try again later.",
-    });
+    return res
+      .status(isClientErr ? 400 : 500)
+      .json({ error: err.message || "Merchant registration failed" });
   }
 }
-
-
 
 /* ---------------- update business details ---------------- */
 
@@ -498,89 +253,40 @@ async function updateMerchant(req, res) {
 
 async function loginByEmail(req, res) {
   try {
-    const body = req.body || {};
+    const { email, password, device_id } = req.body || {};
 
-    const email =
-      body.email !== null && body.email !== undefined
-        ? String(body.email).trim().toLowerCase()
-        : "";
-
-    const password =
-      body.password !== null && body.password !== undefined
-        ? String(body.password)
-        : "";
+    if (!email || !password) {
+      return res.status(400).json({ error: "email and password are required" });
+    }
 
     const deviceId =
-      body.device_id !== null &&
-      body.device_id !== undefined &&
-      String(body.device_id).trim()
-        ? String(body.device_id).trim()
-        : null;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "Email address is required.",
-      });
-    }
-
-    if (!password) {
-      return res.status(400).json({
-        success: false,
-        message: "Password is required.",
-      });
-    }
+      device_id && String(device_id).trim() ? String(device_id).trim() : null;
 
     if (!deviceId) {
-      return res.status(400).json({
-        success: false,
-        message: "Device ID is required.",
-      });
+      return res.status(400).json({ error: "device_id is required" });
     }
 
-    /*
-     * This model function must filter by:
-     *
-     * email + role: "merchant"
-     */
     const candidates = await findCandidatesByEmail(email);
-
-    if (!Array.isArray(candidates) || candidates.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No merchant account was found with this email address.",
-      });
+    if (!candidates.length) {
+      return res.status(404).json({ error: "User not found" });
     }
 
-    let pickedUser = null;
-
-    for (const candidate of candidates) {
-      if (!candidate?.password_hash) {
-        continue;
-      }
-
-      const passwordMatches = await bcrypt.compare(
-        password,
-        candidate.password_hash,
-      );
-
-      if (passwordMatches) {
-        pickedUser = candidate;
+    let picked = null;
+    for (const u of candidates) {
+      if (!u?.password_hash) continue;
+      const ok = await bcrypt.compare(password, u.password_hash);
+      if (ok) {
+        picked = u;
         break;
       }
     }
 
-    if (!pickedUser) {
-      return res.status(401).json({
-        success: false,
-        message: "Incorrect password. Please try again.",
-      });
+    if (!picked) {
+      return res.status(401).json({ error: "Incorrect password" });
     }
 
     const user = await prisma.users.findUnique({
-      where: {
-        user_id: pickedUser.user_id,
-      },
+      where: { user_id: picked.user_id },
       select: {
         user_id: true,
         user_name: true,
@@ -592,73 +298,31 @@ async function loginByEmail(req, res) {
       },
     });
 
-    /*
-     * Check user existence before accessing user.role.
-     */
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "Merchant account not found.",
-      });
-    }
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.is_active === false)
+      return res
+        .status(403)
+        .json({ error: "Account is deactivated. Please contact support." });
 
-    if (
-      String(user.role || "")
-        .trim()
-        .toLowerCase() !== "merchant"
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "This account is not registered as a merchant.",
-      });
-    }
-
-    if (user.is_active === false) {
-      return res.status(403).json({
-        success: false,
-        message: "Your account has been deactivated. Please contact support.",
-      });
-    }
-
-    /*
-     * When already logged in, verify that the incoming device
-     * matches the device stored for this merchant user_id.
-     */
     if (user.is_verified === true) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
-        where: {
-          user_id: user.user_id,
-        },
-        select: {
-          device_id: true,
-        },
+        where: { user_id: user.user_id },
+        select: { device_id: true },
       });
-
-      const storedDeviceId = deviceRecord?.device_id
+      const dbDeviceId = deviceRecord?.device_id
         ? String(deviceRecord.device_id)
         : null;
-
-      if (!storedDeviceId || storedDeviceId !== deviceId) {
+      if (!dbDeviceId || dbDeviceId !== deviceId) {
         return res.status(409).json({
-          success: false,
-          message:
-            "This account is already logged in on another device. Please log out from the other device first.",
+          error:
+            "This account appears to be logged in on another device. Please log out from the other device first.",
         });
       }
     }
 
-    /*
-     * Store or update the device for this specific merchant
-     * user account.
-     */
     await prisma.all_device_ids.upsert({
-      where: {
-        user_id: user.user_id,
-      },
-      update: {
-        device_id: deviceId,
-        last_seen: new Date(),
-      },
+      where: { user_id: user.user_id },
+      update: { device_id: deviceId, last_seen: new Date() },
       create: {
         user_id: user.user_id,
         device_id: deviceId,
@@ -667,27 +331,13 @@ async function loginByEmail(req, res) {
     });
 
     await prisma.users.update({
-      where: {
-        user_id: user.user_id,
-      },
-      data: {
-        is_verified: true,
-        last_login: new Date(),
-      },
+      where: { user_id: user.user_id },
+      data: { is_verified: true, last_login: new Date() },
     });
 
     const business = await prisma.merchant_business_details.findFirst({
-      where: {
-        user_id: user.user_id,
-      },
-      orderBy: [
-        {
-          created_at: "desc",
-        },
-        {
-          business_id: "desc",
-        },
-      ],
+      where: { user_id: user.user_id },
+      orderBy: [{ created_at: "desc" }, { business_id: "desc" }],
       select: {
         business_id: true,
         business_name: true,
@@ -697,53 +347,25 @@ async function loginByEmail(req, res) {
       },
     });
 
-    if (!business) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Merchant business details were not found. Please contact support.",
-      });
-    }
-
-    if (!process.env.ACCESS_TOKEN_SECRET) {
-      throw new Error("ACCESS_TOKEN_SECRET is not configured");
-    }
-
-    if (!process.env.REFRESH_TOKEN_SECRET) {
-      throw new Error("REFRESH_TOKEN_SECRET is not configured");
-    }
-
-    const tokenPayload = {
+    const payload = {
       user_id: Number(user.user_id),
       role: user.role,
       user_name: user.user_name,
-      phone: user.phone,
     };
-
-    const accessToken = jwt.sign(
-      tokenPayload,
-      process.env.ACCESS_TOKEN_SECRET,
-      {
-        expiresIn: "60m",
-      },
-    );
-
-    const refreshToken = jwt.sign(
-      tokenPayload,
-      process.env.REFRESH_TOKEN_SECRET,
-      {
-        expiresIn: "1440m",
-      },
-    );
+    const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "60m",
+    });
+    const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
+      expiresIn: "1440m",
+    });
 
     return res.status(200).json({
-      success: true,
-      message: "Login successful.",
+      message: "Login successful",
       token: {
-        access_token: accessToken,
+        access_token,
         access_token_time: 60,
-        refresh_token: refreshToken,
-        refresh_token_time: 1440,
+        refresh_token,
+        refresh_token_time: 10,
       },
       user: {
         user_id: Number(user.user_id),
@@ -753,29 +375,18 @@ async function loginByEmail(req, res) {
         email: user.email,
         is_verified: 1,
         device_id: deviceId,
-
-        owner_type: business.owner_type ?? null,
-
-        business_id: business.business_id ? Number(business.business_id) : null,
-
-        business_name: business.business_name ?? null,
-
-        business_logo: business.business_logo ?? null,
-
-        address: business.address ?? null,
+        owner_type: business?.owner_type ?? null,
+        business_id: business?.business_id
+          ? Number(business.business_id)
+          : null,
+        business_name: business?.business_name ?? null,
+        business_logo: business?.business_logo ?? null,
+        address: business?.address ?? null,
       },
     });
-  } catch (error) {
-    console.error("Merchant login error:", {
-      message: error?.message,
-      code: error?.code,
-      stack: error?.stack,
-    });
-
-    return res.status(500).json({
-      success: false,
-      message: "Login failed due to a server error. Please try again later.",
-    });
+  } catch (err) {
+    console.error("loginByEmail error:", err.message);
+    return res.status(500).json({ error: "Login failed due to server error" });
   }
 }
 
