@@ -66,16 +66,40 @@ async function findRequestById(request_id) {
   });
 }
 
-// admin_logs has a real FK to users with no cascade, so it must be detached
-// before the user row can be deleted. Wallet tables (wallets, wallet_ledger,
-// wallet_holds, wallet_transaction_logs, wallet_transactions) have no FK to
-// users in the schema — they're intentionally left untouched so financial
-// records survive account deletion.
+// Several tables have a real FK to users with no cascade/setNull, so they
+// must be detached or removed before the user row can be deleted. Wallet
+// tables (wallets, wallet_ledger, wallet_holds, wallet_transaction_logs,
+// wallet_transactions) have no FK to users in the schema — they're
+// intentionally left untouched so financial records survive account
+// deletion. Tables below with nullable user_id are detached (set null);
+// tables where user_id is required are deleted outright (their own
+// dependents, e.g. event_booking_seats, event_review_helpful, cascade
+// automatically via existing FK rules).
 async function cleanupUserData(uid) {
-  await prisma.admin_logs.updateMany({
-    where: { user_id: uid },
-    data: { user_id: null },
-  });
+  await prisma.$transaction([
+    prisma.admin_logs.updateMany({
+      where: { user_id: uid },
+      data: { user_id: null },
+    }),
+    prisma.app_ratings.updateMany({
+      where: { user_id: uid },
+      data: { user_id: null },
+    }),
+    prisma.event_organizers.updateMany({
+      where: { user_id: uid },
+      data: { user_id: null },
+    }),
+    prisma.organizer_revenue_share.updateMany({
+      where: { updated_by: uid },
+      data: { updated_by: null },
+    }),
+    prisma.bookings.deleteMany({ where: { user_id: uid } }),
+    prisma.event_bookings.deleteMany({ where: { user_id: uid } }),
+    prisma.event_payment_sessions.deleteMany({ where: { user_id: uid } }),
+    prisma.event_reviews.deleteMany({ where: { user_id: uid } }),
+    prisma.event_seat_holds.deleteMany({ where: { user_id: uid } }),
+    prisma.reviews.deleteMany({ where: { user_id: uid } }),
+  ]);
 }
 
 async function approveAndDeleteUser(request_id, resolved_by) {
