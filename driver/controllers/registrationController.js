@@ -445,27 +445,15 @@ const loginUser = async (req, res) => {
     const merchantDesktopNoDevice = isMerchant && desktop === true;
     const financeNoDevice = isFinance && desktop === true;
 
-    // Device requirement check - finance and admin can skip device
-    if (
-      !adminNoDevice &&
-      !merchantDesktopNoDevice &&
-      !financeNoDevice &&
-      !deviceId
-    ) {
-      return errorResponse(
-        res,
-        400,
-        "Device information is required for login. Please restart the app.",
-      );
-    }
-
-    // Device conflict check - skip for finance, admin, and demo/review accounts
+    // Device conflict check - skip for finance, admin, demo/review accounts,
+    // and when no device_id was supplied (device_id is optional for login)
     if (
       !adminNoDevice &&
       !merchantDesktopNoDevice &&
       !financeNoDevice &&
       !isDemoBypassPhone(user.phone) &&
-      user.is_verified === true
+      user.is_verified === true &&
+      deviceId
     ) {
       const deviceRecord = await prisma.all_device_ids.findUnique({
         where: { user_id: user.user_id },
