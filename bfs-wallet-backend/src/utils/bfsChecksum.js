@@ -4,10 +4,12 @@ const path = require("path");
 const {
   PRIVATE_KEY_PATH,
   PUBLIC_KEY_PATH,
+  UAT_PUBLIC_KEY_PATH,
 } = require("../config/bfsConfig");
 
 let privateKeyPem = null;
 let publicKeyPem = null;
+let uatPublicKeyPem = null;
 
 function loadKeys() {
   if (!privateKeyPem && PRIVATE_KEY_PATH) {
@@ -15,6 +17,9 @@ function loadKeys() {
   }
   if (!publicKeyPem && PUBLIC_KEY_PATH) {
     publicKeyPem = fs.readFileSync(path.resolve(PUBLIC_KEY_PATH), "utf8");
+  }
+  if (!uatPublicKeyPem && UAT_PUBLIC_KEY_PATH) {
+    uatPublicKeyPem = fs.readFileSync(path.resolve(UAT_PUBLIC_KEY_PATH), "utf8");
   }
 }
 
@@ -32,20 +37,19 @@ function signChecksum(source) {
   return signature.toString("hex").toUpperCase();
 }
 
-// function verifyChecksum(params, order, checksumHex) {
-//   loadKeys();
-//   if (!publicKeyPem) throw new Error("Public key not loaded");
-//   const verify = crypto.createVerify("RSA-SHA1");
-//   const source = buildSourceString(params, order);
-//   verify.update(source, "utf8");
-//   verify.end();
-//   const sig = Buffer.from(checksumHex, "hex");
-//   return verify.verify(publicKeyPem, sig);
-// }
-
+function verifyChecksum(params, order, checksumHex) {
+  loadKeys();
+  if (!uatPublicKeyPem) throw new Error("BFS UAT public key not loaded");
+  const verify = crypto.createVerify("RSA-SHA1");
+  const source = buildSourceString(params, order);
+  verify.update(source, "utf8");
+  verify.end();
+  const sig = Buffer.from(checksumHex, "hex");
+  return verify.verify(uatPublicKeyPem, sig);
+}
 
 module.exports = {
   buildSourceString,
   signChecksum,
-//   verifyChecksum,
+  verifyChecksum,
 };

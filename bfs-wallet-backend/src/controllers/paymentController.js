@@ -31,8 +31,7 @@ async function accountEnquiryHandler(req, res, next) {
       return res.status(e.status || 400).json({ ok: false, error: e.message });
     }
 
-    console.log("Account Enquiry Request - orderNo:", orderNo, "remitterBankId:", remitterBankId, "remitterAccNo:", remitterAccNo);
-    const data = await accountEnquiry({ orderNo, remitterBankId, remitterAccNo });
+    console.log("Account Enquiry Request:", JSON.stringify({ orderNo, remitterBankId, remitterAccNo }));    const data = await accountEnquiry({ orderNo, remitterBankId, remitterAccNo });
     res.json({ ok: true, data });
   } catch (err) {
     next(err);

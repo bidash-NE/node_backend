@@ -7,21 +7,19 @@ function generateOrderNo(userId) {
   const rand = Math.floor(Math.random() * 1000)
     .toString()
     .padStart(3, "0");
-  const prefix = String(userId || "U").slice(0, 24); // keep total ≤ 40 chars (BFS spec)
-  return `${prefix}${ts}${rand}`;
+  return `${userId || "U"}${ts}${rand}`;
 }
 
 function formatTxnTime(date = new Date()) {
-  // YYYYMMDDHHmmSS in BTT (UTC+6) — BFS spec requires Bhutan Time
-  const btt = new Date(date.getTime() + 6 * 60 * 60 * 1000);
+  // YYYYMMDDHHmmSS
   const pad = (n, len = 2) => String(n).padStart(len, "0");
   return (
-    btt.getUTCFullYear().toString() +
-    pad(btt.getUTCMonth() + 1) +
-    pad(btt.getUTCDate()) +
-    pad(btt.getUTCHours()) +
-    pad(btt.getUTCMinutes()) +
-    pad(btt.getUTCSeconds())
+    date.getFullYear().toString() +
+    pad(date.getMonth() + 1) +
+    pad(date.getDate()) +
+    pad(date.getHours()) +
+    pad(date.getMinutes()) +
+    pad(date.getSeconds())
   );
 }
 

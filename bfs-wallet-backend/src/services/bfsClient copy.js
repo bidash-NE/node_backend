@@ -12,7 +12,7 @@ const {
 const {
   buildSourceString,
   signChecksum,
-  verifyChecksum,
+  // verifyChecksum,
 } = require("../utils/bfsChecksum");
 const { toFormUrlEncoded, parseBfsResponse } = require("../utils/nvp");
 const { logRmaPg } = require("./rmaLogService");
@@ -33,7 +33,7 @@ const AR_AS_FIELDS = [
   "bfs_version",
 ];
 
-// AE – account enquiry (spec: bfs_benfId|bfs_bfsTxnId|bfs_msgType|bfs_remitterAccNo|bfs_remitterBankId)
+// AE
 const AE_FIELDS = [
   "bfs_benfId",
   "bfs_bfsTxnId",
@@ -42,7 +42,7 @@ const AE_FIELDS = [
   "bfs_remitterBankId",
 ];
 
-// DR – debit request (spec: bfs_benfId|bfs_bfsTxnId|bfs_msgType|bfs_remitterOtp)
+// DR
 const DR_FIELDS = [
   "bfs_benfId",
   "bfs_bfsTxnId",
@@ -92,34 +92,12 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
   const body = toFormUrlEncoded(fullParams);
   // console.log("[BFS] Request body:", body);
 
-  let data;
-  try {
-    const resp = await axios.post(url, body, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      timeout: BFS_TIMEOUT_MS,
-    });
-    data = resp.data;
-  } catch (axiosErr) {
-    const code = axiosErr.code || "";
-    let message;
-    let status;
-
-    if (code === "ECONNABORTED" || axiosErr.message?.includes("timeout")) {
-      message = "Payment gateway timed out. Please try again.";
-      status = 504;
-    } else if (["ECONNREFUSED", "ENOTFOUND", "ECONNRESET", "ENETUNREACH"].includes(code)) {
-      message = "Payment gateway is unreachable. Please try again later.";
-      status = 503;
-    } else {
-      message = "Payment gateway error. Please try again.";
-      status = 502;
-    }
-
-    const err = new Error(message);
-    err.status = status;
-    err.bfsCode = code;
-    throw err;
-  }
+  const { data } = await axios.post(url, body, {
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    timeout: BFS_TIMEOUT_MS,
+  });
 
   const raw = typeof data === "string" ? data : String(data);
   const respObj = parseBfsResponse(raw);
@@ -152,15 +130,16 @@ async function postToBfs(url, params, fieldOrder, respFieldOrder, logCtx = {}) {
     console.error("[RMA_LOG] failed to insert log:", e.message || e);
   }
 
-  // 🔒 Verify checksum AFTER logging, so even failures are captured.
-  if (respObj.bfs_checkSum && respFieldOrder) {
-    const ok = verifyChecksum(respObj, respFieldOrder, respObj.bfs_checkSum);
-    if (!ok) {
-      const err = new Error("BFS response checksum verification failed");
-      err.raw = raw;
-      throw err;
-    }
-  }
+  // 🔒 If you later enable response checksum verification, do it AFTER logging
+  // so even failures are captured.
+  // if (respObj.bfs_checkSum && respFieldOrder) {
+  //   const ok = verifyChecksum(respObj, respFieldOrder, respObj.bfs_checkSum);
+  //   if (!ok) {
+  //     const err = new Error("BFS response checksum verification failed");
+  //     err.raw = raw;
+  //     throw err;
+  //   }
+  // }
 
   return { raw, obj: respObj };
 }

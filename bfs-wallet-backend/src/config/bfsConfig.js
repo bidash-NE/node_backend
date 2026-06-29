@@ -10,6 +10,7 @@ module.exports = {
 
   PRIVATE_KEY_PATH: process.env.BFS_PRIVATE_KEY_PATH,
   PUBLIC_KEY_PATH: process.env.BFS_PUBLIC_KEY_PATH,
+  UAT_PUBLIC_KEY_PATH: process.env.BFS_UAT_PUBLIC_KEY_PATH,
   BFS_TIMEOUT_MS: Number(process.env.BFS_TIMEOUT_MS || 60000),
 };
 

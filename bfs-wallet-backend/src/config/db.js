@@ -16,6 +16,8 @@ function updatePayment(orderNo, patch) {
 }
 
 function getPayment(orderNo) {
+  console.log("Getting payment for orderNo:", orderNo);
+  console.log("Current keys in payments map:", Array.from(payments.keys()));
   return payments.get(orderNo) || null;
 }
 

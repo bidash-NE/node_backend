@@ -14,19 +14,11 @@ function getNum(v) {
 }
 
 function pickUserId(req) {
-  return (
-    getNum(req.body?.user_id) ??
-    getNum(req.query?.user_id) ??
-    getNum(req.headers["x-user-id"])
-  );
+  return req.user?.id ?? null;
 }
 
 function pickAdminId(req) {
-  return (
-    getNum(req.headers["x-admin-id"]) ??
-    getNum(req.body?.admin_id) ??
-    getNum(req.query?.admin_id)
-  );
+  return req.user?.id ?? null;
 }
 
 /* USER */
@@ -37,8 +29,7 @@ async function createWithdrawal(req, res) {
 
     const idempotencyKey = req.header("Idempotency-Key") || "";
     const { amount, bank, user_note} = req.body || {};
-    console.log("Withdrawal request:", { userId, amount, bank, user_note });
-
+    console.log("Withdrawal request:", JSON.stringify({ userId, amount, bank, user_note }));
     const data = await withTx((conn) =>
       S.userCreateWithdrawal(conn, {
         userId,
