@@ -7,12 +7,21 @@ function extractBearer(req) {
   return m ? m[1].trim() : null;
 }
 
+function pickSecret() {
+  return (
+    process.env.JWT_ACCESS_SECRET ||
+    process.env.ACCESS_TOKEN_SECRET ||
+    process.env.JWT_SECRET ||
+    ""
+  );
+}
+
 function requireUserAuth(req, res, next) {
   try {
     const token = extractBearer(req);
     if (!token) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
-    const secret = process.env.JWT_SECRET;
+    const secret = pickSecret();
     if (!secret) {
       return res.status(500).json({ ok: false, error: "JWT_SECRET is not set" });
     }
