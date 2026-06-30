@@ -14,10 +14,9 @@ app.use(helmet());
 
 app.use(cors({
   origin: [
-    // TODO: replace with your actual frontend/admin domains
     'https://admin.tabdey.com', 'https://organizer.tabdey.com', 'https://status.tabdey.com',
-    // process.env.CORS_ORIGIN || 'http://localhost:3000',
-  ],
+    process.env.CORS_ORIGIN,
+  ].filter(Boolean),
   credentials: true,
 }));
 
