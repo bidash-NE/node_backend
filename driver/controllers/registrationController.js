@@ -208,14 +208,14 @@ const registerUser = async (req, res) => {
           return errorResponse(
             res,
             409,
-            "This email is already registered. Please use a different email or login.",
+            `This email is already registered as ${user?.role || "this role"}. Please use a different email or login.`,
           );
         }
         if (target.includes("phone")) {
           return errorResponse(
             res,
             409,
-            "This phone number is already registered. Please use a different number or login.",
+            `This phone number is already registered as ${user?.role || "this role"}. Please use a different number or login.`,
           );
         }
       }

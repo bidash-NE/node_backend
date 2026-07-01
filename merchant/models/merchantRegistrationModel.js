@@ -126,18 +126,22 @@ async function registerMerchantModel(data) {
     );
   }
 
-  // Check for existing email, phone, username before transaction
+  // Check for existing email, phone, username within this role before transaction
   const existingEmail = await prisma.users.findFirst({
-    where: { email: email },
+    where: { email: email, role: role },
   });
   if (existingEmail)
-    throw new Error("Email already exists. Please use another email.");
+    throw new Error(
+      "Email already exists for this role. Please use another email.",
+    );
 
   const existingPhone = await prisma.users.findFirst({
-    where: { phone: phone },
+    where: { phone: phone, role: role },
   });
   if (existingPhone)
-    throw new Error("Phone number already exists. Please use another phone.");
+    throw new Error(
+      "Phone number already exists for this role. Please use another phone.",
+    );
 
   const usernameExists = await checkScopedUsernameExists(
     user_name,
