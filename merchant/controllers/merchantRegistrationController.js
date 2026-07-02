@@ -253,11 +253,13 @@ async function updateMerchant(req, res) {
 
 async function loginByEmail(req, res) {
   try {
-    const { email, password, device_id } = req.body || {};
+    const { email, password, device_id, role } = req.body || {};
 
     if (!email || !password) {
       return res.status(400).json({ error: "email and password are required" });
     }
+
+    const normalizedRole = role ? String(role).trim().toLowerCase() : "merchant";
 
     const deviceId =
       device_id && String(device_id).trim() ? String(device_id).trim() : null;
@@ -266,9 +268,11 @@ async function loginByEmail(req, res) {
       return res.status(400).json({ error: "device_id is required" });
     }
 
-    const candidates = await findCandidatesByEmail(email);
+    const candidates = await findCandidatesByEmail(email, normalizedRole);
     if (!candidates.length) {
-      return res.status(404).json({ error: "User not found" });
+      return res
+        .status(404)
+        .json({ error: `No ${normalizedRole} account was found with this email.` });
     }
 
     let picked = null;
@@ -299,6 +303,13 @@ async function loginByEmail(req, res) {
     });
 
     if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.role?.toLowerCase() !== normalizedRole) {
+      return res
+        .status(403)
+        .json({ error: "The selected role does not match this account." });
+    }
+
     if (user.is_active === false)
       return res
         .status(403)

@@ -347,9 +347,11 @@ async function updateMerchantDetailsModel(business_id, data) {
 
 /* ------------------------ FINDERS ------------------------ */
 
-async function findCandidatesByEmail(email) {
+async function findCandidatesByEmail(email, role) {
   const em = String(email || "").trim();
   if (!em) return [];
+
+  const roleFilter = role ? String(role).trim().toLowerCase() : null;
 
   const allUsers = await prisma.users.findMany({
     orderBy: { user_id: "desc" },
@@ -365,7 +367,9 @@ async function findCandidatesByEmail(email) {
   });
 
   return allUsers.filter(
-    (user) => user.email?.toLowerCase() === em.toLowerCase(),
+    (user) =>
+      user.email?.toLowerCase() === em.toLowerCase() &&
+      (!roleFilter || user.role?.toLowerCase() === roleFilter),
   );
 }
 
