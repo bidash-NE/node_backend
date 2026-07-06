@@ -9,7 +9,8 @@
     "migrate": "node src/db/migrate.js",
     "seed": "node src/db/seed.js",
     "seed:seats": "node src/db/seed_seats.js",
-    "seed:screenings": "node src/db/seed_screenings.js"
+    "seed:screenings": "node src/db/seed_screenings.js",
+    "backfill:wallets": "node src/scripts/backfillWallets.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1039.0",

@@ -1,17 +1,6 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const walletApi = require('../services/walletApi');
-const eventCredits = require('../services/eventCredits');
-
-// GET /wallet/event-credit — signup credit balance, redeemable only against event tickets
-router.get('/event-credit', requireAuth, async (req, res, next) => {
-  try {
-    const balance = await eventCredits.getBalance(req.user.id);
-    res.json({ success: true, data: { balance } });
-  } catch (err) {
-    next(err);
-  }
-});
 
 // GET /wallet/balance
 router.get('/balance', requireAuth, async (req, res, next) => {
