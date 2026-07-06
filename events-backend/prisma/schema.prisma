@@ -86,6 +86,7 @@ model event_bookings {
   status               bookings_status              @default(confirmed)
   payment_status       event_payment_status         @default(paid)
   wallet_journal_code  String?                      @db.VarChar(36)
+  credit_applied       Int                          @default(0)
   created_at           DateTime                     @default(now()) @db.Timestamp(0)
   screening_id         String?                      @db.Char(36)
   users          users                   @relation(fields: [user_id], references: [user_id], onUpdate: Restrict, map: "bookings_ibfk_1")
@@ -97,6 +98,27 @@ model event_bookings {
   @@index([event_id], map: "event_id")
   @@index([tier_id], map: "tier_id")
   @@index([user_id], map: "user_id")
+}
+
+// Signup credit balance — Nu. granted to new users, redeemable only against event ticket purchases.
+model event_credits {
+  user_id    BigInt   @id @db.UnsignedBigInt
+  balance    Int      @default(0)
+  granted    Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  updated_at DateTime @default(now()) @db.Timestamp(0)
+}
+
+// Ledger of event_credits redemptions/refunds, one row per booking (negative amount = refund).
+model event_credit_usages {
+  id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  user_id    BigInt   @db.UnsignedBigInt
+  booking_id String?  @db.VarChar(50)
+  amount     Int
+  created_at DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([user_id], map: "idx_credit_usage_user")
+  @@index([booking_id], map: "idx_credit_usage_booking")
 }
 
 model business_banners {

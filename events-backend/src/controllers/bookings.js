@@ -1,6 +1,7 @@
 const { Prisma } = require('@prisma/client');
 const prisma = require('../db');
 const walletApi = require('../services/walletApi');
+const eventCredits = require('../services/eventCredits');
 
 function generateBookingId() {
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -28,7 +29,12 @@ const DEFAULT_ORG_SHARE = 80;
 // Charges the user once for the full amount (paid to the organizer), then
 // settles the platform's share out of the organizer's wallet. This keeps the
 // user's wallet history to a single debit per booking.
-async function processWalletPayment(userId, organizerId, totalAmount, eventTitle, tPin) {
+//
+// Any available signup event-credit is redeemed first, up to totalAmount. The
+// organizer still receives the full totalAmount — the platform (Tabdey) wallet
+// funds the credited portion directly, so the promo cost is absorbed by the
+// platform rather than the organizer.
+async function processWalletPayment(userId, organizerId, totalAmount, eventTitle, tPin, bookingId) {
   // Fetch user wallet, organizer wallet, and share config in parallel
   const organizer = await prisma.event_organizers.findUnique({
     where: { id: organizerId },
@@ -50,14 +56,52 @@ async function processWalletPayment(userId, organizerId, totalAmount, eventTitle
   const orgAmount = parseFloat((totalAmount * orgPct / 100).toFixed(2));
   const tabdeyAmount = parseFloat((totalAmount - orgAmount).toFixed(2));
 
-  const orgReceipt = await walletApi.transfer({
-    senderWalletId: userWalletId,
-    recipientWalletId: organizerWalletId,
-    amount: totalAmount,
-    note: `${eventTitle} — ticket payment`,
-    tPin,
-  });
-  const orgJournalCode = orgReceipt.receipt.journal_no;
+  // Reserve credit before charging the user's real wallet, so the payable
+  // amount already reflects the discount.
+  const creditReserved = Math.min(await eventCredits.getBalance(userId), totalAmount);
+  const userPayable = totalAmount - creditReserved;
+
+  let orgJournalCode = null;
+  let creditApplied = 0;
+  try {
+    if (userPayable > 0) {
+      const orgReceipt = await walletApi.transfer({
+        senderWalletId: userWalletId,
+        recipientWalletId: organizerWalletId,
+        amount: userPayable,
+        note: `${eventTitle} — ticket payment`,
+        tPin,
+      });
+      orgJournalCode = orgReceipt.receipt.journal_no;
+    }
+
+    // Only consume the credit once the user's own payment (if any) has cleared.
+    if (creditReserved > 0) {
+      creditApplied = await eventCredits.applyCredit(userId, creditReserved, bookingId);
+    }
+  } catch (payErr) {
+    // User's own payment leg failed — nothing was charged, no credit consumed. Re-throw as-is.
+    throw payErr;
+  }
+
+  // Platform funds the credited portion so the organizer still receives the
+  // full totalAmount. Non-fatal — the user's ticket is already secured by
+  // this point; flag for manual reconciliation on failure.
+  if (creditApplied > 0) {
+    try {
+      await walletApi.transfer({
+        senderWalletId: TABDEY_WALLET_ID,
+        recipientWalletId: organizerWalletId,
+        amount: creditApplied,
+        note: `${eventTitle} — signup credit redemption`,
+      });
+    } catch (creditFundErr) {
+      console.error(
+        `Platform credit funding failed for booking ${bookingId} (organizer ${organizerId}, amount ${creditApplied}):`,
+        creditFundErr,
+      );
+    }
+  }
 
   // Settle the platform's share from the organizer's wallet. If this fails,
   // the user's payment still stands — flag for manual reconciliation rather
@@ -80,7 +124,7 @@ async function processWalletPayment(userId, organizerId, totalAmount, eventTitle
     }
   }
 
-  return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId };
+  return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId, creditApplied };
 }
 
 async function createBooking(req, res, next) {
@@ -127,13 +171,17 @@ async function createBooking(req, res, next) {
       });
       const primaryTier = seatDetails[0];
 
+      const bookingId = generateBookingId();
+      const ticketCode = generateTicketCode();
+      const ticketId = generateTicketId();
+
       // 3. Process wallet payment (before DB write — split between organizer + tabdey)
       let payResult = null;
       if (payment_method === 'WALLET') {
         payResult = await processWalletPayment(
           userId, event.organizer_id, totalAmount,
           `Event booking: ${event.title} — ${seat_ids.length} seat(s)`,
-          t_pin,
+          t_pin, bookingId,
         );
       }
 
@@ -164,10 +212,6 @@ async function createBooking(req, res, next) {
             );
           }
 
-          const bookingId = generateBookingId();
-          const ticketCode = generateTicketCode();
-          const ticketId = generateTicketId();
-
           await tx.event_bookings.create({
             data: {
               id: bookingId,
@@ -183,6 +227,7 @@ async function createBooking(req, res, next) {
               status: 'confirmed',
               payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
               wallet_journal_code: payResult?.orgJournalCode ?? null,
+              credit_applied: payResult?.creditApplied ?? 0,
             },
           });
 
@@ -240,6 +285,7 @@ async function createBooking(req, res, next) {
             total_amount: totalAmount,
             payment_method,
             wallet_journal_code: payResult?.orgJournalCode ?? null,
+            credit_applied: payResult?.creditApplied ?? 0,
             attendee_names: attendee_names || [],
             venue_name: event.venue_name,
             event_seats: seatDetails.map((s) => ({
@@ -256,6 +302,11 @@ async function createBooking(req, res, next) {
         }, TX_OPTIONS);
       } catch (txErr) {
         if (payResult) {
+          if (payResult.creditApplied > 0) {
+            await eventCredits.refundCredit(userId, payResult.creditApplied, bookingId).catch((refundErr) => {
+              console.error(`Credit refund failed for booking ${bookingId}:`, refundErr);
+            });
+          }
           txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
         }
         throw txErr;
@@ -283,12 +334,16 @@ async function createBooking(req, res, next) {
 
     const totalAmount = tier.price * quantity;
 
+    const bookingId = generateBookingId();
+    const ticketId = generateTicketId();
+    const ticketCode = generateTicketCode();
+
     let payResult = null;
     if (payment_method === 'WALLET') {
       payResult = await processWalletPayment(
         userId, event.organizer_id, totalAmount,
         `Event booking: ${event.title} — ${quantity} ticket(s)`,
-        t_pin,
+        t_pin, bookingId,
       );
     }
 
@@ -302,10 +357,6 @@ async function createBooking(req, res, next) {
         }
 
         await tx.event_ticket_tiers.update({ where: { id: tier_id }, data: { available_seats: { decrement: quantity } } });
-
-        const bookingId = generateBookingId();
-        const ticketId = generateTicketId();
-        const ticketCode = generateTicketCode();
 
         await tx.event_bookings.create({
           data: {
@@ -321,6 +372,7 @@ async function createBooking(req, res, next) {
             status: 'confirmed',
             payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
             wallet_journal_code: payResult?.orgJournalCode ?? null,
+            credit_applied: payResult?.creditApplied ?? 0,
           },
         });
 
@@ -356,6 +408,7 @@ async function createBooking(req, res, next) {
           total_amount: totalAmount,
           payment_method,
           wallet_journal_code: payResult?.orgJournalCode ?? null,
+          credit_applied: payResult?.creditApplied ?? 0,
           attendee_names: attendee_names || [],
           event_start_at: event.start_at,
           venue_name: event.venue_name,
@@ -364,6 +417,11 @@ async function createBooking(req, res, next) {
       }, TX_OPTIONS);
     } catch (txErr) {
       if (payResult) {
+        if (payResult.creditApplied > 0) {
+          await eventCredits.refundCredit(userId, payResult.creditApplied, bookingId).catch((refundErr) => {
+            console.error(`Credit refund failed for booking ${bookingId}:`, refundErr);
+          });
+        }
         txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
       }
       throw txErr;

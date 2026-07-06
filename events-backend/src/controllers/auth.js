@@ -1,6 +1,8 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const prisma = require('../db');
+const walletApi = require('../services/walletApi');
+const eventCredits = require('../services/eventCredits');
 
 async function register(req, res, next) {
   try {
@@ -20,6 +22,20 @@ async function register(req, res, next) {
       data: { user_name: name, email, phone, password_hash: hash },
       select: { user_id: true, user_name: true, email: true, role: true },
     });
+
+    // Grant the signup event-ticket credit — non-fatal, shouldn't block account creation
+    try {
+      await eventCredits.grantSignupCredit(user.user_id);
+    } catch (creditErr) {
+      console.error(`Signup credit grant failed for user ${user.user_id}:`, creditErr.message);
+    }
+
+    // Auto-provision a wallet — non-fatal if the wallet service is unavailable
+    try {
+      await walletApi.createWallet(user.user_id);
+    } catch (walletErr) {
+      console.error(`Wallet creation failed for user ${user.user_id}:`, walletErr.message);
+    }
 
     const token = jwt.sign(
       { id: user.user_id.toString(), name: user.user_name, email: user.email, role: user.role },
