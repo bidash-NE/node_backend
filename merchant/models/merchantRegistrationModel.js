@@ -143,6 +143,14 @@ async function registerMerchantModel(data) {
       "Phone number already exists for this role. Please use another phone.",
     );
 
+  const existingCid = await prisma.users.findFirst({
+    where: { cid: cidStr, role: role },
+  });
+  if (existingCid)
+    throw new Error(
+      "This CID is already registered for this role. Please login instead.",
+    );
+
   const usernameExists = await checkScopedUsernameExists(
     user_name,
     role,

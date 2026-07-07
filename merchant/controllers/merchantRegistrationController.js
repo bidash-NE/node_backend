@@ -130,6 +130,23 @@ async function registerMerchant(req, res) {
     });
   } catch (err) {
     console.error("Register error:", err.message);
+
+    if (err.code === "P2002") {
+      const target = err.meta?.target;
+      const field = Array.isArray(target)
+        ? target.includes("cid")
+          ? "CID"
+          : target.includes("email")
+            ? "email"
+            : target.includes("phone")
+              ? "phone number"
+              : "information"
+        : "information";
+      return res.status(409).json({
+        error: `This ${field} is already registered for this role. Please login instead.`,
+      });
+    }
+
     const isClientErr =
       /exists|required|invalid|username|business_type_ids/i.test(
         err.message || "",
