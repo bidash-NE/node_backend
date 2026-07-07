@@ -3,7 +3,7 @@ const { prisma } = require("../lib/prisma");
 const { makeTxnId, makeJournalCode } = require("../utils/idService");
 
 // Nu. credited to every wallet the moment it's created (new signups, organizers, etc.)
-const SIGNUP_BONUS = Number(process.env.WALLET_SIGNUP_BONUS ?? 1400);
+const SIGNUP_BONUS = Number(700);
 
 /**
  * Wallet ID format:
@@ -159,7 +159,7 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
           tnx_to: created.wallet_id,
           amount: SIGNUP_BONUS,
           remark: "CR",
-          note: "Signup bonus",
+          note: "Ticket ", // can be changed later
         },
       });
     }
