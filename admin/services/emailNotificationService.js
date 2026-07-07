@@ -116,9 +116,6 @@ async function sendNotificationEmails({
         role: {
           in: roles.map((r) => String(r).trim()),
         },
-        email: {
-          not: null,
-        },
         NOT: {
           email: "",
         },
