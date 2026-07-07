@@ -208,21 +208,28 @@ const registerUser = async (req, res) => {
           return errorResponse(
             res,
             409,
-            `This email is already registered as ${user?.role || "this role"}. Please use a different email or login.`,
+            "This email already exists. Please try using a different one and register.",
           );
         }
         if (target.includes("phone")) {
           return errorResponse(
             res,
             409,
-            `This phone number is already registered as ${user?.role || "this role"}. Please use a different number or login.`,
+            "This phone number already exists. Please try using a different one and register.",
+          );
+        }
+        if (target.includes("cid")) {
+          return errorResponse(
+            res,
+            409,
+            "This CID already exists. Please try using a different one and register.",
           );
         }
       }
       return errorResponse(
         res,
         409,
-        "Account already exists with this information.",
+        "This information already exists. Please try using a different one and register.",
       );
     }
 

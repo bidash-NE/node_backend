@@ -132,7 +132,7 @@ async function registerMerchantModel(data) {
   });
   if (existingEmail)
     throw new Error(
-      "Email already exists for this role. Please use another email.",
+      "This email already exists. Please try using a different one and register.",
     );
 
   const existingPhone = await prisma.users.findFirst({
@@ -140,7 +140,7 @@ async function registerMerchantModel(data) {
   });
   if (existingPhone)
     throw new Error(
-      "Phone number already exists for this role. Please use another phone.",
+      "This phone number already exists. Please try using a different one and register.",
     );
 
   const existingCid = await prisma.users.findFirst({
@@ -148,7 +148,7 @@ async function registerMerchantModel(data) {
   });
   if (existingCid)
     throw new Error(
-      "This CID is already registered for this role. Please login instead.",
+      "This CID already exists. Please try using a different one and register.",
     );
 
   const usernameExists = await checkScopedUsernameExists(
