@@ -135,15 +135,15 @@ async function registerMerchant(req, res) {
       const target = err.meta?.target;
       const field = Array.isArray(target)
         ? target.includes("cid")
-          ? "CID"
+          ? "This CID"
           : target.includes("email")
-            ? "email"
+            ? "This email"
             : target.includes("phone")
-              ? "phone number"
-              : "information"
-        : "information";
+              ? "This phone number"
+              : "This information"
+        : "This information";
       return res.status(409).json({
-        error: `This ${field} is already registered for this role. Please login instead.`,
+        error: `${field} already exists. Please try using a different one and register.`,
       });
     }
 
