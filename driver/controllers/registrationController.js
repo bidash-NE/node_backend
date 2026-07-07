@@ -54,11 +54,13 @@ const registerUser = async (req, res) => {
     const normalizedPhone = normalizeBhutanPhone(user.phone);
     const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
 
-    // Admin and finance roles don't require device
+    // Admin, finance, organizer, driver, and passenger (user) roles don't require device
     const requiresDevice =
       user?.role !== "admin" &&
       user?.role !== "finance" &&
-      user?.role !== "organizer";
+      user?.role !== "organizer" &&
+      user?.role !== "driver" &&
+      user?.role !== "user";
 
     if (requiresDevice && !deviceID) {
       return errorResponse(res, 400, "Device ID is required for registration");
@@ -81,7 +83,7 @@ const registerUser = async (req, res) => {
 
       userId = toNumber(newUser.user_id);
 
-      if (requiresDevice) {
+      if (deviceID) {
         if (user.role === "driver") {
           await prismaTx.driver_devices.create({
             data: {
