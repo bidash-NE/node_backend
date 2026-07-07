@@ -37,8 +37,14 @@ async function processWalletPayment(userId, organizerId, totalAmount, eventTitle
   if (!organizer?.user_id) throw Object.assign(new Error('Organizer has no linked user account'), { status: 503 });
 
   const [userWalletData, orgWalletData, shareConfig] = await Promise.all([
-    walletApi.getWalletByUser(userId.toString()),
-    walletApi.getWalletByUser(organizer.user_id.toString()),
+    walletApi.getWalletByUser(userId.toString()).catch((err) => {
+      console.error(`[processWalletPayment] buyer wallet lookup failed — user_id=${userId}:`, err.message);
+      throw err;
+    }),
+    walletApi.getWalletByUser(organizer.user_id.toString()).catch((err) => {
+      console.error(`[processWalletPayment] organizer wallet lookup failed — organizer_id=${organizerId}, user_id=${organizer.user_id}:`, err.message);
+      throw err;
+    }),
     prisma.organizer_revenue_share.findUnique({ where: { organizer_id: organizerId } }),
   ]);
 
