@@ -268,6 +268,8 @@ async function createSystemNotification(req, res) {
       target_audience,
     } = req.body || {};
 
+    console.log("[createSystemNotification] incoming body:", JSON.stringify(req.body));
+
     const createdBy = user_id || null;
     const adminName = user_name || "System";
 
@@ -408,6 +410,7 @@ async function createSystemNotification(req, res) {
     });
   } catch (err) {
     console.error("Create notification error:", err);
+    console.error("Create notification error stack:", err?.stack);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",
