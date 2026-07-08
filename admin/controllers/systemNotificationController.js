@@ -69,8 +69,16 @@ async function sendEmailToSingleUser(req, res) {
     const safeTitle = String(title).trim();
     const safeMessage = String(message).trim();
 
+    const notificationId = await insertSystemNotification({
+      title: safeTitle,
+      message: safeMessage,
+      deliveryChannels: ["email"],
+      targetAudience: [`user:${target_user_id}`],
+      createdBy,
+    });
+
     const emailSummary = await sendNotificationEmails({
-      notificationId: null,
+      notificationId,
       title: safeTitle,
       message: safeMessage,
       roles: [],
@@ -96,7 +104,7 @@ async function sendEmailToSingleUser(req, res) {
       reason,
       created_by: createdBy,
       admin_name: adminName,
-      notification_id: null,
+      notification_id: notificationId,
       context: "single",
       roles: [],
     });
@@ -104,12 +112,13 @@ async function sendEmailToSingleUser(req, res) {
     await adminLogModel.addLog({
       user_id: createdBy,
       admin_name: adminName,
-      activity: `Sent EMAIL (single user) to user_id=${target_user_id} (${email}) — "${safeTitle}"`,
+      activity: `Sent EMAIL (single user) to user_id=${target_user_id} (${email}) — "${safeTitle}" (Notification #${notificationId})`,
     });
 
     return res.status(200).json({
       success: true,
       message: "Email sent successfully.",
+      notification_id: notificationId,
       target_user_id: Number(target_user_id),
       email,
       email_summary: emailSummary,
@@ -159,6 +168,14 @@ async function sendSmsToSingleUser(req, res) {
     const safeTitle = String(title).trim();
     const safeMessage = String(message).trim();
 
+    const notificationId = await insertSystemNotification({
+      title: safeTitle,
+      message: safeMessage,
+      deliveryChannels: ["sms"],
+      targetAudience: [`user:${target_user_id}`],
+      createdBy,
+    });
+
     const smsSummary = await sendNotificationSmsBulk({
       title: safeTitle,
       message: safeMessage,
@@ -180,7 +197,7 @@ async function sendSmsToSingleUser(req, res) {
       reason: failed > 0 ? "SMS gateway returned failure" : "",
       created_by: createdBy,
       admin_name: adminName,
-      notification_id: null,
+      notification_id: notificationId,
       context: "single",
       roles: [],
     });
@@ -188,12 +205,13 @@ async function sendSmsToSingleUser(req, res) {
     await adminLogModel.addLog({
       user_id: createdBy,
       admin_name: adminName,
-      activity: `Sent SMS (single user) to user_id=${target_user_id} (${phone}) — "${safeTitle}"`,
+      activity: `Sent SMS (single user) to user_id=${target_user_id} (${phone}) — "${safeTitle}" (Notification #${notificationId})`,
     });
 
     return res.status(200).json({
       success: true,
       message: "SMS sent successfully.",
+      notification_id: notificationId,
       target_user_id: Number(target_user_id),
       phone,
       sms_summary: smsSummary,
@@ -316,31 +334,28 @@ async function createSystemNotification(req, res) {
       )
       .filter(Boolean);
 
-    const wantsInApp = lowerChannels.includes("in_app");
     const wantsEmail = lowerChannels.includes("email");
     const wantsSms = lowerChannels.includes("sms");
 
-    let notificationId = null;
     let emailSummary = null;
     let smsSummary = null;
 
-    if (wantsInApp) {
-      notificationId = await insertSystemNotification({
-        title: String(title).trim(),
-        message: String(message).trim(),
-        deliveryChannels: ["in_app"],
-        targetAudience: roles,
-        createdBy,
-      });
+    // Always persist the notification, regardless of which channel(s) were selected.
+    const notificationId = await insertSystemNotification({
+      title: String(title).trim(),
+      message: String(message).trim(),
+      deliveryChannels: lowerChannels,
+      targetAudience: roles,
+      createdBy,
+    });
 
-      await adminLogModel.addLog({
-        user_id: createdBy,
-        admin_name: adminName,
-        activity: `Created IN_APP notification #${notificationId} - "${String(
-          title,
-        ).trim()}" for roles [${roles.join(", ")}]`,
-      });
-    }
+    await adminLogModel.addLog({
+      user_id: createdBy,
+      admin_name: adminName,
+      activity: `Created notification #${notificationId} - "${String(
+        title,
+      ).trim()}" via [${lowerChannels.join(", ")}] for roles [${roles.join(", ")}]`,
+    });
 
     if (wantsEmail) {
       emailSummary = await sendNotificationEmails({
@@ -358,14 +373,10 @@ async function createSystemNotification(req, res) {
           ? Number(emailSummary.total)
           : sent + failed + skipped;
 
-      let logMessage = `Sent EMAIL notification to roles [${roles.join(", ")}]`;
-      if (notificationId) logMessage += ` (Notification #${notificationId})`;
-      logMessage += ` — total: ${total}, sent: ${sent}, failed: ${failed}, skipped: ${skipped}`;
-
       await adminLogModel.addLog({
         user_id: createdBy,
         admin_name: adminName,
-        activity: logMessage,
+        activity: `Sent EMAIL notification to roles [${roles.join(", ")}] (Notification #${notificationId}) — total: ${total}, sent: ${sent}, failed: ${failed}, skipped: ${skipped}`,
       });
     }
 
@@ -381,14 +392,10 @@ async function createSystemNotification(req, res) {
       const failed = Number(smsSummary?.failed || 0);
       const batches = Number(smsSummary?.batches || 0);
 
-      let logMessage = `Sent SMS notification to roles [${roles.join(", ")}]`;
-      if (notificationId) logMessage += ` (Notification #${notificationId})`;
-      logMessage += ` — total: ${total}, sent: ${sent}, failed: ${failed}, batches: ${batches}`;
-
       await adminLogModel.addLog({
         user_id: createdBy,
         admin_name: adminName,
-        activity: logMessage,
+        activity: `Sent SMS notification to roles [${roles.join(", ")}] (Notification #${notificationId}) — total: ${total}, sent: ${sent}, failed: ${failed}, batches: ${batches}`,
       });
     }
 
@@ -410,7 +417,7 @@ async function createSystemNotification(req, res) {
 }
 
 /* ======================================================
-   Fetch all IN_APP notifications (admin)
+   Fetch all notifications (admin)
 ====================================================== */
 async function getAllSystemNotificationsController(req, res) {
   try {

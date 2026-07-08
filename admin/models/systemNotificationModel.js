@@ -1,8 +1,8 @@
 const { prisma } = require("../lib/prisma.js");
 
 /**
- * Insert a new IN_APP system notification.
- * (We only store in DB when "in_app" channel is used.)
+ * Insert a new system notification record.
+ * Stored for every send, regardless of which delivery channel(s) were used.
  */
 async function insertSystemNotification(data) {
   const {
@@ -34,7 +34,7 @@ async function insertSystemNotification(data) {
 }
 
 /**
- * Fetch all IN_APP notifications (for admin view).
+ * Fetch all notifications (for admin view).
  */
 async function getAllSystemNotifications() {
   const rows = await prisma.system_notifications.findMany({
@@ -55,7 +55,6 @@ async function getAllSystemNotifications() {
 
 /**
  * Fetch notifications visible to a user based on their role.
- * Only IN_APP notifications are stored here.
  */
 async function getNotificationsForUserRole(userId) {
   if (!userId) return [];
