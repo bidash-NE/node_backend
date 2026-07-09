@@ -103,8 +103,9 @@ async function sendViaGateway({ to, text, from }) {
   console.log("Attempting to send SMS to URL:", SMS_URL);
   console.log("Phone number:", to);
 
+  let resp;
   try {
-    const resp = await fetch(SMS_URL, {
+    resp = await fetch(SMS_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -113,24 +114,25 @@ async function sendViaGateway({ to, text, from }) {
       body: JSON.stringify({ to, text, from }),
       signal: AbortSignal.timeout(10000),
     });
-
-    const bodyText = await resp.text();
-
-    if (!resp.ok) {
-      throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
-    }
-
-    return bodyText;
   } catch (err) {
-    console.error("Fetch error details:", {
+    console.error(`SMS FAILED to ${to} — request error:`, {
       name: err.name,
       message: err.message,
       cause: err.cause,
       code: err.code,
     });
-
     throw err;
   }
+
+  const bodyText = await resp.text();
+
+  if (!resp.ok) {
+    console.error(`SMS FAILED to ${to} — gateway status ${resp.status}:`, bodyText);
+    throw new Error(`SMS gateway error ${resp.status}: ${bodyText}`);
+  }
+
+  console.log(`SMS SUCCESS to ${to} — gateway response:`, bodyText);
+  return bodyText;
 }
 
 /* ===================== USER LOOKUP HELPERS ===================== */
