@@ -13,6 +13,9 @@ const {
 const {
   sendNotificationSmsBulk,
 } = require("../services/smsNotificationService");
+const {
+  sendNotificationPush,
+} = require("../services/pushNotificationService");
 
 // Redis log model (unchanged)
 const {
@@ -338,9 +341,11 @@ async function createSystemNotification(req, res) {
 
     const wantsEmail = lowerChannels.includes("email");
     const wantsSms = lowerChannels.includes("sms");
+    const wantsInApp = lowerChannels.includes("in_app");
 
     let emailSummary = null;
     let smsSummary = null;
+    let pushSummary = null;
 
     // Always persist the notification, regardless of which channel(s) were selected.
     const notificationId = await insertSystemNotification({
@@ -401,12 +406,34 @@ async function createSystemNotification(req, res) {
       });
     }
 
+    if (wantsInApp) {
+      try {
+        pushSummary = await sendNotificationPush({
+          title: String(title).trim(),
+          message: String(message).trim(),
+          roles,
+        });
+
+        await adminLogModel.addLog({
+          user_id: createdBy,
+          admin_name: adminName,
+          activity: `Sent PUSH (in-app) notification to roles [${roles.join(", ")}] (Notification #${notificationId}) — total: ${pushSummary.total_target_users}, sent: ${pushSummary.sent}, failed: ${pushSummary.failed}, no_token: ${pushSummary.users_without_tokens}`,
+        });
+      } catch (pushErr) {
+        // Push delivery is best-effort — the in_app record is already saved,
+        // so a push-service outage shouldn't fail the whole request.
+        console.error("Send push notification error:", pushErr);
+        pushSummary = { sent: 0, failed: 0, total_target_users: 0, users_without_tokens: 0, error: pushErr.message };
+      }
+    }
+
     return res.status(201).json({
       success: true,
       message: "Notification processed successfully.",
       notification_id: notificationId,
       email_summary: emailSummary,
       sms_summary: smsSummary,
+      push_summary: pushSummary,
     });
   } catch (err) {
     console.error("Create notification error:", err);
