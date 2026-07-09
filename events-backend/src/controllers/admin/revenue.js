@@ -17,7 +17,7 @@ async function getSummary(req, res, next) {
     }
 
     const where = {
-      status: "confirmed",
+      status: { in: ["confirmed", "used"] },
       ...(eventIdFilter && { event_id: eventIdFilter }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
     };
@@ -64,7 +64,7 @@ async function getSummary(req, res, next) {
              CAST(SUM(total_amount) AS SIGNED) AS revenue,
              CAST(COUNT(id) AS SIGNED) AS bookings
       FROM event_bookings
-      WHERE status = 'confirmed'
+      WHERE status IN ('confirmed', 'used')
         AND created_at >= ${fromTs}
         AND created_at <= ${toTs}
       GROUP BY DATE(created_at)
@@ -121,7 +121,7 @@ async function getEventRevenue(req, res, next) {
         .status(404)
         .json({ success: false, message: "Event not found" });
 
-    const bookingWhere = { event_id: id, status: "confirmed" };
+    const bookingWhere = { event_id: id, status: { in: ["confirmed", "used"] } };
 
     const [totals, byTier, byPaymentMethod, screenings] = await Promise.all([
       prisma.event_bookings.aggregate({
@@ -161,7 +161,7 @@ async function getEventRevenue(req, res, next) {
       by: ["screening_id"],
       where: {
         screening_id: { in: screeningIds },
-        event_bookings: { status: "confirmed" },
+        event_bookings: { status: { in: ["confirmed", "used"] } },
       },
       _count: { seat_id: true },
     });
@@ -347,7 +347,7 @@ async function exportRevenue(req, res, next) {
     }
 
     const where = {
-      status: 'confirmed',
+      status: { in: ['confirmed', 'used'] },
       ...(eventIdFilter && { event_id: eventIdFilter }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
     };
@@ -414,7 +414,7 @@ async function exportEventRevenue(req, res, next) {
     }
 
     const bookings = await prisma.event_bookings.findMany({
-      where: { event_id: id, status: 'confirmed' },
+      where: { event_id: id, status: { in: ['confirmed', 'used'] } },
       orderBy: { created_at: 'desc' },
       include: {
         event_ticket_tiers: { select: { name: true } },
