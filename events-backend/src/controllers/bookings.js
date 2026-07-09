@@ -1,18 +1,24 @@
+const crypto = require('crypto');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../db');
 const walletApi = require('../services/walletApi');
 
+// 5 random bytes (40 bits) keeps daily collision odds negligible, unlike the
+// old 4-digit (0000-9999) suffix which regularly collided on busy days.
 function generateBookingId() {
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  const rand = crypto.randomBytes(5).toString('hex');
   return `BK-${today}-${rand}`;
 }
 
 function generateTicketId() {
   const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const rand = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  const rand = crypto.randomBytes(5).toString('hex');
   return `TK-${today}-${rand}`;
 }
+
+const MAX_ID_COLLISION_RETRIES = 3;
+const isPrimaryKeyCollision = (err) => err.code === 'P2002';
 
 function generateTicketCode() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -89,6 +95,52 @@ async function processWalletPayment(userId, organizerId, totalAmount, eventTitle
   return { orgJournalCode, tabdeyJournalCode, orgAmount, tabdeyAmount, orgPct, tabdeyPct, organizerId };
 }
 
+async function upsertRevenueShare(organizerId, totalAmount, payResult) {
+  await prisma.organizer_revenue_share.upsert({
+    where: { organizer_id: organizerId },
+    create: {
+      organizer_id: organizerId,
+      org_share_pct: payResult.orgPct,
+      tabdey_share_pct: payResult.tabdeyPct,
+      total_revenue: totalAmount,
+      total_org_revenue: payResult.orgAmount,
+      total_tabdey_revenue: payResult.tabdeyAmount,
+    },
+    update: {
+      total_revenue: { increment: totalAmount },
+      total_org_revenue: { increment: payResult.orgAmount },
+      total_tabdey_revenue: { increment: payResult.tabdeyAmount },
+    },
+  });
+}
+
+// Cancels a reserved-but-unpaid cinema booking (wallet charge failed) and
+// restores the seats/tier availability it had provisionally claimed.
+async function releaseCinemaReservation(bookingId, seatDetails) {
+  const tierDecrements = seatDetails.reduce((acc, s) => {
+    acc[s.tier_id] = (acc[s.tier_id] || 0) + 1;
+    return acc;
+  }, {});
+  await prisma.$transaction(async (tx) => {
+    await tx.event_booking_seats.deleteMany({ where: { booking_id: bookingId } });
+    await tx.event_bookings.delete({ where: { id: bookingId } });
+    await Promise.all(
+      Object.entries(tierDecrements).map(([tid, count]) =>
+        tx.event_ticket_tiers.update({ where: { id: tid }, data: { available_seats: { increment: count } } }),
+      ),
+    );
+  });
+}
+
+// Cancels a reserved-but-unpaid general-admission booking (wallet charge
+// failed) and restores the tier availability it had provisionally claimed.
+async function releaseGeneralAdmissionReservation(bookingId, tierId, quantity) {
+  await prisma.$transaction(async (tx) => {
+    await tx.event_bookings.delete({ where: { id: bookingId } });
+    await tx.event_ticket_tiers.update({ where: { id: tierId }, data: { available_seats: { increment: quantity } } });
+  });
+}
+
 async function createBooking(req, res, next) {
   try {
     const { event_id, tier_id, quantity, attendee_names, payment_method, seat_ids, screening_id, t_pin } = req.body;
@@ -133,22 +185,16 @@ async function createBooking(req, res, next) {
       });
       const primaryTier = seatDetails[0];
 
-      const bookingId = generateBookingId();
-      const ticketCode = generateTicketCode();
+      let bookingId = generateBookingId();
+      let ticketCode = generateTicketCode();
       const ticketId = generateTicketId();
 
-      // 3. Process wallet payment (before DB write — split between organizer + tabdey)
-      let payResult = null;
-      if (payment_method === 'WALLET') {
-        payResult = await processWalletPayment(
-          userId, event.organizer_id, totalAmount,
-          `Event booking: ${event.title} — ${seat_ids.length} seat(s)`,
-          t_pin,
-        );
-      }
-
-      // 4. Atomic DB writes — re-validates race-condition-sensitive state
+      // 3. Reserve the booking first — re-validates race-condition-sensitive
+      // state and holds the seats. Wallet payment happens *after* this commits,
+      // so a payment failure never leaves money moved with no booking to show
+      // for it; it just cancels the reservation instead (see compensation below).
       let result;
+      for (let attempt = 1; attempt <= MAX_ID_COLLISION_RETRIES; attempt++) {
       try {
         result = await prisma.$transaction(async (tx) => {
           // Re-validate holds
@@ -187,8 +233,8 @@ async function createBooking(req, res, next) {
               payment_method,
               attendee_names: JSON.stringify(attendee_names || []),
               status: 'confirmed',
-              payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-              wallet_journal_code: payResult?.orgJournalCode ?? null,
+              payment_status: 'pending',
+              wallet_journal_code: null,
             },
           });
 
@@ -213,26 +259,6 @@ async function createBooking(req, res, next) {
 
           await tx.event_seat_holds.deleteMany({ where: { screening_id, user_id: userId } });
 
-          // Update running revenue totals
-          if (payResult) {
-            await tx.organizer_revenue_share.upsert({
-              where: { organizer_id: event.organizer_id },
-              create: {
-                organizer_id: event.organizer_id,
-                org_share_pct: payResult.orgPct,
-                tabdey_share_pct: payResult.tabdeyPct,
-                total_revenue: totalAmount,
-                total_org_revenue: payResult.orgAmount,
-                total_tabdey_revenue: payResult.tabdeyAmount,
-              },
-              update: {
-                total_revenue: { increment: totalAmount },
-                total_org_revenue: { increment: payResult.orgAmount },
-                total_tabdey_revenue: { increment: payResult.tabdeyAmount },
-              },
-            });
-          }
-
           return {
             booking_id: bookingId,
             ticket_id: ticketId,
@@ -245,7 +271,8 @@ async function createBooking(req, res, next) {
             quantity: seat_ids.length,
             total_amount: totalAmount,
             payment_method,
-            wallet_journal_code: payResult?.orgJournalCode ?? null,
+            payment_status: 'pending',
+            wallet_journal_code: null,
             attendee_names: attendee_names || [],
             venue_name: event.venue_name,
             event_seats: seatDetails.map((s) => ({
@@ -260,11 +287,41 @@ async function createBooking(req, res, next) {
             created_at: new Date().toISOString(),
           };
         }, TX_OPTIONS);
+        break;
       } catch (txErr) {
-        if (payResult) {
-          txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
+        if (isPrimaryKeyCollision(txErr) && attempt < MAX_ID_COLLISION_RETRIES) {
+          bookingId = generateBookingId();
+          ticketCode = generateTicketCode();
+          continue;
         }
         throw txErr;
+      }
+      }
+
+      // 4. Charge the wallet now that the seats are reserved. If this fails,
+      // no money has moved — cancel the reservation instead of leaving the
+      // customer with a paid-for booking they can't complete, or vice versa.
+      if (payment_method === 'WALLET') {
+        let payResult;
+        try {
+          payResult = await processWalletPayment(
+            userId, event.organizer_id, totalAmount,
+            `Event booking: ${event.title} — ${seat_ids.length} seat(s)`,
+            t_pin,
+          );
+        } catch (payErr) {
+          await releaseCinemaReservation(bookingId, seatDetails);
+          throw payErr;
+        }
+
+        await prisma.event_bookings.update({
+          where: { id: bookingId },
+          data: { payment_status: 'paid', wallet_journal_code: payResult.orgJournalCode },
+        });
+        await upsertRevenueShare(event.organizer_id, totalAmount, payResult);
+
+        result.payment_status = 'paid';
+        result.wallet_journal_code = payResult.orgJournalCode;
       }
 
       return res.status(201).json({ success: true, data: result });
@@ -289,20 +346,14 @@ async function createBooking(req, res, next) {
 
     const totalAmount = tier.price * quantity;
 
-    const bookingId = generateBookingId();
+    let bookingId = generateBookingId();
     const ticketId = generateTicketId();
-    const ticketCode = generateTicketCode();
+    let ticketCode = generateTicketCode();
 
-    let payResult = null;
-    if (payment_method === 'WALLET') {
-      payResult = await processWalletPayment(
-        userId, event.organizer_id, totalAmount,
-        `Event booking: ${event.title} — ${quantity} ticket(s)`,
-        t_pin,
-      );
-    }
-
+    // Reserve the booking first (see cinema branch above for why); wallet
+    // payment happens after this commits.
     let result;
+    for (let attempt = 1; attempt <= MAX_ID_COLLISION_RETRIES; attempt++) {
     try {
       result = await prisma.$transaction(async (tx) => {
         // Re-check availability (race condition guard)
@@ -325,30 +376,10 @@ async function createBooking(req, res, next) {
             payment_method,
             attendee_names: JSON.stringify(attendee_names || []),
             status: 'confirmed',
-            payment_status: payment_method === 'WALLET' ? 'paid' : 'pending',
-            wallet_journal_code: payResult?.orgJournalCode ?? null,
+            payment_status: 'pending',
+            wallet_journal_code: null,
           },
         });
-
-        // Update running revenue totals
-        if (payResult) {
-          await tx.organizer_revenue_share.upsert({
-            where: { organizer_id: event.organizer_id },
-            create: {
-              organizer_id: event.organizer_id,
-              org_share_pct: payResult.orgPct,
-              tabdey_share_pct: payResult.tabdeyPct,
-              total_revenue: totalAmount,
-              total_org_revenue: payResult.orgAmount,
-              total_tabdey_revenue: payResult.tabdeyAmount,
-            },
-            update: {
-              total_revenue: { increment: totalAmount },
-              total_org_revenue: { increment: payResult.orgAmount },
-              total_tabdey_revenue: { increment: payResult.tabdeyAmount },
-            },
-          });
-        }
 
         return {
           booking_id: bookingId,
@@ -361,18 +392,48 @@ async function createBooking(req, res, next) {
           quantity,
           total_amount: totalAmount,
           payment_method,
-          wallet_journal_code: payResult?.orgJournalCode ?? null,
+          payment_status: 'pending',
+          wallet_journal_code: null,
           attendee_names: attendee_names || [],
           event_start_at: event.start_at,
           venue_name: event.venue_name,
           created_at: new Date().toISOString(),
         };
       }, TX_OPTIONS);
+      break;
     } catch (txErr) {
-      if (payResult) {
-        txErr.message += ` Wallet journals: org=${payResult.orgJournalCode}, tabdey=${payResult.tabdeyJournalCode}. Please contact support.`;
+      if (isPrimaryKeyCollision(txErr) && attempt < MAX_ID_COLLISION_RETRIES) {
+        bookingId = generateBookingId();
+        ticketCode = generateTicketCode();
+        continue;
       }
       throw txErr;
+    }
+    }
+
+    // Charge the wallet now that the tier availability is reserved. If this
+    // fails, no money has moved — cancel the reservation instead.
+    if (payment_method === 'WALLET') {
+      let payResult;
+      try {
+        payResult = await processWalletPayment(
+          userId, event.organizer_id, totalAmount,
+          `Event booking: ${event.title} — ${quantity} ticket(s)`,
+          t_pin,
+        );
+      } catch (payErr) {
+        await releaseGeneralAdmissionReservation(bookingId, tier_id, quantity);
+        throw payErr;
+      }
+
+      await prisma.event_bookings.update({
+        where: { id: bookingId },
+        data: { payment_status: 'paid', wallet_journal_code: payResult.orgJournalCode },
+      });
+      await upsertRevenueShare(event.organizer_id, totalAmount, payResult);
+
+      result.payment_status = 'paid';
+      result.wallet_journal_code = payResult.orgJournalCode;
     }
 
     res.status(201).json({ success: true, data: result });

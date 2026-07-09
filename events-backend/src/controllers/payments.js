@@ -1,6 +1,10 @@
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const prisma = require('../db');
 const bfs = require('../services/bfs');
+
+const MAX_ID_COLLISION_RETRIES = 3;
+const isPrimaryKeyCollision = (err) => err.code === 'P2002';
 
 // ─── Step 1: Init bank payment ────────────────────────────────────────────────
 // Stores booking context, calls BFS init, returns orderNo + bank list
@@ -226,9 +230,11 @@ async function trackRevenueShare(tx, organizerId, totalAmount, split) {
 
 // ─── Internal: create confirmed booking after BFS payment ────────────────────
 async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMethod, orderNo) {
+  // 5 random bytes (40 bits) keeps daily collision odds negligible, unlike the
+  // old 4-digit (0000-9999) suffix which regularly collided on busy days.
   function genBookingId() {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    return `BK-${today}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+    return `BK-${today}-${crypto.randomBytes(5).toString('hex')}`;
   }
   function genTicketCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -236,10 +242,21 @@ async function confirmBookingFromSession(_, userId, ctx, totalAmount, paymentMet
     return `TD-${r(2)}${r(4)}${r(2)}`;
   }
 
-  return prisma.$transaction(async (tx) => {
+  for (let attempt = 1; attempt <= MAX_ID_COLLISION_RETRIES; attempt++) {
     const bookingId  = genBookingId();
     const ticketCode = genTicketCode();
 
+    try {
+      return await confirmBookingTx(tx => tx, userId, ctx, totalAmount, paymentMethod, orderNo, bookingId, ticketCode);
+    } catch (txErr) {
+      if (isPrimaryKeyCollision(txErr) && attempt < MAX_ID_COLLISION_RETRIES) continue;
+      throw txErr;
+    }
+  }
+}
+
+function confirmBookingTx(_, userId, ctx, totalAmount, paymentMethod, orderNo, bookingId, ticketCode) {
+  return prisma.$transaction(async (tx) => {
     if (ctx.type === 'cinema' && ctx.seat_ids?.length) {
       // Cinema booking
       const tiers = await tx.event_ticket_tiers.findMany({ where: { event_id: ctx.event_id } });
