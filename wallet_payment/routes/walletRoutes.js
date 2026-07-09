@@ -16,19 +16,6 @@ const rateLimiter = rateLimit({
     }),
 });
 
-const rateLimiterTransfer = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000,
-  max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) =>
-    res.status(429).json({
-      success: false,
-      message:
-        "You can only make 30 transfer requests in 24 hours. Please try again later.",
-    }),
-});
-
 // CREATE WALLET
 router.post("/create", rateLimiter, ctrl.create);
 
@@ -81,7 +68,7 @@ router.post(
   ctrl.forgotTPinVerifySms,
 );
 
-router.post("/transfer", rateLimiterTransfer, ctrl.userTransfer);
+router.post("/transfer", ctrl.userTransfer);
 
 router.get("/:user_id/has-tpin", ctrl.checkTPinByUserId);
 
