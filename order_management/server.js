@@ -77,11 +77,11 @@ async function testPrismaConnection() {
 
     if (error.message.includes("Access denied")) {
       console.error(
-        "   Please check your database username and password in .env file"
+        "   Please check your database username and password in .env file",
       );
     } else if (error.message.includes("Unknown database")) {
       console.error(
-        "   Please check if the database name is correct in .env file"
+        "   Please check if the database name is correct in .env file",
       );
     } else if (error.message.includes("connect ETIMEDOUT")) {
       console.error("   Please check if the database host is reachable");
@@ -100,7 +100,7 @@ app.use(
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: false,
-  })
+  }),
 );
 
 // Access logger
@@ -291,7 +291,7 @@ const listRoutes = () => {
     }, 60_000);
 
     console.log(
-      "🧹 Scheduled orders cleanup started: pending + rejected + legacy (1 min interval)"
+      "🧹 Scheduled orders cleanup started: pending + rejected + legacy (1 min interval)",
     );
 
     logger.info("Scheduled orders cleanup interval started", {
@@ -300,9 +300,7 @@ const listRoutes = () => {
     });
 
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(
-        `\n🚀 Order service + Realtime listening on port number: ${PORT}`
-      );
+      console.log(`\n🚀 Order service + Realtime listening on port : ${PORT}`);
       console.log(`📍 URL: http://localhost:${PORT}`);
       console.log(`❤️  Health check: http://localhost:${PORT}/health`);
       console.log(`📦 Uploads served at: http://localhost:${PORT}/uploads/...`);
