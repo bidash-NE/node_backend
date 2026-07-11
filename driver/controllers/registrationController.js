@@ -568,10 +568,10 @@ const loginUser = async (req, res) => {
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "60m",
+      expiresIn: "7d",
     });
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "1440m",
+      expiresIn: "30d",
     });
 
     // Build user response object
@@ -814,10 +814,10 @@ const verifyActiveSession = async (req, res) => {
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "60m",
+      expiresIn: "7d",
     });
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "1440m",
+      expiresIn: "30d",
     });
 
     const userResponse = {
@@ -929,7 +929,7 @@ const refreshAccessToken = async (req, res) => {
     };
 
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "60m",
+      expiresIn: "7d",
     });
 
     return res.status(200).json({

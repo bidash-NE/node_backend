@@ -300,11 +300,11 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
   };
 
   const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-    expiresIn: "60m",
+    expiresIn: "7d",
   });
 
   const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-    expiresIn: "1440m",
+    expiresIn: "30d",
   });
 
   const userResponse = {
