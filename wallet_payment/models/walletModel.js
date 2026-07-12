@@ -3,7 +3,7 @@ const { prisma } = require("../lib/prisma");
 const { makeTxnId, makeJournalCode } = require("../utils/idService");
 
 // Nu. credited to every wallet the moment it's created (new signups, organizers, etc.)
-const SIGNUP_BONUS = Number(700);
+const SIGNUP_BONUS = Number(0);
 
 /**
  * Wallet ID format:
