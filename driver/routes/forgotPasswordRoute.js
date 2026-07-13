@@ -28,7 +28,7 @@ const otpVerifyLimiter = makeLimiter({
 });
 
 const resetLimiter = makeLimiter({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 1 * 60 * 1000, // 1 min
   max: 5,
   message: "Too many password reset attempts. Please try again later.",
 });
