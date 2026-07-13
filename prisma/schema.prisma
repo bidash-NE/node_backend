@@ -488,6 +488,7 @@ model event_bookings {
   status              event_bookings_status         @default(confirmed)
   payment_status      event_bookings_payment_status @default(paid)
   wallet_journal_code String?                       @db.VarChar(36)
+  credit_applied      Int                           @default(0)
   created_at          DateTime                      @default(now()) @db.Timestamp(0)
   checked_in_at       DateTime?                     @db.Timestamp(0)
   event_booking_seats event_booking_seats[]
@@ -1995,6 +1996,39 @@ model wallet_transaction_logs {
   @@index([request_id], map: "idx_wtl_request_id")
 }
 
+model event_credit_usages {
+  id         BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  user_id    BigInt   @db.UnsignedBigInt
+  booking_id String?  @db.VarChar(50)
+  amount     Int
+  created_at DateTime @default(now()) @db.Timestamp(0)
+
+  @@index([booking_id], map: "idx_credit_usage_booking")
+  @@index([user_id], map: "idx_credit_usage_user")
+}
+
+model event_credits {
+  user_id    BigInt   @id @db.UnsignedBigInt
+  balance    Int      @default(0)
+  granted    Int      @default(0)
+  created_at DateTime @default(now()) @db.Timestamp(0)
+  updated_at DateTime @default(now()) @db.Timestamp(0)
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model wallets_backup_20260710 {
+  id         BigInt                         @default(0) @db.UnsignedBigInt
+  wallet_id  String?                        @db.VarChar(20)
+  user_id    BigInt                         @db.UnsignedBigInt
+  amount     Decimal                        @default(0.00) @db.Decimal(15, 2)
+  t_pin      String?                        @db.VarChar(255)
+  status     wallets_backup_20260710_status @default(ACTIVE)
+  created_at DateTime                       @default(now()) @db.Timestamp(0)
+  updated_at DateTime                       @default(now()) @db.Timestamp(0)
+
+  @@ignore
+}
+
 enum settlement_accounts_party_type {
   DRIVER
   MERCHANT
@@ -2507,4 +2541,9 @@ enum ride_fare_counters_status {
   rejected
   withdrawn
   expired
+}
+
+enum wallets_backup_20260710_status {
+  ACTIVE
+  INACTIVE
 }
