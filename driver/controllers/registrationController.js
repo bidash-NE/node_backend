@@ -941,6 +941,7 @@ const verifyActiveSession = async (req, res) => {
     const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
+      user_name: user.user_name,
       phone: String(user.phone || ""),
     };
 
@@ -1029,6 +1030,7 @@ const refreshAccessToken = async (req, res) => {
       select: {
         user_id: true,
         role: true,
+        user_name: true,
         phone: true,
         is_active: true,
         is_verified: true,
@@ -1056,6 +1058,7 @@ const refreshAccessToken = async (req, res) => {
     const payload = {
       user_id: toNumber(user.user_id),
       role: user.role,
+      user_name: user.user_name,
       phone: user.phone,
     };
 

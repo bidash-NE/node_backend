@@ -34,11 +34,11 @@ function tableForKind(kind) {
   return t;
 }
 
-/** Verify admin identity: user exists and user_name matches admin_name */
+/** Verify requesting user identity: user exists and user_name matches the token's user_name */
 async function verifyAdmin(user_id, admin_name) {
   if (!user_id || !admin_name) {
     throw new Error(
-      "Admin verification failed: user_id and admin_name are required",
+      "User verification failed: your session is missing user information. Please log in again.",
     );
   }
   const user = await prisma.users.findUnique({
@@ -46,13 +46,13 @@ async function verifyAdmin(user_id, admin_name) {
     select: { user_id: true, user_name: true },
   });
   if (!user) {
-    throw new Error("Admin verification failed: user not found");
+    throw new Error("User verification failed: user not found.");
   }
   const matches =
     user.user_name?.toLowerCase() === String(admin_name).toLowerCase();
   if (!matches) {
     throw new Error(
-      "Admin verification failed: admin_name does not match user",
+      "User verification failed: user_name does not match your account.",
     );
   }
   return user;
@@ -486,7 +486,10 @@ async function deleteCategory(kind, id, user_id, admin_name) {
         !user ||
         user.user_name?.toLowerCase() !== String(admin_name).toLowerCase()
       ) {
-        return { success: false, message: "Admin verification failed." };
+        return {
+          success: false,
+          message: "User verification failed: user_name does not match your account.",
+        };
       }
     }
 
