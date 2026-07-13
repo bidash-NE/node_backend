@@ -130,6 +130,23 @@ async function registerMerchant(req, res) {
     });
   } catch (err) {
     console.error("Register error:", err.message);
+
+    if (err.code === "P2002") {
+      const target = err.meta?.target;
+      const field = Array.isArray(target)
+        ? target.includes("cid")
+          ? "This CID"
+          : target.includes("email")
+            ? "This email"
+            : target.includes("phone")
+              ? "This phone number"
+              : "This information"
+        : "This information";
+      return res.status(409).json({
+        error: `${field} already exists. Please try using a different one and register.`,
+      });
+    }
+
     const isClientErr =
       /exists|required|invalid|username|business_type_ids/i.test(
         err.message || "",
@@ -253,13 +270,11 @@ async function updateMerchant(req, res) {
 
 async function loginByEmail(req, res) {
   try {
-    const { email, password, device_id, role } = req.body || {};
+    const { email, password, device_id } = req.body || {};
 
     if (!email || !password) {
       return res.status(400).json({ error: "email and password are required" });
     }
-
-    const normalizedRole = role ? String(role).trim().toLowerCase() : "merchant";
 
     const deviceId =
       device_id && String(device_id).trim() ? String(device_id).trim() : null;
@@ -268,11 +283,9 @@ async function loginByEmail(req, res) {
       return res.status(400).json({ error: "device_id is required" });
     }
 
-    const candidates = await findCandidatesByEmail(email, normalizedRole);
+    const candidates = await findCandidatesByEmail(email);
     if (!candidates.length) {
-      return res
-        .status(404)
-        .json({ error: `No ${normalizedRole} account was found with this email.` });
+      return res.status(404).json({ error: "User not found" });
     }
 
     let picked = null;
@@ -303,13 +316,6 @@ async function loginByEmail(req, res) {
     });
 
     if (!user) return res.status(404).json({ error: "User not found" });
-
-    if (user.role?.toLowerCase() !== normalizedRole) {
-      return res
-        .status(403)
-        .json({ error: "The selected role does not match this account." });
-    }
-
     if (user.is_active === false)
       return res
         .status(403)
@@ -364,10 +370,10 @@ async function loginByEmail(req, res) {
       user_name: user.user_name,
     };
     const access_token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
-      expiresIn: "60m",
+      expiresIn: "7d",
     });
     const refresh_token = jwt.sign(payload, process.env.REFRESH_TOKEN_SECRET, {
-      expiresIn: "1440m",
+      expiresIn: "30d",
     });
 
     return res.status(200).json({

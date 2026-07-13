@@ -372,6 +372,8 @@ async function getByUserId(req, res) {
     const { user_id } = req.params;
     const uid = Number(user_id);
 
+    console.log("User id: ", uid);
+    
     if (!isValidUserId(uid)) {
       return res.status(400).json({
         success: false,

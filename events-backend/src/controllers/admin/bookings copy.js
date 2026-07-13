@@ -2,7 +2,7 @@ const prisma = require('../../db');
 
 async function listBookings(req, res, next) {
   try {
-    const { event_id, screening_id, payment_method, status, tier_name, from_date, to_date, q, page = 1, limit = 20 } = req.query;
+    const { event_id, screening_id, payment_method, from_date, to_date, q, page = 1, limit = 20 } = req.query;
 
     const dateFilter = {};
     if (from_date) dateFilter.gte = new Date(from_date);
@@ -23,8 +23,6 @@ async function listBookings(req, res, next) {
       ...(event_id && { event_id }),
       ...(screening_id && { screening_id }),
       ...(payment_method && { payment_method }),
-      ...(status && { status }),
-      ...(tier_name && { event_ticket_tiers: { name: tier_name } }),
       ...(Object.keys(dateFilter).length && { created_at: dateFilter }),
       ...(q && { OR: [{ id: { contains: q } }, { ticket_code: { contains: q } }] }),
     };

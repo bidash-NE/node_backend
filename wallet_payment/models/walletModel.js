@@ -1,5 +1,9 @@
 // models/walletModel.js
 const { prisma } = require("../lib/prisma");
+const { makeTxnId, makeJournalCode } = require("../utils/idService");
+
+// Nu. credited to every wallet the moment it's created (new signups, organizers, etc.)
+const SIGNUP_BONUS = Number(0);
 
 /**
  * Wallet ID format:
@@ -122,7 +126,7 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
           data: {
             wallet_id,
             user_id: uid,
-            amount: 0,
+            amount: SIGNUP_BONUS > 0 ? SIGNUP_BONUS : 0,
             status: st,
           },
         });
@@ -144,6 +148,20 @@ async function createWallet({ user_id, status = "ACTIVE" }) {
       throw new Error(
         "Could not allocate unique wallet_id after multiple attempts.",
       );
+    }
+
+    if (SIGNUP_BONUS > 0) {
+      await tx.wallet_transactions.create({
+        data: {
+          transaction_id: makeTxnId(),
+          journal_code: makeJournalCode(),
+          tnx_from: null,
+          tnx_to: created.wallet_id,
+          amount: SIGNUP_BONUS,
+          remark: "CR",
+          note: "Ticket ", // can be changed later
+        },
+      });
     }
 
     return normalizeWallet(created);

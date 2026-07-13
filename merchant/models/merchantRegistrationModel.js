@@ -132,7 +132,7 @@ async function registerMerchantModel(data) {
   });
   if (existingEmail)
     throw new Error(
-      "Email already exists for this role. Please use another email.",
+      "This email already exists. Please try using a different one and register.",
     );
 
   const existingPhone = await prisma.users.findFirst({
@@ -140,7 +140,15 @@ async function registerMerchantModel(data) {
   });
   if (existingPhone)
     throw new Error(
-      "Phone number already exists for this role. Please use another phone.",
+      "This phone number already exists. Please try using a different one and register.",
+    );
+
+  const existingCid = await prisma.users.findFirst({
+    where: { cid: cidStr, role: role },
+  });
+  if (existingCid)
+    throw new Error(
+      "This CID already exists. Please try using a different one and register.",
     );
 
   const usernameExists = await checkScopedUsernameExists(
@@ -347,11 +355,9 @@ async function updateMerchantDetailsModel(business_id, data) {
 
 /* ------------------------ FINDERS ------------------------ */
 
-async function findCandidatesByEmail(email, role) {
+async function findCandidatesByEmail(email) {
   const em = String(email || "").trim();
   if (!em) return [];
-
-  const roleFilter = role ? String(role).trim().toLowerCase() : null;
 
   const allUsers = await prisma.users.findMany({
     orderBy: { user_id: "desc" },
@@ -367,9 +373,7 @@ async function findCandidatesByEmail(email, role) {
   });
 
   return allUsers.filter(
-    (user) =>
-      user.email?.toLowerCase() === em.toLowerCase() &&
-      (!roleFilter || user.role?.toLowerCase() === roleFilter),
+    (user) => user.email?.toLowerCase() === em.toLowerCase(),
   );
 }
 

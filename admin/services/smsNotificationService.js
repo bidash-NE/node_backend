@@ -46,9 +46,6 @@ async function getPhonesForRoles(roles = []) {
       role: {
         in: roles,
       },
-      phone: {
-        not: null,
-      },
       NOT: {
         phone: "",
       },
