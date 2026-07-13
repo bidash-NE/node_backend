@@ -59,7 +59,12 @@ async function createCategoryCtrl(req, res) {
       category_image: fileWebPath || body.category_image || null,
     };
 
-    const out = await addCategory(kind, payload, body.user_id, body.admin_name);
+    const out = await addCategory(
+      kind,
+      payload,
+      req.user.user_id,
+      req.user.user_name,
+    );
 
     if (!out.success) {
       return res.status(400).json({ error: out.message });
@@ -126,8 +131,8 @@ async function updateCategoryCtrl(req, res) {
       kind,
       id,
       fields,
-      body.user_id,
-      body.admin_name,
+      req.user.user_id,
+      req.user.user_name,
     );
 
     if (!out.success) {
@@ -161,8 +166,12 @@ async function deleteCategoryCtrl(req, res) {
       return res.status(400).json({ error: "Invalid id" });
     }
 
-    const { user_id, admin_name } = req.body || {};
-    const out = await deleteCategory(kind, id, user_id, admin_name);
+    const out = await deleteCategory(
+      kind,
+      id,
+      req.user.user_id,
+      req.user.user_name,
+    );
 
     if (!out.success) {
       return res.status(404).json({ error: out.message });

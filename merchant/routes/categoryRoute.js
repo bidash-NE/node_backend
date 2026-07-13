@@ -13,6 +13,21 @@ const {
 } = require("../controllers/categoryController");
 
 const { uploadCategoryImage } = require("../middlewares/categoryImage");
+const authUser = require("../middlewares/authUser");
+
+/* ---------------- role gate ---------------- */
+const CATEGORY_WRITE_ROLES = ["admin", "merchant", "super_admin"];
+
+const requireRole = (allowedRoles) => (req, res, next) => {
+  const role = String(req.user?.role || "").toLowerCase();
+  if (!allowedRoles.includes(role)) {
+    return res.status(403).json({
+      success: false,
+      message: "You do not have permission to perform this action.",
+    });
+  }
+  return next();
+};
 
 /* ---------------- rate limit helper ---------------- */
 const makeLimiter = ({ windowMs, max, message }) =>
@@ -98,6 +113,8 @@ router.get(
 // CREATE (supports multipart with file field "category_image")
 router.post(
   "/:kind",
+  authUser,
+  requireRole(CATEGORY_WRITE_ROLES),
   validateKindParam,
   writeLimiter,
   uploadCategoryImage(),
@@ -107,6 +124,8 @@ router.post(
 // UPDATE (partial; auto-delete old image if replaced)
 router.put(
   "/:kind/:id",
+  authUser,
+  requireRole(CATEGORY_WRITE_ROLES),
   validateKindParam,
   writeLimiter,
   validateIdParam,
@@ -117,6 +136,8 @@ router.put(
 // DELETE (also deletes the old image file)
 router.delete(
   "/:kind/:id",
+  authUser,
+  requireRole(CATEGORY_WRITE_ROLES),
   validateKindParam,
   deleteLimiter,
   validateIdParam,
