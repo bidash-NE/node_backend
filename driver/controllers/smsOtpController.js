@@ -79,6 +79,28 @@ function isZero(value) {
   return value === false || Number(value) === 0;
 }
 
+function normalizeRole(raw) {
+  if (raw == null) return null;
+
+  const value = String(raw).trim().toLowerCase();
+
+  const aliases = {
+    superadmin: "super_admin",
+    "super admin": "super_admin",
+  };
+
+  return aliases[value] || value || null;
+}
+
+const ALLOWED_REGISTRATION_ROLES = [
+  "user",
+  "merchant",
+  "driver",
+  "organizer",
+  "finance",
+  "admin",
+];
+
 function isAdminRole(role) {
   const r = String(role || "")
     .toLowerCase()
@@ -348,6 +370,7 @@ async function buildNormalLoginResponse({ user, deviceId, desktop = false }) {
 exports.sendSmsOtp = async (req, res) => {
   try {
     const phone = normalizePhone(req.body.phone);
+    const role = normalizeRole(req.body.role);
 
     if (!phone) {
       return res.status(400).json({
@@ -356,8 +379,25 @@ exports.sendSmsOtp = async (req, res) => {
       });
     }
 
+    if (!role) {
+      return res.status(400).json({
+        success: false,
+        message: "Role is required.",
+      });
+    }
+
+    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid role.",
+      });
+    }
+
+    // Same phone can be reused across different roles — only block
+    // when an account already exists under the role being registered.
     const existingUser = await prisma.users.findFirst({
       where: {
+        role,
         OR: [{ phone: phone }, { phone: `+${phone}` }],
       },
       select: { user_id: true },
@@ -366,11 +406,11 @@ exports.sendSmsOtp = async (req, res) => {
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: "Phone already registered. OTP not sent.",
+        message: `This phone number is already registered under the ${role} role. OTP not sent.`,
       });
     }
 
-    const rlKey = `otp_sms_rl:${phone}`;
+    const rlKey = `otp_sms_rl:${role}:${phone}`;
 
     if (await redis.get(rlKey)) {
       return res.status(429).json({
@@ -381,7 +421,7 @@ exports.sendSmsOtp = async (req, res) => {
 
     const otp = makeOtp();
 
-    await redis.set(`otp_sms:${phone}`, otp, { ex: 300 });
+    await redis.set(`otp_sms:${role}:${phone}`, otp, { ex: 300 });
     await redis.set(rlKey, "1", { ex: 30 });
 
     const text =
@@ -415,6 +455,7 @@ exports.verifySmsOtp = async (req, res) => {
   try {
     const phone = normalizePhone(req.body.phone);
     const otp = String(req.body.otp || "").trim();
+    const role = normalizeRole(req.body.role);
 
     if (!phone || !otp) {
       return res.status(400).json({
@@ -423,7 +464,21 @@ exports.verifySmsOtp = async (req, res) => {
       });
     }
 
-    const storedOtp = await redis.get(`otp_sms:${phone}`);
+    if (!role) {
+      return res.status(400).json({
+        success: false,
+        message: "Role is required.",
+      });
+    }
+
+    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid role.",
+      });
+    }
+
+    const storedOtp = await redis.get(`otp_sms:${role}:${phone}`);
 
     if (!storedOtp) {
       return res.status(410).json({
@@ -439,8 +494,8 @@ exports.verifySmsOtp = async (req, res) => {
       });
     }
 
-    await redis.set(`verified_sms:${phone}`, "true", { ex: 900 });
-    await redis.del(`otp_sms:${phone}`);
+    await redis.set(`verified_sms:${role}:${phone}`, "true", { ex: 900 });
+    await redis.del(`otp_sms:${role}:${phone}`);
 
     return res.status(200).json({
       success: true,
