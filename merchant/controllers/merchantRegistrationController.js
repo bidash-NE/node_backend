@@ -268,6 +268,11 @@ async function updateMerchant(req, res) {
 
 /* ---------------- login (email + password ONLY) ---------------- */
 
+// This is the merchant-specific login endpoint, so the role is always
+// fixed to "merchant" — it must never authenticate a user/driver/admin
+// account that happens to share the same email.
+const MERCHANT_ROLE = "merchant";
+
 async function loginByEmail(req, res) {
   try {
     const { email, password, device_id } = req.body || {};
@@ -283,9 +288,11 @@ async function loginByEmail(req, res) {
       return res.status(400).json({ error: "device_id is required" });
     }
 
-    const candidates = await findCandidatesByEmail(email);
+    const candidates = await findCandidatesByEmail(email, MERCHANT_ROLE);
     if (!candidates.length) {
-      return res.status(404).json({ error: "User not found" });
+      return res
+        .status(404)
+        .json({ error: "No merchant account was found with this email." });
     }
 
     let picked = null;
@@ -316,6 +323,13 @@ async function loginByEmail(req, res) {
     });
 
     if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (String(user.role || "").toLowerCase() !== MERCHANT_ROLE) {
+      return res
+        .status(403)
+        .json({ error: "The selected role does not match this account." });
+    }
+
     if (user.is_active === false)
       return res
         .status(403)

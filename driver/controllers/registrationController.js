@@ -23,6 +23,29 @@ function isDemoBypassPhone(phone) {
   return Boolean(phone) && DEMO_BYPASS_PHONES.includes(phone);
 }
 
+function normalizeRole(raw) {
+  if (raw == null) return null;
+
+  const value = String(raw).trim().toLowerCase();
+
+  const aliases = {
+    superadmin: "super_admin",
+    "super admin": "super_admin",
+  };
+
+  return aliases[value] || value || null;
+}
+
+const ALLOWED_REGISTRATION_ROLES = [
+  "user",
+  "merchant",
+  "driver",
+  "organizer",
+  "finance",
+  "admin",
+];
+const ALLOWED_LOGIN_ROLES = [...ALLOWED_REGISTRATION_ROLES, "super_admin"];
+
 /* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {
   let userId = null;
@@ -51,19 +74,97 @@ const registerUser = async (req, res) => {
       );
     }
 
+    const role = normalizeRole(user.role);
+
+    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
+      return errorResponse(
+        res,
+        400,
+        "Invalid role. Allowed roles are user, merchant, driver, organizer, finance and admin.",
+      );
+    }
+
     const normalizedPhone = normalizeBhutanPhone(user.phone);
+    const normalizedEmail = user.email
+      ? String(user.email).trim().toLowerCase()
+      : null;
+    const cidValue = user.cid ? String(user.cid).trim() : null;
     const deviceID = driver?.device_id ?? req.body.deviceID ?? null;
 
     // Admin, finance, organizer, driver, and passenger (user) roles don't require device
     const requiresDevice =
-      user?.role !== "admin" &&
-      user?.role !== "finance" &&
-      user?.role !== "organizer" &&
-      user?.role !== "driver" &&
-      user?.role !== "user";
+      role !== "admin" &&
+      role !== "finance" &&
+      role !== "organizer" &&
+      role !== "driver" &&
+      role !== "user";
 
     if (requiresDevice && !deviceID) {
       return errorResponse(res, 400, "Device ID is required for registration");
+    }
+
+    /*
+     * Check duplicates only within the requested role.
+     * Same email, phone, or CID with another role is allowed.
+     * Same email, phone, or CID with the same role is rejected.
+     */
+    const existingAccounts = await prisma.$queryRaw`
+      SELECT user_id, email, phone, cid, role
+      FROM users
+      WHERE LOWER(role) = ${role}
+        AND (
+          (${normalizedEmail} IS NOT NULL AND LOWER(email) = ${normalizedEmail})
+          OR phone = ${normalizedPhone}
+          OR (${cidValue} IS NOT NULL AND cid = ${cidValue})
+        )
+      LIMIT 10
+    `;
+
+    const emailAlreadyExists =
+      normalizedEmail &&
+      existingAccounts.some(
+        (account) =>
+          account.email &&
+          account.email.toLowerCase() === normalizedEmail &&
+          String(account.role).toLowerCase() === role,
+      );
+
+    if (emailAlreadyExists) {
+      return errorResponse(
+        res,
+        409,
+        `This email is already registered under the ${role} role.`,
+      );
+    }
+
+    const phoneAlreadyExists = existingAccounts.some(
+      (account) =>
+        account.phone === normalizedPhone &&
+        String(account.role).toLowerCase() === role,
+    );
+
+    if (phoneAlreadyExists) {
+      return errorResponse(
+        res,
+        409,
+        `This phone number is already registered under the ${role} role.`,
+      );
+    }
+
+    const cidAlreadyExists =
+      cidValue &&
+      existingAccounts.some(
+        (account) =>
+          account.cid === cidValue &&
+          String(account.role).toLowerCase() === role,
+      );
+
+    if (cidAlreadyExists) {
+      return errorResponse(
+        res,
+        409,
+        `This CID is already registered under the ${role} role.`,
+      );
     }
 
     await prisma.$transaction(async (prismaTx) => {
@@ -72,19 +173,20 @@ const registerUser = async (req, res) => {
       const newUser = await prismaTx.users.create({
         data: {
           user_name: user.user_name ?? null,
-          email: user.email ? user.email.toLowerCase() : null,
+          email: normalizedEmail,
           phone: normalizedPhone,
+          cid: cidValue,
           password_hash: hashedPassword,
           is_verified: false,
           is_active: true,
-          role: user.role,
+          role: role,
         },
       });
 
       userId = toNumber(newUser.user_id);
 
       if (deviceID) {
-        if (user.role === "driver") {
+        if (role === "driver") {
           await prismaTx.driver_devices.create({
             data: {
               user_id: newUser.user_id,
@@ -104,7 +206,7 @@ const registerUser = async (req, res) => {
       }
 
       // Driver-specific validation (skip for finance, admin, merchant)
-      if (user.role === "driver") {
+      if (role === "driver") {
         if (
           !driver ||
           !driver.current_location?.coordinates ||
@@ -189,9 +291,9 @@ const registerUser = async (req, res) => {
     });
 
     let message = "Registration successful";
-    if (user.role === "driver") message = "Driver registration successful";
-    if (user.role === "admin") message = "Admin registration successful";
-    if (user.role === "finance") message = "Finance registration successful";
+    if (role === "driver") message = "Driver registration successful";
+    if (role === "admin") message = "Admin registration successful";
+    if (role === "finance") message = "Finance registration successful";
 
     return res.status(201).json({
       success: true,
@@ -332,6 +434,16 @@ const loginUser = async (req, res) => {
       );
     }
 
+    const role = normalizeRole(b.role);
+
+    if (!role) {
+      return errorResponse(res, 400, "Role is required.");
+    }
+
+    if (!ALLOWED_LOGIN_ROLES.includes(role)) {
+      return errorResponse(res, 400, "Invalid account role.");
+    }
+
     const desktop = truthy(b.desktop);
     const deviceId = safeDeviceId(
       b.device_id ?? b.deviceID ?? b.deviceId ?? b.deviceid ?? null,
@@ -339,18 +451,24 @@ const loginUser = async (req, res) => {
 
     let candidates = [];
 
+    /*
+     * Login is role-scoped: the same email/phone can exist under multiple
+     * roles (e.g. one person with both a rider and a driver account), so
+     * the lookup must always be email + requested role, or phone + requested role.
+     */
     if (email) {
       const normalizedEmail = email.toLowerCase();
       candidates = await prisma.$queryRaw`
         SELECT user_id, user_name, phone, email, role, is_active, is_verified, password_hash
         FROM users
         WHERE LOWER(email) = ${normalizedEmail}
+          AND LOWER(role) = ${role}
         ORDER BY user_id DESC
         LIMIT 25
       `;
     } else {
       candidates = await prisma.users.findMany({
-        where: { phone: phone },
+        where: { phone: phone, role: role },
         select: {
           user_id: true,
           user_name: true,
@@ -370,7 +488,7 @@ const loginUser = async (req, res) => {
       return errorResponse(
         res,
         404,
-        "No account found with this email or phone number. Please check and try again.",
+        `No ${role} account was found with this email or phone number.`,
       );
     }
 
@@ -385,7 +503,11 @@ const loginUser = async (req, res) => {
     }
 
     if (!picked) {
-      return errorResponse(res, 401, "Incorrect password. Please try again.");
+      return errorResponse(
+        res,
+        401,
+        `Incorrect password for this ${role} account.`,
+      );
     }
 
     const user = await prisma.users.findUnique({
@@ -410,6 +532,15 @@ const loginUser = async (req, res) => {
     }
 
     user.user_id = toNumber(user.user_id);
+
+    // Never issue a token for a role different from the role requested.
+    if (normalizeRole(user.role) !== role) {
+      return errorResponse(
+        res,
+        403,
+        "The selected role does not match this account.",
+      );
+    }
 
     if (user.is_active === false) {
       return errorResponse(
