@@ -37,15 +37,29 @@ function normalizeRole(raw) {
   return aliases[value] || value || null;
 }
 
-const ALLOWED_REGISTRATION_ROLES = [
-  "user",
-  "merchant",
-  "driver",
-  "organizer",
-  "finance",
-  "admin",
-];
-const ALLOWED_LOGIN_ROLES = [...ALLOWED_REGISTRATION_ROLES, "super admin"];
+/*
+ * Roles are managed dynamically via the `roles` table (see admin/routes/roleRoute.js)
+ * instead of a hardcoded list, so an admin can add/retire roles without a redeploy.
+ * `self_registrable = false` roles (e.g. "super admin") can log in / reset
+ * password but cannot be granted through the public /register endpoint.
+ */
+async function isRegistrableRole(role) {
+  if (!role) return false;
+  const row = await prisma.roles.findFirst({
+    where: { name: role, is_active: true, self_registrable: true },
+    select: { role_id: true },
+  });
+  return Boolean(row);
+}
+
+async function isLoginableRole(role) {
+  if (!role) return false;
+  const row = await prisma.roles.findFirst({
+    where: { name: role, is_active: true },
+    select: { role_id: true },
+  });
+  return Boolean(row);
+}
 
 /* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {
@@ -77,12 +91,8 @@ const registerUser = async (req, res) => {
 
     const role = normalizeRole(user.role);
 
-    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
-      return errorResponse(
-        res,
-        400,
-        "Invalid role. Allowed roles are user, merchant, driver, organizer, finance and admin.",
-      );
+    if (!(await isRegistrableRole(role))) {
+      return errorResponse(res, 400, "Invalid or non-registrable role.");
     }
 
     const normalizedPhone = normalizeBhutanPhone(user.phone);
@@ -441,7 +451,7 @@ const loginUser = async (req, res) => {
       return errorResponse(res, 400, "Role is required.");
     }
 
-    if (!ALLOWED_LOGIN_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return errorResponse(res, 400, "Invalid account role.");
     }
 

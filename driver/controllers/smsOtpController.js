@@ -93,14 +93,16 @@ function normalizeRole(raw) {
   return aliases[value] || value || null;
 }
 
-const ALLOWED_REGISTRATION_ROLES = [
-  "user",
-  "merchant",
-  "driver",
-  "organizer",
-  "finance",
-  "admin",
-];
+// Roles are managed dynamically via the `roles` table (admin/routes/roleRoute.js)
+// instead of a hardcoded list, so an admin can add/retire roles without a redeploy.
+async function isRegistrableRole(role) {
+  if (!role) return false;
+  const row = await prisma.roles.findFirst({
+    where: { name: role, is_active: true, self_registrable: true },
+    select: { role_id: true },
+  });
+  return Boolean(row);
+}
 
 function isAdminRole(role) {
   const r = String(role || "")
@@ -387,7 +389,7 @@ exports.sendSmsOtp = async (req, res) => {
       });
     }
 
-    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
+    if (!(await isRegistrableRole(role))) {
       return res.status(400).json({
         success: false,
         message: "Invalid role.",
@@ -472,7 +474,7 @@ exports.verifySmsOtp = async (req, res) => {
       });
     }
 
-    if (!ALLOWED_REGISTRATION_ROLES.includes(role)) {
+    if (!(await isRegistrableRole(role))) {
       return res.status(400).json({
         success: false,
         message: "Invalid role.",

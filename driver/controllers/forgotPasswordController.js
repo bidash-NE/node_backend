@@ -70,15 +70,16 @@ function normalizeRole(raw) {
   return aliases[value] || value || null;
 }
 
-const ALLOWED_ACCOUNT_ROLES = [
-  "user",
-  "merchant",
-  "driver",
-  "organizer",
-  "finance",
-  "admin",
-  "super admin",
-];
+// Roles are managed dynamically via the `roles` table (admin/routes/roleRoute.js)
+// instead of a hardcoded list, so an admin can add/retire roles without a redeploy.
+async function isLoginableRole(role) {
+  if (!role) return false;
+  const row = await prisma.roles.findFirst({
+    where: { name: role, is_active: true },
+    select: { role_id: true },
+  });
+  return Boolean(row);
+}
 
 async function sendSmsGateway({ to, text, from }) {
   if (!SMS_MASTER_KEY) throw new Error("SMS_MASTER_KEY missing in .env");
@@ -147,7 +148,7 @@ exports.sendOtpSms = async (req, res) => {
       return res.status(400).json({ error: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res.status(400).json({ error: "Invalid role." });
     }
 
@@ -225,7 +226,7 @@ exports.verifyOtpSms = async (req, res) => {
       return res.status(400).json({ error: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res.status(400).json({ error: "Invalid role." });
     }
 
@@ -287,7 +288,7 @@ exports.resetPasswordSms = async (req, res) => {
       return res.status(400).json({ error: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res.status(400).json({ error: "Invalid role." });
     }
 
@@ -386,7 +387,7 @@ exports.sendOtp = async (req, res) => {
         .json({ success: false, message: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid role." });
@@ -515,7 +516,7 @@ exports.verifyOtp = async (req, res) => {
         .json({ success: false, message: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid role." });
@@ -602,7 +603,7 @@ exports.resetPassword = async (req, res) => {
         .json({ success: false, message: "Role is required." });
     }
 
-    if (!ALLOWED_ACCOUNT_ROLES.includes(role)) {
+    if (!(await isLoginableRole(role))) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid role." });

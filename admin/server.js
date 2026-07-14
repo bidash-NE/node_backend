@@ -60,6 +60,7 @@ const userPointConversionRoutes = require("./routes/userPointConversionRoutes");
 const contactRoutes = require("./routes/contactMessageRoutes");
 const logoImageRoutes = require("./routes/logoImageRoutes");
 const accountDeletionRoutes = require("./routes/accountDeletionRoutes");
+const roleRoutes = require("./routes/roleRoute");
 
 // Healthcheck
 app.get("/health", (_req, res) => {
@@ -73,6 +74,7 @@ app.use("/api/orders", orderReportRoutes);
 app.use("/api/system-notifications", systemNotificationRoute);
 app.use("/api/app-ratings", appRatingRoutes);
 app.use("/api/admin-collaborators", adminCollaboratorRoutes);
+app.use("/api/admin/roles", roleRoutes);
 app.use("/api/points", pointSystemRoutes);
 app.use("/api/user", userPointConversionRoutes);
 app.use("/api/contact-messages", contactRoutes);
