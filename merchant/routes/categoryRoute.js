@@ -16,7 +16,7 @@ const { uploadCategoryImage } = require("../middlewares/categoryImage");
 const authUser = require("../middlewares/authUser");
 
 /* ---------------- role gate ---------------- */
-const CATEGORY_WRITE_ROLES = ["admin", "merchant", "super_admin"];
+const CATEGORY_WRITE_ROLES = ["admin", "merchant", "super admin"];
 
 const requireRole = (allowedRoles) => (req, res, next) => {
   const role = String(req.user?.role || "").toLowerCase();

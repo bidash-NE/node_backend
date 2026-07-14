@@ -29,8 +29,9 @@ function normalizeRole(raw) {
   const value = String(raw).trim().toLowerCase();
 
   const aliases = {
-    superadmin: "super_admin",
-    "super admin": "super_admin",
+    superadmin: "super admin",
+    super_admin: "super admin",
+    "super-admin": "super admin",
   };
 
   return aliases[value] || value || null;
@@ -44,7 +45,7 @@ const ALLOWED_REGISTRATION_ROLES = [
   "finance",
   "admin",
 ];
-const ALLOWED_LOGIN_ROLES = [...ALLOWED_REGISTRATION_ROLES, "super_admin"];
+const ALLOWED_LOGIN_ROLES = [...ALLOWED_REGISTRATION_ROLES, "super admin"];
 
 /* ===================== REGISTER ===================== */
 const registerUser = async (req, res) => {

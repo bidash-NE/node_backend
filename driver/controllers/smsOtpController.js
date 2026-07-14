@@ -85,8 +85,9 @@ function normalizeRole(raw) {
   const value = String(raw).trim().toLowerCase();
 
   const aliases = {
-    superadmin: "super_admin",
-    "super admin": "super_admin",
+    superadmin: "super admin",
+    super_admin: "super admin",
+    "super-admin": "super admin",
   };
 
   return aliases[value] || value || null;
