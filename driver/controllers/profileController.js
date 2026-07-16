@@ -113,7 +113,7 @@ exports.updateProfile = async (req, res) => {
     // Check if user exists
     const existingUser = await prisma.users.findUnique({
       where: { user_id: userId },
-      select: { user_id: true, profile_image: true, email: true },
+      select: { user_id: true, profile_image: true, email: true, role: true },
     });
 
     if (!existingUser) {
@@ -142,11 +142,13 @@ exports.updateProfile = async (req, res) => {
       }
     }
 
-    // Check if email is already taken by another user
+    // Check if email is already taken by another account under the SAME role
+    // (the same email/phone is allowed to exist under a different role).
     if (email && email !== existingUser.email) {
       const emailExists = await prisma.users.findFirst({
         where: {
           email: email.toLowerCase(),
+          role: existingUser.role,
           user_id: { not: userId },
         },
       });
@@ -155,16 +157,17 @@ exports.updateProfile = async (req, res) => {
         return errorResponse(
           res,
           409,
-          "This email is already registered to another account. Please use a different email.",
+          `This email is already registered to another ${existingUser.role} account. Please use a different email.`,
         );
       }
     }
 
-    // Check if phone is already taken by another user
+    // Check if phone is already taken by another account under the SAME role
     if (phone) {
       const phoneExists = await prisma.users.findFirst({
         where: {
           phone: phone,
+          role: existingUser.role,
           user_id: { not: userId },
         },
       });
@@ -173,7 +176,7 @@ exports.updateProfile = async (req, res) => {
         return errorResponse(
           res,
           409,
-          "This phone number is already registered to another account. Please use a different number.",
+          `This phone number is already registered to another ${existingUser.role} account. Please use a different number.`,
         );
       }
     }
