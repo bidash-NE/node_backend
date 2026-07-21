@@ -1,71 +1,84 @@
-// Remove this line:
-// const fetch = require("node-fetch");
+const { Expo } = require("expo-server-sdk");
 
-const EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send";
+const expoClient = new Expo();
 
 function isExpoToken(t) {
-  return (
-    typeof t === "string" &&
-    (t.startsWith("ExponentPushToken[") || t.startsWith("ExpoPushToken["))
-  );
+  return typeof t === "string" && Expo.isExpoPushToken(t);
 }
 
+const MIXED_PROJECT_ERROR = /same project/i;
+
+// Sends one chunk. If Expo rejects it because the tokens span multiple
+// Expo/EAS projects (its batch endpoint requires a single project per
+// request), falls back to sending each message individually so a project
+// mismatch degrades to slower delivery instead of failing the whole chunk.
+async function sendChunkWithFallback(chunk) {
+  try {
+    return await expoClient.sendPushNotificationsAsync(chunk);
+  } catch (error) {
+    if (chunk.length > 1 && MIXED_PROJECT_ERROR.test(error?.message || "")) {
+      console.warn(
+        `⚠️ Mixed-project batch (${chunk.length} messages) — falling back to individual sends.`,
+      );
+      const tickets = [];
+      for (const message of chunk) {
+        try {
+          const [ticket] = await expoClient.sendPushNotificationsAsync([message]);
+          tickets.push(ticket);
+        } catch (singleError) {
+          tickets.push({ status: "error", message: singleError.message });
+        }
+      }
+      return tickets;
+    }
+    throw error;
+  }
+}
+
+// Sends messages via Expo's real batch endpoint (up to 100 messages per HTTP
+// call, handled by chunkPushNotifications) instead of one HTTP request per
+// message. Keeps the same return shape callers already rely on:
+// { success, results: [{ to, ok, status }], total_messages, success_count, failure_count }
 async function sendPushMessages(messages) {
   if (!messages || messages.length === 0) {
     return { success: false, error: "No messages to send" };
   }
 
+  const chunks = expoClient.chunkPushNotifications(messages);
   const results = [];
   let successCount = 0;
   let failureCount = 0;
 
-  console.log(`📤 Sending ${messages.length} notifications individually...`);
+  console.log(
+    `📤 Sending ${messages.length} notifications in ${chunks.length} batch(es)...`,
+  );
 
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-
+  for (const chunk of chunks) {
     try {
-      // fetch is now built-in in Node.js 20
-      const response = await fetch(EXPO_SEND_URL, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Accept-Encoding": "gzip, deflate",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(message),
+      const tickets = await sendChunkWithFallback(chunk);
+
+      tickets.forEach((ticket, idx) => {
+        const to = chunk[idx]?.to;
+        const ok = ticket.status === "ok";
+
+        if (ok) {
+          successCount++;
+        } else {
+          failureCount++;
+        }
+
+        results.push({ to, ok, response: ticket });
       });
 
-      const json = await response.json();
-
-      results.push({
-        to: message.to,
-        status: response.status,
-        ok: response.ok,
-        response: json,
-      });
-
-      if (response.ok) {
-        successCount++;
-        console.log(`✅ [${i + 1}/${messages.length}] Sent successfully`);
-      } else {
-        failureCount++;
-        console.log(
-          `❌ [${i + 1}/${messages.length}] Failed: ${json.errors?.[0]?.message || "Unknown error"}`,
-        );
-      }
-
-      if (i < messages.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      console.log(
+        `✅ Batch of ${chunk.length} sent (${tickets.filter((t) => t.status === "ok").length} ok)`,
+      );
     } catch (error) {
-      console.error(`❌ [${i + 1}/${messages.length}] Error:`, error.message);
-      results.push({
-        to: message.to,
-        ok: false,
-        error: error.message,
+      console.error("❌ Batch send error:", error.message);
+      chunk.forEach((m) => {
+        results.push({ to: m.to, ok: false, error: error.message });
+        failureCount++;
       });
-      failureCount++;
     }
   }
 

@@ -1,5 +1,27 @@
+const crypto = require("crypto");
 const { prisma } = require("../lib/prisma.js");
 const expo = require("../services/expoService");
+
+// In-memory tracker for role broadcast jobs (this service has no queue/redis
+// infra yet). Jobs are cleaned up a day after they finish so the map doesn't
+// grow unbounded; status is lost if the process restarts mid-broadcast.
+const BROADCAST_JOBS = new Map();
+const BROADCAST_BATCH_SIZE = 100;
+const BROADCAST_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+// If any users fail on the first pass, the job automatically re-sends to
+// just those users this many more times before giving up on them.
+const BROADCAST_MAX_AUTO_RETRIES = 2;
+const BROADCAST_RETRY_DELAY_MS = 2000;
+
+function scheduleBroadcastJobCleanup(jobId) {
+  const timer = setTimeout(() => BROADCAST_JOBS.delete(jobId), BROADCAST_JOB_TTL_MS);
+  timer.unref?.();
+}
+
+function publicBroadcastJobView(job) {
+  const { _internal, ...rest } = job;
+  return rest;
+}
 
 // Helper function to convert BigInt to Number
 function toNumber(value) {
@@ -619,4 +641,283 @@ exports.getNotificationHistory = async (req, res) => {
       "Unable to retrieve notification history. Please try again later.",
     );
   }
+};
+
+// ===================== BROADCAST TO ALL USERS OF A ROLE =====================
+
+// Sends one round of messages to `userIds`, updates job counters, and
+// returns the list of user_ids that failed in this round (retryable).
+// `trackProgress` should only be true for the initial pass, so processed_users
+// doesn't double-count users across auto-retry rounds.
+async function sendBroadcastRound(jobId, userIds, trackProgress) {
+  const job = BROADCAST_JOBS.get(jobId);
+  const { title, body, data } = job._internal;
+  const failedUserIds = [];
+
+  for (let i = 0; i < userIds.length; i += BROADCAST_BATCH_SIZE) {
+    const batch = userIds.slice(i, i + BROADCAST_BATCH_SIZE);
+
+    try {
+      const { tokens, tokensByUser } = await fetchExpoTokensForUsers(batch);
+      const usersWithTokens = Array.from(tokensByUser.keys());
+      const usersWithoutTokens = batch.filter(
+        (id) => !usersWithTokens.includes(id),
+      );
+      // No token registered at all — retrying won't help until the user's
+      // device re-registers, so these are excluded from failedUserIds.
+      job.users_without_tokens += usersWithoutTokens.length;
+      job.users_without_tokens_ids.push(...usersWithoutTokens);
+
+      if (tokens.length) {
+        const messages = tokens.map((to) => ({
+          to,
+          title,
+          body,
+          data: data || {},
+          sound: "default",
+          priority: "high",
+        }));
+
+        const result = await expo.sendPushMessages(messages);
+        job.tokens_sent += result.success_count || 0;
+        job.tokens_failed += result.failure_count || 0;
+
+        // Map each token back to its own delivery outcome instead of
+        // stamping every user in the batch with the same aggregate status.
+        const tokenOk = new Map();
+        for (const r of result.results || []) {
+          tokenOk.set(r.to, !!r.ok);
+        }
+
+        const userLogEntries = [];
+        for (const [userId, userTokens] of tokensByUser.entries()) {
+          const allOk = userTokens.every((t) => tokenOk.get(t) === true);
+          userLogEntries.push({ userId, status: allOk ? "sent" : "failed" });
+          if (!allOk) failedUserIds.push(userId);
+        }
+
+        try {
+          if (prisma.notification_logs) {
+            await Promise.all(
+              userLogEntries.map(({ userId, status }) =>
+                prisma.notification_logs.create({
+                  data: {
+                    user_id: userId,
+                    title,
+                    body,
+                    data: JSON.stringify(data || {}),
+                    status,
+                    sent_at: new Date(),
+                  },
+                }),
+              ),
+            );
+          }
+        } catch (logError) {
+          console.error(
+            `[broadcast:${jobId}] failed to log batch:`,
+            logError.message,
+          );
+        }
+      }
+    } catch (batchError) {
+      console.error(`[broadcast:${jobId}] batch error:`, batchError);
+      job.errors.push(batchError.message || String(batchError));
+      // We don't know per-user outcome when the batch itself throws
+      // (e.g. token lookup failed) — mark everyone in it as failed so
+      // they're eligible for the next auto-retry round rather than dropped.
+      failedUserIds.push(...batch);
+    }
+
+    if (trackProgress) job.processed_users += batch.length;
+  }
+
+  return failedUserIds;
+}
+
+async function processBroadcastJob(jobId) {
+  const job = BROADCAST_JOBS.get(jobId);
+  if (!job) return;
+
+  try {
+    let pending = job._internal.userIds;
+    let attempt = 0;
+
+    while (pending.length && attempt <= BROADCAST_MAX_AUTO_RETRIES) {
+      if (attempt > 0) {
+        job.retry_attempts = attempt;
+        await new Promise((r) => setTimeout(r, BROADCAST_RETRY_DELAY_MS));
+      }
+
+      pending = await sendBroadcastRound(jobId, pending, attempt === 0);
+      job.failed_user_ids = pending;
+      attempt++;
+    }
+
+    job.status = "completed";
+  } catch (error) {
+    console.error(`[broadcast:${jobId}] fatal error:`, error);
+    job.status = "failed";
+    job.errors.push(error.message || String(error));
+  } finally {
+    job.completed_at = new Date().toISOString();
+    scheduleBroadcastJobCleanup(jobId);
+  }
+}
+
+function makeBroadcastHandler(role, label) {
+  return async function broadcastHandler(req, res) {
+    try {
+      const { title, body, data = {} } = req.body || {};
+
+      if (!title || typeof title !== "string" || !title.trim()) {
+        return errorResponse(res, 400, "Notification title is required.");
+      }
+
+      if (!body || typeof body !== "string" || !body.trim()) {
+        return errorResponse(res, 400, "Notification body is required.");
+      }
+
+      const users = await prisma.users.findMany({
+        where: { role },
+        select: { user_id: true },
+      });
+      const userIds = users.map((u) => toNumber(u.user_id));
+
+      const jobId = crypto.randomUUID();
+      const job = {
+        job_id: jobId,
+        role,
+        title: title.trim(),
+        body: body.trim(),
+        status: "processing",
+        total_target_users: userIds.length,
+        processed_users: 0,
+        tokens_sent: 0,
+        tokens_failed: 0,
+        users_without_tokens: 0,
+        users_without_tokens_ids: [],
+        failed_user_ids: [],
+        retry_attempts: 0,
+        errors: [],
+        created_at: new Date().toISOString(),
+        completed_at: null,
+        _internal: { userIds, title: title.trim(), body: body.trim(), data },
+      };
+      BROADCAST_JOBS.set(jobId, job);
+
+      if (userIds.length === 0) {
+        job.status = "completed";
+        job.completed_at = new Date().toISOString();
+        scheduleBroadcastJobCleanup(jobId);
+      } else {
+        setImmediate(() => processBroadcastJob(jobId));
+      }
+
+      return successResponse(
+        res,
+        202,
+        `Broadcast to all ${label} queued.`,
+        publicBroadcastJobView(job),
+      );
+    } catch (error) {
+      console.error(`Broadcast to ${label} error:`, error);
+      return errorResponse(
+        res,
+        500,
+        "Unable to start broadcast. Please try again later.",
+      );
+    }
+  };
+}
+
+// ✅ Broadcast to all users with role = "user"
+exports.broadcastToUsers = makeBroadcastHandler("user", "users");
+
+// ✅ Broadcast to all users with role = "merchant"
+exports.broadcastToMerchants = makeBroadcastHandler("merchant", "merchants");
+
+// ✅ Broadcast to all users with role = "driver"
+exports.broadcastToDrivers = makeBroadcastHandler("driver", "drivers");
+
+// ===================== GET BROADCAST JOB STATUS =====================
+exports.getBroadcastStatus = async (req, res) => {
+  const { job_id } = req.params;
+  const job = BROADCAST_JOBS.get(job_id);
+
+  if (!job) {
+    return errorResponse(res, 404, "Broadcast job not found.");
+  }
+
+  return successResponse(
+    res,
+    200,
+    "Broadcast job status retrieved.",
+    publicBroadcastJobView(job),
+  );
+};
+
+// ===================== RETRY FAILED USERS FROM A BROADCAST JOB =====================
+exports.retryBroadcastFailures = async (req, res) => {
+  const { job_id } = req.params;
+  const original = BROADCAST_JOBS.get(job_id);
+
+  if (!original) {
+    return errorResponse(res, 404, "Broadcast job not found.");
+  }
+
+  if (original.status === "processing") {
+    return errorResponse(
+      res,
+      409,
+      "Original broadcast is still processing. Try again once it completes.",
+    );
+  }
+
+  const retryUserIds = [...new Set(original.failed_user_ids)];
+
+  if (!retryUserIds.length) {
+    return errorResponse(
+      res,
+      400,
+      "No failed users to retry for this job. (Users without a registered token are excluded — retrying won't help until they register one.)",
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  const job = {
+    job_id: jobId,
+    role: original.role,
+    retry_of: original.job_id,
+    title: original.title,
+    body: original.body,
+    status: "processing",
+    total_target_users: retryUserIds.length,
+    processed_users: 0,
+    tokens_sent: 0,
+    tokens_failed: 0,
+    users_without_tokens: 0,
+    users_without_tokens_ids: [],
+    failed_user_ids: [],
+    retry_attempts: 0,
+    errors: [],
+    created_at: new Date().toISOString(),
+    completed_at: null,
+    _internal: {
+      userIds: retryUserIds,
+      title: original.title,
+      body: original.body,
+      data: original._internal?.data || {},
+    },
+  };
+  BROADCAST_JOBS.set(jobId, job);
+
+  setImmediate(() => processBroadcastJob(jobId));
+
+  return successResponse(
+    res,
+    202,
+    `Retry broadcast queued for ${retryUserIds.length} previously failed user(s).`,
+    publicBroadcastJobView(job),
+  );
 };
