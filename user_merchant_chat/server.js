@@ -262,6 +262,7 @@ async function safeUnlink(filePath) {
 // - /uploads/chat/xxx.jpg
 // - /chat/uploads/chat/xxx.jpg
 // - https://grab.newedge.bt/chat/uploads/chat/xxx.jpg
+// - /chat/uploads/chat_voice/xxx.m4a
 function mediaUrlToDiskPath(mediaUrl) {
   if (!mediaUrl) return null;
 
@@ -281,16 +282,15 @@ function mediaUrlToDiskPath(mediaUrl) {
     s = s.replace(/^\/chat\/uploads\//, "/uploads/");
   }
 
-  // only delete chat files
-  if (!s.startsWith("/uploads/chat/")) {
+  const relativePath = s.replace(/^\/uploads\//, "");
+  const [subfolder, filename] = relativePath.split("/");
+
+  // Only delete files owned by this chat service.
+  if (!["chat", "chat_voice"].includes(subfolder) || !filename) {
     return null;
   }
 
-  const filename = s.split("/").pop();
-
-  if (!filename) return null;
-
-  return path.join(upload.UPLOAD_ROOT, "chat", filename);
+  return path.join(upload.UPLOAD_ROOT, subfolder, path.basename(filename));
 }
 
 /* -------------------- Prisma helpers -------------------- */

@@ -114,7 +114,7 @@ function buildStoredMediaUrl(req, fieldname, filename) {
   // Force chat images to be served under /chat/uploads/...
   let out = rel;
 
-  if (fieldname === "chat_image") {
+  if (["chat_image", "chat_voice"].includes(fieldname)) {
     out = `/chat${rel.startsWith("/") ? rel : `/${rel}`}`;
   }
 
@@ -253,7 +253,7 @@ function makeNotificationTitle(orderId) {
   return "New message";
 }
 
-function makeNotificationBody({ senderRole, text, hasImage }) {
+function makeNotificationBody({ senderRole, text, hasImage, hasVoice }) {
   const cleanText = cleanStr(text);
 
   if (cleanText) {
@@ -264,6 +264,12 @@ function makeNotificationBody({ senderRole, text, hasImage }) {
     return senderRole === "CUSTOMER"
       ? "Customer sent an image."
       : "Merchant sent an image.";
+  }
+
+  if (hasVoice) {
+    return senderRole === "CUSTOMER"
+      ? "Customer sent a voice message."
+      : "Merchant sent a voice message.";
   }
 
   return "You have a new chat message.";
@@ -382,6 +388,7 @@ async function notifyChatRecipient({
   message,
   text,
   hasImage,
+  hasVoice,
 }) {
   try {
     const meta = await store.getConversationMeta(conversationId);
@@ -427,6 +434,7 @@ async function notifyChatRecipient({
       senderRole: actor.role,
       text,
       hasImage,
+      hasVoice,
     });
 
     const payloadData = {
@@ -789,7 +797,8 @@ exports.sendMessage = async (req, res) => {
 
     const conversationId = String(req.params.conversationId || "");
     const text = String(req.body?.body || "").trim();
-    const hasImage = !!req.file;
+    const hasImage = req.file?.fieldname === "chat_image";
+    const hasVoice = req.file?.fieldname === "chat_voice";
 
     const ok = await store.isMember(conversationId, actor.role, actor.id);
 
@@ -800,10 +809,10 @@ exports.sendMessage = async (req, res) => {
       });
     }
 
-    if (!text && !hasImage) {
+    if (!text && !hasImage && !hasVoice) {
       return res.status(400).json({
         success: false,
-        message: "body or chat_image required",
+        message: "body, chat_image, or chat_voice required",
       });
     }
 
@@ -813,6 +822,9 @@ exports.sendMessage = async (req, res) => {
     if (hasImage) {
       type = "IMAGE";
       mediaUrl = buildStoredMediaUrl(req, "chat_image", req.file.filename);
+    } else if (hasVoice) {
+      type = "VOICE";
+      mediaUrl = buildStoredMediaUrl(req, "chat_voice", req.file.filename);
     }
 
     const { streamId, ts: tsMs } = await store.addMessage(conversationId, {
@@ -852,6 +864,7 @@ exports.sendMessage = async (req, res) => {
       message,
       text,
       hasImage,
+      hasVoice,
     }).catch((e) => {
       console.error("[chat] notifyChatRecipient async ERROR:", e?.message || e);
     });

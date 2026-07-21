@@ -12,11 +12,36 @@ const UPLOAD_ROOT =
 // ✅ Only CHAT subfolder
 const SUBFOLDERS = {
   chat_image: "chat",
+  chat_voice: "chat_voice",
   default: "chat",
 };
 
 const TARGET_KB = Number(process.env.CHAT_IMAGE_TARGET_KB || 100);
 const MAX_BYTES = Number(process.env.CHAT_IMAGE_MAX_BYTES || 10 * 1024 * 1024);
+const VOICE_MAX_BYTES = Number(
+  process.env.CHAT_VOICE_MAX_BYTES || 10 * 1024 * 1024,
+);
+
+const ALLOWED_VOICE_MIME_TYPES = new Set([
+  "audio/aac",
+  "audio/flac",
+  "audio/m4a",
+  "audio/mp4",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "audio/webm",
+  "audio/x-m4a",
+  "audio/x-wav",
+]);
+
+// Some containers do not reveal whether their tracks are audio- or video-only.
+const ALLOWED_VOICE_CONTAINER_MIME_TYPES = new Set([
+  ...ALLOWED_VOICE_MIME_TYPES,
+  "application/ogg",
+  "video/mp4",
+  "video/webm",
+]);
 
 /* ---------------- helpers ---------------- */
 
@@ -25,6 +50,7 @@ function ensureDirSync(dir) {
 }
 
 ensureDirSync(path.join(UPLOAD_ROOT, SUBFOLDERS.chat_image));
+ensureDirSync(path.join(UPLOAD_ROOT, SUBFOLDERS.chat_voice));
 
 function slugBase(originalName = "chat-image") {
   const ext = path.extname(originalName || "");
@@ -173,14 +199,35 @@ const storage = multer.diskStorage({
   },
 
   filename: (req, file, cb) => {
-    const base = slugBase(file.originalname || "chat-image");
+    const base = slugBase(file.originalname || file.fieldname);
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    if (file.fieldname === "chat_voice") {
+      const ext = path.extname(file.originalname || "").toLowerCase();
+      return cb(null, `${unique}-${base}${ext}`);
+    }
 
     // Save original upload temporarily.
     // Final compressed image will be renamed to .webp after processing.
     cb(null, `${unique}-${base}.upload`);
   },
 });
+
+async function validateVoiceFile(file) {
+  const { fileTypeFromFile } = await import("file-type");
+  const detected = await fileTypeFromFile(file.path);
+  const declaredMime = String(file.mimetype || "").toLowerCase();
+  const detectedMime = String(detected?.mime || "").toLowerCase();
+
+  if (
+    !ALLOWED_VOICE_MIME_TYPES.has(declaredMime) ||
+    !ALLOWED_VOICE_CONTAINER_MIME_TYPES.has(detectedMime)
+  ) {
+    throw new Error("Only valid audio files are allowed for chat_voice.");
+  }
+
+  return detected;
+}
 
 const rawUpload = multer({
   storage,
@@ -197,7 +244,7 @@ const rawUpload = multer({
   },
 
   limits: {
-    fileSize: MAX_BYTES,
+    fileSize: Math.max(MAX_BYTES, VOICE_MAX_BYTES),
     files: 1,
   },
 });
@@ -279,6 +326,100 @@ function single(fieldName) {
   };
 }
 
+function messageMedia() {
+  const multerFields = rawUpload.fields([
+    { name: "chat_image", maxCount: 1 },
+    { name: "chat_voice", maxCount: 1 },
+  ]);
+
+  return function messageMediaUpload(req, res, next) {
+    multerFields(req, res, async function (err) {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          message: err.message || "Media upload failed.",
+          code: err.code,
+          field: err.field,
+        });
+      }
+
+      const imageFile = req.files?.chat_image?.[0] || null;
+      const voiceFile = req.files?.chat_voice?.[0] || null;
+
+      if (imageFile && voiceFile) {
+        deleteFileIfExists(imageFile.path);
+        deleteFileIfExists(voiceFile.path);
+        return res.status(400).json({
+          success: false,
+          message: "Send either chat_image or chat_voice, not both.",
+        });
+      }
+
+      if (voiceFile) {
+        try {
+          if (voiceFile.size > VOICE_MAX_BYTES) {
+            throw new Error("Voice message exceeds the allowed size.");
+          }
+          const detected = await validateVoiceFile(voiceFile);
+          const finalFilename = `${path.parse(voiceFile.filename).name}.${detected.ext}`;
+          const finalPath = path.join(voiceFile.destination, finalFilename);
+
+          if (finalPath !== voiceFile.path) {
+            fs.renameSync(voiceFile.path, finalPath);
+            voiceFile.filename = finalFilename;
+            voiceFile.path = finalPath;
+          }
+          voiceFile.mimetype = detected.mime;
+          req.file = voiceFile;
+          return next();
+        } catch (voiceErr) {
+          deleteFileIfExists(voiceFile.path);
+          return res.status(400).json({
+            success: false,
+            message: voiceErr.message || "Voice upload failed.",
+          });
+        }
+      }
+
+      if (!imageFile) return next();
+
+      const oldPath = imageFile.path;
+      try {
+        if (imageFile.size > MAX_BYTES) {
+          throw new Error("Chat image exceeds the allowed size.");
+        }
+        const inputBuffer = await getInputBufferForSharp(imageFile);
+        await sharp(inputBuffer).metadata();
+        const finalFilename = imageFile.filename.replace(/\.upload$/i, ".webp");
+        const finalPath = path.join(imageFile.destination, finalFilename);
+        const compression = await compressImageBufferToTargetKB(
+          inputBuffer,
+          finalPath,
+          { targetKB: TARGET_KB },
+        );
+        deleteFileIfExists(oldPath);
+        const stat = fs.statSync(finalPath);
+        Object.assign(imageFile, {
+          filename: finalFilename,
+          path: finalPath,
+          size: stat.size,
+          mimetype: "image/webp",
+          compression,
+        });
+        req.file = imageFile;
+        return next();
+      } catch (imageErr) {
+        deleteFileIfExists(oldPath);
+        return res.status(400).json({
+          success: false,
+          message: "Only valid image files are allowed.",
+          error: imageErr.message,
+        });
+      }
+    });
+  };
+}
+
 /* ---------------- public web path ---------------- */
 
 function toWebPath(fieldname, filename) {
@@ -290,10 +431,12 @@ function toWebPath(fieldname, filename) {
 
 const upload = {
   single,
+  messageMedia,
   toWebPath,
   UPLOAD_ROOT,
   SUBFOLDERS,
   TARGET_KB,
+  VOICE_MAX_BYTES,
   rawUpload,
 };
 

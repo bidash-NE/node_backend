@@ -49,19 +49,19 @@ let rateLimiterOrder = rateLimit({
   },
 });
 
-// router.post(
-//   "/orders",
-//   rateLimiterOrder,
-//   uploadDeliveryPhotos,
-//   orderCtrl.createOrder,
-// );
+router.post(
+  "/orders",
+  rateLimiterOrder,
+  uploadDeliveryPhotos,
+  orderCtrl.createOrder,
+);
 
-router.post("/orders", (req, res) => {
-  return res.status(503).json({
-    success: false,
-    message: "Coming Soon...",
-  });
-});
+// router.post("/orders", (req, res) => {
+//   return res.status(503).json({
+//     success: false,
+//     message: "Coming Soon...",
+//   });
+// });
 
 router.get("/orders/:order_id", validOrderId, orderCtrl.getOrderById);
 router.put("/orders/:order_id", validOrderId, orderCtrl.updateOrder);

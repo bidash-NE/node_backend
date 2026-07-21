@@ -118,7 +118,9 @@ async function addMessage(conversationId, { senderRole, senderId, type, text, me
     String(ts),
   );
 
-  const lastText = type === "TEXT" ? (text || "") : text ? text : "[image]";
+  const mediaFallback = type === "VOICE" ? "[voice message]" : "[image]";
+  const lastText =
+    type === "TEXT" ? (text || "") : text ? text : mediaFallback;
   await redis.hset(K.conv(conversationId), {
     lastMsgAt: String(ts),
     lastMsgType: type,

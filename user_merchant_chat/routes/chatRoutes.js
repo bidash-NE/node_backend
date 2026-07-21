@@ -19,22 +19,22 @@ function jsonUnlessMultipart() {
   };
 }
 
-function maybeUploadSingle(field) {
-  return function maybeUploadSingleMiddleware(req, res, next) {
+function maybeUploadMessageMedia() {
+  return function maybeUploadMessageMediaMiddleware(req, res, next) {
     const ct = String(req.headers["content-type"] || "").toLowerCase();
 
     if (!ct.includes("multipart/form-data")) {
       return next();
     }
 
-    if (!upload || typeof upload.single !== "function") {
+    if (!upload || typeof upload.messageMedia !== "function") {
       return res.status(500).json({
         success: false,
         message: "Upload middleware is not configured correctly.",
       });
     }
 
-    const middleware = upload.single(field);
+    const middleware = upload.messageMedia();
 
     if (typeof middleware !== "function") {
       return res.status(500).json({
@@ -82,11 +82,11 @@ router.get("/conversations", chat.listConversations);
 // get messages
 router.get("/messages/:conversationId", chat.getMessages);
 
-// send message: supports JSON text or multipart chat_image
+// send message: supports JSON text or multipart chat_image/chat_voice
 router.post(
   "/messages/:conversationId",
   jsonUnlessMultipart(),
-  maybeUploadSingle("chat_image"),
+  maybeUploadMessageMedia(),
   chat.sendMessage,
 );
 
