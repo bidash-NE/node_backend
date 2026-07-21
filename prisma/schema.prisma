@@ -393,7 +393,6 @@ model driver_vehicles {
   make               String    @db.VarChar(50)
   model              String    @db.VarChar(50)
   year               Int       @db.SmallInt
-  year               Int       @db.SmallInt
   color              String    @db.VarChar(30)
   license_plate      String    @unique(map: "license_plate") @db.VarChar(20)
   vehicle_type       String    @db.VarChar(20)
