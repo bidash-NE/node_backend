@@ -440,7 +440,7 @@ async function notifyChatRecipient({
     const payloadData = {
       type: "chat_message",
       screen:
-        recipientType === "MERCHANT" ? "MessageScreen" : "ChatRoomScreen",
+        recipientType === "MERCHANT" ? "MessageScreen" : "message",
       conversation_id: String(conversationId),
       order_id: orderId || null,
       sender_type: actor.role,
