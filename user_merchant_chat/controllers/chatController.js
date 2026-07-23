@@ -6,6 +6,8 @@
 // ✅ Notification title format: "New message from {ORDER_ID}"
 
 const { prisma } = require("../lib/prisma");
+const fs = require("fs/promises");
+const path = require("path");
 
 const store = require("../models/chatStoreRedis");
 const upload = require("../middlewares/upload");
@@ -121,6 +123,30 @@ function buildStoredMediaUrl(req, fieldname, filename) {
   const base = String(process.env.MEDIA_BASE_URL || "").trim().replace(/\/+$/, "");
 
   return base ? `${base}${out}` : out;
+}
+
+async function deleteStoredChatMediaSafe(mediaUrl) {
+  if (!mediaUrl) return;
+
+  try {
+    let pathname = String(mediaUrl).trim();
+    if (/^https?:\/\//i.test(pathname)) pathname = new URL(pathname).pathname;
+    pathname = pathname.replace(/^\/chat\/uploads\//, "/uploads/");
+    const match = pathname.match(/^\/uploads\/(chat|chat_voice)\/([^/]+)$/);
+    if (!match) return;
+
+    const folder = match[1];
+    const filename = path.basename(match[2]);
+    const folderPath = path.resolve(upload.UPLOAD_ROOT, folder);
+    const filePath = path.resolve(folderPath, filename);
+    if (!filePath.startsWith(`${folderPath}${path.sep}`)) return;
+
+    await fs.unlink(filePath).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  } catch (error) {
+    console.error("[chat] deleteStoredChatMediaSafe ERROR:", error?.message || error);
+  }
 }
 
 /* ==================== PRISMA FETCHERS ==================== */
@@ -765,10 +791,16 @@ exports.getMessages = async (req, res) => {
       merchant_business_logo: b?.business_logo || "",
     };
 
-    const rows = await store.getMessages(conversationId, {
+    const storedRows = await store.getMessages(conversationId, {
       limit,
       beforeId,
     });
+    const rows = await store.filterHiddenMessages(
+      conversationId,
+      actor.role,
+      actor.id,
+      storedRows,
+    );
 
     return res.json({
       success: true,
@@ -882,6 +914,133 @@ exports.sendMessage = async (req, res) => {
       success: false,
       message: e.message || "Server error",
     });
+  }
+};
+
+// DELETE /chat/messages/:conversationId/:messageId/me
+exports.deleteMessageForMe = async (req, res) => {
+  try {
+    const actor = getActorStrict(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: "Missing x-user-type / x-user-id",
+      });
+    }
+
+    const conversationId = String(req.params.conversationId || "");
+    const messageId = String(req.params.messageId || "");
+    if (!(await store.isMember(conversationId, actor.role, actor.id))) {
+      return res.status(403).json({ success: false, message: "Not allowed" });
+    }
+    if (!(await store.getMessageById(conversationId, messageId))) {
+      return res.status(404).json({ success: false, message: "Message not found" });
+    }
+
+    await store.hideMessageForMember(
+      conversationId,
+      actor.role,
+      actor.id,
+      messageId,
+    );
+    return res.json({
+      success: true,
+      message: "Message deleted for you.",
+      conversation_id: conversationId,
+      message_id: messageId,
+      deleted_for: "ME",
+    });
+  } catch (e) {
+    log("[chat] deleteMessageForMe ERROR:", e.message);
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
+  }
+};
+
+// DELETE /chat/messages/:conversationId/:messageId/everyone
+exports.deleteMessageForEveryone = async (req, res) => {
+  try {
+    const actor = getActorStrict(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: "Missing x-user-type / x-user-id",
+      });
+    }
+
+    const conversationId = String(req.params.conversationId || "");
+    const messageId = String(req.params.messageId || "");
+    if (!(await store.isMember(conversationId, actor.role, actor.id))) {
+      return res.status(403).json({ success: false, message: "Not allowed" });
+    }
+
+    const message = await store.getMessageById(conversationId, messageId);
+    if (!message) {
+      return res.status(404).json({ success: false, message: "Message not found" });
+    }
+    if (
+      message.sender_type !== actor.role ||
+      Number(message.sender_id) !== Number(actor.id)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the sender can delete a message for both participants.",
+      });
+    }
+
+    await store.deleteMessageForEveryone(conversationId, messageId);
+    await deleteStoredChatMediaSafe(message.media_url);
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`chat:conv:${conversationId}`).emit("chat:message_deleted", {
+        conversationId,
+        messageId,
+        deletedFor: "EVERYONE",
+      });
+    }
+    return res.json({
+      success: true,
+      message: "Message deleted for both participants.",
+      conversation_id: conversationId,
+      message_id: messageId,
+      deleted_for: "EVERYONE",
+    });
+  } catch (e) {
+    log("[chat] deleteMessageForEveryone ERROR:", e.message);
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
+  }
+};
+
+// DELETE /chat/conversations/:conversationId
+exports.deleteConversation = async (req, res) => {
+  try {
+    const actor = getActorStrict(req);
+    if (!actor) {
+      return res.status(401).json({
+        success: false,
+        message: "Missing x-user-type / x-user-id",
+      });
+    }
+
+    const conversationId = String(req.params.conversationId || "");
+    if (!(await store.isMember(conversationId, actor.role, actor.id))) {
+      return res.status(403).json({ success: false, message: "Not allowed" });
+    }
+
+    const result = await store.deleteConversationForMember(
+      conversationId,
+      actor.role,
+      actor.id,
+    );
+    return res.json({
+      success: true,
+      message: "Conversation deleted for you.",
+      conversation_id: conversationId,
+      deleted_for: "ME",
+      hidden_message_count: result.hidden_message_count,
+    });
+  } catch (e) {
+    log("[chat] deleteConversation ERROR:", e.message);
+    return res.status(500).json({ success: false, message: e.message || "Server error" });
   }
 };
 

@@ -54,6 +54,9 @@ const requiredHandlers = [
   "listConversations",
   "getMessages",
   "sendMessage",
+  "deleteMessageForMe",
+  "deleteMessageForEveryone",
+  "deleteConversation",
   "markRead",
 ];
 
@@ -73,6 +76,25 @@ router.post(
   express.json(),
   chat.getOrCreateConversationForOrder,
 );
+
+// delete one message only for the requester
+router.delete(
+  "/messages/:conversationId/:messageId/me",
+  chat.deleteMessageForMe,
+);
+
+// delete one message for both participants (sender only)
+router.delete(
+  "/messages/:conversationId/:messageId/everyone",
+  chat.deleteMessageForEveryone,
+);
+router.delete(
+  "/messages/:conversationId/:messageId/both",
+  chat.deleteMessageForEveryone,
+);
+
+// delete the conversation from the requester's inbox/history
+router.delete("/conversations/:conversationId", chat.deleteConversation);
 
 // ✅ LIST CONVERSATIONS
 // - CUSTOMER uses x-user-id

@@ -10,6 +10,7 @@ const K = {
   inbox: (role, uid) => `chat:user:${role}:${uid}:inbox`,
   unread: (cid) => `chat:conv:${cid}:unread`,
   lastread: (cid) => `chat:conv:${cid}:lastread`,
+  hiddenMsgs: (cid, member) => `chat:conv:${cid}:hidden:${member}`,
 
   // ✅ NEW: business inbox (merchant list uses this)
   bizInbox: (businessId) => `chat:business:${businessId}:inbox`,
@@ -172,6 +173,121 @@ async function getMessages(conversationId, { limit = 30, beforeId = null }) {
   });
 }
 
+function deserializeMessage([id, arr]) {
+  const o = {};
+  for (let i = 0; i < arr.length; i += 2) o[arr[i]] = arr[i + 1];
+  return {
+    id,
+    sender_type: o.senderType,
+    sender_id: Number(o.senderId),
+    message_type: o.type,
+    body: o.text || null,
+    media_url: o.mediaUrl || null,
+    ts: Number(o.ts),
+  };
+}
+
+async function getMessageById(conversationId, messageId) {
+  const rows = await redis.xrange(
+    K.msgs(conversationId),
+    String(messageId),
+    String(messageId),
+  );
+  return rows.length ? deserializeMessage(rows[0]) : null;
+}
+
+async function filterHiddenMessages(conversationId, role, userId, messages) {
+  if (!messages.length) return messages;
+  const key = K.hiddenMsgs(conversationId, memberKey(role, userId));
+  const multi = redis.multi();
+  for (const message of messages) multi.sismember(key, message.id);
+  const results = await multi.exec();
+  return messages.filter((_, index) => Number(results[index]?.[1] || 0) !== 1);
+}
+
+async function hideMessageForMember(conversationId, role, userId, messageId) {
+  await redis.sadd(
+    K.hiddenMsgs(conversationId, memberKey(role, userId)),
+    String(messageId),
+  );
+}
+
+async function refreshLastMessage(conversationId) {
+  const rows = await redis.xrevrange(K.msgs(conversationId), "+", "-", "COUNT", 1);
+  const meta = await redis.hgetall(K.conv(conversationId));
+  const members = await redis.smembers(K.members(conversationId));
+  let lastMsgAt = Number(meta.createdAt || 0);
+  let lastMsgType = "";
+  let lastMsgText = "";
+  let lastMsgMedia = "";
+
+  if (rows.length) {
+    const message = deserializeMessage(rows[0]);
+    lastMsgAt = message.ts;
+    lastMsgType = message.message_type;
+    lastMsgMedia = message.media_url || "";
+    lastMsgText =
+      message.body ||
+      (message.message_type === "VOICE" ? "[voice message]" : "[image]");
+  }
+
+  const multi = redis.multi();
+  multi.hset(K.conv(conversationId), {
+    lastMsgAt: String(lastMsgAt),
+    lastMsgType,
+    lastMsgText: lastMsgText.slice(0, 120),
+    lastMsgMedia,
+  });
+
+  const inboxLookup = redis.multi();
+  for (const member of members) {
+    const [role, id] = member.split(":");
+    inboxLookup.zscore(K.inbox(role, id), conversationId);
+  }
+  if (meta.businessId) {
+    inboxLookup.zscore(K.bizInbox(meta.businessId), conversationId);
+  }
+  const inboxResults = await inboxLookup.exec();
+
+  for (let index = 0; index < members.length; index++) {
+    if (inboxResults[index]?.[1] == null) continue;
+    const [role, id] = members[index].split(":");
+    multi.zadd(K.inbox(role, id), lastMsgAt, conversationId);
+  }
+  if (
+    meta.businessId &&
+    inboxResults[members.length]?.[1] != null
+  ) {
+    multi.zadd(K.bizInbox(meta.businessId), lastMsgAt, conversationId);
+  }
+  await multi.exec();
+}
+
+async function deleteMessageForEveryone(conversationId, messageId) {
+  const deleted = await redis.xdel(K.msgs(conversationId), String(messageId));
+  if (Number(deleted) > 0) await refreshLastMessage(conversationId);
+  return Number(deleted) > 0;
+}
+
+async function deleteConversationForMember(conversationId, role, userId) {
+  const member = memberKey(role, userId);
+  const rows = await redis.xrange(K.msgs(conversationId), "-", "+");
+  const meta = await redis.hgetall(K.conv(conversationId));
+  const multi = redis.multi();
+
+  if (rows.length) {
+    multi.sadd(K.hiddenMsgs(conversationId, member), ...rows.map(([id]) => id));
+  }
+  multi.zrem(K.inbox(role, userId), conversationId);
+  multi.hset(K.unread(conversationId), member, 0);
+  multi.hdel(K.lastread(conversationId), member);
+  if (role === "MERCHANT" && meta.businessId) {
+    multi.zrem(K.bizInbox(meta.businessId), conversationId);
+  }
+  await multi.exec();
+  return { hidden_message_count: rows.length };
+}
+
 async function listInbox(role, userId, { limit = 50 } = {}) {
   const ids = await redis.zrevrange(K.inbox(role, userId), 0, limit - 1);
   if (!ids.length) return [];
@@ -315,6 +431,7 @@ async function deleteConversationByOrderId(orderId, { deleteFiles } = {}) {
   for (const m of members) {
     const [role, id] = m.split(":");
     multi.zrem(K.inbox(role, id), cid);
+    multi.del(K.hiddenMsgs(cid, m));
   }
 
   // ✅ remove from business inbox too
@@ -364,6 +481,11 @@ module.exports = {
   // messages
   addMessage,
   getMessages,
+  getMessageById,
+  filterHiddenMessages,
+  hideMessageForMember,
+  deleteMessageForEveryone,
+  deleteConversationForMember,
 
   // inboxes
   listInbox,
