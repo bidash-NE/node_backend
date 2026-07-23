@@ -34,15 +34,16 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install OpenSSL for Prisma runtime
-RUN apk add --no-cache openssl
+# Install OpenSSL for Prisma runtime and FFmpeg for uniform voice messages
+RUN apk add --no-cache openssl ffmpeg
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Create uploads directory for chat images
-RUN mkdir -p /app/user_merchant_chat/uploads/chat && \
+# Create uploads directories for chat media
+RUN mkdir -p /app/user_merchant_chat/uploads/chat \
+    /app/user_merchant_chat/uploads/chat_voice && \
     chown -R nodejs:nodejs /app/user_merchant_chat/uploads
 
 # Copy from builder

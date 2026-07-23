@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const sharp = require("sharp");
 const heicConvert = require("heic-convert");
+const { spawn } = require("child_process");
 
 // ✅ Define upload root
 const UPLOAD_ROOT =
@@ -203,8 +204,7 @@ const storage = multer.diskStorage({
     const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     if (file.fieldname === "chat_voice") {
-      const ext = path.extname(file.originalname || "").toLowerCase();
-      return cb(null, `${unique}-${base}${ext}`);
+      return cb(null, `${unique}-${base}.voice-upload`);
     }
 
     // Save original upload temporarily.
@@ -229,12 +229,76 @@ async function validateVoiceFile(file) {
   return detected;
 }
 
+function convertVoiceToM4a(file) {
+  const ffmpegPath = String(process.env.FFMPEG_PATH || "ffmpeg").trim();
+  const finalFilename = `${path.parse(file.filename).name}.m4a`;
+  const finalPath = path.join(file.destination, finalFilename);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      ffmpegPath,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        file.path,
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+        "-movflags",
+        "+faststart",
+        finalPath,
+      ],
+      { windowsHide: true },
+    );
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      deleteFileIfExists(finalPath);
+      reject(new Error("Voice conversion timed out."));
+    }, 60_000);
+
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk}`.slice(-2000);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      deleteFileIfExists(finalPath);
+      reject(
+        new Error(
+          error?.code === "ENOENT"
+            ? "FFmpeg is not installed on the chat server."
+            : error.message,
+        ),
+      );
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        deleteFileIfExists(finalPath);
+        return reject(
+          new Error(`Voice conversion failed${stderr ? `: ${stderr}` : "."}`),
+        );
+      }
+      return resolve({ finalFilename, finalPath });
+    });
+  });
+}
+
 const rawUpload = multer({
   storage,
 
   // Let multer accept first. We validate using sharp/heic-convert after upload.
   fileFilter: (_req, file, cb) => {
-    console.log("[CHAT IMAGE RECEIVED]", {
+    console.log("[CHAT MEDIA RECEIVED]", {
       fieldname: file.fieldname,
       originalname: file.originalname,
       mimetype: file.mimetype,
@@ -360,16 +424,15 @@ function messageMedia() {
           if (voiceFile.size > VOICE_MAX_BYTES) {
             throw new Error("Voice message exceeds the allowed size.");
           }
-          const detected = await validateVoiceFile(voiceFile);
-          const finalFilename = `${path.parse(voiceFile.filename).name}.${detected.ext}`;
-          const finalPath = path.join(voiceFile.destination, finalFilename);
-
-          if (finalPath !== voiceFile.path) {
-            fs.renameSync(voiceFile.path, finalPath);
-            voiceFile.filename = finalFilename;
-            voiceFile.path = finalPath;
-          }
-          voiceFile.mimetype = detected.mime;
+          await validateVoiceFile(voiceFile);
+          const originalPath = voiceFile.path;
+          const { finalFilename, finalPath } = await convertVoiceToM4a(voiceFile);
+          deleteFileIfExists(originalPath);
+          const stat = fs.statSync(finalPath);
+          voiceFile.filename = finalFilename;
+          voiceFile.path = finalPath;
+          voiceFile.size = stat.size;
+          voiceFile.mimetype = "audio/mp4";
           req.file = voiceFile;
           return next();
         } catch (voiceErr) {
