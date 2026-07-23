@@ -36,4 +36,7 @@ const readLimiter = makeLimiter({
 // GET /api/platform-fee-rules/percent
 router.get("/percent", readLimiter, controller.getFeePercentage);
 
+// GET /api/platform-fee-rules/banner-fee
+router.get("/banner-fee", readLimiter, controller.getBannerFee);
+
 module.exports = router;

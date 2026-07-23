@@ -99,6 +99,7 @@ const addUserOrderStatusNotification =
 const addUserWalletDebitNotification =
   _notifMod?.addUserWalletDebitNotification ||
   pickFn(_notifMod, "addUserWalletDebitNotification");
+const insertUserNotification = _notifMod?.insertUserNotification || null;
 
 /* ============================================================
    PUSH helpers
@@ -181,6 +182,103 @@ async function sendPushToUserId(user_id, { title, body }) {
   } catch (e) {
     console.error("[PUSH FAILED]", e?.message || e);
     return { ok: false, error: e?.message || "push_failed" };
+  }
+}
+
+async function notifyUserAcceptPaymentFailed({ user_id, order_id, error }) {
+  const uid = Number(user_id);
+  if (!Number.isFinite(uid) || uid <= 0) return;
+
+  const insufficient = /insufficient|amount\s*>=|balance/i.test(
+    String(error || ""),
+  );
+  const message = insufficient
+    ? `Your order ${order_id} could not be accepted because your wallet balance is insufficient.`
+    : `Your order ${order_id} could not be accepted because payment failed.`;
+  const data = {
+    order_id,
+    status: "PENDING",
+    reason: insufficient
+      ? "INSUFFICIENT_WALLET_BALANCE"
+      : "PAYMENT_FAILED",
+  };
+
+  const tasks = [
+    sendPushToUserId(uid, {
+      title: "Order not accepted",
+      body: message,
+    }),
+  ];
+
+  if (typeof insertUserNotification === "function") {
+    tasks.push(
+      insertUserNotification(db, {
+        user_id: uid,
+        type: "order_payment_failed",
+        title: "Order not accepted",
+        message,
+        data,
+        status: "unread",
+      }),
+    );
+  }
+
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error(
+        "[ACCEPT PAYMENT FAILURE USER NOTIFY FAILED]",
+        result.reason?.message || result.reason,
+      );
+    }
+  }
+}
+
+function isMerchantWalletMissingError(error) {
+  return /merchant\s+wallet\s+(missing|not\s+found|required)/i.test(
+    String(error || ""),
+  );
+}
+
+async function notifyMerchantWalletRequired({ business_ids, order_id }) {
+  const merchantUserIds = await getMerchantUserIdsByBusinessIds(business_ids);
+  const message = `Create your merchant wallet before accepting order ${order_id}.`;
+  const data = {
+    order_id,
+    code: "MERCHANT_WALLET_REQUIRED",
+  };
+  const tasks = [];
+
+  for (const merchantUserId of merchantUserIds) {
+    tasks.push(
+      sendPushToUserId(merchantUserId, {
+        title: "Wallet setup required",
+        body: message,
+      }),
+    );
+
+    if (typeof insertUserNotification === "function") {
+      tasks.push(
+        insertUserNotification(db, {
+          user_id: merchantUserId,
+          type: "merchant_wallet_required",
+          title: "Wallet setup required",
+          message,
+          data,
+          status: "unread",
+        }),
+      );
+    }
+  }
+
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error(
+        "[MERCHANT WALLET REQUIRED NOTIFY FAILED]",
+        result.reason?.message || result.reason,
+      );
+    }
   }
 }
 
@@ -1655,6 +1753,7 @@ async function updateOrderStatus(req, res) {
 
   let result = null;
   let captureResult = null;
+  let walletCaptureStarted = false;
 
   try {
     await conn.beginTransaction();
@@ -1697,6 +1796,7 @@ async function updateOrderStatus(req, res) {
     }
 
     // 2. Capture wallet inside same transaction
+    walletCaptureStarted = true;
     captureResult = await captureOnAccept(order_id, conn);
 
     const captureOk =
@@ -1762,11 +1862,28 @@ async function updateOrderStatus(req, res) {
       error: err?.message || err,
     });
 
+    const merchantWalletRequired = isMerchantWalletMissingError(
+      err?.message || err,
+    );
+
+    if (merchantWalletRequired) {
+      await notifyMerchantWalletRequired({ business_ids, order_id });
+    } else if (walletCaptureStarted) {
+      await notifyUserAcceptPaymentFailed({
+        user_id,
+        order_id,
+        error: err?.message || err,
+      });
+    }
+
     return res.status(400).json({
       success: false,
-      message:
-        "Order could not be accepted because wallet transaction failed. All order changes have been reverted.",
-      code: "ACCEPT_ROLLED_BACK",
+      message: merchantWalletRequired
+        ? "Create your merchant wallet before accepting this order. The order remains pending."
+        : "Order could not be accepted because wallet transaction failed. All order changes have been reverted.",
+      code: merchantWalletRequired
+        ? "MERCHANT_WALLET_REQUIRED"
+        : "ACCEPT_ROLLED_BACK",
       error: err?.message || String(err),
     });
   } finally {

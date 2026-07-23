@@ -75,7 +75,7 @@ const validateBusinessIdParam = (req, res, next) => {
 router.post("/", writeLimiter, uploadMartMenuImage, createMartMenuCtrl);
 
 // List (supports ?business_id=&category_name=)
-router.get("/", readLimiter, listMartMenuCtrl);
+// router.get("/", readLimiter, listMartMenuCtrl);
 
 // All by business
 router.get(

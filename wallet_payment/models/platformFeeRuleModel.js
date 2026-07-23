@@ -67,6 +67,43 @@ async function getFeePercentBp() {
   };
 }
 
+/** Fetch the banner fee rule by service_type. */
+async function getBannerFeeRule() {
+  const rule = await prisma.platform_fee_rules.findFirst({
+    where: {
+      service_type: "banner_fee_rule",
+    },
+    select: {
+      rule_id: true,
+      service_type: true,
+      fee_type: true,
+      fee_fixed_cents: true,
+      apply_on: true,
+      priority: true,
+      is_active: true,
+      starts_at: true,
+      ends_at: true,
+    },
+    orderBy: [
+      {
+        priority: "asc",
+      },
+      {
+        rule_id: "asc",
+      },
+    ],
+  });
+
+  if (!rule) return null;
+
+  return {
+    ...rule,
+    rule_id: Number(rule.rule_id),
+    fee_fixed_cents: Number(rule.fee_fixed_cents || 0),
+  };
+}
+
 module.exports = {
   getFeePercentBp,
+  getBannerFeeRule,
 };
