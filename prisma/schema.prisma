@@ -180,6 +180,7 @@ model cancelled_orders {
   delivery_instruction_note String?                                 @db.VarChar(256)
   delivery_photo_url        String?                                 @db.Text
   delivery_special_mode     cancelled_orders_delivery_special_mode?
+  chat_cleaned              Boolean                                 @default(false)
   cancelled_order_items     cancelled_order_items[]
 
   @@index([cancelled_at], map: "idx_cancelled_time")
@@ -254,6 +255,7 @@ model delivered_orders {
   delivery_instruction_note String?                                 @db.VarChar(256)
   delivery_photo_url        String?                                 @db.Text
   delivery_special_mode     delivered_orders_delivery_special_mode?
+  chat_cleaned              Boolean                                 @default(false)
   delivered_order_items     delivered_order_items[]
 
   @@index([service_type, original_created_at], map: "idx_delivered_service_created")

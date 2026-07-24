@@ -446,14 +446,65 @@ async function fetchDeliveredOrderIds(limit) {
   };
 }
 
-async function markDbCleaned(orderId) {
+function buildCancelledSelect() {
+  const fields = prismaModelFields("cancelled_orders");
+  const select = { order_id: true };
+  if (fields.has("cancelled_at")) select.cancelled_at = true;
+  if (fields.has("created_at")) select.created_at = true;
+  if (fields.has("chat_cleaned")) select.chat_cleaned = true;
+  if (fields.has("is_chat_cleaned")) select.is_chat_cleaned = true;
+  if (fields.has("cleaned")) select.cleaned = true;
+  return select;
+}
+
+function buildCancelledWhere() {
+  const fields = prismaModelFields("cancelled_orders");
+  if (fields.has("chat_cleaned")) {
+    return { OR: [{ chat_cleaned: false }, { chat_cleaned: 0 }] };
+  }
+  if (fields.has("is_chat_cleaned")) {
+    return { OR: [{ is_chat_cleaned: false }, { is_chat_cleaned: 0 }] };
+  }
+  if (fields.has("cleaned")) {
+    return { OR: [{ cleaned: false }, { cleaned: 0 }] };
+  }
+  return {};
+}
+
+async function fetchCancelledOrderIds(limit) {
+  if (!prismaModelExists("cancelled_orders")) {
+    return { rows: [], mode: "Prisma model cancelled_orders not found" };
+  }
+
+  const fields = prismaModelFields("cancelled_orders");
+  const orderBy = fields.has("cancelled_id")
+    ? [{ cancelled_id: "desc" }]
+    : fields.has("cancelled_at")
+      ? [{ cancelled_at: "desc" }]
+      : [{ order_id: "desc" }];
+  const rows = await prisma.cancelled_orders.findMany({
+    where: buildCancelledWhere(),
+    select: buildCancelledSelect(),
+    orderBy,
+    take: Math.max(1, Number(limit) || 50),
+  });
+
+  return {
+    rows: rows.map(serializeRow),
+    mode: fields.has("chat_cleaned")
+      ? "cancelled_orders.chat_cleaned=false"
+      : "fallback: cancelled_orders",
+  };
+}
+
+async function markDbCleaned(orderId, modelName = "delivered_orders") {
   const oid = String(orderId || "").trim();
 
-  if (!oid || !prismaModelExists("delivered_orders")) {
+  if (!oid || !prismaModelExists(modelName)) {
     return false;
   }
 
-  const fields = prismaModelFields("delivered_orders");
+  const fields = prismaModelFields(modelName);
 
   const data = {};
 
@@ -468,7 +519,7 @@ async function markDbCleaned(orderId) {
   }
 
   try {
-    const result = await prisma.delivered_orders.updateMany({
+    const result = await prisma[modelName].updateMany({
       where: {
         order_id: oid,
       },
@@ -479,6 +530,7 @@ async function markDbCleaned(orderId) {
   } catch (error) {
     logCleanupError("markDbCleaned failed", error, {
       orderId: oid,
+      modelName,
     });
 
     return false;
@@ -496,13 +548,28 @@ async function cleanupTick() {
   const graceMin = Number(process.env.CLEANUP_GRACE_MINUTES || 0);
 
   try {
-    const { rows, mode } = await fetchDeliveredOrderIds(batch);
+    const [delivered, cancelled] = await Promise.all([
+      fetchDeliveredOrderIds(batch),
+      fetchCancelledOrderIds(batch),
+    ]);
+    const rows = [
+      ...delivered.rows.map((row) => ({
+        ...row,
+        cleanupSource: "delivered_orders",
+      })),
+      ...cancelled.rows.map((row) => ({
+        ...row,
+        cleanupSource: "cancelled_orders",
+      })),
+    ];
 
     if (!rows.length) return;
 
     logCleanup("poll", {
       found: rows.length,
-      mode,
+      delivered: delivered.rows.length,
+      cancelled: cancelled.rows.length,
+      modes: [delivered.mode, cancelled.mode],
     });
 
     for (const row of rows) {
@@ -511,7 +578,8 @@ async function cleanupTick() {
       if (!orderId) continue;
 
       // Optional grace period if delivered_orders has created_at/delivered_at
-      const graceDate = row.created_at || row.delivered_at || null;
+      const graceDate =
+        row.created_at || row.delivered_at || row.cancelled_at || null;
 
       if (graceMin > 0 && graceDate) {
         const ageMs = Date.now() - new Date(graceDate).getTime();
@@ -522,7 +590,10 @@ async function cleanupTick() {
       }
 
       if (typeof store.wasOrderCleaned === "function") {
-        if (await store.wasOrderCleaned(orderId)) continue;
+        if (await store.wasOrderCleaned(orderId)) {
+          await markDbCleaned(orderId, row.cleanupSource);
+          continue;
+        }
       }
 
       const result = await store.deleteConversationByOrderId(orderId, {
@@ -552,14 +623,18 @@ async function cleanupTick() {
         },
       });
 
+      if (typeof store.markOrderCleaned === "function") {
+        await store.markOrderCleaned(orderId);
+      }
+      await markDbCleaned(orderId, row.cleanupSource);
+
       if (result.deleted) {
-        if (typeof store.markOrderCleaned === "function") {
-          await store.markOrderCleaned(orderId);
-        }
-
-        await markDbCleaned(orderId);
-
         logCleanup("deleted chat", result);
+      } else {
+        logCleanup("chat already absent", {
+          orderId,
+          source: row.cleanupSource,
+        });
       }
     }
   } catch (error) {
