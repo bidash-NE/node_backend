@@ -168,7 +168,10 @@ async function createFoodMenuItem(payload) {
     const itemName = toStrOrNull(item_name);
     const price = validatePrice(actual_price, "Price");
     const discount = validateDiscount(discount_percentage);
-    const tax = validatePrice(tax_rate, "Tax rate") ?? 0;
+    const tax =
+      tax_rate === undefined || tax_rate === null || tax_rate === ""
+        ? 0
+        : validatePrice(tax_rate, "Tax rate");
     const isVeg = toBool(is_veg, false);
     const spice = validateSpiceLevel(spice_level);
     const isAvail = toBool(is_available, true);
