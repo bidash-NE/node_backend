@@ -331,9 +331,15 @@ async function listInbox(role, userId, { limit = 50 } = {}) {
  * ✅ NEW: list conversations for a business (merchant list)
  * Uses ZSET chat:business:<businessId>:inbox
  */
-async function listBusinessInbox(businessId, { limit = 50 } = {}) {
+async function listBusinessInbox(
+  businessId,
+  { limit = 50, merchantUserId = null } = {},
+) {
   const bid = String(businessId || "").trim();
   if (!bid) return [];
+  const merchantMember = merchantUserId
+    ? memberKey("MERCHANT", merchantUserId)
+    : null;
 
   const ids = await redis.zrevrange(K.bizInbox(bid), 0, limit - 1);
   if (!ids.length) return [];
@@ -341,12 +347,18 @@ async function listBusinessInbox(businessId, { limit = 50 } = {}) {
   const multi = redis.multi();
   for (const cid of ids) {
     multi.hgetall(K.conv(cid));
+    if (merchantMember) multi.hget(K.unread(cid), merchantMember);
   }
   const res = await multi.exec();
+  const resultWidth = merchantMember ? 2 : 1;
 
   const out = [];
   for (let i = 0; i < ids.length; i++) {
-    const meta = res[i]?.[1] || {};
+    const offset = i * resultWidth;
+    const meta = res[offset]?.[1] || {};
+    const unread = merchantMember
+      ? Number(res[offset + 1]?.[1] || 0)
+      : 0;
 
     out.push({
       conversation_id: ids[i],
@@ -356,9 +368,7 @@ async function listBusinessInbox(businessId, { limit = 50 } = {}) {
       last_message_body: meta.lastMsgText || "",
       last_message_media_url: meta.lastMsgMedia || "",
 
-      // business-level list cannot know “per merchant user unread”
-      // your UI can hide badge or show 0
-      unread_count: 0,
+      unread_count: unread,
 
       customer_id: meta.customerId ? Number(meta.customerId) : null,
       business_id: meta.businessId ? Number(meta.businessId) : null,

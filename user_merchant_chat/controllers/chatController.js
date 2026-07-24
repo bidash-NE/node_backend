@@ -673,8 +673,13 @@ exports.listConversations = async (req, res) => {
         });
       }
 
+      const merchantUserId =
+        toPositiveNumber(req.headers["x-user-id"]) ||
+        (await fetchMerchantIdByBusinessId(businessId));
+
       const rows = await store.listBusinessInbox(String(businessId), {
         limit: 50,
+        merchantUserId,
       });
 
       const userIds = [
