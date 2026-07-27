@@ -808,7 +808,7 @@ async function startServer() {
   }
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`chat running on port number: ${PORT}`);
+    console.log(`chat running on port : ${PORT}`);
 
     logger.info("Chat service started", {
       module: "chat_service",
